@@ -1,6 +1,8 @@
 //! Ed25519 signer implementation.
 
-use super::{Ed25519SigningKey, error::Ed25519SignerError, verifier::Ed25519Verifier};
+use super::{
+    Ed25519SigningKey, X25519SecretKey, error::Ed25519SignerError, verifier::Ed25519Verifier,
+};
 use crate::key::KeyExport;
 use dialog_varsig::{Did, Principal, Signer, eddsa::Ed25519Signature};
 use serde::Serialize;
@@ -74,6 +76,19 @@ impl Ed25519Signer {
     #[must_use]
     pub const fn signing_key(&self) -> &Ed25519SigningKey {
         &self.signer
+    }
+
+    /// Get the X25519 agreement key derived from this signer's Ed25519 key.
+    ///
+    /// See [`Ed25519SigningKey::agreement_key`] for how derivation differs
+    /// between native and the browser.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on the browser when the signer was restored from an
+    /// archive carrying no agreement component. Never fails on native.
+    pub async fn agreement_key(&self) -> Result<X25519SecretKey, Ed25519SignerError> {
+        Ok(self.signer.agreement_key().await?)
     }
 }
 

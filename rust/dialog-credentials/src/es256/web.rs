@@ -85,6 +85,9 @@ impl SigningKey {
             KeyExport::NonExtractable {
                 private_key,
                 public_key,
+                // ES256 is an ECDSA key with no X25519 derivation, so it never
+                // carries an agreement component.
+                agreement: _,
             } => {
                 let subtle = get_subtle_crypto()?;
                 let public_key_bytes = export_public_key_compressed(&subtle, &public_key).await?;
@@ -120,6 +123,7 @@ impl SigningKey {
             Ok(KeyExport::NonExtractable {
                 private_key: self.private_key.clone(),
                 public_key: self.public_key.clone(),
+                agreement: None,
             })
         }
     }
@@ -526,6 +530,9 @@ impl ExtractableKey for SigningKey {
             KeyExport::NonExtractable {
                 private_key,
                 public_key,
+                // ES256 is an ECDSA key with no X25519 derivation, so it never
+                // carries an agreement component.
+                agreement: _,
             } => {
                 let subtle = get_subtle_crypto()?;
                 let public_key_bytes = export_public_key_compressed(&subtle, &public_key).await?;

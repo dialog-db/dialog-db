@@ -9,6 +9,13 @@ pub enum Ed25519KeyError {
     /// The seed bytes have the wrong length (expected 32).
     InvalidSeedLength(usize),
 
+    /// No X25519 agreement key is available for this signing key.
+    ///
+    /// Only reachable on the browser, where a non-extractable key restored from
+    /// an archive written before the agreement component existed has no seed to
+    /// re-derive from.
+    AgreementKeyUnavailable,
+
     /// Random number generation failed (native only).
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     Rng(getrandom::Error),
@@ -22,6 +29,10 @@ impl std::fmt::Display for Ed25519KeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidSeedLength(n) => write!(f, "expected 32 seed bytes, got {n}"),
+            Self::AgreementKeyUnavailable => write!(
+                f,
+                "no X25519 agreement key available: the signing key was restored without one"
+            ),
             #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
             Self::Rng(e) => write!(f, "RNG error: {e}"),
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]

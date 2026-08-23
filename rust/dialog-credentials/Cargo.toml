@@ -11,6 +11,7 @@ license.workspace = true
 default = ["ed25519"]
 ed25519 = [
     "dep:ed25519-dalek",
+    "dep:x25519-dalek",
     "dep:getrandom",
     "dep:base58",
     "dialog-varsig/edwards25519",
@@ -34,7 +35,11 @@ serde = { workspace = true, features = ["derive"] }
 signature = { workspace = true }
 
 # ed25519 feature deps
+# `x25519-dalek` backs the X25519 agreement keys derived from an Ed25519 seed;
+# on the browser arm the derivation still runs here, and only the resulting
+# secret is handed to WebCrypto (which cannot derive X25519 from Ed25519).
 ed25519-dalek = { workspace = true, optional = true }
+x25519-dalek = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 base58 = { workspace = true, optional = true }
 
@@ -54,6 +59,7 @@ web-sys = { workspace = true, features = ["Crypto", "SubtleCrypto", "CryptoKey",
 dialog-common = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [lints.rust]

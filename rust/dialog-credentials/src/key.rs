@@ -26,7 +26,25 @@ pub enum KeyExport {
         private_key: CryptoKey,
         /// The WebCrypto public key.
         public_key: CryptoKey,
+        /// The derived X25519 agreement key pair, when one was archived.
+        ///
+        /// A non-extractable signing key never yields its seed, so the X25519
+        /// key it was derived from cannot be recovered later. Archiving it here
+        /// as a third component is what makes the agreement key restorable.
+        /// `None` for exports written before the agreement key existed, or for
+        /// keys that never had one.
+        agreement: Option<AgreementKeyPair>,
     },
+}
+
+/// An opaque WebCrypto X25519 key pair, archived alongside a signing key.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[derive(Debug, Clone)]
+pub struct AgreementKeyPair {
+    /// The WebCrypto X25519 private key.
+    pub private_key: CryptoKey,
+    /// The WebCrypto X25519 public key.
+    pub public_key: CryptoKey,
 }
 
 impl From<&[u8; 32]> for KeyExport {
@@ -41,6 +59,7 @@ impl From<CryptoKeyPair> for KeyExport {
         KeyExport::NonExtractable {
             private_key: pair.get_private_key(),
             public_key: pair.get_public_key(),
+            agreement: None,
         }
     }
 }
@@ -53,10 +72,29 @@ impl From<KeyExport> for JsValue {
             KeyExport::NonExtractable {
                 private_key,
                 public_key,
-            } => CryptoKeyPair::new(&private_key, &public_key).into(),
+                agreement,
+            } => {
+                let pair = CryptoKeyPair::new(&private_key, &public_key);
+                // The X25519 pair rides along as an extra property so the
+                // archived value stays a plain `{ privateKey, publicKey }`
+                // object for readers that predate the agreement key.
+                if let Some(agreement) = agreement {
+                    let value = CryptoKeyPair::new(&agreement.private_key, &agreement.public_key);
+                    // Set failures here would silently drop the agreement key,
+                    // so surface them as a dropped property rather than a
+                    // half-written object: `Reflect::set` on a fresh object
+                    // only fails if the object is frozen, which it is not.
+                    let _ = Reflect::set(&pair, &AGREEMENT_KEY.into(), &value);
+                }
+                pair.into()
+            }
         }
     }
 }
+
+/// Property name carrying the archived X25519 pair on a serialized key export.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+const AGREEMENT_KEY: &str = "agreementKey";
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 impl TryFrom<JsValue> for KeyExport {
@@ -79,9 +117,30 @@ impl TryFrom<JsValue> for KeyExport {
             .dyn_into()
             .map_err(|_| WebCryptoError::KeyImport("invalid publicKey".into()))?;
 
+        // Absent or malformed agreement key is not an error: exports written
+        // before the X25519 component existed simply do not carry one.
+        let agreement = Reflect::get(&value, &AGREEMENT_KEY.into())
+            .ok()
+            .filter(|v| !v.is_undefined() && !v.is_null())
+            .and_then(|v| {
+                let private_key: CryptoKey = Reflect::get(&v, &"privateKey".into())
+                    .ok()?
+                    .dyn_into()
+                    .ok()?;
+                let public_key: CryptoKey = Reflect::get(&v, &"publicKey".into())
+                    .ok()?
+                    .dyn_into()
+                    .ok()?;
+                Some(AgreementKeyPair {
+                    private_key,
+                    public_key,
+                })
+            });
+
         Ok(KeyExport::NonExtractable {
             private_key,
             public_key,
+            agreement,
         })
     }
 }
@@ -138,6 +197,24 @@ pub trait ExtractableKey: Sized {
 
     /// Export the key material.
     fn export(&self) -> impl std::future::Future<Output = Result<KeyExport, WebCryptoError>>;
+}
+
+/// Trait for creating WebCrypto X25519 keys with extractable key material.
+///
+/// The counterpart to [`ExtractableKey`] for agreement keys: derivation from an
+/// Ed25519 seed normally produces a **non-extractable** `CryptoKey`, and this
+/// trait opts into an extractable one for backup or export.
+///
+/// # Security Warning
+///
+/// Extractable keys allow the private key material to be exported from
+/// WebCrypto. Only use them when you have a specific need for key export.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub trait ExtractableAgreementKey: Sized {
+    /// Derive an X25519 key from an Ed25519 seed with an extractable secret.
+    fn from_ed25519_seed(
+        seed: &[u8; 32],
+    ) -> impl std::future::Future<Output = Result<Self, WebCryptoError>>;
 }
 
 // Re-export credential types for backward compatibility.
