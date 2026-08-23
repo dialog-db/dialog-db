@@ -17,11 +17,11 @@ use crate::{
     envelope::{Envelope, EnvelopePayload, payload_tag::PayloadTag},
     future::FutureKind,
     promise::{Promised, WaitingOn},
-    subject::Subject,
     time::{TimeBoundError, range::TimeRange, timestamp::Timestamp},
 };
 use crate::{
     delegation::SignatureVerificationError as DelegationSignatureError,
+    delegation::chain::check_chain,
     revocation::{RevocationChecker, RevocationMatch, RevocationSelector},
     verification::{Verifiable, VerificationContext},
 };
@@ -570,55 +570,14 @@ impl InvocationPayload {
         // Proofs are expected in subject-to-invocation-issuer (root-to-leaf) order.
         let proofs: Vec<&'a Delegation<S>> = proofs.into_iter().collect();
 
-        // Start with the invocation's own time bounds.
-        let mut time_range = TimeRange::from(self);
+        // Linkage, rooting, and time are properties of the delegation
+        // sequence alone, so they come from one implementation shared with
+        // `/ucan/revoke` witness paths rather than being re-derived here.
+        let chain_range = check_chain(proofs.iter().copied(), self.subject(), now)?;
 
-        // Hold a last proof that was verified in the chain.
-        let mut authorization: Option<&'a Delegation<S>> = None;
-
-        for proof in proofs {
-            // Resolve the delegation's subject: Specific(did) uses that did,
-            // Any falls back to the previously implied subject.
-            let subject = match proof.subject() {
-                Subject::Specific(subject) => subject,
-                Subject::Any => {
-                    if authorization.is_none() {
-                        proof.issuer()
-                    } else {
-                        self.subject()
-                    }
-                }
-            };
-
-            if subject != self.subject() {
-                if authorization.is_none() && matches!(proof.subject(), Subject::Any) {
-                    return Err(CheckFailed::UnprovenSubject {
-                        subject: self.subject().clone(),
-                        issuer: proof.issuer().clone(),
-                    });
-                }
-                return Err(CheckFailed::UnauthorizedSubject {
-                    claimed: self.subject().clone(),
-                    authorized: subject.clone(),
-                });
-            }
-
-            // Verify principal alignment: root proof's issuer must be the
-            // subject, subsequent proofs' issuers must match previous audience.
-            if let Some(evidence) = authorization {
-                if proof.issuer() != evidence.audience() {
-                    return Err(CheckFailed::DelegationAudienceMismatch {
-                        claimed: proof.issuer().clone(),
-                        authorized: evidence.audience().clone(),
-                    });
-                }
-            } else if proof.issuer() != self.subject() {
-                return Err(CheckFailed::UnprovenSubject {
-                    subject: self.subject().clone(),
-                    issuer: proof.issuer().clone(),
-                });
-            }
-
+        // What is left needs the invocation: attenuation against its command,
+        // and policy predicates over its arguments.
+        for proof in &proofs {
             if !self.command.starts_with(proof.command()) {
                 return Err(CheckFailed::CommandEscalation {
                     claimed: self.command.clone(),
@@ -631,12 +590,11 @@ impl InvocationPayload {
                     return Err(CheckFailed::PolicyViolation(Box::new(predicate.clone())));
                 }
             }
-
-            // Intersect with this delegation's time bounds.
-            time_range = time_range.intersect(proof.into());
-
-            authorization = Some(proof);
         }
+
+        // The invocation's own expiration narrows the chain's window.
+        let time_range = chain_range.intersect(TimeRange::from(self));
+        let authorization = proofs.last().copied();
 
         // If proof chain was not empty we ensure that invocation
         // issuer aligns with outmost delegation audience.
@@ -657,15 +615,11 @@ impl InvocationPayload {
             });
         }
 
-        // Verify the accumulated time window is non-empty.
+        // `check_chain` already judged the hops; this re-checks the window
+        // once the invocation's own expiration is folded in.
         if !time_range.is_valid() {
             return Err(CheckFailed::InvalidTimeWindow { range: time_range });
         }
-
-        // A non-empty window only says the chain *could* be valid at some
-        // instant. Judge it against the one this verification was given:
-        // without this an expired delegation still authorizes. `None` is a
-        // deliberate opt-out (historical replay, no trusted clock).
         if let Some(now) = now {
             time_range.check(&now)?;
         }
