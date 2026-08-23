@@ -122,6 +122,22 @@ impl RevocationChecker for UnverifiedRevocations {
 #[derive(Debug, Clone, Copy)]
 pub struct TolerateUnavailability<T>(pub T);
 
+/// A shared checker answers exactly as the checker it borrows.
+///
+/// Lets a holder keep its checker behind an `Arc` or a field and still hand a
+/// borrow to a verification environment, rather than cloning a store for every
+/// verification.
+impl<T: RevocationChecker + ConditionalSync> RevocationChecker for &T {
+    type Error = T::Error;
+
+    fn query(
+        &self,
+        selector: RevocationSelector<'_>,
+    ) -> impl Future<Output = Result<Option<RevocationMatch>, Self::Error>> {
+        (*self).query(selector)
+    }
+}
+
 impl<T: RevocationChecker> RevocationChecker for TolerateUnavailability<T> {
     type Error = Never;
 

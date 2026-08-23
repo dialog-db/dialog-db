@@ -260,13 +260,19 @@ macro_rules! dispatch {
 /// result. Inject a different provider with [`UcanAuthorizer::with_resolver`] to
 /// change the resolution policy (for example, `did:key`-only, or a custom
 /// fetcher).
-pub struct UcanAuthorizer<Resolver = CachingResolver<WebResolver>> {
+pub struct UcanAuthorizer<
+    Resolver = CachingResolver<WebResolver>,
+    Revocations = dialog_ucan_core::UnverifiedRevocations,
+> {
     address: Address,
     credential: Option<S3Credential>,
     resolver: std::sync::Arc<Resolver>,
+    revocations: std::sync::Arc<Revocations>,
 }
 
-impl<Resolver: std::fmt::Debug> std::fmt::Debug for UcanAuthorizer<Resolver> {
+impl<Resolver: std::fmt::Debug, Revocations> std::fmt::Debug
+    for UcanAuthorizer<Resolver, Revocations>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UcanAuthorizer")
             .field("address", &self.address)
@@ -275,12 +281,13 @@ impl<Resolver: std::fmt::Debug> std::fmt::Debug for UcanAuthorizer<Resolver> {
     }
 }
 
-impl<Resolver> Clone for UcanAuthorizer<Resolver> {
+impl<Resolver, Revocations> Clone for UcanAuthorizer<Resolver, Revocations> {
     fn clone(&self) -> Self {
         Self {
             address: self.address.clone(),
             credential: self.credential.clone(),
             resolver: self.resolver.clone(),
+            revocations: self.revocations.clone(),
         }
     }
 }
@@ -306,6 +313,10 @@ impl<Resolver> UcanAuthorizer<Resolver> {
     /// `resolver` is any [`Provider<Resolve>`](dialog_capability::Provider),
     /// letting the embedder choose the resolution policy: local-only,
     /// network-enabled, a custom cache, or a mocked fetcher for tests.
+    ///
+    /// Revocation is unchecked: see
+    /// [`with_revocations`](UcanAuthorizer::with_revocations) to supply an
+    /// index.
     pub fn with_resolver(
         address: Address,
         credential: Option<S3Credential>,
@@ -315,13 +326,37 @@ impl<Resolver> UcanAuthorizer<Resolver> {
             address,
             credential,
             resolver: std::sync::Arc::new(resolver),
+            revocations: std::sync::Arc::new(dialog_ucan_core::UnverifiedRevocations),
         }
     }
 }
 
-impl<Resolver> UcanAuthorizer<Resolver>
+impl<Resolver, Revocations> UcanAuthorizer<Resolver, Revocations> {
+    /// Check every proof against `revocations` while verifying.
+    ///
+    /// Without this an authorizer establishes nothing about revocation
+    /// status — the default checker is named for that. Supplying one moves
+    /// the question inside the chain walk, where it is asked per link
+    /// against the principals entitled to revoke that link, rather than
+    /// being re-derived by the caller afterwards from a flatter view of the
+    /// chain.
+    pub fn with_revocations<Checked>(
+        self,
+        revocations: Checked,
+    ) -> UcanAuthorizer<Resolver, Checked> {
+        UcanAuthorizer {
+            address: self.address,
+            credential: self.credential,
+            resolver: self.resolver,
+            revocations: std::sync::Arc::new(revocations),
+        }
+    }
+}
+
+impl<Resolver, Revocations> UcanAuthorizer<Resolver, Revocations>
 where
     Resolver: dialog_capability::Provider<Resolve> + dialog_common::ConditionalSync,
+    Revocations: dialog_ucan_core::revocation::RevocationChecker + dialog_common::ConditionalSync,
 {
     /// Authorize a UCAN container.
     ///
@@ -353,13 +388,11 @@ where
         // fetches the DID document; a cache sits in front. The chain verify path
         // only sees a varsig resolver.
         let resolver = PerformingResolver::new(self.resolver.as_ref());
-        // No revocation store exists yet, so nothing is looked up. Named for
-        // what it does: it establishes nothing about revocation status.
-        let environment = Environment::new(
-            chain.proof_store(),
-            resolver,
-            dialog_ucan_core::UnverifiedRevocations,
-        );
+        // Revocation is the embedder's to supply: the default checker looks
+        // nothing up and is named for that, while `with_revocations` puts a
+        // real index behind it. Either way the question is asked inside the
+        // chain walk, per link and per entitled revoker.
+        let environment = Environment::new(chain.proof_store(), resolver, &*self.revocations);
         let context = VerificationContext::new(&environment);
         chain.verify(&context).await.map_err(|e| {
             // Two different failures arrive here: their material not
@@ -844,6 +877,109 @@ mod tests {
 
     /// An authorizer built with an explicit resolver still authorizes a normal
     /// did:key invocation: the injected [`MethodResolver`] routes did:key
+    /// Reports one delegation as revoked, by a named principal.
+    #[derive(Debug, Clone)]
+    struct RevokedLink {
+        cid: ipld_core::cid::Cid,
+        principal: dialog_capability::Did,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("revocation index unreachable")]
+    struct IndexUnreachable;
+
+    impl dialog_ucan_core::revocation::RevocationChecker for RevokedLink {
+        type Error = IndexUnreachable;
+
+        async fn query(
+            &self,
+            selector: dialog_ucan_core::revocation::RevocationSelector<'_>,
+        ) -> Result<Option<dialog_ucan_core::revocation::RevocationMatch>, Self::Error> {
+            if selector.delegation == self.cid && selector.by.contains(&self.principal) {
+                return Ok(Some(dialog_ucan_core::revocation::RevocationMatch {
+                    revocation: selector.delegation,
+                    principal: self.principal.clone(),
+                }));
+            }
+            Ok(None)
+        }
+    }
+
+    /// A chain resting on a revoked delegation must not authorize — and the
+    /// same chain must authorize without a checker, so the refusal is the
+    /// checker's doing rather than something else about the container.
+    #[dialog_common::test]
+    async fn it_refuses_a_chain_whose_proof_was_revoked() {
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::generate().await.expect("operator key");
+
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .await
+            .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+
+        let invocation = InvocationBuilder::new()
+            .issuer(operator.clone())
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec!["archive".to_string(), "get".to_string()])
+            .arguments(args)
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, std::sync::Arc::new(delegation));
+        let container = InvocationChain::new(invocation, delegations)
+            .to_bytes()
+            .expect("container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
+
+        // Without a checker the chain stands: nothing is looked up.
+        let unchecked = UcanAuthorizer::new(address.clone(), Some(credentials.clone()));
+        assert!(
+            unchecked.authorize(&container).await.is_ok(),
+            "the chain itself is sound"
+        );
+
+        // With one, the revoked proof refuses it.
+        let checked =
+            UcanAuthorizer::new(address, Some(credentials)).with_revocations(RevokedLink {
+                cid,
+                principal: subject.did(),
+            });
+        let error = checked
+            .authorize(&container)
+            .await
+            .expect_err("a revoked proof must refuse the chain");
+        assert!(
+            matches!(
+                error,
+                S3Error::Authorization(dialog_capability::access::AuthorizeError::Revoked { .. })
+            ),
+            "expected a revocation refusal, got: {error:?}"
+        );
+    }
+
     /// locally without touching the (mocked) did:web fetcher. This proves the
     /// configurable-resolver wiring carries through to `authorize`.
     #[dialog_common::test]
