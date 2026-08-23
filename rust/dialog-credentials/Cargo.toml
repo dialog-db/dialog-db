@@ -12,6 +12,9 @@ default = ["ed25519"]
 ed25519 = [
     "dep:ed25519-dalek",
     "dep:x25519-dalek",
+    "dep:aes-gcm",
+    "dep:hkdf",
+    "dep:sha2",
     "dep:getrandom",
     "dep:base58",
     "dialog-varsig/edwards25519",
@@ -32,6 +35,7 @@ dialog-common = { workspace = true }
 dialog-varsig = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
 signature = { workspace = true }
 
 # ed25519 feature deps
@@ -40,6 +44,12 @@ signature = { workspace = true }
 # secret is handed to WebCrypto (which cannot derive X25519 from Ed25519).
 ed25519-dalek = { workspace = true, optional = true }
 x25519-dalek = { workspace = true, optional = true }
+# Sealed-secret deps. AES-GCM and HKDF run in Rust on native; the browser arm
+# routes both through WebCrypto so they hit the platform's accelerated,
+# constant-time implementations instead of a software AES compiled to wasm.
+aes-gcm = { workspace = true, optional = true }
+hkdf = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 base58 = { workspace = true, optional = true }
 

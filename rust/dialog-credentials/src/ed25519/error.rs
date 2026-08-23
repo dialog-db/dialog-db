@@ -9,6 +9,22 @@ pub enum Ed25519KeyError {
     /// The seed bytes have the wrong length (expected 32).
     InvalidSeedLength(usize),
 
+    /// Random number generation failed.
+    ///
+    /// Unlike [`Ed25519KeyError::Rng`] this is available on every platform:
+    /// ephemeral agreement keys need randomness in the browser too.
+    RandomSource(String),
+
+    /// The Ed25519 key does not yield a valid X25519 agreement key.
+    InvalidAgreementKey,
+
+    /// The key agreement produced a non-contributory (all-zero) result.
+    ///
+    /// Raised when a peer supplies a low-order public key. The browser's
+    /// `deriveBits` rejects these itself; this keeps native behaving the same
+    /// way rather than silently returning an all-zero secret.
+    NonContributoryAgreement,
+
     /// No X25519 agreement key is available for this signing key.
     ///
     /// Only reachable on the browser, where a non-extractable key restored from
@@ -29,6 +45,13 @@ impl std::fmt::Display for Ed25519KeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidSeedLength(n) => write!(f, "expected 32 seed bytes, got {n}"),
+            Self::RandomSource(e) => write!(f, "RNG error: {e}"),
+            Self::InvalidAgreementKey => {
+                write!(f, "key does not yield a valid X25519 agreement key")
+            }
+            Self::NonContributoryAgreement => {
+                write!(f, "key agreement produced a non-contributory result")
+            }
             Self::AgreementKeyUnavailable => write!(
                 f,
                 "no X25519 agreement key available: the signing key was restored without one"

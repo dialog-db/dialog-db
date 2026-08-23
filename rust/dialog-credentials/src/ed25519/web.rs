@@ -716,6 +716,14 @@ impl AgreementSecretKey {
         Self::import_secret(&secret, false).await
     }
 
+    /// Import a raw X25519 secret as a non-extractable key.
+    ///
+    /// Used for ephemeral sender keys, whose secret is generated directly
+    /// rather than derived from an Ed25519 seed.
+    pub(crate) async fn from_secret_bytes(secret: &[u8; 32]) -> Result<Self, WebCryptoError> {
+        Self::import_secret(secret, false).await
+    }
+
     /// Import a raw X25519 secret with the given extractability.
     async fn import_secret(secret: &[u8; 32], extractable: bool) -> Result<Self, WebCryptoError> {
         let subtle = get_subtle_crypto()?;

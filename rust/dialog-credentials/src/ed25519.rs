@@ -38,13 +38,13 @@ pub use crate::key::{ExtractableAgreementKey, ExtractableKey, WebCryptoError};
 /// WebCrypto has no Ed25519-to-X25519 conversion of its own, so the browser arm
 /// derives here too and only hands the result to `importKey`.
 #[must_use]
-pub fn agreement_secret_bytes(seed: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn agreement_secret_bytes(seed: &[u8; 32]) -> [u8; 32] {
     ed25519_dalek::SigningKey::from_bytes(seed).to_scalar_bytes()
 }
 
 /// Derive the raw X25519 public key bytes from raw X25519 secret bytes.
 #[must_use]
-pub fn agreement_public_bytes(secret: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn agreement_public_bytes(secret: &[u8; 32]) -> [u8; 32] {
     x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(*secret)).to_bytes()
 }
 
@@ -253,7 +253,7 @@ impl Ed25519SigningKey {
     /// restored on the browser from an archive that carried no agreement
     /// component. On native this never fails.
     #[allow(clippy::unused_async)] // async is needed on WASM
-    pub async fn agreement_key(&self) -> Result<X25519SecretKey, Ed25519KeyError> {
+    pub(crate) async fn agreement_key(&self) -> Result<X25519SecretKey, Ed25519KeyError> {
         match self {
             Self::Native(key) => Ok(X25519SecretKey::Native(native::AgreementSecretKey::from(
                 key.to_scalar_bytes(),
@@ -292,7 +292,7 @@ impl Ed25519SigningKey {
 /// `WebCrypto` holds a browser `CryptoKey` plus its cached raw bytes.
 #[derive(Debug, Clone)]
 #[allow(missing_copy_implementations)] // CryptoKey is not Copy on WASM
-pub enum X25519PublicKey {
+pub(crate) enum X25519PublicKey {
     /// Native public key using `x25519_dalek`.
     Native(native::AgreementPublicKey),
 
@@ -304,7 +304,7 @@ pub enum X25519PublicKey {
 impl X25519PublicKey {
     /// Get the raw public key bytes.
     #[must_use]
-    pub fn to_bytes(&self) -> [u8; 32] {
+    pub(crate) fn to_bytes(&self) -> [u8; 32] {
         match self {
             Self::Native(key) => key.to_bytes(),
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -319,7 +319,7 @@ impl X25519PublicKey {
     /// On the browser, returns an error if the `WebCrypto` import fails. Never
     /// fails on native.
     #[allow(clippy::unused_async)] // async is needed on WASM
-    pub async fn from_bytes(bytes: &[u8; 32]) -> Result<Self, Ed25519KeyError> {
+    pub(crate) async fn from_bytes(bytes: &[u8; 32]) -> Result<Self, Ed25519KeyError> {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
             Ok(Self::WebCrypto(
@@ -331,6 +331,26 @@ impl X25519PublicKey {
         {
             Ok(Self::Native(native::AgreementPublicKey::from(*bytes)))
         }
+    }
+}
+
+impl X25519PublicKey {
+    /// Derive the agreement key for an Ed25519 identity.
+    ///
+    /// This is what makes sealing to a bare `did:key` possible: the X25519
+    /// public key is the Montgomery form of the Ed25519 public key, so it can
+    /// be computed from the DID alone with no lookup or prior interaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Ed25519 key is not a valid curve point, or if
+    /// the browser import fails.
+    pub(crate) async fn from_ed25519(verifier: &Ed25519Verifier) -> Result<Self, Ed25519KeyError> {
+        let montgomery = ed25519_dalek::VerifyingKey::from_bytes(&verifier.0.to_bytes())
+            .map_err(|_| Ed25519KeyError::InvalidAgreementKey)?
+            .to_montgomery()
+            .to_bytes();
+        Self::from_bytes(&montgomery).await
     }
 }
 
@@ -367,7 +387,7 @@ impl Eq for X25519PublicKey {}
 /// `Debug` is redacted: `x25519_dalek::StaticSecret` withholds its own `Debug`
 /// so secret scalars cannot be logged, and this wrapper keeps that property.
 #[derive(Clone)]
-pub enum X25519SecretKey {
+pub(crate) enum X25519SecretKey {
     /// Native secret key using `x25519_dalek`.
     Native(native::AgreementSecretKey),
 
@@ -389,7 +409,7 @@ impl X25519SecretKey {
     /// On the browser, returns an error if the `WebCrypto` import fails. Never
     /// fails on native.
     #[allow(clippy::unused_async)] // async is needed on WASM
-    pub async fn from_ed25519_seed(seed: &[u8; 32]) -> Result<Self, Ed25519KeyError> {
+    pub(crate) async fn from_ed25519_seed(seed: &[u8; 32]) -> Result<Self, Ed25519KeyError> {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
             Ok(Self::WebCrypto(
@@ -405,9 +425,37 @@ impl X25519SecretKey {
         }
     }
 
+    /// Generate a single-use agreement key.
+    ///
+    /// Used by the sender when sealing: a fresh key per message means the
+    /// sender's long-term key never performs the agreement, so compromising it
+    /// later cannot open past messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RNG or the browser import fails.
+    #[allow(clippy::unused_async)] // async is needed on WASM
+    pub(crate) async fn ephemeral() -> Result<Self, Ed25519KeyError> {
+        let mut secret = [0u8; 32];
+        getrandom::getrandom(&mut secret)
+            .map_err(|e| Ed25519KeyError::RandomSource(e.to_string()))?;
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            Ok(Self::WebCrypto(
+                web::AgreementSecretKey::from_secret_bytes(&secret).await?,
+            ))
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Ok(Self::Native(native::AgreementSecretKey::from(secret)))
+        }
+    }
+
     /// Get the corresponding X25519 public key.
     #[must_use]
-    pub fn public_key(&self) -> X25519PublicKey {
+    pub(crate) fn public_key(&self) -> X25519PublicKey {
         match self {
             Self::Native(key) => X25519PublicKey::Native(native::AgreementPublicKey::from(key)),
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -425,7 +473,7 @@ impl X25519SecretKey {
     /// On the browser, returns an error if `deriveBits` fails. Never fails on
     /// native.
     #[allow(clippy::unused_async)] // async is needed on WASM
-    pub async fn diffie_hellman(
+    pub(crate) async fn diffie_hellman(
         &self,
         peer: &X25519PublicKey,
     ) -> Result<[u8; 32], Ed25519KeyError> {
@@ -435,7 +483,15 @@ impl X25519SecretKey {
                 // its raw bytes, which is what `X25519PublicKey::to_bytes`
                 // gives us in either case.
                 let peer = native::AgreementPublicKey::from(peer.to_bytes());
-                Ok(key.diffie_hellman(&peer).to_bytes())
+                let shared = key.diffie_hellman(&peer);
+                // `x25519_dalek` does not reject low-order peer keys, so a
+                // crafted key would yield an all-zero secret. WebCrypto's
+                // `deriveBits` rejects them, and this keeps the two platforms
+                // behaving identically.
+                if !shared.was_contributory() {
+                    return Err(Ed25519KeyError::NonContributoryAgreement);
+                }
+                Ok(shared.to_bytes())
             }
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::WebCrypto(key) => {
