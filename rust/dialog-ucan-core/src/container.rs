@@ -60,6 +60,17 @@ pub enum ContainerError {
         revoker: Did,
     },
 
+    /// The chain does not authorize the invocation: a link's audience,
+    /// subject, command, policy, or validity window did not hold up.
+    ///
+    /// Carries the [`CheckFailed`] itself rather than its rendered text,
+    /// so a caller answering this to its own clients can distinguish an
+    /// expired proof from a forged chain and say which. Rendering it
+    /// early would leave every one of these looking like malformed
+    /// input.
+    #[error(transparent)]
+    Unauthorized(#[from] crate::invocation::CheckFailed),
+
     /// Invalid configuration.
     #[error("Configuration error: {0}")]
     Configuration(String),
