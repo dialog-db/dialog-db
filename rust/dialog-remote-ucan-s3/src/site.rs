@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use dialog_capability::access::{
     Access, Authorization as _, Authorize as AuthorizeEffect, AuthorizeError, FromCapability,
-    Protocol,
+    Protocol, TimeRange,
 };
 use dialog_capability::{
     Ability, Capability, Constraint, Effect, Fork, ForkInvocation, Provider, Site, SiteAddress,
     SiteFork, SiteId, Subject,
 };
+use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Rejection;
 use dialog_effects::authority::{self, OperatorExt};
@@ -161,15 +162,49 @@ where
 
         let scope = <Ucan as Protocol>::Access::from_capability(self.0.capability());
 
+        // Ask for a chain that is good NOW, not merely for one that
+        // exists. The proof walk has no clock of its own: it filters
+        // candidates by whether their window covers the REQUESTED one,
+        // and an unbounded request is covered by every window, including
+        // one that closed yesterday. Leaving this unbounded is what let a
+        // lapsed certificate retained beside a live route be picked --
+        // arbitrarily, since candidate order follows content hashes --
+        // and then presented to a responder that does check the clock,
+        // which answers `Expired` for authority the holder still has.
+        //
+        // The requirement is the instant of presentation rather than a
+        // window reaching into the future: `covers` is inclusive, so this
+        // admits exactly what a responder checking `now` admits, and asks
+        // for no more lifetime than the request itself needs. It does not
+        // bound the resulting authorization -- the proof still reports
+        // the window its certificates agree on.
+        let at = now_s();
         let authorization = Subject::from(profile)
             .attenuate(Access)
-            .invoke(AuthorizeEffect::<Ucan>::new(operator, scope))
+            .invoke(
+                AuthorizeEffect::<Ucan>::new(operator, scope).during(TimeRange {
+                    not_before: Some(at),
+                    expiration: Some(at),
+                }),
+            )
             .perform(env)
             .await?;
 
         let invocation = authorization.invoke().await?;
         Ok(self.0.attest(UcanAuthorization::from(invocation)))
     }
+}
+
+/// The current moment in unix seconds, the unit delegation bounds use.
+///
+/// A clock this far behind the epoch cannot happen on a machine that can
+/// verify a signature; falling back to zero keeps the caller total, and a
+/// zero requirement is one every unexpired certificate meets.
+fn now_s() -> u64 {
+    time::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
 }
 
 /// UCAN site configuration for delegated authorization.
@@ -204,6 +239,7 @@ mod tests {
 
     use super::*;
     use dialog_capability::did;
+    use dialog_effects::archive::prelude::*;
 
     #[cfg(not(target_arch = "wasm32"))]
     use std::collections::{BTreeMap, HashMap};
@@ -222,6 +258,87 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     #[cfg(not(target_arch = "wasm32"))]
     use tokio::net::TcpListener;
+
+    /// An env that answers `Identify` and records what window the fork
+    /// asked its authority to cover, refusing the claim afterwards --
+    /// the request is the whole subject here, not what comes back.
+    struct RecordingEnv {
+        profile: dialog_capability::Did,
+        operator: dialog_capability::Did,
+        asked: std::sync::Mutex<Option<TimeRange>>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<authority::Identify> for RecordingEnv {
+        async fn execute(
+            &self,
+            _input: authority::Identify,
+        ) -> Result<Capability<authority::Operator>, dialog_effects::authority::AuthorityError>
+        {
+            Ok(Subject::from(self.profile.clone())
+                .attenuate(authority::Profile::local(self.profile.clone()))
+                .attenuate(authority::Operator::new(self.operator.clone())))
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<AuthorizeEffect<Ucan>> for RecordingEnv {
+        async fn execute(
+            &self,
+            input: Capability<AuthorizeEffect<Ucan>>,
+        ) -> Result<<Ucan as Protocol>::Authorization, AuthorizeError> {
+            *self.asked.lock().expect("uncontended") = Some(input.into_effect().duration);
+            Err(AuthorizeError::Unavailable {
+                detail: "recorded".to_string(),
+            })
+        }
+    }
+
+    /// The presign path asks for authority that is good NOW.
+    ///
+    /// The proof walk has no clock: it admits any certificate whose
+    /// window covers the REQUESTED one, and an unbounded request is
+    /// covered by a window that closed yesterday. Leaving this unbounded
+    /// is what let a lapsed certificate retained beside a live route be
+    /// picked and presented to a responder that does check the clock.
+    #[dialog_common::test]
+    async fn it_asks_for_authority_that_is_good_at_the_moment_it_presents() {
+        let profile = did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX");
+        let operator = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        let env = RecordingEnv {
+            profile: profile.clone(),
+            operator,
+            asked: std::sync::Mutex::new(None),
+        };
+
+        let before = now_s();
+        let fork = Subject::from(profile)
+            .archive()
+            .catalog("data")
+            .get(dialog_common::Blake3Hash::hash(b"block"))
+            .fork(&UcanAddress::new("https://access.test/ucan/"));
+        let _ = UcanFork::from(fork).authorize(&env).await;
+        let after = now_s();
+
+        let asked = env
+            .asked
+            .lock()
+            .expect("uncontended")
+            .expect("the fork claimed authority");
+        let (Some(not_before), Some(expiration)) = (asked.not_before, asked.expiration) else {
+            panic!("the fork asked for an unbounded window: {asked:?}");
+        };
+        assert_eq!(
+            not_before, expiration,
+            "the requirement is the instant of presentation, not a window",
+        );
+        assert!(
+            (before..=after).contains(&not_before),
+            "the fork asked about {not_before}, which is not now ({before}..={after})",
+        );
+    }
 
     // The reason travels as itself, so what this pins is the round
     // trip: whatever the responder built arrives as the same value.
