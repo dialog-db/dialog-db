@@ -232,6 +232,139 @@ mod tests {
         Ok(())
     }
 
+    // The agreement key must outlive a session. A browser signer cannot
+    // re-derive it (its Ed25519 key is non-extractable and yields no seed), so
+    // it has to survive IndexedDb's structured clone as part of the stored
+    // credential. Without this, every reload would produce a signer that can
+    // sign but cannot open anything previously sealed to its DID.
+    #[dialog_common::test]
+    async fn it_preserves_the_agreement_key_across_a_session() -> anyhow::Result<()> {
+        use dialog_credentials::Ed25519Signer;
+        use dialog_credentials::secret::Context;
+        use dialog_credentials::{Ed25519Verifier, Signer as CredentialSigner};
+
+        const VAULT: Context = Context::new("dialog/vault/test");
+
+        let provider = IndexedDb::connect(unique_name("cred-agreement")).await?;
+        let address = unique_did().await;
+
+        // Session 1: a profile is generated and stored.
+        let profile = Ed25519Signer::generate().await.unwrap();
+        let profile_did = profile.ed25519_did().to_string();
+        address
+            .clone()
+            .credential()
+            .key("self")
+            .save(Credential::Signer(profile.into()))
+            .perform(&provider)
+            .await?;
+
+        // The account seals a vault secret knowing only the DID.
+        let sealed = profile_did
+            .parse::<Ed25519Verifier>()
+            .unwrap()
+            .secret(VAULT)
+            .conceal(&[9u8; 32])
+            .await
+            .unwrap();
+
+        // Session 2: the profile is loaded back out of storage.
+        let loaded = address
+            .credential()
+            .key("self")
+            .load()
+            .perform(&provider)
+            .await?;
+
+        let Credential::Signer(signer) = loaded else {
+            panic!("expected a signer credential");
+        };
+        let CredentialSigner::Ed25519(signer) = signer.into_signer() else {
+            panic!("expected an ed25519 signer");
+        };
+
+        assert_eq!(
+            signer.ed25519_did().to_string(),
+            profile_did,
+            "the reloaded credential should be the same identity"
+        );
+        assert_eq!(
+            signer.secret(VAULT).reveal(&sealed).await.unwrap(),
+            [9u8; 32],
+            "a reloaded credential should open a secret sealed to its DID"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_the_agreement_key_across_two_sessions() -> anyhow::Result<()> {
+        use dialog_credentials::Ed25519Signer;
+        use dialog_credentials::secret::Context;
+        use dialog_credentials::{Ed25519Verifier, Signer as CredentialSigner};
+
+        const VAULT: Context = Context::new("dialog/vault/test");
+
+        let provider = IndexedDb::connect(unique_name("cred-agreement-twice")).await?;
+        let address = unique_did().await;
+
+        let profile = Ed25519Signer::generate().await.unwrap();
+        let profile_did = profile.ed25519_did().to_string();
+        address
+            .clone()
+            .credential()
+            .key("self")
+            .save(Credential::Signer(profile.into()))
+            .perform(&provider)
+            .await?;
+
+        let sealed = profile_did
+            .parse::<Ed25519Verifier>()
+            .unwrap()
+            .secret(VAULT)
+            .conceal(b"two sessions")
+            .await
+            .unwrap();
+
+        // Load and re-save, as a long-lived app would across restarts.
+        let first = address
+            .clone()
+            .credential()
+            .key("self")
+            .load()
+            .perform(&provider)
+            .await?;
+        address
+            .clone()
+            .credential()
+            .key("self")
+            .save(first)
+            .perform(&provider)
+            .await?;
+
+        let second = address
+            .credential()
+            .key("self")
+            .load()
+            .perform(&provider)
+            .await?;
+
+        let Credential::Signer(signer) = second else {
+            panic!("expected a signer credential");
+        };
+        let CredentialSigner::Ed25519(signer) = signer.into_signer() else {
+            panic!("expected an ed25519 signer");
+        };
+
+        assert_eq!(
+            signer.secret(VAULT).reveal(&sealed).await.unwrap(),
+            b"two sessions",
+            "the agreement key should survive a second storage round trip"
+        );
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_rejects_garbage_credential() -> anyhow::Result<()> {
         let provider = IndexedDb::connect(unique_name("cred-garbage")).await?;
