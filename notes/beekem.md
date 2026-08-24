@@ -586,6 +586,120 @@ life, against millions of facts. The keyring is a rounding error in storage;
 its cost is replay time on open, which is what checkpointing is for when it
 starts to matter.
 
+## Rotation
+
+Rotation needs to be exercised from the first day of the encryption layer, long
+before any CGKA exists. Three questions fall out of that, and the first one has
+a firm answer that shapes the rest.
+
+### You cannot make rotation coordination-free
+
+The tempting move is to derive the new key deterministically from public state
+— the root hash, a commit count — so two peers rotate to the *same* key without
+talking. It does not work, and the reason is worth writing down so nobody
+re-proposes it: a key derived from the old key plus public state is known to
+anyone who knew the old key. That is precisely the party rotation exists to
+lock out. **Post-compromise security requires fresh entropy, and fresh entropy
+cannot be agreed on without communication.**
+
+So concurrent rotation is not a failure mode to design away. It is the normal
+case, and the design has to tolerate it — which BeeKEM already does, by keeping
+every concurrent version of a node rather than picking a winner.
+
+### Epochs are named, not counted
+
+That tolerance costs nothing if an epoch is a *content-addressed identifier*
+rather than a position in a sequence. Each sealed node's plaintext header names
+the epoch it was written under; a reader resolves that name to a key. Two peers
+rotating concurrently produce two epochs, both resolvable, and nothing needs to
+agree on an order.
+
+This is what the header must carry from day one — it is the whole reason the
+static-key phase cannot use a bare key with no epoch field.
+
+### The stand-in is a degenerate keyring, not a fake
+
+Which makes step 1's "static key" the wrong mental model. What we want is the
+same *shape* as the eventual system with the tree removed:
+
+```rust
+trait Keyring {
+    /// The epoch to write new content under.
+    fn current(&self) -> (EpochId, SymmetricKey);
+    /// Resolve any epoch a node header names, however old.
+    fn resolve(&self, epoch: &EpochId) -> Result<SymmetricKey, KeyringError>;
+    /// Mint a new epoch with fresh entropy, recording it in the log.
+    async fn rotate(&mut self) -> Result<EpochId, KeyringError>;
+}
+```
+
+The stand-in implementation keeps an append-only log of epoch records (each
+naming its predecessors, exactly like a CGKA op) and resolves an epoch by
+deriving `HKDF(space_secret, epoch_id)`. Every member holds the space secret,
+delivered to a profile's own devices by `secret::Seal`. It is a real keyring
+with one member set and no key agreement — a *degenerate* BeeKEM, not a mock.
+
+Swapping in BeeKEM later changes `resolve` from a KDF into a walk up the tree,
+and `rotate` from minting a record into `Cgka::update`. The header format, the
+sealing layer, the log, and every test written against them stay as they are.
+
+### Rotation is public API, with a policy above it
+
+Make it an ordinary command in the existing builder style, not a test hook:
+
+```rust
+branch.rotate().perform(&operator).await?;
+```
+
+Triggers sit above it as a policy, and this is where the deterministic idea
+belongs — as a *trigger*, never as key derivation:
+
+| Policy | Use |
+| --- | --- |
+| `OnDemand` | production default |
+| `EveryNCommits(n)` | tests, fixtures |
+| `WhenRootMatches(mask)` | tests wanting rotation at reproducible points |
+| `OnMembershipShrink` | later, once there is membership to shrink |
+
+With an aggressive policy in the test harness, every fixture produces a
+multi-epoch tree and the whole suite exercises cross-epoch reads for free. The
+property test that matters needs no CGKA at all: two peers, each rotating
+independently, converge — and every node in the merged tree still decrypts.
+
+### The cost that is easy to miss: rotation partitions dedup
+
+`TreeDifference` prunes by comparing the hashes carried in parents' links,
+never loading a subtree whose hash matches. That pruning is what makes sync
+proportional to the size of the difference.
+
+Encryption keeps that property *within* an epoch — deterministic SIV means
+identical plaintext under one key yields identical ciphertext and therefore an
+identical hash. Across epochs it does not: the same logical node written by two
+peers under two different epochs has different ciphertext, a different hash,
+and the pruning fails. The subtree gets read and transferred as though it had
+changed.
+
+Three things bound how much this matters:
+
+- **Nothing already written is invalidated.** Existing nodes keep their epoch,
+  their ciphertext and their hash. Structural sharing across tree versions is
+  untouched, because unchanged nodes are never rewritten.
+- **It only bites newly created, identical content** written by peers sitting
+  in different epochs. Correctness is unaffected either way — merge is defined
+  over decrypted entries, so the duplicate resolves; what is lost is transfer
+  efficiency.
+- **It is forward-only.** Once peers converge on an epoch, pruning works again.
+
+And the escape hatch does not exist: a long-lived content key wrapped by
+rotating epoch keys would preserve dedup perfectly, but if the key the data is
+encrypted under never changes, removing a member never takes away their ability
+to read new writes. Rotation that means anything must change the key content is
+sealed under, and therefore must partition dedup from that point forward.
+
+The practical consequence: **rotate rarely in production, constantly in tests.**
+That is an argument against `WhenRootMatches` as a production policy and for it
+as a test one — the opposite of where the idea naturally lands.
+
 ## Sharp edges
 
 - **Writes may have to rekey first.** After a membership change the group
@@ -645,11 +759,13 @@ The revised order:
    protocol involved. This alone ships something real: a space an untrusted
    blob store cannot read, which is `notes/privacy.md`'s L0 with nothing else
    required.
-2. **Two epochs, still no BeeKEM.** A fake key provider that rotates on demand,
-   so nodes written under different epochs coexist in one tree and a reader
-   re-derives the right key per node from the header. This is the step that
-   keeps (1) honest: without it, it is far too easy to bake in an assumption
-   that the key is stable and discover it only when the CGKA arrives.
+2. **Rotation, still no BeeKEM.** A degenerate keyring — an epoch log plus
+   `HKDF(space_secret, epoch_id)` — behind the same `Keyring` trait the CGKA
+   will later implement, with `rotate()` exposed as ordinary API and an
+   aggressive policy in the test harness. See [Rotation](#rotation). This is
+   the step that keeps (1) honest: without it, it is far too easy to bake in an
+   assumption that the key is stable and discover it only when the CGKA
+   arrives.
 3. **Spike: `beekem` on `wasm32-unknown-unknown`.** An hour's work, and it
    gates only steps 4–6, so it can happen any time before them. If the crate
    does not build for wasm we port instead — which changes nothing about
