@@ -1,4 +1,4 @@
-# Cells and Wiring: Network Topology as Data
+# Propagation Network: Topology as Data
 
 ## Status
 
@@ -7,6 +7,14 @@ the first slice. Companion reading: `version-control.md` (the merge this
 note leans on), `subject-routing-options.md` (the local half of routing),
 `scope-and-delegation.md` (wildcard scopes, referenced by the trust
 section).
+
+A word on terminology. The propagator literature (Sussman/Radul) calls its
+unit of state a *cell*, but that word is taken here: `Cell` already names
+the CAS mutable pointer in `dialog-repository`, and those memory cells play
+their own distinct role in this design. So this note says **node** for the
+propagator-network unit of state — concretely, a branch (or a whole
+repository, viewed as its branches sharing one archive) — and reserves
+"cell" for the CAS pointer, as in the codebase.
 
 ## Problem
 
@@ -28,43 +36,43 @@ the profile's certificates in its access branch. The address half should
 follow.
 
 The proposal: represent peers and the connections between repositories as
-ordinary version-controlled facts — an address book of nodes and a set of
-directed edges — and demote the cells to the three jobs only they can do
-(bootstrap, local override, trust anchoring).
+ordinary version-controlled facts — an address book of peers and a set of
+directed edges between nodes — and demote the memory cells to the three
+jobs only they can do (bootstrap, local override, trust anchoring).
 
 ## The sync engine is already a propagator network
 
 The framing that makes the design fall out is Sussman-style propagators:
-cells holding join-semilattice values, autonomous propagators that fire
-monotonically and idempotently when an input cell gains information, and
+nodes holding join-semilattice values, autonomous propagators that fire
+monotonically and idempotently when an input gains information, and
 convergence guaranteed by the lattice algebra rather than by scheduling.
 This is not an analogy to grow into — it is what the merge in
 `version-control.md` already is:
 
-| Propagator model              | Dialog today                                          |
-| ----------------------------- | ----------------------------------------------------- |
-| Cell holding a lattice value  | A branch: log + watermark (OR-set; merge is log union, "same log, same cache") |
+| Propagator model                     | Dialog today                                          |
+| ------------------------------------ | ----------------------------------------------------- |
+| State unit holds a lattice value     | A branch: log + watermark (OR-set; merge is log union, "same log, same cache") |
 | Join is commutative/assoc/idempotent | R1/R2/R3 screens; re-pulling is harmless by construction |
-| Propagator fires on new info  | Pull; scenarios 1–2 (watermark inclusion) are the O(1) "nothing new, don't fire" test |
-| Cycle tolerance               | Mesh sync: joins commute, cycles cost only idle ticks |
-| Quiescence                    | All pairwise pulls hit scenario 1/2                   |
+| Propagator fires on new info         | Pull; scenarios 1–2 (watermark inclusion) are the O(1) "nothing new, don't fire" test |
+| Cycle tolerance                      | Mesh sync: joins commute, cycles cost only idle ticks |
+| Quiescence                           | All pairwise pulls hit scenario 1/2                   |
 
 What the model does *not* have today is its wiring inside the system. The
 upstream and remote cells are the network's wiring diagram, held off to the
 side. Moving them into the tree makes the network **self-describing**: the
-wiring is cell content, subject to the same join, replicated to every
-replica, and a new replica pulls once and inherits its whole I/O behavior.
-The sync daemon stops being configured and becomes a stateless interpreter
-of the tree.
+wiring replicates with the data, merges like the data, and a new replica
+pulls once and inherits its whole I/O behavior. The sync daemon stops being
+configured and becomes a stateless interpreter of the tree.
 
 Three mechanisms in the codebase are already instances of one propagator
 family, currently unrelated in code:
 
-- `dialog.rule/on` triggers: intra-cell propagators (commit fires rule).
+- `dialog.rule/on` triggers: propagators *within* a branch (commit fires
+  rule).
 - Session layering (`SessionBranch`): a local junction joining several
-  branch cells into one read view.
-- Upstream sync: an inter-cell propagator whose trigger is "peer head
-  moved" and whose body is the join.
+  branches into one read view.
+- Upstream sync: a propagator *between* branches, whose trigger is "peer
+  head moved" and whose body is the join.
 
 This note only reifies the third, but the schema below is chosen so the
 other two could later share its vocabulary.
@@ -104,34 +112,36 @@ Scenario 1 makes polling nearly free (zero reads on the idle tick), so
 notification is an optimization layered on later (a site that supports
 watch), never a semantic requirement. Nothing in this note depends on it.
 
-## The scope lattice
+## Which entity a fact attaches to decides who shares it
 
-Entity derivation already provides a lattice of scopes, and the design
-principle is: *every fact goes on the rung matching who should share it.*
+Entity derivation already gives four kinds of derived entity, and each is
+shared by a different audience. The design principle: *every fact goes on
+the entity matching who should share it.*
 
-| Rung              | Entity derivation          | Shared by                    | Example                         |
-| ----------------- | -------------------------- | ---------------------------- | ------------------------------- |
-| repository        | `subject.this()`           | everyone with the repo       | peers, shared edges, "pages that exist" |
-| repository branch | `hash(subject, name)`      | everyone, per branch         | branch-scoped tracking intent   |
-| replica           | `hash(profile, subject)`   | one profile's devices        | device-local wiring, "active page" |
-| replica branch    | `hash(replica, name)`      | one profile, one branch      | origins (already lives here)    |
+| Entity derived from        | Who converges on it              | Example                         |
+| -------------------------- | -------------------------------- | ------------------------------- |
+| `subject` (the repo DID)   | everyone with the repo           | peers, shared edges, "pages that exist" |
+| `(subject, name)`          | everyone, per branch             | branch-scoped tracking intent   |
+| `(profile, subject)`       | one profile's devices (a replica)| device-local wiring, "active page" |
+| `(replica, name)`          | one profile, one branch          | origins (already lives here)    |
 
 `schema::Branch::new(replica: impl AsRef<Entity>, name)` is already generic
-over the owner entity, so the repository-branch rung costs nothing new —
-but the scope choice must be visible at call sites (two named constructors,
-not one polymorphic one), because attaching topology to the replica-scoped
-branch entity would make every collaborator write to a different entity and
-share nothing. Origins stay on the replica-branch rung; that rung is what
-makes an origin a sequential actor, and nothing here touches it.
+over the owner entity, so the `(subject, name)` row costs nothing new — but
+the choice must be visible at call sites (two named constructors, not one
+polymorphic one), because attaching topology to the `(replica, name)`
+entity would make every collaborator write to a different entity and share
+nothing. Origins stay on `(replica, name)`; that derivation is what makes
+an origin a sequential actor, and nothing here touches it.
 
-The address book sits on the repository rung. A device-local mirror ("this
-laptop also syncs to my NAS") is the *same fact shape* one rung down, on the
-replica entity. Shared and local wiring differ only in which entity the
-edge hangs off.
+The address book hangs off the repository entity, so it is shared by
+everyone. A device-local mirror ("this laptop also syncs to my NAS") is the
+*same fact shape* attached to the replica entity instead — visible only to
+that profile's devices, invisible and irrelevant to collaborators. Shared
+and private wiring differ only in which entity the edge hangs off.
 
 ## Schema
 
-### Nodes: the address book
+### Peers: the address book
 
 The entity is the peer's DID — intrinsic, global, collision-free. Petnames
 are attributes, cardinality-many:
@@ -155,15 +165,16 @@ possibly several per peer, and advisory: a replica may know a better route
 ### Edges: the wiring
 
 One relation, read from both ends. "Upstream" is an edge whose sink is a
-local cell; "push remote" is an edge whose source is local. The edge entity
-derives from `(source, sink)` so concurrent additions of the same edge
-converge to one entity whose attributes merge:
+local node; "push remote" is an edge whose source is local. The edge entity
+derives from `(source, sink)` so two replicas concurrently adding the same
+connection mint the same entity, and their attributes merge instead of
+duplicating the edge:
 
 ```text
-edge = hash(source-cell, sink-cell)
+edge = hash(source-node, sink-node)
 
-edge   dialog.flow/source   <cell ref: did, or (did, branch)>
-edge   dialog.flow/sink     <cell ref>
+edge   dialog.flow/source   <node: did, or (did, branch)>
+edge   dialog.flow/sink     <node>
 edge   dialog.flow/scope    "user/*"            # optional; cardinality many, union
 edge   dialog.flow/proof    blob:<delegation>   # only for writing a foreign rendezvous
 ```
@@ -179,8 +190,10 @@ commitments and not later discoveries:
   convergence dies; if cross-repo materialized views ever happen, derived
   facts must be keyed by provenance version so re-derivation is a no-op.
   Until someone does that work, transforms on edges are out.
-- **Multiple scopes union.** Concurrent scope additions widen the edge;
-  they never conflict. Narrowing is a retraction, with the caveat below.
+- **Multiple scopes union.** The scope attribute is cardinality-many and
+  the effective scope is the union of the ranges, so concurrent scope
+  additions widen the edge; they never conflict. Narrowing is a
+  retraction, with the caveat below.
 - **Retracting an edge stops future flow and rescinds nothing.**
   Propagators never un-propagate; everything already joined stays joined.
   Same asymmetry as capability revocation, worth surfacing in any UI that
@@ -212,7 +225,7 @@ everything A later receives.
 
 ## What stays outside the tree
 
-Three jobs the cells keep, because they cannot move:
+Three jobs the memory cells keep, because they cannot move:
 
 1. **Bootstrap.** You cannot learn from the tree where to fetch the tree.
    At least one (subject, site) pair is irreducibly local. This is git's
@@ -286,6 +299,35 @@ replica-scoped facts can bear against a malicious collaborator. If it is
 conventional, anything that must be tamper-evident uses the signed-envelope
 pattern (signature in the blob, facts as index), same as delegations.
 
+## Winners as read-time policy
+
+The merge deliberately does *less* than a truth-maintenance system: it
+converges the log and derives one live set with a fixed deterministic
+tie-break (higher stored-byte hash on same-fact collisions). But the log
+retains every claim with its provenance — origin, edition, what superseded
+what — so a different resolution policy can live **at read time, in the
+query layer**, without touching the merge:
+
+- Any policy that is a pure, deterministic function of the merged log
+  converges for free: same log everywhere, same answer everywhere. The
+  built-in tie-break is just the default policy; an application can query
+  the claim records and prefer-by-author, prefer-by-recency-of-edition, or
+  surface the contest to a human, and no replica disagrees.
+- What must **not** happen is a policy feeding its choice back into the
+  merge (a "resolver" that commits winners) unless that write is itself
+  keyed by the versions it resolved — otherwise two replicas resolving
+  concurrently reintroduce the conflict one level up.
+- The part of a TMS this does not give is justification tracking:
+  conclusions that retract when their premises die. In dialog that is the
+  rules engine's territory — derived facts keyed by the provenance versions
+  of their premises, exactly the monotonicity condition the edge-transform
+  ban above points at. Same condition, two doors it guards.
+
+So "the query engine is a policy for choosing winners" is sound as long as
+choosing stays a read-time view over the log; the staged `prepare`/`commit`
+pull is the quarantine point if a policy ever needs to inspect novelty
+before it joins.
+
 ## The topology region must always be materialized
 
 Pull adopts subtrees by reference and hydrates lazily (scenario 3 adopts a
@@ -308,10 +350,10 @@ layered into sessions via the existing multi-branch join is an
 implementation choice for slice 2; the layered branch composes better with
 the access branch, which has the same materialization need.
 
-## Sideline: branches as cells
+## Sideline: branches as nodes in their own right
 
 If branches were subjects (own DIDs) sharing an archive, remotes and
-upstreams collapse further: edges connect cells, uniformly, and the address
+upstreams collapse further: edges connect nodes, uniformly, and the address
 book covers branches too. The merge layer is already indifferent —
 watermarks compare across repository boundaries, the router already maps
 many DIDs to one provider, and origins are per-(branch, issuer) regardless.
@@ -320,26 +362,27 @@ provable link to its repository (hierarchical derivation is convenient but
 not publicly verifiable for Ed25519; a retained parent-issued attestation
 is verifiable and uses existing machinery — do both). This note does not
 depend on that unification, but the edge schema deliberately references
-cells as `did` or `(did, branch)` so adopting it later narrows a type
+nodes as `did` or `(did, branch)` so adopting it later narrows a type
 instead of reshaping the relation.
 
 ## Staged plan
 
 Each slice is independently shippable and none breaks existing cells.
 
-1. **Peer directory** (`dialog.peer/*`): nodes on the repository rung,
+1. **Peer directory** (`dialog.peer/*`): peers on the repository entity,
    resolution order local-override → tree → bootstrap, cells demoted but
    fully functional. No sync behavior changes. Deliverable: a pulled
    address book — replica B resolves a petname replica A asserted.
 2. **Edges** (`dialog.flow/*`) for *input* wiring: which peers a branch
-   tracks, on the repository-branch rung; sync bases and head caches stay
-   in cells (or fall away if the derivability spike lands). Deliverable: a
-   fresh replica self-configures its pulls from the tree.
+   tracks, on the `(subject, name)` branch entity; sync bases and head
+   caches stay in cells (or fall away if the derivability spike lands).
+   Deliverable: a fresh replica self-configures its pulls from the tree.
 3. **Output edges + pin set**: retained proofs make edges executable;
    profile-scoped sealed pins gate firing. Deliverable: "clone and it just
    works" — safely.
 4. **Always-materialized topology region** (can land with 2).
-5. Later, separately argued: scoped edges, notification, branch-as-cell.
+5. Later, separately argued: scoped edges, notification, branches as
+   first-class nodes.
 
 ### Slice 1, concretely
 
