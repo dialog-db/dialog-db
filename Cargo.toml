@@ -38,6 +38,7 @@ members = [
     "rust/dialog-remote-fs",
     "rust/dialog-network",
     "rust/dialog-identity",
+    "rust/dialog-keyring",
     "rust/dialog-operator",
     "rust/dialog-repository",
     "rust/dialog-varsig",
@@ -218,6 +219,9 @@ path = "./rust/dialog-storage"
 
 [workspace.dependencies.dialog-effects]
 path = "./rust/dialog-effects"
+
+[workspace.dependencies.dialog-keyring]
+path = "./rust/dialog-keyring"
 
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
