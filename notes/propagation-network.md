@@ -143,7 +143,9 @@ and private wiring differ only in which entity the edge hangs off.
 
 The whole proposal in one sentence: **this is `.gitmodules` for remotes —
 git's two config tables become versioned, replicated facts; every kind of
-ref stays exactly where git keeps it.**
+ref stays exactly where git keeps it.** (The "Mounts" section later
+reframes the tracking relation as the `integrate` policy of a more
+general mount relation — read this section first, then that one.)
 
 The tables, side by side with git. References are always entities —
 names are attributes people edit, never addresses code follows:
@@ -785,6 +787,76 @@ The sync daemon reduces to two queries either way. In two-table terms —
 pull sources: sites of peers referenced by my tracking entries (self-DID
 peers being the rendezvous case); push targets: tracking entries toward
 foreign-DID peers, gated by proof verification and the local pin.
+
+## Mounts: peers as databases, not sources
+
+The reframe that simplifies everything above it. The note to this point
+assumed every tracked peer is *integrated* — pulled through the screens
+and merged into shared state. The better default is the symlink model:
+most peers are **mounted**, not merged. A mount holds the peer's tree by
+root reference (the by-reference adoption and lazy hydration machinery,
+unchanged) and *exposes* it, read-only, as a named database — the
+Datomic shape: a query takes a set of database values (`$local`,
+`$bob`), cross-database joins are query expressions, and every fact is
+forever attributed to its database. A repository becomes **an address
+book plus a set of mounted databases, one of which is local**. The
+exposure mechanism exists: `SessionBranch` already layers branches into
+one read view; a mount is a foreign branch in that layering.
+
+Merging degrades to what it should have been: an opt-in *convergence
+relationship* — for one's own devices (same-subject replicas) and true
+collaborators — a policy on a mount rather than the foundation:
+
+```text
+mnt   dialog.mount/of      br-b7        # entity = Entity::of(Mount { of, … })
+mnt   dialog.mount/policy  "expose"     # or "integrate"
+```
+
+(`dialog.replicate/from|to` earlier is then the `integrate` policy; one
+relation can carry both.)
+
+What evaporates under mount-by-default: the entire insider-validity
+problem — watermark inflation, verify-on-absorb, trust tiers — applies
+**only to integrate-mounts**, because it is entirely about absorbing a
+peer's claims as shared state. A mounted peer's facts stay theirs; a
+signed head plus content addressing is the whole trust story, and no
+context is ever absorbed. Most of the address book is mounts.
+
+### The reflection region: pins without ping-pong
+
+Mounted queries are deterministic only if the revision records *which*
+bob — the pin. Three desiderata: pins in the tree hash (determinism),
+automatic advancement (no ceremony), no ping-pong. Naively pick two:
+auto + in-tree makes mutual mirrors reflect each other forever; in-tree
++ quiet is manual submodule bumps; auto + quiet keeps the basis at the
+session layer like Datomic (passed at query time), losing derivation
+reproducibility.
+
+Stratification gets all three — the same move the system already made
+twice (the head keeps the watermark out of the tree; the ephemeral
+segment keeps tip-state out of the log). Designate a **reflection
+region**: the part of a tree holding pins of *other* trees' roots.
+Define a tree's **reflected root** as its root *excluding its own
+reflection region*. Pins always pin reflected roots. Then:
+
+- B updating its pin of A changes B's full root (signed, versioned, in
+  B's hash — tree roots do belong in the tree) but not B's reflected
+  root, so A observes no change and does nothing. Mutual mounts settle
+  in one round, structurally: **a mirror never reflects the other
+  mirror's reflection of itself.** No pacing rules, no annotation
+  etiquette — the loop is dead by construction.
+- Derivations joining `$local` with `$bob` read bob-at-pinned-root — a
+  pure function of the local revision. The pin is flake.lock,
+  auto-advancing and loop-free.
+- Pins do not compose transitively: A's mount of B excludes B's pins,
+  so A does not automatically see B's mount of C — like non-recursive
+  submodules. A feature: transitive exposure is an explicit act.
+
+Pin advancement is novelty-paced for free: a pin moves only when the
+peer's reflected root moved, which is genuine data novelty by
+definition. The explicit meaning-paced pin ("checkpoint", "adopted
+their release") remains as a *frozen* mount — `policy: pinned` — the
+submodule analogy's other half, now unified into the same relation.
 
 ## Determinism at the seams
 
