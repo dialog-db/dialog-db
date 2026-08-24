@@ -328,9 +328,31 @@ dialog keeps the watermark **on the head rather than in the tree**: the
 head (tree root + watermark, signed) is the versioned object that
 reflects "state changed", while keeping who-is-where tracking outside the
 fixpoint. The rule that lets in-tree annotations exist anyway:
-**annotate only when non-annotation novelty integrates.** Then a data
-exchange settles in one bookkeeping round — real novelty, annotation,
-absorption without counter-annotation, fast-forward, silence.
+**annotate only when non-annotation novelty integrates.** Operationally:
+
+- **Nothing is ever withheld from broadcast.** Publishing heads is
+  untouched; the rule gates only whether the integrating commit *writes
+  new annotation facts*.
+- **No local-vs-integrated tracking is needed.** The test is on *what*
+  the incoming novelty is, not *whose*: does the delta contain anything
+  outside the reserved annotation namespace? That is an attribute-range
+  test over the delta — the same range-scoped classification the span
+  machinery performs. "Peer updates get bundled" falls out: an
+  annotation-only delta simply triggers no counter-annotation.
+- **The common case self-terminates even without the rule.** A commits
+  data → B merges and annotates "A@1" → A pulls: A holds nothing B
+  lacks, `theirs.includes(ours)` holds, A **fast-forwards by root,
+  minting nothing** → B sees equal heads → settled. Annotations flow
+  downstream, and the downstream side adopts rather than merges. The
+  rule is a damper for one pathological schedule only: both sides
+  holding concurrent novelty and annotating simultaneously, round after
+  round. Under the rule each such merge is annotation-free, hence
+  fast-forwardable next round, hence settling.
+- **The rule is expressible in existing vocabulary.** Inductive rules
+  declare `dialog.rule/on` and `dialog.rule/reads`; "a rule that never
+  fires on its own conclusions" is a rule whose trigger pattern excludes
+  its conclusion attributes — the general discipline against rule
+  feedback, not an annotation special case.
 
 Two companion observations:
 
@@ -351,13 +373,23 @@ Two companion observations:
   that discipline — the settling rule and the annotation share one
   mechanism instead of each being bespoke.
 
+Where this leaves the sync-record design — three layers, the middle one
+droppable:
+
+1. **Watermarks on signed heads** (exists today): the automatic sync
+   record. Acks and settledness come from it alone, loop-free by
+   construction because it sits outside the tree.
+2. **In-tree peer annotations** (optional): the inductive rule above.
+   Buys *queryability* — "origin last integrated us at edition E" as an
+   ordinary fact in the address book. If it proves fiddly, drop it;
+   layer 1 carries the semantics, layer 2 is UX.
+3. **Explicit pins** (deliberate): meaning-paced citations
+   ("checkpoint", "adopted their release") that freeze an edge rather
+   than track it — the other half of the submodule analogy.
+
 What genuinely stays local shrinks to the push-side pair (the CAS token
 on the remote's mutable pointer, and the residency certificate) — which
-pin nothing and observe the outside world. On top of the automatic,
-novelty-paced annotation sits the **explicit pin**: a deliberate,
-meaning-paced citation ("checkpoint", "adopted their release") that
-freezes an edge rather than tracking it — the other half of the
-submodule analogy.
+pin nothing and observe the outside world.
 
 Secrets are a fourth category with a sharper answer: bearer credentials
 never appear as fact values, encrypted or not. Encrypted values break the
@@ -405,31 +437,28 @@ of an edge need different guards, and the split is clean:
   verification, or no auto-fire. Delegation *is* the trust policy; the
   tiers are its distances.
 
-  The rollup model completes when heads (or revision records) *reference
-  their authorizing chain* by envelope hash. Chains already live in the
-  tree (`delegations().retain`; the prover assembles proofs from exactly
-  these facts), so this is one content-addressed pointer, no
-  duplication — and it makes "issuer authorized for subject" checkable by
-  **anyone** from tree contents, not just by the site at push time: the
-  batch carries its validity proof, so a puller enforces the same
-  boundary the site does, which is what makes pulling from arbitrary
-  sites safe. Chains change rarely, so verification memoizes by envelope
-  hash. This also composes with materialization for free: the access
-  branch is already the always-materialized precedent, so the proof
-  region and the topology region are one "must be local, must be
-  verified" layer. Semantics choice to make early: a retracted delegation
-  should invalidate adoption of *future* heads only (revocation does not
-  rescind, consistent with everything else here).
-
-  Operator key rotation does not inflate the store, by the same split
-  `access.rs` migration already draws: the tree retains only the
-  **durable cross-party prefix** of a chain (changes rarely, dedupes by
-  envelope hash), while the **ephemeral leaf** (profile → session key —
-  re-signable on demand, the thing that accumulated one-per-build in the
-  legacy store) travels *with the head* in the cell value. A head is
-  replaced, never accumulated, so rotation costs nothing durable; and
-  since only the current head is verified at adoption, expired session
-  certificates never need retention at all.
+  Heads *referencing their authorizing chain* (by envelope hash,
+  resolving against the chains `delegations().retain` already keeps for
+  the prover; the ephemeral profile → session leaf riding the head's
+  cell value, replaced with it, never accumulated) is an optional
+  extension whose scope must be stated honestly. The site-check and the
+  puller-check are the same check from different vantage points, so
+  chain-on-head changes not *when* authorization is checked but **who
+  can check it and which sites are usable**: it is load-bearing only on
+  the untrusted-site tier — a dumb bucket without the invocation gate, a
+  mirror, a peer's relay. Where every site enforces pushes (today's
+  deployments), it adds nothing, and it is not core machinery.
+  Re-verification of *history* is neither possible with it nor a goal
+  without it: nothing retains chains today either, and authorization is
+  a property of **transfers, not of data at rest** — checked at the
+  adoption boundary, like push rights, and consistent with
+  revocation-does-not-rescind (a revoked collaborator's old commits
+  stand, so their old chains prove nothing actionable). Audit-grade
+  attestation, where wanted, is an explicit act — deliberately retaining
+  a chain the way a pin retains a citation — never mechanical
+  accumulation. Verification of current heads memoizes by envelope hash
+  (chains change rarely), and the chains must be materialized to check —
+  the same "must be local, must be verified" layer as the access branch.
 - **Output edges (writing a rendezvous) are an exfiltration vector.** A
   pulled edge with a valid proof is a self-authorizing instruction to copy
   the repository somewhere. The proof settles only *sink consent* — it is
