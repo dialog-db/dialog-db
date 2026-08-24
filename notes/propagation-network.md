@@ -145,31 +145,79 @@ The whole proposal in one sentence: **this is `.gitmodules` for remotes —
 git's two config tables become versioned, replicated facts; every kind of
 ref stays exactly where git keeps it.**
 
-The two tables, side by side with git:
+The tables, side by side with git. References are always entities —
+names are attributes people edit, never addresses code follows:
 
 ```text
 # git: [remote "bob"] url = …
-bob   dialog.peer/name   "bob"
-bob   dialog.peer/did    "did:key:zBlog"
-bob   dialog.peer/site   "s3://…"              # a value, not an entity
+bob    dialog.peer/name     "bob"
+bob    dialog.peer/did      "did:key:zBlog"
+bob    dialog.peer/site     "s3://…"            # a value, not an entity
+
+# the branch registry — a branch is an entity; its name is an attribute
+br-a1  dialog.branch/subject  "did:key:zNotes"
+br-a1  dialog.branch/name     "main"
+br-b7  dialog.branch/subject  "did:key:zBlog"   # Bob's registry facts arrive
+br-b7  dialog.branch/name     "main"            # by pulling him; shown as bob/main
 
 # git: [branch "main"] remote = bob, merge = main
-trk   dialog.track/branch  "main"               # my branch
-trk   dialog.track/peer    bob                  # whose
-trk   dialog.track/of      "main"               # their branch — always read as bob/main
+trk    dialog.track/source  br-b7               # entity = hash(source, target)
+trk    dialog.track/target  br-a1
 ```
 
-Two rules that keep it this small:
+`trk` needs nothing more: the source entity's subject resolves through
+the address book to sites, so a peer attribute would be redundant (store
+it redundantly-by-design if reverse queries want it). Deriving the
+tracking entity from the ordered pair makes concurrent identical
+additions converge instead of duplicating.
+
+Three rules that keep it this small:
 
 - **The hub is a peer whose DID is your own subject.** "origin" = me, at
   another site. Same-subject rendezvous and cross-repo tracking need no
   separate mechanisms — git doesn't distinguish "my origin" from "a fork
   I track" either; both are remotes. Cross-repo *push* is a tracking
-  entry toward a foreign-DID peer plus a retained delegation.
-- **Names never unify anything.** Identity is `(DID, branch-name)`; a
-  bare branch name is local to its subject and always displayed
-  qualified, git-style: `main` is yours, `bob/main` is Bob's. Entity
-  hashes exist so facts merge; users never see them.
+  entry sourced from your branch toward a foreign-subject branch, plus a
+  retained delegation.
+- **Names never unify and never address.** A branch name is local to its
+  subject, displayed qualified git-style (`main` is yours, `bob/main` is
+  Bob's), and code refers only to entities. Same-name collisions
+  surface as ambiguity, exactly like petname conflicts, resolved by the
+  same address-book policy.
+- **Pulling a peer delivers their registry.** Bob's `dialog.branch/*`
+  facts live in Bob's tree; you never mint entities for his branches.
+
+### Branch identity: derived or minted
+
+The one genuine fork this schema surfaces. The protocol already follows
+"name but never refer by name" — the head carries the opaque branch
+identifier, and `version-control.md` is explicit that the name never
+travels — but that identifier is name-*derived* (`hash(replica, name)`),
+so the name is baked into identity even though it is never transmitted.
+
+- **Derived** (`hash(subject, name)`, the status quo shape): rename is
+  reincarnation — a new branch, and a new origin stream. The virtue is
+  convergent creation: two devices creating "main" offline mint the same
+  entity and their histories simply merge.
+- **Minted** (opaque id at creation; the name a freely-editable
+  attribute): rename is cheap and identity is stable. Two devices
+  creating "main" offline mint two branches both named "main" — a
+  *visible* ambiguity, like a petname conflict, instead of a silent
+  unification.
+
+The minted option's cost is arguably correct behavior (silently merging
+two independently-created branches because they share a default name is
+a bug derived identity commits by construction), and its ambiguity is
+handled by policy that must exist anyway. Its endgame is the
+branches-as-subjects sideline: **the minted identifier wants to be a
+DID**, making branch names petnames in the same address book as peers,
+with delegation and cross-repo reference falling out for free. An opaque
+minted entity preserves that upgrade without committing to it. What
+minting complicates is bootstrap — a well-known name is no longer
+computable to an entity — resolved as the retirement plan already does:
+the entry-point cell keeps a conventional name-based *address* (names as
+rendezvous paths chosen by the publisher are addresses, not references),
+and everything in-tree refers by entity from there.
 
 And where every kind of state lives, one row per thing:
 
@@ -638,16 +686,15 @@ declared. North star, not a commitment.
 
 ## A generalization deferred: sites, nodes, and flows as entities
 
-An earlier draft of this note factored the model into five first-class
-relations (sites, peers, nodes, rendezvous, flows). That is more ontology
-than the proposal needs — sites can be values on peers, node references
-can be qualified names rather than entities, and the rendezvous/flow
-split collapses under the hub-is-a-self-peer rule — so the two-table form
-in "The short version" is the design. This section is retained as the
-generalization target: if flows between arbitrary nodes with scopes and
-owners ever become first-class, this is the shape they take, and the
-two-table form narrows into it without reshaping (a tracking entry is a
-flow whose sink is local; a peer site is a one-site rendezvous).
+An earlier draft factored the model into five first-class relations
+(sites, peers, nodes, rendezvous, flows). The short-version form keeps
+the substance — branch entities are nodes, tracking entries are edges —
+while shedding the extra ontology: sites are values on peers, and the
+rendezvous/flow split collapses under the hub-is-a-self-peer rule. This
+section is retained as the generalization target: if flows gain scopes
+and owners as first-class attributes, the short-version relations widen
+into these without reshaping (a tracking entry is a flow whose sink is
+local; a peer site is a one-site rendezvous).
 
 Cast: Alice (profile `zAlice`, laptop + phone), her repo `zNotes` with
 branch `main`, a hub S3 bucket, Bob's repo `zBlog` she pulls from and may
