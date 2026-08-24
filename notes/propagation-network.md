@@ -1095,8 +1095,11 @@ targets additionally gate on retained proofs plus the local pin set.
 **Phase 2 — the head map.** Each branch publishes two roots: the
 **data root** (the tree as today — facts and config; what peers pin)
 and a **head map** — `{did → signed head}`, one entry per followed
-peer, the entry a content-addressed blob of that peer's head (so one
-reference carries root, edition, watermark, and signature). The head
+peer, the entry a content-addressed blob of that peer's head — the existing
+`Revision` value of `revision.rs`: branch identifier, issuer, tree
+root, edition, context, signature (so one reference carries the peer's
+root, position, knowledge, and proof of authorship, nothing new
+invented). The head
 grows one field: `(tree, map, edition, context)`.
 
 The map is a **lattice value**, and that is the load-bearing property.
@@ -1125,7 +1128,14 @@ unfollow stick: the join is **scoped to the follow-set** — accept and
 publish entries only for DIDs you follow — else union-of-keys
 resurrects unfollowed peers; with scoping, same-follow-set peers still
 converge identically and different follow-sets agree on their
-intersection. This is flake.lock as a convergent, gossipable lattice —
+intersection. And one rule keeps the map's own churn out of the
+lattice: since the head now carries the map root, a peer's head changes
+when only their map changes — so **entries replace only on strictly
+greater edition, and updating the map mints no edition** (head-level
+metadata, versioned by replacement like the context). A map-only
+republication arrives with an unchanged edition and joins to a no-op;
+the ripple stops after one hop, and a peer's latest map is still seen
+by fetching them directly. This is flake.lock as a convergent, gossipable lattice —
 the concrete and final form of the reflection region, and the one
 isolated piece of new machinery.
 
