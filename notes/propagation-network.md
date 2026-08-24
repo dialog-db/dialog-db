@@ -243,12 +243,37 @@ Three jobs the memory cells keep, because they cannot move:
    become a commit generator, and each such commit would invalidate every
    peer's scenario-1 check in turn.
 
-Open question that moves this boundary: **is the sync base derivable?** The
-peer's published watermark (on their signed head) and the local `Context`
-may together determine the merge base without storing a tree hash per
-upstream. If so, `Upstream.tree` becomes a pure cache, edges become pure
-config that changes only when a human changes it, and tier 3 nearly empties.
-Worth a spike before implementing anything in tier 3.
+**Spike result: the sync base is not derivable, and it is two different
+things.** The hoped-for derivation (peer's published watermark + local
+`Context` → merge base) fails three ways: a watermark comparison yields a
+causal *cut*, not a tree, and no `Version → TreeReference` mapping exists
+anywhere — deliberately, since a revision record cannot contain the root
+of the tree it lives in (`revision_record.rs`); the meet of two contexts
+is generally an antichain no actual revision ever materialized, so no tree
+ever had that content; and `common_ancestor` yields at best a `Version`,
+at O(log gap) fallible verified reads against the cell's infallible O(1).
+But the two *roles* of the stored base have different standings:
+
+- **For pull it is a droppable cache.** The merge is correct from the
+  empty base ("correct, just unable to skip anything", `pull.rs:56-60`,
+  pinned by the empty-base non-resurrection tests). Dropping it costs the
+  zero-read fast paths (scenarios 1/3 never fire, graft disabled, deltas
+  become whole trees) but never corrupts. So it needs no home in the
+  tree: an unregistered local cache, rebuilt by one full pull.
+- **For push it is authoritative and non-causal.** It is the last
+  observed value of the *remote's* mutable head pointer — the
+  compare-and-set token for the non-fast-forward guard and the
+  replaced-remote defense — and a residency certificate ("a tree the
+  target itself served or accepted") that makes the boundary-missing
+  block policy sound and bounds upload volume. No watermark asserts
+  either. Epistemically this is the same category as the trust pins
+  below: a local observation about the outside world, not a fact about
+  the data. It stays local, permanently.
+
+Consequence: upstream *wiring* still moves to the tree, but upstream
+entries cannot become pure configuration — each output edge keeps a small
+local companion (its CAS/residency observation), and each input edge an
+optional cache.
 
 Secrets are a fourth category with a sharper answer: bearer credentials
 never appear as fact values, encrypted or not. Encrypted values break the
@@ -268,11 +293,19 @@ cannot do capabilities.
 In-tree wiring is writable by anyone who can commit, so the two directions
 of an edge need different guards, and the split is clean:
 
-- **Input edges (pull) may auto-fire.** Integrity is safe: blocks are
-  content-addressed and heads signature-verified before any block is read.
-  A malicious site can serve stale state or withhold — an availability
-  attack — but cannot forge content. Transitive discovery of pull sources
-  is therefore safe by default.
+- **Input edges (pull) may auto-fire — with a caveat the attribution
+  spike sharpened.** Blocks are content-addressed and heads
+  signature-verified before any block is read, so a malicious *site*
+  cannot tamper with a head in flight; stale state and withholding (an
+  availability attack) are its ceiling. But head verification today
+  checks only that the named issuer signed the payload — **no check that
+  the issuer is authorized for the subject** (the "authority binding"
+  item already open in `version-control.md`). Until that lands, "verified
+  head" means "internally consistent head", and auto-firing transitively
+  discovered input edges extends trust to whoever those heads name as
+  issuer. Safe default meanwhile: auto-fire input edges only toward peers
+  in the address book, which is exactly the retained-delegation /
+  known-peer set.
 - **Output edges (writing a rendezvous) are an exfiltration vector.** A
   pulled edge with a valid proof is a self-authorizing instruction to copy
   the repository somewhere. The proof settles only *sink consent* — it is
@@ -291,13 +324,42 @@ retract the blob's facts, which is a visible denial (your pins are gone,
 nothing fires) rather than a silent redirect. That failure mode is
 acceptable; the redirect is not.
 
-A related soundness question to settle early: in-tree claim attribution
-(origin fields in records) is *asserted* by whoever's tree you pulled,
-while head signatures are verified. Whether "facts from my own origin" is a
-cryptographic filter or a conventional one decides how much weight
-replica-scoped facts can bear against a malicious collaborator. If it is
-conventional, anything that must be tamper-evident uses the signed-envelope
-pattern (signature in the blob, facts as index), same as delegations.
+**Spike result: in-tree claim attribution is conventional, not
+cryptographic.** The precise boundary:
+
+- *Cryptographic:* heads (signature over branch, issuer, tree, edition,
+  context; origin recomputed from the signed fields, so no head can mint
+  into another origin) and revision-level attribution on the read path
+  (`TreeHistory::revision_record` verifies signature + slot binding and
+  skips planted decoys).
+- *Conventional:* claim/history records carry **no issuer and no
+  signature** — their origin is an unauthenticated 32-byte key prefix
+  chosen by whoever wrote the entry. Nothing on the pull path checks a
+  record's claimed origin against any signed artifact, and the merged
+  watermark adopts the upstream's published context (fast-forward:
+  verbatim; graft/replay: unioned) without verifying that its entries
+  about *third-party* origins are legitimate. `observe_revisions` derives
+  versions from record contents but never calls `record.verify()`.
+
+Two consequences. First, the design one this section needs: an
+origin-scoped read filter ("only facts from my replicas") cannot be
+trusted against a hostile collaborator, so replica-scoped facts that must
+bear weight use the signed-envelope pattern (signature in the value blob,
+facts as the index — exactly `delegation/prove.rs` and the forged-rule
+handling in `induce.rs`), and the pin set stays out of the tree entirely.
+Second, a pre-existing vulnerability independent of this design, recorded
+here because the spike surfaced it: a collaborator can publish a validly
+signed head whose context inflates **another origin's** watermark entry
+(the ceiling check bounds magnitude, not ownership). Replicas that pull it
+merge the inflated entry (per-origin max), after which R1 treats that
+origin's genuine future writes as already-observed and silently discards
+them, and Tier-0 causality (same-origin ⇒ edition ordering, zero reads)
+treats forged same-origin records as sequential supersessions instead of
+surfacing conflicts. That is a targeted, quiet censorship primitive
+available to anyone whose head you pull, and it deserves a fix regardless
+of topology-in-tree — most likely verifying the revision records riding a
+delta before absorbing their versions, and bounding context adoption to
+verified evidence.
 
 ## Winners as read-time policy
 
@@ -365,6 +427,47 @@ depend on that unification, but the edge schema deliberately references
 nodes as `did` or `(did, branch)` so adopting it later narrows a type
 instead of reshaping the relation.
 
+Once arbitrary peers are wired in, the causality between "repository" and
+"shared storage" inverts: today the repo decides that its branches share
+an archive; with the edge graph as the topology truth, an archive is a
+*locality choice* — a pool that pays off (via structural sharing) exactly
+where nodes are densely wired with identity-join edges. "Repository"
+becomes an emergent label for a tightly-wired, co-located cluster, and
+archive sharing could in principle be derived from the wiring rather than
+declared. North star, not a commitment.
+
+## Retiring the branch cells
+
+The conservative concrete goal: a change that retires the side-band cells
+in favor of the database storing its own topology. Inventorying the cells
+shows they have three different fates, and that the chicken-and-egg worry
+(if the db stores branches, how do you discover which branches exist?) is
+solved rather than created by the move:
+
+- **`branch/{name}/revision` stays, by architecture.** It is the mutable
+  pointer *to* the tree — the one thing that cannot live inside what it
+  points at. In propagator terms it is the node's identity as a mutable
+  location. Likewise the remote-side head cells: they are the rendezvous.
+- **`branch/{name}/upstream` and `remote/{name}/address` are the
+  retirement targets.** Wiring becomes `dialog.peer/*` + `dialog.flow/*`
+  facts; the sync base splits per the spike result above (pull: local
+  droppable cache; push: local observation that never had a home in the
+  tree to begin with).
+- **`branch/{name}/induction` is already replica-local by design** and
+  simply stays.
+
+On discovery: there is no branch enumeration *today* — cell addresses are
+pure naming convention under the subject's space, so a branch can only be
+found by already knowing its name. Moving branch existence into the tree
+fixes this. The bootstrap chain becomes: irreducible local knowledge =
+`(subject DID, site, well-known branch name)` — and `ACCESS_BRANCH =
+"main"` is already that convention. From there: well-known name → its
+`revision` cell by convention → its tree → in-tree registry
+(`dialog.branch/*` facts on the `(subject, name)` entities: which branches
+exist, plus the peers and edges) → every other branch's head cell, again
+by naming convention. One entry point, everything else discovered; works
+on dumb stores that cannot list keys.
+
 ## Staged plan
 
 Each slice is independently shippable and none breaks existing cells.
@@ -374,8 +477,9 @@ Each slice is independently shippable and none breaks existing cells.
    fully functional. No sync behavior changes. Deliverable: a pulled
    address book — replica B resolves a petname replica A asserted.
 2. **Edges** (`dialog.flow/*`) for *input* wiring: which peers a branch
-   tracks, on the `(subject, name)` branch entity; sync bases and head
-   caches stay in cells (or fall away if the derivability spike lands).
+   tracks, on the `(subject, name)` branch entity; pull sync bases and
+   head caches become local caches, push bases stay local observations
+   (per the spike result).
    Deliverable: a fresh replica self-configures its pulls from the tree.
 3. **Output edges + pin set**: retained proofs make edges executable;
    profile-scoped sealed pins gate firing. Deliverable: "clone and it just
@@ -403,10 +507,20 @@ precedent this codebase already has:
 
 ## Open questions
 
-- Sync-base derivability from watermarks (moves the tier-3 boundary; spike
-  first).
-- Is in-tree claim attribution verifiable or conventional against a
-  malicious collaborator holding write access?
+Answered by spikes (results inline above): sync-base derivability — **no**
+(pull-side cache, push-side authoritative local observation); in-tree claim
+attribution — **conventional** (signed-envelope pattern required for
+anything tamper-evident; watermark-inflation vulnerability recorded in the
+trust section).
+
+Still open:
+
+- Head-issuer authorization: binding "validly signed" to "authorized for
+  the subject" (the `version-control.md` authority-binding item; gates how
+  freely input edges may auto-fire).
+- Hardening context adoption against third-party watermark inflation
+  (verify revision records riding a delta before absorbing their
+  versions).
 - Reserved region vs. layered topology branch for materialization.
 - Which capability authorizes `dialog.peer/*` / `dialog.flow/*` writes —
   ordinary commit authority, or an attenuated topology command?
