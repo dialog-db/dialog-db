@@ -7,6 +7,9 @@ use crate::{Epoch, EpochId, EpochLog, KeyringError, Sealed};
 /// Domain separator for epoch key derivation.
 const KEY_DOMAIN: &[u8] = b"dialog/keyring/epoch-key/v1";
 
+/// Domain separator for the stable address-blinding key.
+const BLINDING_DOMAIN: &[u8] = b"dialog/keyring/blinding/v1";
+
 /// What the sealing layer needs from key agreement, and nothing more.
 ///
 /// This is the seam BeeKEM eventually sits behind. Everything above it — the
@@ -17,6 +20,23 @@ const KEY_DOMAIN: &[u8] = b"dialog/keyring/epoch-key/v1";
 pub trait Keyring: ConditionalSync {
     /// The epoch new content should be sealed under.
     fn current(&self) -> EpochId;
+
+    /// Every epoch this keyring can resolve.
+    ///
+    /// Used to build a synchronous [`NodeSealer`](crate::NodeSealer): sealing
+    /// runs inside the tree's persist, which does not await, so the keys have
+    /// to be resolved before it starts.
+    fn epochs(&self) -> Vec<EpochId>;
+
+    /// The key that blinds storage addresses, which never rotates.
+    ///
+    /// Separate from the epoch keys on purpose. A node's address has to stay
+    /// put across rotations or every link written before one would dangle, so
+    /// this cannot be derived from an epoch. It buys strictly less than an
+    /// epoch key does: with it, and without one, an observer can confirm a
+    /// guess about a node's contents and learn that the node exists — but can
+    /// read nothing.
+    fn blinding_key(&self) -> [u8; 32];
 
     /// Resolve an epoch named by a sealed blob, however old.
     ///
@@ -157,6 +177,16 @@ impl LocalKeyring {
 impl Keyring for LocalKeyring {
     fn current(&self) -> EpochId {
         self.current.clone()
+    }
+
+    fn epochs(&self) -> Vec<EpochId> {
+        self.log.epochs().collect()
+    }
+
+    fn blinding_key(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new_keyed(&self.secret);
+        hasher.update(BLINDING_DOMAIN);
+        *hasher.finalize().as_bytes()
     }
 
     async fn key(&self, epoch: &EpochId) -> Result<[u8; 32], KeyringError> {

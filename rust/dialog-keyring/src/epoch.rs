@@ -138,6 +138,11 @@ impl EpochLog {
         self.epochs.get(id)
     }
 
+    /// Every epoch in the log, in name order.
+    pub fn epochs(&self) -> impl Iterator<Item = EpochId> + '_ {
+        self.epochs.keys().cloned()
+    }
+
     /// How many epochs this log holds.
     #[must_use]
     pub fn len(&self) -> usize {

@@ -784,12 +784,116 @@ one runs on both targets:
   BeeKEM is for, and why `LocalKeyring` is a placeholder. Useful today only
   where there is nobody to lock out: one profile's own devices, against an
   untrusted blob store.
-- **Not wired into the tree.** Nothing threads a sealed address back into a
-  `Link`, so a parent still points at its children's plaintext hash. That is
-  the invasive half, it belongs in `dialog-search-tree`, and it is the next
-  step. What is proven here is that the layer underneath it behaves.
+- **Wired into the tree, but only at the storage boundary.** See
+  [Wired into the tree](#wired-into-the-tree). `Link` still records a node's
+  plaintext identity; what changes is that the backend never sees that
+  identity or those bytes. Moving the identity itself to the ciphertext would
+  remove the need for a blinding key, and is a much larger change.
 - **No keyring replication.** `EpochLog::merge` is a union in memory; nothing
   writes it to the tree published alongside the data root.
+
+## Wired into the tree
+
+`ContentAddressedStorage` now takes an optional [`NodeCipher`]. With one
+attached it seals what it writes, opens what it reads, and files each node
+under a blinded address. **The tree above it is untouched** — same identities,
+same call sites, same code path — which is what makes the integration a few
+dozen lines rather than a rewrite of `differential.rs`.
+
+`dialog-keyring`'s `NodeSealer` is the implementation: a keyring resolved to
+concrete keys once, up front.
+
+```rust
+let sealer = Arc::new(NodeSealer::resolve(&keyring).await?);
+let storage = ContentAddressedStorage::with_cipher(backend, sealer);
+```
+
+Two things fell out of doing it that the design had not accounted for.
+
+### Sealing cannot use WebCrypto
+
+`TransientTree::persist` is synchronous. Nodes are sealed inside it, so the
+cipher cannot await, so in the browser it cannot be `WebCrypto` — it has to be
+a software cipher on both targets. `dialog-credentials`' careful routing of
+AES through `SubtleCrypto` applies to sealing *to an identity*, and cannot
+apply to sealing content.
+
+This is not fatal and it is not even expensive (see below), but it is a
+constraint the design should have named. Both paths use the same algorithm, so
+a blob sealed by one opens under the other — pinned by a test.
+
+### Addresses need a key that never rotates
+
+A node's address cannot be the hash of its plaintext: that identity is what
+`Link` records, so anyone holding the store could hash a guess at a node's
+contents and look it up. Guessing a small index node is not far-fetched.
+
+So the address is blinded — `blake3::keyed_hash(blinding_key, identity)`. But
+that key **cannot** come from an epoch. A link written before a rotation
+records an identity, and if rotating moved where that node lived, every such
+link would dangle. The blinding key has to be stable for the life of the
+space, distributed with membership rather than derived from the current epoch.
+
+That is a weaker thing to hold than a decryption key, which is what makes it
+acceptable: someone who kept it after being removed can confirm guesses about
+nodes they could already read, and learn that a node exists. They can read
+nothing written since.
+
+## What it costs
+
+Measured on native against an in-memory backend — 16-byte keys, 32-byte
+values, nodes averaging ~13 KB. `cargo bench -p dialog-keyring`.
+
+| Workload | Plain | Sealed | Delta |
+| --- | ---: | ---: | ---: |
+| Commit 1,000 entries | 803 µs | 914 µs | **+14%** |
+| Commit 10,000 entries | 161 ms | 165 ms | **+2.7%** |
+| Insert 1,000, flushing after each | 59.1 ms | 98.1 ms | **+66%** |
+| 64 cold point reads over 10,000 entries | 697 µs | 1.27 ms | **+82%** |
+| Cold full scan of 10,000 entries | 764 µs | 1.38 ms | **+81%** |
+| Stored bytes | — | +61 B/node | **+0.47%** |
+
+Per node, isolated from the tree: seal ~850 MiB/s, open ~1.08 GiB/s, address
+~90 ns regardless of size.
+
+### Reading this
+
+**Batched writes are nearly free.** A commit seals only the nodes it actually
+writes, and at 10,000 entries that is lost in the tree's own work. This is the
+shape a real commit has.
+
+**Unbatched writes are not.** Flushing after every insert re-writes — and so
+re-seals — the whole root-to-leaf path per entry. The 66% is a property of
+that access pattern rather than of sealing, but it sharpens a rule: seal at
+flush, and batch flushes. A write path that persists per-entry pays for
+sealing per-entry.
+
+**Cold reads roughly double, and warm reads do not change.** The node cache
+holds decrypted buffers, so sealing charges the miss and nothing else. The
++82% is measured against an in-memory backend, which is the worst possible
+case for *relative* overhead: a ~12 µs decrypt of a 13 KB node next to a
+memcpy looks enormous, and next to a disk seek or a network round trip it
+disappears. The honest statement is the absolute one — **about 12 µs per node
+fetched** — and what that costs depends entirely on what the fetch itself
+costs.
+
+**Storage overhead is a rounding error** because the header is fixed at 61
+bytes and nodes are large. It would matter for a tree of tiny nodes.
+
+### Headroom, if the read path matters
+
+Two obvious inefficiencies, neither addressed:
+
+- **Sealing makes two passes** over the plaintext — a keyed BLAKE3 for the
+  nonce, then AES-GCM. A real SIV construction does one. This is why seal
+  (850 MiB/s) is slower than open (1.08 GiB/s).
+- **Opening allocates twice.** `open` returns a fresh `Vec`, which the tree
+  then copies into an `AlignedVec` to read as an rkyv archive. Decrypting
+  straight into an aligned buffer would remove a full copy from every node
+  read.
+
+Neither is worth doing before there is a reason to care, but both mean the
++82% is not a floor.
 
 ## Suggested sequence
 
