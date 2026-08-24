@@ -161,15 +161,20 @@ br-b7  dialog.branch/subject  "did:key:zBlog"   # Bob's registry facts arrive
 br-b7  dialog.branch/name     "main"            # by pulling him; shown as bob/main
 
 # git: [branch "main"] remote = bob, merge = main
-trk    dialog.track/source  br-b7               # entity = hash(source, target)
-trk    dialog.track/target  br-a1
+rep    dialog.replicate/from  br-b7
+rep    dialog.replicate/to    br-a1
 ```
 
-`trk` needs nothing more: the source entity's subject resolves through
+`rep` needs nothing more: the `from` entity's subject resolves through
 the address book to sites, so a peer attribute would be redundant (store
-it redundantly-by-design if reverse queries want it). Deriving the
-tracking entity from the ordered pair makes concurrent identical
-additions converge instead of duplicating.
+it redundantly-by-design if reverse queries want it). Its entity derives
+from the *labeled* relation — `Entity::of(Replicate { from, to })`, the
+same tagged-named-fields convention `ReplicaHash`/`BranchHash` already
+use in `schema.rs` — so field roles, not positions, disambiguate the
+direction, and concurrent identical additions converge instead of
+duplicating. The relation is named `replicate` deliberately: it
+documents the identity-join-only constraint in its own name (it is not
+`transform`, and it is standing intent, not a `merge` event).
 
 Three rules that keep it this small:
 
@@ -199,11 +204,20 @@ so the name is baked into identity even though it is never transmitted.
   reincarnation — a new branch, and a new origin stream. The virtue is
   convergent creation: two devices creating "main" offline mint the same
   entity and their histories simply merge.
+- **Derived + generation** (`hash(subject, name, generation)`, the
+  generation derivable by query — count of prior registry entities with
+  that name): the middle rung. Fixes reincarnation *in time* — create,
+  delete, recreate "main" later, and the new branch does not inherit the
+  ghost's history — at no new state, since prior generations are already
+  registry facts. It cannot fix *concurrent* creation: two offline
+  devices both observe N prior generations, both mint N+1, and converge
+  anyway; generation only disambiguates when the predecessors are
+  visible.
 - **Minted** (opaque id at creation; the name a freely-editable
   attribute): rename is cheap and identity is stable. Two devices
   creating "main" offline mint two branches both named "main" — a
   *visible* ambiguity, like a petname conflict, instead of a silent
-  unification.
+  unification. Fixes both the temporal and the concurrent case.
 
 The minted option's cost is arguably correct behavior (silently merging
 two independently-created branches because they share a default name is
