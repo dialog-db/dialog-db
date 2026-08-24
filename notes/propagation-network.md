@@ -822,6 +822,67 @@ peer's claims as shared state. A mounted peer's facts stay theirs; a
 signed head plus content addressing is the whole trust story, and no
 context is ever absorbed. Most of the address book is mounts.
 
+### The policy spectrum: expose, index, integrate
+
+Federated query costs per mount joined, per query — the honest downside
+of `expose`. But integration's performance benefit comes from the
+**index**, not the **sharing**; historic integration carried two jobs at
+once (building a union index, and converging state with the peer), and
+only one's own devices and true collaborators need the second. Split
+them and the policy space is three-valued:
+
+- **`expose`** — federated query, nothing materialized. For
+  rarely-queried peers.
+- **`index`** — materialize a *local* union index over the mounted view,
+  incrementally maintained on pull, disposable and rebuildable: a
+  replica-local cache, never shared, no claims absorbed, no trust
+  obligations, no ping-pong (it is not in the tree at all). This is
+  what "integration derives indexed state on pull" was actually buying.
+  The machinery is the incremental-view-maintenance shape of `dbsp.md` /
+  `incremental-subscriptions.md`.
+- **`integrate`** — true shared convergence, reserved for same-subject
+  replicas and real collaborators, with the merge semantics and the
+  (scoped-down) trust machinery.
+
+### The version-vector view
+
+The automerge correspondence is exact: origin = actor, edition/count =
+seq, `Context` = the version vector, and "what a peer thinks each
+origin's seq is" is the peer's *published context*, arriving on every
+signed head — no new tracking needed. Reconstruction from an empty
+store works because dialog is a state-based system that carries its own
+op history: the log region holds every claim and revision record, so a
+fresh replica pulling the tree receives the full change history, of
+which the watermark is the lossless summary (exact because origins are
+sequential). Automerge ships ops and derives state; dialog ships state
+containing its ops — same information, opposite packaging.
+
+### Lattice-land and fact-land
+
+The principle beneath every ping-pong fix in this note, stated once:
+the merge already implements datalog's no-novelty rule (semi-naive
+evaluation) — but only in *lattice-land*. `Context::merge` with an
+entry ≤ yours is a no-op; R1 screens observed claims; a pull carrying
+nothing unobserved mints nothing. Joins are absorbing, so echoes die by
+algebra: someone claiming your root is what it is joins to nothing.
+Every ping-pong in this note arose the same way — moving
+position-tracking into *fact-land* (annotations, pins-as-facts), where
+an updated assertion has identity, and identity is novelty.
+
+> Positions and acknowledgments live as lattice values, joined; facts
+> are for assertions with identity. Ping-pong is a lattice value
+> wearing fact clothing.
+
+This also corrects the determinism story: a derivation's deterministic
+input is the **revision**, and a revision is (tree root, edition,
+**context**) — the context is fixed and signed at mint time, so rules
+may read the watermark deterministically without it being tree facts.
+The lockfile always existed; it is on the head. Fact-land pins are
+needed only for a reproducible *mount basis* cited by shared
+derivations — and there the reflection region is the structural
+rendering of the same no-novelty rule (a stratum excluded from
+peer-visible novelty), one principle in two forms.
+
 ### The reflection region: pins without ping-pong
 
 Mounted queries are deterministic only if the revision records *which*
@@ -899,13 +960,14 @@ Two consequences:
   inputs. The query surface is two-tier: *pure* (revision-scoped, what
   rules and resolvers see) and *situated* (joins in observations, what a
   status view shows, non-authoritative by construction).
-- **The annotation layer is upgraded.** Filed above as droppable UX, it
-  is under this framing the **lockfile**: the only deterministic way a
-  derivation can reason about peers at all ("as of this revision, we had
-  integrated bob through E"). If no derivation needs peer-awareness it
-  stays optional; the moment one does, it is required — the alternative,
-  rules peeking at observations, is exactly the nondeterministic seam
-  being ruled out.
+- **The lockfile already exists — on the head.** (Correcting an earlier
+  draft of this bullet that promoted in-tree annotations to lockfile
+  status.) The revision is (tree root, edition, context); the context
+  is fixed and signed at mint, so a derivation reading the watermark is
+  reading its own revision — deterministic without any tree facts. See
+  "Lattice-land and fact-land" under Mounts: in-tree position facts are
+  needed only as a mount basis cited by shared derivations, and they
+  live in the reflection region.
 
 ## The ephemeral segment, and commits as invocations
 
