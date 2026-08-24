@@ -885,6 +885,9 @@ peer-visible novelty), one principle in two forms.
 
 ### The reflection region: pins without ping-pong
 
+(Concrete form: the **lock root** of the staged plan's phase 2 — a
+second small tree beside the data tree, its root riding the head.)
+
 Mounted queries are deterministic only if the revision records *which*
 bob — the pin. Three desiderata: pins in the tree hash (determinism),
 automatic advancement (no ceremony), no ping-pong. Naively pick two:
@@ -1075,25 +1078,44 @@ on dumb stores that cannot list keys.
 
 ## Staged plan
 
-Each slice is independently shippable and none breaks existing cells.
+Three phases; value ships at each; none breaks existing cells.
 
-1. **Peer directory** (`dialog.peer/*`): peers on the repository entity,
-   resolution order local-override → tree → bootstrap, cells demoted but
-   fully functional. No sync behavior changes. Deliverable: a pulled
-   address book — replica B resolves a petname replica A asserted.
-2. **Edges** (`dialog.flow/*`) for *input* wiring: which peers a branch
-   tracks, on the `(subject, name)` branch entity; pull sync bases and
-   head caches become local caches, push bases stay local observations
-   (per the spike result).
-   Deliverable: a fresh replica self-configures its pulls from the tree.
-3. **Output edges + pin set**: retained proofs make edges executable;
-   profile-scoped sealed pins gate firing. Deliverable: "clone and it just
-   works" — safely.
-4. **Always-materialized topology region** (can land with 2).
-5. Later, separately argued: scoped edges, notification, branches as
-   first-class nodes.
+**Phase 1 — config as facts. No new tree machinery.**
+`dialog.peer/*` (address book), `dialog.branch/*` (registry; derived
+identity `hash(subject, name)` to start, upgradeable later),
+`dialog.replicate/*` (what tracks what). Resolution order: local
+override → tree → bootstrap cell. The sync daemon stays the imperative
+loop it is today — it reads facts instead of cells. Nothing reads peer
+*state* from the tree yet, so no lock root is needed for correctness.
+Deliverables: replicated versioned config, self-configuring replicas,
+branch enumeration, branch cells (except heads) retired. Output push
+targets additionally gate on retained proofs plus the local pin set.
 
-### Slice 1, concretely
+**Phase 2 — the lock root.** Each branch publishes two roots: the
+**data root** (the tree as today — facts and config; what peers pin)
+and a **lock root** — a second small tree mapping *mounted node →
+pinned head* (the peer's signed head as a content-addressed blob, so
+one reference carries root, watermark, and signature). The head grows
+one field: `(tree, lock, edition, context)`. Theorem-compliant and
+ping-pong-free by construction: locks pin data roots and **locks are
+never pinned**, so the reference graph is bipartite (locks → data,
+nothing → locks) and acyclic however tangled the follow-graph is.
+Advancement is novelty-paced for free — a lock entry changes only when
+the pinned peer's data changed — and determinism holds: a derivation's
+input is the revision (data, lock, context), all fixed and signed at
+mint. This is flake.nix (config facts) + flake.lock (the lock tree)
+under one signature, and it is the concrete form of the reflection
+region: the isolated, bounded piece of new machinery.
+
+**Phase 3 — the query surface over mounts.** `$bob` in queries via the
+session layering; `expose` first; the `index` policy (local
+materialized union view, incrementally maintained, disposable) when
+performance demands it. Builds entirely on phases 1–2.
+
+Later, separately argued: scoped replication, notification, minted or
+DID branch identity, branches as first-class nodes.
+
+### Phase 1, concretely
 
 Mirror the retained-delegation surface, which is the in-tree config
 precedent this codebase already has:
