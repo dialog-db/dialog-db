@@ -11,6 +11,10 @@ license.workspace = true
 default = ["ed25519"]
 ed25519 = [
     "dep:ed25519-dalek",
+    "dep:x25519-dalek",
+    "dep:aes-gcm",
+    "dep:hkdf",
+    "dep:sha2",
     "dep:getrandom",
     "dep:base58",
     "dialog-varsig/edwards25519",
@@ -31,10 +35,21 @@ dialog-common = { workspace = true }
 dialog-varsig = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
 signature = { workspace = true }
 
 # ed25519 feature deps
+# `x25519-dalek` backs the X25519 agreement keys derived from an Ed25519 seed;
+# on the browser arm the derivation still runs here, and only the resulting
+# secret is handed to WebCrypto (which cannot derive X25519 from Ed25519).
 ed25519-dalek = { workspace = true, optional = true }
+x25519-dalek = { workspace = true, optional = true }
+# Sealed-secret deps. AES-GCM and HKDF run in Rust on native; the browser arm
+# routes both through WebCrypto so they hit the platform's accelerated,
+# constant-time implementations instead of a software AES compiled to wasm.
+aes-gcm = { workspace = true, optional = true }
+hkdf = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 base58 = { workspace = true, optional = true }
 
@@ -54,6 +69,7 @@ web-sys = { workspace = true, features = ["Crypto", "SubtleCrypto", "CryptoKey",
 dialog-common = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [lints.rust]

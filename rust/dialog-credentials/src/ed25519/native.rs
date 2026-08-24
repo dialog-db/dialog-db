@@ -12,3 +12,13 @@ pub type SigningKey = ed25519_dalek::SigningKey;
 ///
 /// This is a type alias to `ed25519_dalek::VerifyingKey`.
 pub type VerifyingKey = ed25519_dalek::VerifyingKey;
+
+/// Native X25519 secret key.
+///
+/// This is a type alias to `x25519_dalek::StaticSecret`.
+pub type AgreementSecretKey = x25519_dalek::StaticSecret;
+
+/// Native X25519 public key.
+///
+/// This is a type alias to `x25519_dalek::PublicKey`.
+pub type AgreementPublicKey = x25519_dalek::PublicKey;

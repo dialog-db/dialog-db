@@ -60,6 +60,7 @@ async-stream = "0.3"
 async-trait = "0.1"
 auto_enums = { version = "0.8", features = ["futures03"] }
 axum = "0.8"
+aes-gcm = "0.10"
 base58 = "0.2"
 base64 = "0.22"
 blake3 = "1"
@@ -75,10 +76,12 @@ csv-async = { version = "1", features = ["tokio"] }
 dashmap = "6"
 dirs = "5"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 hashbrown = "0.16"
+hkdf = "0.12"
 hmac = "0.12"
 http-body-util = "0.1"
 hyper = "1"
