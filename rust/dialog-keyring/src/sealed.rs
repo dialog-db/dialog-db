@@ -34,6 +34,10 @@
 //!   between *different* plaintexts under one key needs on the order of 2^48
 //!   sealed blobs in a single epoch.
 
+use aes_gcm::{
+    Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit, Payload},
+};
 use dialog_common::Blake3Hash;
 
 use crate::{EpochId, KeyringError};
@@ -81,6 +85,52 @@ impl Sealed {
             nonce,
             ciphertext,
         })
+    }
+
+    /// Seal `plain` without awaiting.
+    ///
+    /// The tree persists nodes in a synchronous call, so the write path needs
+    /// this rather than [`seal`](Self::seal). Same algorithm, same derived
+    /// nonce, same additional data — the bytes are identical, which
+    /// `sync_and_async_sealing_agree` pins.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyringError::Crypto`] if the cipher fails.
+    pub fn seal_now(key: &[u8; 32], epoch: &EpochId, plain: &[u8]) -> Result<Self, KeyringError> {
+        let nonce = derive_nonce(key, epoch, plain);
+        let ciphertext = Aes256Gcm::new(key.into())
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: plain,
+                    aad: &aad(epoch),
+                },
+            )
+            .map_err(|e| KeyringError::Crypto(e.to_string()))?;
+        Ok(Self {
+            epoch: epoch.clone(),
+            nonce,
+            ciphertext,
+        })
+    }
+
+    /// Open the blob without awaiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyringError::Failed`] if the key is wrong or the blob has
+    /// been tampered with.
+    pub fn open_now(&self, key: &[u8; 32]) -> Result<Vec<u8>, KeyringError> {
+        Aes256Gcm::new(key.into())
+            .decrypt(
+                Nonce::from_slice(&self.nonce),
+                Payload {
+                    msg: &self.ciphertext,
+                    aad: &aad(&self.epoch),
+                },
+            )
+            .map_err(|_| KeyringError::Failed)
     }
 
     /// Open the blob with `key`.

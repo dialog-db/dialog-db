@@ -59,3 +59,6 @@ pub use policy::{RotationContext, RotationPolicy};
 
 mod sealed;
 pub use sealed::Sealed;
+
+mod sealer;
+pub use sealer::NodeSealer;

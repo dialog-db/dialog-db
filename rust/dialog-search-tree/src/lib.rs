@@ -161,6 +161,9 @@ pub use entry::*;
 mod node;
 pub use node::*;
 
+mod cipher;
+pub use cipher::NodeCipher;
+
 mod storage;
 pub use storage::*;
 

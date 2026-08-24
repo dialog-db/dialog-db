@@ -295,3 +295,33 @@ async fn the_address_is_the_same_on_every_platform() {
 
 /// The address of `b"a node buffer"` sealed by [`replica`]'s genesis epoch.
 const GOLDEN_ADDRESS: &str = "blake3#6YaQwrhb37ra75Nu5it94bQ7SLLyF1rbZ259oU22MLqm";
+
+#[dialog_common::test]
+async fn sync_and_async_sealing_agree() {
+    // The write path seals synchronously, because the tree's persist does not
+    // await; anything that resolves a key ahead of time can seal
+    // asynchronously. Both must produce the same bytes, or a node written by
+    // one path would be unreadable by a peer using the other.
+    let keyring = replica();
+    let epoch = keyring.current();
+    let key = keyring.key(&epoch).await.unwrap();
+
+    let asynchronous = Sealed::seal(&key, &epoch, b"a node buffer").await.unwrap();
+    let synchronous = Sealed::seal_now(&key, &epoch, b"a node buffer").unwrap();
+
+    assert_eq!(asynchronous, synchronous);
+    assert_eq!(synchronous.open(&key).await.unwrap(), b"a node buffer");
+    assert_eq!(asynchronous.open_now(&key).unwrap(), b"a node buffer");
+}
+
+#[dialog_common::test]
+async fn the_blinding_key_does_not_rotate() {
+    // A node's address has to stay put across rotations, or every link
+    // written before one would dangle.
+    let mut keyring = replica();
+    let before = keyring.blinding_key();
+
+    keyring.rotate_with([2u8; 32]);
+
+    assert_eq!(keyring.blinding_key(), before);
+}

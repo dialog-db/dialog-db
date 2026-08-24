@@ -1315,11 +1315,14 @@ dependencies = [
 name = "dialog-keyring"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "blake3",
+ "criterion",
  "dialog-common",
  "dialog-credentials",
  "dialog-search-tree",
  "dialog-storage",
+ "futures-util",
  "getrandom 0.2.16",
  "serde",
  "thiserror 2.0.18",

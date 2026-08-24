@@ -7,9 +7,16 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+# The synchronous cipher. The tree's persist path does not await, so content
+# sealing cannot route through `WebCrypto` the way `dialog-credentials` does;
+# it has to be software AES on both targets. Same algorithm either way, so the
+# two paths produce identical bytes -- asserted in `tests/sealing.rs`.
+aes-gcm = { workspace = true }
 blake3 = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
+dialog-search-tree = { workspace = true }
+dialog-storage = { workspace = true }
 getrandom = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
@@ -22,17 +29,19 @@ wasm-bindgen = { workspace = true }
 
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
-# The search tree supplies real node buffers for the integration test that
-# proves sealing composes with the shapes the tree actually produces.
-dialog-search-tree = { workspace = true }
-dialog-storage = { workspace = true }
+futures-util = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
-# tokio for the test process is native-only: the wasm tests run on
-# wasm-bindgen-test and the browser event loop, and tokio's `net` pulls `mio`,
-# which does not build for wasm.
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+[[bench]]
+name = "sealing"
+harness = false
+
+# tokio and criterion for the test process are native-only: the wasm tests run
+# on wasm-bindgen-test and the browser event loop, and tokio's `net` pulls
+# `mio`, which does not build for wasm.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
 
 [lints.rust]
 # These cfgs are used by the dialog_common::test proc macro.
