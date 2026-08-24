@@ -786,6 +786,55 @@ pull sources: sites of peers referenced by my tracking entries (self-DID
 peers being the rendezvous case); push targets: tracking entries toward
 foreign-DID peers, gated by proof verification and the local pin.
 
+## Determinism at the seams
+
+The worry the split state model raises: peer state changes without the
+tree hash reflecting it, and resolvers operate from a specific revision —
+does the seam introduce nondeterminism, the way an unpinned fetch does in
+a build system?
+
+No — because the seam admits state through exactly one door, and that
+door mints a revision. The only way a peer's state affects the tree is
+integration: a pull that screens it and commits, after which it is
+ordinary in-tree state. Before that it is invisible to everything
+revision-scoped. Peer heads are in the same category as a user typing a
+fact: **input, not state** — unreflected until commit, and that is what
+makes everything downstream of commit reproducible. "Resolvers operate
+from a specific revision point" is not a limitation; it is the
+determinism guarantee.
+
+The Nix correspondence is exact. Nix does not make the network
+deterministic — it confines impurity to fixed-output derivations
+(impure fetch, content-verified) and evaluates purely from pinned
+inputs:
+
+| Nix                                   | Dialog                                          |
+| ------------------------------------- | ----------------------------------------------- |
+| flake input spec                      | `dialog.replicate` relation + peer's site       |
+| fixed-output fetch (impure, verified) | fetch + signature-verified head                 |
+| flake.lock                            | the integrated-position annotation              |
+| pure eval from pinned inputs          | rules/queries as pure functions of the revision |
+| `nix flake update`                    | pull                                            |
+
+The one question no deterministic system answers from inside a pinned
+evaluation is "is upstream current *right now*" — Nix cannot either;
+that is what `flake update` is for. Not a leak; the definition of now.
+
+Two consequences:
+
+- **A sharp rule:** derivations read only the revision; observation
+  overlays (cached remote heads) are for humans and UI, never rule
+  inputs. The query surface is two-tier: *pure* (revision-scoped, what
+  rules and resolvers see) and *situated* (joins in observations, what a
+  status view shows, non-authoritative by construction).
+- **The annotation layer is upgraded.** Filed above as droppable UX, it
+  is under this framing the **lockfile**: the only deterministic way a
+  derivation can reason about peers at all ("as of this revision, we had
+  integrated bob through E"). If no derivation needs peer-awareness it
+  stays optional; the moment one does, it is required — the alternative,
+  rules peeking at observations, is exactly the nondeterministic seam
+  being ruled out.
+
 ## The ephemeral segment, and commits as invocations
 
 Two ideas that are one idea. If a commit is a UCAN invocation, the
