@@ -139,14 +139,54 @@ everyone. A device-local mirror ("this laptop also syncs to my NAS") is the
 that profile's devices, invisible and irrelevant to collaborators. Shared
 and private wiring differ only in which entity the edge hangs off.
 
-## Schema
+## The short version, in git vocabulary
 
-Refined by the worked model below into five durable relations — sites,
-peers, nodes, rendezvous, flows — after noticing that today's
-remote+upstream is *not* an edge between nodes: same-subject sync is one
-node's replicas converging through a rendezvous site, and only
-cross-subject connections are true edges. The subsections here introduce
-the pieces; "The model, spelled out" assembles them.
+The whole proposal in one sentence: **this is `.gitmodules` for remotes —
+git's two config tables become versioned, replicated facts; every kind of
+ref stays exactly where git keeps it.**
+
+The two tables, side by side with git:
+
+```text
+# git: [remote "bob"] url = …
+bob   dialog.peer/name   "bob"
+bob   dialog.peer/did    "did:key:zBlog"
+bob   dialog.peer/site   "s3://…"              # a value, not an entity
+
+# git: [branch "main"] remote = bob, merge = main
+trk   dialog.track/branch  "main"               # my branch
+trk   dialog.track/peer    bob                  # whose
+trk   dialog.track/of      "main"               # their branch — always read as bob/main
+```
+
+Two rules that keep it this small:
+
+- **The hub is a peer whose DID is your own subject.** "origin" = me, at
+  another site. Same-subject rendezvous and cross-repo tracking need no
+  separate mechanisms — git doesn't distinguish "my origin" from "a fork
+  I track" either; both are remotes. Cross-repo *push* is a tracking
+  entry toward a foreign-DID peer plus a retained delegation.
+- **Names never unify anything.** Identity is `(DID, branch-name)`; a
+  bare branch name is local to its subject and always displayed
+  qualified, git-style: `main` is yours, `bob/main` is Bob's. Entity
+  hashes exist so facts merge; users never see them.
+
+And where every kind of state lives, one row per thing:
+
+| Git                       | Dialog today                    | Proposed                                  |
+| ------------------------- | ------------------------------- | ----------------------------------------- |
+| `[remote]` config         | `remote/{name}/address` cell    | **facts** (shared, versioned)             |
+| `[branch]` tracking config| `upstream` cell (identity half) | **facts** (shared, versioned)             |
+| `refs/heads/*`            | `branch/{name}/revision` cell   | cell — **stays** (the mutable pointer)    |
+| `refs/remotes/*`          | cached remote-head cells        | local cache — **stays**                   |
+| (implicit in remote refs) | sync base                       | local cache (pull) / local observation (push) — **stays** |
+
+Everything below this section is analysis defending that table
+(propagator framing, trust, quiescence) or generalizations deliberately
+deferred (flows between arbitrary nodes, the ephemeral segment) — not
+additional things being built.
+
+## Schema
 
 ### Peers: the address book
 
@@ -596,7 +636,18 @@ becomes an emergent label for a tightly-wired, co-located cluster, and
 archive sharing could in principle be derived from the wiring rather than
 declared. North star, not a commitment.
 
-## The model, spelled out
+## A generalization deferred: sites, nodes, and flows as entities
+
+An earlier draft of this note factored the model into five first-class
+relations (sites, peers, nodes, rendezvous, flows). That is more ontology
+than the proposal needs — sites can be values on peers, node references
+can be qualified names rather than entities, and the rendezvous/flow
+split collapses under the hub-is-a-self-peer rule — so the two-table form
+in "The short version" is the design. This section is retained as the
+generalization target: if flows between arbitrary nodes with scopes and
+owners ever become first-class, this is the shape they take, and the
+two-table form narrows into it without reshaping (a tracking entry is a
+flow whose sink is local; a peer site is a one-site rendezvous).
 
 Cast: Alice (profile `zAlice`, laptop + phone), her repo `zNotes` with
 branch `main`, a hub S3 bucket, Bob's repo `zBlog` she pulls from and may
@@ -657,23 +708,22 @@ flow₂  dialog.flow/of       <zNotes repo entity>
 flow₂  dialog.flow/proof    blob:bafy…         # Bob's delegation, retained
 ```
 
-**Peer state, split by pacing** — most of it is deliberately not stored:
+**Peer state, split by pacing** — this part is not deferred; it applies
+identically to the two-table form. Most peer state is deliberately not
+stored:
 
 | State                                  | Where                                    | Why |
 | -------------------------------------- | ---------------------------------------- | --- |
 | peer's live head ("where is Bob now")  | local cell (cached fetch) → query-time overlay concept | an observation, refreshed by fetch; `BranchRevision` is the overlay precedent |
 | settledness ("in sync with Bob")       | derived, stored nowhere: mutual watermark inclusion | a predicate, not a fact |
-| integrated position ("Bob as of this revision") | ephemeral segment (preferred; loop-proof by construction) or the inductive-rule fact `dialog.flow/at` | the one tree-worthy piece, novelty-paced |
+| integrated position ("Bob as of this revision") | ephemeral segment (preferred; loop-proof by construction) or an inductive-rule fact | the one tree-worthy piece, novelty-paced |
 | push CAS token + residency             | local only, forever                      | per-replica observations; sharing corrupts CAS semantics |
 | trust pins                             | local, profile-scoped, sealed            | trust anchors cannot live inside what they protect |
 
-The sync daemon reduces to two queries. Pull sources: rendezvous sites
-of my nodes, plus sources of flows whose sink is mine and whose owner is
-my repo or my replica. Push targets: flows whose source is mine, gated
-by proof verification and the local pin. Slice mapping: slice 1 = sites
-+ peers (+ resolver); slice 2 = nodes + rendezvous + flows, which now
-carries the branch registry for free; the state table's top rows are
-query-time projections needing no new storage.
+The sync daemon reduces to two queries either way. In two-table terms —
+pull sources: sites of peers referenced by my tracking entries (self-DID
+peers being the rendezvous case); push targets: tracking entries toward
+foreign-DID peers, gated by proof verification and the local pin.
 
 ## The ephemeral segment, and commits as invocations
 
