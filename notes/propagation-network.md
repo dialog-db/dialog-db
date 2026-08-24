@@ -1208,6 +1208,23 @@ at that scale, EBT-style delta negotiation is an optimization layer on
 the wire, with the peer table as its source of truth — the same split
 SSB itself makes between its log format and its replication protocol.
 
+**The tree is reused literally, not by analogy.** The peer table is a
+second *instance* of the existing search tree — same node format, same
+content-addressed archive, same structural sharing, same diff for
+delta gossip, same lazy hydration — entries keyed by branch entity
+(per-issuer subkeys for `integrated`), datum = the head blob ref. It
+must be a separate instance rather than a region of the data tree
+(fetch-paced entries, and the self-reference ripple), but the only new
+code is the merge discipline, which is *simpler* than the existing
+one: the OR-set screens were never in the tree — they are what pull
+layers on top — and the peers root's discipline is per-key
+replace-if-strictly-greater-edition, no history, no coverage. The
+compact statement of the end-state: **a head is a signed tuple of
+roots of one tree kind, each root governed by its own merge
+discipline** — data by the OR-set join, peers by per-key freshness,
+and a future ephemeral segment would be a third root with replacement
+discipline, not a new mechanism.
+
 **Phase 3 — the query surface over mounts.** `$bob` in queries via the
 session layering; `expose` first; the `index` policy (local
 materialized union view, incrementally maintained, disposable) when
