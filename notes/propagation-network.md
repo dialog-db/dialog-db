@@ -1139,6 +1139,27 @@ by fetching them directly. This is flake.lock as a convergent, gossipable lattic
 the concrete and final form of the reflection region, and the one
 isolated piece of new machinery.
 
+**The map is the context's sibling, and must stay its sibling.** The
+context is the same genus — a per-actor version vector, lattice-joined
+per-key, riding the head — so the map is a second instance of a kind
+that already works, not a new invention. They cannot be one structure,
+for three reasons of increasing weight: context keys are *origins*
+(one-way hashes, many per peer — not invertible to a DID you can look
+up); context values carry no tree roots (nothing in a watermark
+dereferences to content, and `did → root` is the map's whole purpose);
+and decisively, the context is an *ancestry* summary whose exactness
+feeds `observes()` and the R1 screen — extending it with entries for
+followed-but-not-integrated peers would make their claims screen as
+already-seen and be silently discarded on a later genuine integration,
+the watermark-inflation failure mode self-inflicted. The clean split:
+**the context answers "what do I contain" (backward-looking, feeds the
+screens, exactly ancestral); the map answers "what can I reach"
+(outward-looking, feeds mounts and gossip, scoped to follows).** For
+integrate-peers they overlap — the earlier "the lockfile was on the
+head the whole time" observation; the map adds exactly what the
+context structurally cannot: dereferenceable roots, and coverage of
+peers mounted without integration.
+
 **Phase 3 — the query surface over mounts.** `$bob` in queries via the
 session layering; `expose` first; the `index` policy (local
 materialized union view, incrementally maintained, disposable) when
