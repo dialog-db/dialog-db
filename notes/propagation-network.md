@@ -275,6 +275,23 @@ entries cannot become pure configuration — each output edge keeps a small
 local companion (its CAS/residency observation), and each input edge an
 optional cache.
 
+**Why the tree cannot record the pulled revision automatically — and what
+it can record instead.** The git-submodule intuition ("just commit what we
+pulled") founders on pacing, not on content. A gitlink advances when a
+human deliberately bumps it; the sync base advances on every fetch, and
+recording a per-fetch value in shared data breaks quiescence: pull P, hit
+scenario 2 (nothing new), record "pulled P@R" — that mints a revision,
+which is novelty; P absorbs it, P's head moves, the next pull of P hits
+scenario 2 again and records again, forever. The propagator network never
+settles because firing the propagator changes the data it watches. The
+cell version avoids the loop precisely by being invisible to the merge.
+What *is* sound is the actual submodule analog: an **explicit pin** — a
+deliberate fact "cites P's branch at edition E, tree T", copied from P's
+signed head (hence verifiable third-hand), paced by meaning
+("checkpoint", "adopted their release") rather than by fetch. Pins
+compose with edges (a pinned edge is frozen tracking); neither replaces
+the push-side base, which pins nothing — it observes a mutable pointer.
+
 Secrets are a fourth category with a sharper answer: bearer credentials
 never appear as fact values, encrypted or not. Encrypted values break the
 index (equality search needs deterministic encryption, which leaks equality
@@ -293,19 +310,42 @@ cannot do capabilities.
 In-tree wiring is writable by anyone who can commit, so the two directions
 of an edge need different guards, and the split is clean:
 
-- **Input edges (pull) may auto-fire — with a caveat the attribution
-  spike sharpened.** Blocks are content-addressed and heads
-  signature-verified before any block is read, so a malicious *site*
-  cannot tamper with a head in flight; stale state and withholding (an
-  availability attack) are its ceiling. But head verification today
-  checks only that the named issuer signed the payload — **no check that
-  the issuer is authorized for the subject** (the "authority binding"
-  item already open in `version-control.md`). Until that lands, "verified
-  head" means "internally consistent head", and auto-firing transitively
-  discovered input edges extends trust to whoever those heads name as
-  issuer. Safe default meanwhile: auto-fire input edges only toward peers
-  in the address book, which is exactly the retained-delegation /
-  known-peer set.
+- **Input edges (pull) may auto-fire — under the rollup trust model,
+  with one insider gap to close.** The deliberate design: the *site*
+  enforces the trust boundary by checking a push invocation's delegation
+  chain to the subject; the pusher vouches for batch contents; the
+  signed head is the batch signature. (Per-fact signing was rejected as
+  unscalable, correctly.) This handles **outsiders** completely — nothing
+  reaches the rendezvous without a chain. What it cannot catch is an
+  *authorized* pusher publishing an invalid batch — in rollup terms, a
+  sequencer problem needing validity checking, not authorization. The
+  watermark-inflation finding above is exactly that. The validity
+  evidence already exists and is already signed: the revision records
+  riding a delta. Verifying them before absorbing their versions (today
+  `observe_revisions` decodes but never calls `record.verify()`) closes
+  the insider hole on the screened and graft paths for a handful of
+  Ed25519 checks per pull, no new signing anywhere. Fast-forward-by-root
+  is the one path where verbatim context adoption is the point (zero
+  reads); there **trust becomes a per-edge attribute** — an edge to your
+  own devices or server adopts by root, an edge to an arbitrary
+  address-book peer pays the verification reads. The policy finally has a
+  natural home because the edge is data.
+
+  The rollup model completes when heads (or revision records) *reference
+  their authorizing chain* by envelope hash. Chains already live in the
+  tree (`delegations().retain`; the prover assembles proofs from exactly
+  these facts), so this is one content-addressed pointer, no
+  duplication — and it makes "issuer authorized for subject" checkable by
+  **anyone** from tree contents, not just by the site at push time: the
+  batch carries its validity proof, so a puller enforces the same
+  boundary the site does, which is what makes pulling from arbitrary
+  sites safe. Chains change rarely, so verification memoizes by envelope
+  hash. This also composes with materialization for free: the access
+  branch is already the always-materialized precedent, so the proof
+  region and the topology region are one "must be local, must be
+  verified" layer. Semantics choice to make early: a retracted delegation
+  should invalidate adoption of *future* heads only (revocation does not
+  rescind, consistent with everything else here).
 - **Output edges (writing a rendezvous) are an exfiltration vector.** A
   pulled edge with a valid proof is a self-authorizing instruction to copy
   the repository somewhere. The proof settles only *sink consent* — it is
@@ -515,12 +555,12 @@ trust section).
 
 Still open:
 
-- Head-issuer authorization: binding "validly signed" to "authorized for
-  the subject" (the `version-control.md` authority-binding item; gates how
-  freely input edges may auto-fire).
-- Hardening context adoption against third-party watermark inflation
-  (verify revision records riding a delta before absorbing their
-  versions).
+- Chain-referencing heads: which artifact carries the envelope hash (head
+  vs. revision record), and the revocation semantics (proposed: a
+  retracted delegation gates future adoption only).
+- Verify-on-absorb for revision records riding a delta (the insider
+  validity check), and the per-edge trust attribute gating verbatim
+  context adoption on fast-forward.
 - Reserved region vs. layered topology branch for materialization.
 - Which capability authorizes `dialog.peer/*` / `dialog.flow/*` writes —
   ordinary commit authority, or an attenuated topology command?
