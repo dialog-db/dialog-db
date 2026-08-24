@@ -236,12 +236,15 @@ Three jobs the memory cells keep, because they cannot move:
    protects. The pin set that guards "where do I write" (below) is what the
    tree is checked *against*; putting it in the tree is circular however
    well it is signed.
-3. **Sync state.** The sync base (`Upstream.tree`), cached remote heads,
-   and the induction watermark are per-replica bookkeeping that advances on
-   every fetch. As facts they would turn every idle tick into a revision —
-   an auto-sync loop that currently hits scenario 1 at zero cost would
-   become a commit generator, and each such commit would invalidate every
-   peer's scenario-1 check in turn.
+3. **Sync state — the pointer-paced part only.** The push-side base,
+   cached remote heads, and the induction watermark are per-replica
+   observations that advance on fetch, independent of whether any
+   novelty integrated. As facts they would mint revisions out of
+   no-novelty (a scenario-2 advance recorded as a fact is bookkeeping
+   the peer absorbs and echoes — see the quiescence analysis below).
+   The *novelty-paced* part of sync state — which peer cut a merge
+   integrated — belongs in the tree, riding the very commit the
+   integration mints; the distinction is worked out below.
 
 **Spike result: the sync base is not derivable, and it is two different
 things.** The hoped-for derivation (peer's published watermark + local
@@ -254,12 +257,14 @@ ever had that content; and `common_ancestor` yields at best a `Version`,
 at O(log gap) fallible verified reads against the cell's infallible O(1).
 But the two *roles* of the stored base have different standings:
 
-- **For pull it is a droppable cache.** The merge is correct from the
-  empty base ("correct, just unable to skip anything", `pull.rs:56-60`,
-  pinned by the empty-base non-resurrection tests). Dropping it costs the
-  zero-read fast paths (scenarios 1/3 never fire, graft disabled, deltas
-  become whole trees) but never corrupts. So it needs no home in the
-  tree: an unregistered local cache, rebuilt by one full pull.
+- **For pull it is a droppable diff-pruning cache.** The merge is
+  correct from the empty base ("correct, just unable to skip anything",
+  `pull.rs:56-60`, pinned by the empty-base non-resurrection tests), and
+  the idle tick survives without it: scenario 2 is gated on watermark
+  inclusion alone, base unconsulted, so "nothing new" stays zero-read.
+  What dropping it costs is diff pruning when both sides genuinely
+  diverged (graft disabled, deltas become whole trees). Never corrupts;
+  needs no durable home; rebuilt by one full pull.
 - **For push it is authoritative and non-causal.** It is the last
   observed value of the *remote's* mutable head pointer — the
   compare-and-set token for the non-fast-forward guard and the
@@ -275,22 +280,50 @@ entries cannot become pure configuration — each output edge keeps a small
 local companion (its CAS/residency observation), and each input edge an
 optional cache.
 
-**Why the tree cannot record the pulled revision automatically — and what
-it can record instead.** The git-submodule intuition ("just commit what we
-pulled") founders on pacing, not on content. A gitlink advances when a
-human deliberately bumps it; the sync base advances on every fetch, and
-recording a per-fetch value in shared data breaks quiescence: pull P, hit
-scenario 2 (nothing new), record "pulled P@R" — that mints a revision,
-which is novelty; P absorbs it, P's head moves, the next pull of P hits
-scenario 2 again and records again, forever. The propagator network never
-settles because firing the propagator changes the data it watches. The
-cell version avoids the loop precisely by being invisible to the merge.
-What *is* sound is the actual submodule analog: an **explicit pin** — a
-deliberate fact "cites P's branch at edition E, tree T", copied from P's
-signed head (hence verifiable third-hand), paced by meaning
-("checkpoint", "adopted their release") rather than by fetch. Pins
-compose with edges (a pinned edge is frozen tracking); neither replaces
-the push-side base, which pins nothing — it observes a mutable pointer.
+**Recording where peers are: the clock is already in the tree.** The
+git-submodule intuition ("pull is `submodule update`: no change, no
+commit; integrated novelty, commit") is correct, and what makes it safe
+is that the pacing rule must be *causal*, not *pointer-based*:
+
+- **An integrating pull already commits.** It mints or adopts a revision
+  whose watermark is the union — so the data hash always reflects
+  integration, and that watermark already records "which origins are
+  where, as of this commit." The logical clock this section needs is not
+  new machinery; it is the context that every head carries.
+- **A peer-position annotation may ride that same commit.** An edge fact
+  binding the peer to the integrated cut (peer P, its head's edition,
+  its tree root as cited from P's *signed* head — verifiable third-hand)
+  costs zero extra revisions when it travels with the merge commit, and
+  concurrent recordings from two replicas converge as a per-origin max
+  like everything else.
+- **Why this does not ping-pong:** when P's movement is only our own
+  record echoed back (P adopted our head), P's origins minted nothing,
+  the inclusion check reports nothing new, no commit fires, no new
+  record. Echoes are never novelty. The loop only afflicts the
+  pointer-paced rule — "commit whenever the peer's head *hash* moves" —
+  because a scenario-2 advance (peer moved, nothing new for us) would
+  then mint novelty out of no-novelty, which the peer absorbs and echoes
+  forever. Scenario-2 base advances are the one thing that must never be
+  facts.
+- **The pull-side stored base is then only a diff-pruning cache** — and a
+  weaker one than it first appears: scenario 2 is gated on watermark
+  inclusion alone (the base is not consulted), so idle pulls stay
+  zero-read with no base at all; scenario 1's base-equality check is a
+  micro-shortcut past the watermark comparison. The base earns its keep
+  only when both sides genuinely diverged (O(delta) vs O(tree) diffs in
+  scenarios 4/5). It can lapse and be rebuilt. (Verify when
+  implementing: scenario 3's `tree == base` guard may be redundant with
+  `theirs.includes(ours)` — if they have seen everything we have, unseen
+  local novelty is nil by definition; if so even scenario 3 is
+  watermark-only.)
+
+What genuinely stays local shrinks to the push-side pair (the CAS token
+on the remote's mutable pointer, and the residency certificate) — which
+pin nothing and observe the outside world. On top of the automatic,
+novelty-paced annotation sits the **explicit pin**: a deliberate,
+meaning-paced citation ("checkpoint", "adopted their release") that
+freezes an edge rather than tracking it — the other half of the
+submodule analogy.
 
 Secrets are a fourth category with a sharper answer: bearer credentials
 never appear as fact values, encrypted or not. Encrypted values break the
