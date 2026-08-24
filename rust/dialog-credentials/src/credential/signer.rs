@@ -258,6 +258,47 @@ mod tests {
         assert_eq!(imported.did(), original_did);
     }
 
+    // A credential has to outlive the session that made it: a secret sealed to
+    // its DID must still open after the credential has been through storage.
+    // Native re-derives the agreement key from the stored seed, so nothing
+    // extra is encoded; the browser cannot re-derive and carries the key in the
+    // exported `JsValue` instead. Both must end up able to reveal.
+    #[dialog_common::test]
+    async fn it_reveals_a_secret_sealed_before_storage() {
+        use crate::secret::Context;
+        use crate::{Ed25519Verifier, Signer as CredentialSigner};
+
+        const VAULT: Context = Context::new("dialog/vault/test");
+
+        let profile = Ed25519Signer::generate().await.unwrap();
+        let profile_did = profile.ed25519_did().to_string();
+        let cred = SignerCredential::from(profile);
+
+        // The account seals knowing only the DID.
+        let sealed = profile_did
+            .parse::<Ed25519Verifier>()
+            .unwrap()
+            .secret(VAULT)
+            .conceal(&[5u8; 32])
+            .await
+            .unwrap();
+
+        // Round trip through the stored form.
+        let export = cred.export().await.unwrap();
+        let imported = SignerCredential::import(export).await.unwrap();
+
+        let CredentialSigner::Ed25519(signer) = imported.into_signer() else {
+            panic!("expected an ed25519 signer");
+        };
+
+        assert_eq!(signer.ed25519_did().to_string(), profile_did);
+        assert_eq!(
+            signer.secret(VAULT).reveal(&sealed).await.unwrap(),
+            [5u8; 32],
+            "a stored credential should open a secret sealed to its DID"
+        );
+    }
+
     #[cfg(all(not(target_arch = "wasm32"), feature = "es256"))]
     #[dialog_common::test]
     async fn it_roundtrips_es256_export_import() {

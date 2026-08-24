@@ -38,12 +38,17 @@ pub use crate::key::{ExtractableAgreementKey, ExtractableKey, WebCryptoError};
 /// WebCrypto has no Ed25519-to-X25519 conversion of its own, so the browser arm
 /// derives here too and only hands the result to `importKey`.
 #[must_use]
+#[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), test))]
 pub(crate) fn agreement_secret_bytes(seed: &[u8; 32]) -> [u8; 32] {
     ed25519_dalek::SigningKey::from_bytes(seed).to_scalar_bytes()
 }
 
 /// Derive the raw X25519 public key bytes from raw X25519 secret bytes.
+///
+/// Only the browser needs this: it has to compute the public key in Rust
+/// because `WebCrypto` cannot export one from a non-extractable private key.
 #[must_use]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub(crate) fn agreement_public_bytes(secret: &[u8; 32]) -> [u8; 32] {
     x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(*secret)).to_bytes()
 }
@@ -409,6 +414,7 @@ impl X25519SecretKey {
     /// On the browser, returns an error if the `WebCrypto` import fails. Never
     /// fails on native.
     #[allow(clippy::unused_async)] // async is needed on WASM
+    #[cfg(test)]
     pub(crate) async fn from_ed25519_seed(seed: &[u8; 32]) -> Result<Self, Ed25519KeyError> {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
