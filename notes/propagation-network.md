@@ -317,6 +317,40 @@ is that the pacing rule must be *causal*, not *pointer-based*:
   local novelty is nil by definition; if so even scenario 3 is
   watermark-only.)
 
+**The correction the causal rule still needs: mutual annotations are two
+clocks counting each other.** The echo argument covers adoption (a peer
+adopting our head mints nothing), but an annotation is *not* an echo — it
+is genuine novelty from a fresh origin edition. If both ends of an edge
+annotate every integration, each side's annotation is data the other must
+integrate and would in turn annotate: every round is a real origin
+advance, and causal pacing alone never terminates it. This is exactly why
+dialog keeps the watermark **on the head rather than in the tree**: the
+head (tree root + watermark, signed) is the versioned object that
+reflects "state changed", while keeping who-is-where tracking outside the
+fixpoint. The rule that lets in-tree annotations exist anyway:
+**annotate only when non-annotation novelty integrates.** Then a data
+exchange settles in one bookkeeping round — real novelty, annotation,
+absorption without counter-annotation, fast-forward, silence.
+
+Two companion observations:
+
+- **Acknowledgments already exist and are already signed.** "Did B
+  integrate my push?" is answered by B's next head: its watermark
+  includes my origin at the pushed edition. A separate signed-ack
+  artifact would be pointer-paced bookkeeping — banned above. And this
+  gives *settled* a concrete representation: **an edge is settled ⇔ the
+  two heads mutually include each other's watermarks** — a zero-read
+  predicate on two signed values, observable by anyone, surfaceable as
+  "in sync with origin".
+- **The annotation wants to be an inductive rule conclusion, not a
+  `pull.rs` hook.** Pull already owes a commit phase: integrated novelty
+  must be screened against `dialog.rule/on` triggers, and the
+  replica-local induction watermark exists precisely to pace rule firing
+  over novelty without re-firing on one's own conclusions. A rule
+  triggered by integration, concluding the edge annotation, inherits
+  that discipline — the settling rule and the annotation share one
+  mechanism instead of each being bespoke.
+
 What genuinely stays local shrinks to the push-side pair (the CAS token
 on the remote's mutable pointer, and the residency certificate) — which
 pin nothing and observe the outside world. On top of the automatic,
@@ -357,12 +391,19 @@ of an edge need different guards, and the split is clean:
   riding a delta. Verifying them before absorbing their versions (today
   `observe_revisions` decodes but never calls `record.verify()`) closes
   the insider hole on the screened and graft paths for a handful of
-  Ed25519 checks per pull, no new signing anywhere. Fast-forward-by-root
-  is the one path where verbatim context adoption is the point (zero
-  reads); there **trust becomes a per-edge attribute** — an edge to your
-  own devices or server adopts by root, an edge to an arbitrary
-  address-book peer pays the verification reads. The policy finally has a
-  natural home because the edge is data.
+  Ed25519 checks per pull, no new signing anywhere — and no
+  partial-replication cost, since the records verified are the ones
+  riding the delta, their bytes in hand by construction.
+  Fast-forward-by-root is the one path where verification would fight
+  partial replication (records for regions adopted by reference may not
+  be local) and where verbatim context adoption is the point (zero
+  reads); there **trust is a per-edge tier** — and the tier need not be a
+  new knob: it reads off the delegation graph already stored. Chain
+  roots in your own authority (your devices, your operator) → trust
+  blindly, adopt by root. A cross-party delegation relationship → trust
+  but verify (records checked on absorb). No chain relationship → full
+  verification, or no auto-fire. Delegation *is* the trust policy; the
+  tiers are its distances.
 
   The rollup model completes when heads (or revision records) *reference
   their authorizing chain* by envelope hash. Chains already live in the
@@ -379,6 +420,16 @@ of an edge need different guards, and the split is clean:
   verified" layer. Semantics choice to make early: a retracted delegation
   should invalidate adoption of *future* heads only (revocation does not
   rescind, consistent with everything else here).
+
+  Operator key rotation does not inflate the store, by the same split
+  `access.rs` migration already draws: the tree retains only the
+  **durable cross-party prefix** of a chain (changes rarely, dedupes by
+  envelope hash), while the **ephemeral leaf** (profile → session key —
+  re-signable on demand, the thing that accumulated one-per-build in the
+  legacy store) travels *with the head* in the cell value. A head is
+  replaced, never accumulated, so rotation costs nothing durable; and
+  since only the current head is verified at adoption, expired session
+  certificates never need retention at all.
 - **Output edges (writing a rendezvous) are an exfiltration vector.** A
   pulled edge with a valid proof is a self-authorizing instruction to copy
   the repository somewhere. The proof settles only *sink consent* — it is
