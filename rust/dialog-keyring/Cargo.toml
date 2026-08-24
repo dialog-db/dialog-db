@@ -1,0 +1,42 @@
+[package]
+name = "dialog-keyring"
+description = "Epoch-keyed sealing for content-addressed data"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
+getrandom = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+# The cross-target test macro's wasm inner-test expansion references
+# `wasm_bindgen`, so it must be a real dependency on wasm, not just a dev-dep.
+wasm-bindgen = { workspace = true }
+
+[dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+# The search tree supplies real node buffers for the integration test that
+# proves sealing composes with the shapes the tree actually produces.
+dialog-search-tree = { workspace = true }
+dialog-storage = { workspace = true }
+wasm-bindgen-test = { workspace = true }
+
+# tokio for the test process is native-only: the wasm tests run on
+# wasm-bindgen-test and the browser event loop, and tokio's `net` pulls `mio`,
+# which does not build for wasm.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints.rust]
+# These cfgs are used by the dialog_common::test proc macro.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(dialog_test_wasm_integration)",
+    "cfg(feature, values(\"web-integration-tests\"))",
+] }

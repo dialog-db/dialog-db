@@ -20,7 +20,7 @@ fn subtle() -> Result<SubtleCrypto, SecretError> {
 }
 
 /// Derive an AES-256 key from a shared secret using HKDF-SHA256.
-pub(super) async fn derive_key(shared: &[u8; 32], info: &[u8]) -> Result<[u8; 32], SecretError> {
+pub(crate) async fn derive_key(shared: &[u8; 32], info: &[u8]) -> Result<[u8; 32], SecretError> {
     let subtle = subtle()?;
 
     // Import the raw shared secret as HKDF key material.
@@ -95,7 +95,7 @@ fn aes_params(nonce: &[u8; 12], aad: &[u8]) -> Result<Object, SecretError> {
 }
 
 /// Encrypt with AES-256-GCM.
-pub(super) async fn encrypt(
+pub(crate) async fn encrypt(
     key: &[u8; 32],
     nonce: &[u8; 12],
     plain: &[u8],
@@ -116,7 +116,7 @@ pub(super) async fn encrypt(
 }
 
 /// Decrypt with AES-256-GCM.
-pub(super) async fn decrypt(
+pub(crate) async fn decrypt(
     key: &[u8; 32],
     nonce: &[u8; 12],
     ciphertext: &[u8],

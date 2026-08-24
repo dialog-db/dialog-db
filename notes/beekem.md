@@ -728,6 +728,69 @@ as a test one — the opposite of where the idea naturally lands.
   is still garbage a peer can inject. The two planes must be checked together
   at the sync boundary.
 
+## What exists now
+
+`rust/dialog-keyring` is steps 1 and 2 of the sequence below, built and
+passing on native and in a headless browser. It is a proof of concept: the
+sealing layer and the epoch machinery, with no key agreement anywhere.
+
+| Piece | What it is |
+| --- | --- |
+| `Sealed` | The wire format: `version(1) ‖ epoch(32) ‖ nonce(12) ‖ ciphertext ‖ tag(16)`, addressed by `blake3` of the whole encoding |
+| `EpochId` / `Epoch` / `EpochLog` | Content-addressed epoch names and the append-only log that records them |
+| `Keyring` | The seam: `current`, `key(epoch)`, `rotate` — three operations, nothing else |
+| `LocalKeyring` | The degenerate implementation: `HKDF(space_secret, epoch_id)`, no tree |
+| `RotationPolicy` | `OnDemand` for production; `EverySeals` and `WhenAddressLeadingZeros` for tests |
+
+`dialog_credentials::symmetric` is new alongside it — the AES-256-GCM and
+HKDF-SHA256 that `secret` already had, exposed without the ECDH and DID
+binding that sealing *to an identity* adds. The browser still routes both
+through `WebCrypto`.
+
+### What the tests establish
+
+The properties the design leans on are asserted rather than assumed, and each
+one runs on both targets:
+
+- **Convergence survives sealing.** Two replicas that never spoke, holding the
+  same secret and epoch, seal identical content to byte-identical blobs at the
+  same address. Asserted against synthetic bytes *and* against the real node
+  buffers a 512-entry prolly tree produces.
+- **Boundaries do not move.** The tree chunks itself identically whether or
+  not its buffers are later sealed — as it must, since `rank(key)` runs while
+  a node is built and sealing happens after.
+- **Rotation costs deduplication.** After a rotation the same tree's buffers
+  share *no* addresses with their earlier selves. Both generations stay
+  readable from the one keyring. This is the cost quantified, not avoided.
+- **Concurrent rotation converges.** Two replicas rotate during a partition
+  with no chance to coordinate. Neither can read the other; after exchanging
+  epoch logs both can, both settle on the same current epoch, and their
+  subsequent identical writes share an address again without a third
+  rotation. A later rotation names both concurrent epochs as predecessors and
+  collapses them.
+- **The header is authenticated.** Relabelling a blob with another epoch it
+  could otherwise resolve fails to open rather than silently redirecting.
+  Truncation, an unknown version, a foreign space secret, and an unreplicated
+  epoch are each distinct, and tampering is indistinguishable from a wrong
+  key.
+- **Both platforms agree byte for byte.** A pinned golden address: native
+  RustCrypto and browser `WebCrypto` must produce the same blob, or two peers
+  on different platforms would disagree on every address they compute.
+
+### What it is not
+
+- **No security against a removed member.** Everyone with the space secret
+  derives every epoch. That is not a gap to patch here — it is exactly what
+  BeeKEM is for, and why `LocalKeyring` is a placeholder. Useful today only
+  where there is nobody to lock out: one profile's own devices, against an
+  untrusted blob store.
+- **Not wired into the tree.** Nothing threads a sealed address back into a
+  `Link`, so a parent still points at its children's plaintext hash. That is
+  the invasive half, it belongs in `dialog-search-tree`, and it is the next
+  step. What is proven here is that the layer underneath it behaves.
+- **No keyring replication.** `EpochLog::merge` is a union in memory; nothing
+  writes it to the tree published alongside the data root.
+
 ## Suggested sequence
 
 **Encryption first.** The original ordering here put the CGKA first and the
@@ -752,14 +815,14 @@ Two properties make this order safe rather than merely appealing:
 
 The revised order:
 
-1. **Sealed buffers, static key.** Encrypt-then-hash at the node-buffer seam,
+1. **Sealed buffers.** *(prototyped in `dialog-keyring`)* Encrypt-then-hash at the node-buffer seam,
    SIV nonce so identical plaintext under one key yields identical ciphertext
    and convergence survives, plaintext header carrying epoch identifiers. Key
    delivered to the profile's own devices with `secret::Seal` — no group
    protocol involved. This alone ships something real: a space an untrusted
    blob store cannot read, which is `notes/privacy.md`'s L0 with nothing else
    required.
-2. **Rotation, still no BeeKEM.** A degenerate keyring — an epoch log plus
+2. **Rotation, still no BeeKEM.** *(prototyped in `dialog-keyring`)* A degenerate keyring — an epoch log plus
    `HKDF(space_secret, epoch_id)` — behind the same `Keyring` trait the CGKA
    will later implement, with `rotate()` exposed as ordinary API and an
    aggressive policy in the test harness. See [Rotation](#rotation). This is

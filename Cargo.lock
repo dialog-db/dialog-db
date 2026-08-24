@@ -1312,6 +1312,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-keyring"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-search-tree",
+ "dialog-storage",
+ "getrandom 0.2.16",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-macros"
 version = "0.1.0"
 dependencies = [

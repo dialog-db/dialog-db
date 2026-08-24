@@ -19,6 +19,8 @@ pub mod key;
 #[cfg(feature = "ed25519")]
 pub mod secret;
 pub mod signature;
+#[cfg(feature = "ed25519")]
+pub mod symmetric;
 
 #[cfg(feature = "ed25519")]
 pub mod ed25519;

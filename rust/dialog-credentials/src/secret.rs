@@ -36,7 +36,7 @@ use crate::ed25519::{Ed25519Signer, Ed25519Verifier, X25519PublicKey, X25519Secr
 
 mod error;
 mod message;
-mod platform;
+pub(crate) mod platform;
 
 pub use error::SecretError;
 pub use message::SealedSecret;

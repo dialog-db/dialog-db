@@ -9,7 +9,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 
 /// Derive an AES-256 key from a shared secret.
-pub(super) async fn derive_key(shared: &[u8; 32], info: &[u8]) -> Result<[u8; 32], SecretError> {
+pub(crate) async fn derive_key(shared: &[u8; 32], info: &[u8]) -> Result<[u8; 32], SecretError> {
     let hkdf = Hkdf::<Sha256>::new(None, shared);
     let mut key = [0u8; 32];
     hkdf.expand(info, &mut key)
@@ -18,7 +18,7 @@ pub(super) async fn derive_key(shared: &[u8; 32], info: &[u8]) -> Result<[u8; 32
 }
 
 /// Encrypt with AES-256-GCM.
-pub(super) async fn encrypt(
+pub(crate) async fn encrypt(
     key: &[u8; 32],
     nonce: &[u8; 12],
     plain: &[u8],
@@ -31,7 +31,7 @@ pub(super) async fn encrypt(
 }
 
 /// Decrypt with AES-256-GCM.
-pub(super) async fn decrypt(
+pub(crate) async fn decrypt(
     key: &[u8; 32],
     nonce: &[u8; 12],
     ciphertext: &[u8],
