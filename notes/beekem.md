@@ -416,13 +416,17 @@ holds no content key. To get one they must read the CGKA op log. If that log
 lived in the encrypted tree, it could not be read without the key it contains —
 a bootstrap cycle.
 
-So the keyring is a **dedicated region that is never encrypted**: signed CGKA
-ops, replicated by the same blob path as everything else, readable by anyone
-who can reach the space's storage. This is not a leak, it is the design —
-BeeKEM control messages are public by construction (public keys, ciphertexts,
-member DIDs). It does mean membership is metadata visible at L0, which
-`notes/privacy.md` should be updated to say out loud. There is precedent: that
-note already contemplates UCAN delegations stored in-tree.
+So the keyring is **never encrypted**: signed CGKA ops, replicated by the same
+blob path as everything else, readable by anyone who can reach the space's
+storage. This is not a leak, it is the design — BeeKEM control messages are
+public by construction (public keys, ciphertexts, member DIDs). It does mean
+membership is metadata visible at L0, which `notes/privacy.md` should be
+updated to say out loud. There is precedent: that note already contemplates
+UCAN delegations stored in-tree.
+
+Where it physically sits is a separate question with a two-phase answer — its
+own tree first, a tag-6 region of the main tree once nested encryption makes
+that readable. See [How it fits together](#how-it-fits-together-concretely).
 
 ### One group per space
 
@@ -445,6 +449,137 @@ individuals/groups above BeeKEM; the `beekem` crate itself is flat. Dialog's
 UCAN delegation graph is the natural place to expand "this team may read" into
 the concrete set of device DIDs to seat — which is another piece of Keyhive we
 do not need to import, because we already have the graph.
+
+## How it fits together, concretely
+
+The question that decides the shape of everything else: *where does the
+BeeKEM tree live?*
+
+**Nowhere. You never store it.** The BeeKEM tree is derived state — a
+materialized view over an append-only log of signed operations, rebuilt by
+replay. `beekem` rebuilds it from the op graph on every structural merge
+anyway. Persisting it would be persisting a cache whose source of truth sits
+right next to it.
+
+So the real question is where the *op log* lives, and there the instinct to
+reach for a separate region of the tree is right. It is the idiom we already
+use: one prolly tree, partitioned by a leading tag byte.
+
+| Tag | Region |
+| --- | --- |
+| 0 | entity index (EAV) |
+| 1 | attribute index (AEV) |
+| 2 | value index (VAE) |
+| 3 | history index (claim lineage) |
+| 4 | blob index |
+| 5 | coverage |
+| **6** | **keyring — CGKA ops (proposed)** |
+
+There is precedent for protocol data living in-tree under reserved
+attributes: `WriteScope::Machinery` exists so the delegation records can be
+written as `dialog.*` facts. CGKA operations are the same kind of thing.
+
+### The catch: you cannot navigate an encrypted tree without a key
+
+If node buffers are encrypted whole, a newcomer cannot reach the tag-6 region,
+because getting there means descending through the root and index nodes — and
+those are shared across every region. The keyring would be behind the very key
+it exists to hand out.
+
+So this splits into two phases, and the first one is deliberately dumber:
+
+- **Phase 1 — the keyring is its own tree.** Its own root hash, never
+  encrypted, published in the branch's commit alongside the data tree's root.
+  Same prolly tree machinery, same CAS, same blob replication, no interaction
+  with the encryption layering at all. A reader fetches it with no key, which
+  is the whole point.
+- **Phase 2 — the keyring becomes tag 6.** Once `notes/privacy.md`'s nested
+  L1/L2/L3 encryption exists, navigation (links, ranges) decrypts at a lower
+  tier than values do, so a reader can route to the keyring region and read
+  plaintext values there while every other region's values stay sealed. Then
+  the separate tree folds back in.
+
+Phase 1 costs one extra root hash in the commit. Phase 2 is where we want to
+end up, but it depends on a layering that does not exist yet, and blocking
+group key agreement on it would be backwards.
+
+### A day in the life
+
+**Alice creates the space.** `Cgka::new(TreeId = space DID, MemberId = her
+device DID, her share key)` yields one signed `init_add` op. It goes in the
+keyring. In memory: a two-leaf tree with Alice in slot 0. No group secret
+exists yet — `Create` does not define one.
+
+**Alice writes.** The commit path asks the CGKA for a key per node buffer:
+
+```rust
+let (secret, maybe_op) = cgka
+    .new_app_secret_for(&content_ref, &buffer, &pred_refs, &signer, &mut rng)
+    .await?;
+```
+
+There is no PCS key yet, so the CGKA performs an `Update` on her behalf and
+returns the new op alongside the secret. The commit writes both halves in one
+revision: encrypted data nodes into the data tree, the update op into the
+keyring. Atomic, because it is one commit.
+
+**Alice adds Bob.** Two things, in two planes. A UCAN delegation to Bob (the
+existing path, unchanged), and `cgka.add(bob_did, X25519PublicKey::from_ed25519(bob_did))`
+— no prekey lookup, because Bob's agreement key falls out of his DID. `Add`
+blanks the path, so the group secret goes undefined; the next write by anybody
+rekeys automatically via the step above.
+
+**Bob syncs.** He pulls blobs the usual way. The keyring is plaintext, so he
+reads it holding nothing. He replays it — `new_from_init_add`, then each
+subsequent op in causal order through `merge_concurrent_operation` — and the
+tree reconstructs in memory. His leaf's secret is the X25519 key derived from
+his own Ed25519 identity, so he can climb from his leaf to the root.
+
+**Bob reads a node written three rotations ago.** Each encrypted buffer carries
+a plaintext header naming its epoch (`pcs_key_hash`, `pcs_update_op_hash`) and
+its nonce. `decryption_key_for` replays the op graph *to that point* and
+re-derives that epoch's key. Nothing was ever re-encrypted; old data stays
+readable because the log is complete.
+
+**Alice removes Bob.** `/ucan/revoke` withdraws authority; `cgka.remove(bob)`
+withdraws knowledge. The next write rekeys. Bob keeps every byte he already
+replicated — that is inherent, and the docs must say so — but he derives no
+future epoch key.
+
+**Alice and Bob rekey while partitioned.** Two `Update` ops naming the same
+predecessors. On merge, both versions survive as a conflict node, and the next
+update encrypts for the resolution set instead of a single sibling. Our
+revision DAG's only job here is to deliver both ops with their predecessors
+first; BeeKEM's materialization does the converging.
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Commit as Commit path
+    participant Cgka as beekem::Cgka
+    participant Keyring as Keyring tree (plaintext)
+    participant Data as Data tree (sealed)
+
+    App->>Commit: commit(changes)
+    Commit->>Cgka: new_app_secret_for(node_ref, buffer, preds)
+    alt no current group secret
+        Cgka-->>Cgka: Update (rotate path)
+        Cgka->>Keyring: signed Update op
+    end
+    Cgka-->>Commit: application secret
+    Commit->>Data: seal(buffer) -> ciphertext, blake3(ciphertext)
+    Commit->>Commit: one revision covering both trees
+```
+
+### What this costs
+
+The CGKA lives in the session handle, built on branch open by scanning the
+keyring range, held for the session's life. An `Update` op is a public key plus
+one ciphertext per level — call it a kilobyte in a 64-member group. Membership
+changes and rotations are rare events measured in hundreds over a repository's
+life, against millions of facts. The keyring is a rounding error in storage;
+its cost is replay time on open, which is what checkpointing is for when it
+starts to matter.
 
 ## Sharp edges
 
