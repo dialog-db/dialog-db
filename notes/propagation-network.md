@@ -1176,9 +1176,37 @@ peers: { branch → {
   Mounts have `known` without `integrated`; pure merges the reverse;
   tracked collaborators both.
 
-Size: same head field count as today (context subsumed into `peers`),
-one 32-byte head ref per followed branch on top of the watermark
-entries already paid for. Dozens of peers ≈ low kilobytes.
+Size and scale — the SSB stress test. Inline on the head, the table
+scales to remotes-cardinality, not social-graph cardinality: a
+thousand follows would mean ~100KB re-serialized and re-signed per
+publication. Two fixes, both already owned by the system, plus one
+architectural rule:
+
+- **The head carries the peers *root*, not the table.** `head = (tree,
+  edition, peers-root, signature)` — fixed size at any cardinality; the
+  table is a small search tree of content-addressed blocks, so a
+  one-entry bump rebuilds one path, delta gossip falls out of the
+  existing tree diff, and everyone storing bob's head at edition E
+  stores the same blob (network-wide dedup for free).
+- **`known` updates are lazy** — they land on the next commit or a slow
+  timer, never per-fetch. Sound because entries are self-certifying and
+  the join is monotone: staleness costs nothing (direct follows are
+  fetched directly; the table's gossip role is redundancy, not
+  freshness), and no correctness property reads the map — that is what
+  keeping it out of the screens bought.
+- **The global graph is never materialized** — the SSB lesson. A table
+  holds out-edges only (O(out-degree), hundreds of entries, kilobytes
+  as a tree); transitive reach is *traversing friends' tables*, already
+  replicated with their heads. And the cursors have naturally different
+  cardinalities: `integrated` exists only for true collaborators (a
+  handful), `known` for follows (hundreds) — at social scale you mount
+  feeds, not merge them, and the tree representation charges only for
+  what is present.
+
+State format is not wire format: if dialog ever hosts feed replication
+at that scale, EBT-style delta negotiation is an optimization layer on
+the wire, with the peer table as its source of truth — the same split
+SSB itself makes between its log format and its replication protocol.
 
 **Phase 3 — the query surface over mounts.** `$bob` in queries via the
 session layering; `expose` first; the `index` policy (local
