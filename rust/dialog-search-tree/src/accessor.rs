@@ -55,12 +55,7 @@ where
     pub(crate) async fn warm(&self, hash: Blake3Hash) {
         let _ = self
             .cache
-            .get_or_fetch(&hash, async |key| {
-                self.storage
-                    .retrieve(key)
-                    .await
-                    .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
-            })
+            .warm(&hash, async |key| self.retrieve(key).await)
             .await;
     }
 
@@ -68,6 +63,15 @@ where
     ///
     /// Checks the cache first, then the storage backend. Returns an error if the
     /// node is in neither.
+    ///
+    /// Joins another demand read of the same node, but never a read-ahead:
+    /// a read-ahead queued by a range scan advances only while that scan is
+    /// polled, so a reader arriving from anywhere else — a point lookup, a
+    /// commit walking the tree, a consumer reading between two of the scan's
+    /// yields — would wait on an outcome only the task now waiting could
+    /// produce. Such a reader takes the node over and fetches for itself;
+    /// the scan's own reads, which do drive their read-aheads, join them
+    /// through [`get_node_joining`](Self::get_node_joining).
     pub async fn get_node<Key, Value>(
         &self,
         hash: &Blake3Hash,
@@ -79,14 +83,57 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
-        self.cache
-            .get_or_fetch(hash, async |key| {
-                self.storage
-                    .retrieve(key)
-                    .await
-                    .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
-            })
-            .await?
+        let buffer = self
+            .cache
+            .get_or_fetch(hash, async |key| self.retrieve(key).await)
+            .await?;
+        Self::decode(hash, buffer)
+    }
+
+    /// [`get_node`](Self::get_node) for the range scan's own reads: joins a
+    /// read-ahead already in flight for the node instead of fetching again.
+    ///
+    /// Only sound where the caller keeps driving its warms while it waits —
+    /// the scan polls them alongside the read it awaits — because a joined
+    /// warm that nobody polls never publishes. Everyone else takes
+    /// [`get_node`](Self::get_node).
+    pub(crate) async fn get_node_joining<Key, Value>(
+        &self,
+        hash: &Blake3Hash,
+    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
+    where
+        Key: self::Key,
+        Value: self::Value,
+        Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
+        let buffer = self
+            .cache
+            .get_or_fetch_joining(hash, async |key| self.retrieve(key).await)
+            .await?;
+        Self::decode(hash, buffer)
+    }
+
+    async fn retrieve(&self, key: &Blake3Hash) -> Result<Option<Buffer>, DialogStorageError> {
+        self.storage
+            .retrieve(key)
+            .await
+            .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
+    }
+
+    fn decode<Key, Value>(
+        hash: &Blake3Hash,
+        buffer: Option<Buffer>,
+    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
+    where
+        Key: self::Key,
+        Value: self::Value,
+        Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
+        buffer
             .ok_or_else(|| {
                 DialogSearchTreeError::Node(format!("Blob not found in storage: {}", hash))
             })

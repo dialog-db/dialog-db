@@ -488,8 +488,11 @@ where
                             warming.push(accessor.warm(index.hash_at(sibling)?.clone()));
                         }
 
+                        // The one read that may join an in-flight warm:
+                        // `while_warming` keeps polling the warms while
+                        // this read waits, so a joined warm always publishes.
                         let next_node = while_warming(
-                            accessor.get_node(index.hash_at(child_index)?),
+                            accessor.get_node_joining(index.hash_at(child_index)?),
                             &mut warming,
                         )
                         .await?;
@@ -1293,6 +1296,53 @@ mod prefetch_tests {
             .ok_or_else(|| anyhow::anyhow!("Node not stored"))?;
 
         Ok(PersistentNode::try_from(Buffer::from(bytes))?)
+    }
+
+    /// A reader that needs a node a read-ahead has claimed must not depend
+    /// on that read-ahead being driven. The read-ahead here is polled
+    /// exactly once — enough to claim the node and start its read — and
+    /// then never again, the shape of a walk parked between two yields. A
+    /// point read of a key under that node used to join the claim and wait
+    /// for an outcome only further polling of the read-ahead could produce.
+    // Native only: the bound is tokio's timer, which has no wasm runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_serves_a_claimed_node_to_a_reader_the_read_ahead_cannot_reach() -> Result<()> {
+        use std::task::{Context, Poll};
+
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+        let accessor = crate::Accessor::new(tree.node_cache(), storage.clone());
+
+        // The root's second child, and a key from its leftmost leaf.
+        let root = load(&storage, tree.root()).await?;
+        let ArchivedNodeBody::Index(index) = root.body() else {
+            anyhow::bail!("the built tree has a single leaf; nothing to warm")
+        };
+        let sibling = index.hash_at(1)?.clone();
+        let mut hash = sibling.clone();
+        let key: [u8; 4] = loop {
+            let node = load(&storage, &hash).await?;
+            match node.body() {
+                ArchivedNodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
+                ArchivedNodeBody::Segment(segment) => {
+                    break segment.first_key::<[u8; 4]>()?.as_slice().try_into()?;
+                }
+            }
+        };
+
+        let mut warm = Box::pin(accessor.warm(sibling));
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(warm.as_mut().poll(&mut context), Poll::Pending));
+
+        let read = tree.get(&key, &storage);
+        let value = tokio::time::timeout(std::time::Duration::from_secs(2), read)
+            .await
+            .expect("a reader must not wait on a read-ahead nobody drives")?;
+        assert_eq!(value, Some(value_of(u32::from_be_bytes(key))));
+        drop(warm);
+        Ok(())
     }
 
     #[dialog_common::test]

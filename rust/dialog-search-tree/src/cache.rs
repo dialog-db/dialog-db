@@ -1,5 +1,5 @@
 mod fetches;
-use fetches::{Claim, Fetches};
+use fetches::{Claim, Fetch, Fetches, Kind};
 
 use dialog_common::{ConditionalSend, ConditionalSync};
 
@@ -98,11 +98,19 @@ where
     /// Retrieves a value from the cache, or fetches it using the provided
     /// function.
     ///
-    /// Only one fetch per key is ever in flight through a given cache: a
-    /// caller that misses while another caller is already fetching the same
-    /// key waits for that fetch instead of issuing its own. A fetch that fails
-    /// or is dropped before it publishes leaves nothing behind, so the callers
-    /// waiting on it start over and fetch for themselves.
+    /// A demand read: someone is awaiting it, so it is driven for as long as
+    /// it is in flight. Only one demand fetch per key is ever in flight
+    /// through a given cache — a caller that misses while another demand
+    /// read is already fetching the same key waits for that fetch instead
+    /// of issuing its own. A speculative read-ahead already on the key is
+    /// NOT waited on: it advances only while the walk that queued it is
+    /// polled, and this caller may be the only thing that would ever poll
+    /// it. The caller takes the key over and fetches for itself; the
+    /// read-ahead's bytes, if they ever land, are the same bytes.
+    ///
+    /// A fetch that fails or is dropped before it publishes leaves nothing
+    /// behind, so the callers waiting on it start over and fetch for
+    /// themselves.
     pub async fn get_or_fetch<F, E>(&self, key: &K, fetcher: F) -> Result<Option<V>, E>
     where
         F: AsyncFnOnce(&K) -> Result<Option<V>, E>,
@@ -112,9 +120,13 @@ where
                 return Ok(Some(value));
             }
 
-            match self.fetches.claim(key) {
+            match self.fetches.claim(key, Kind::Demand) {
                 Claim::Ours(fetch) => break fetch,
-                Claim::InFlight(mut outcome) => match outcome.recv().await {
+                Claim::InFlight {
+                    kind: Kind::Speculative,
+                    ..
+                } => break self.fetches.supersede(key),
+                Claim::InFlight { mut outcome, .. } => match outcome.recv().await {
                     Ok(value) => return Ok(value),
                     // The fetch we were waiting on failed or was dropped. Its
                     // claim is already withdrawn, so start over: either the
@@ -123,15 +135,71 @@ where
                 },
             }
         };
+        self.perform(fetch, key, fetcher).await
+    }
 
-        // A failure returns here, dropping the claim and releasing the key.
+    /// [`get_or_fetch`](Self::get_or_fetch) that also waits on a speculative
+    /// read-ahead already in flight for the key.
+    ///
+    /// Sound only for the walk that queued the read-ahead, because that walk
+    /// keeps polling its read-aheads alongside the read it awaits; anywhere
+    /// else, joining one is a wait on an outcome nobody may ever produce.
+    pub(crate) async fn get_or_fetch_joining<F, E>(
+        &self,
+        key: &K,
+        fetcher: F,
+    ) -> Result<Option<V>, E>
+    where
+        F: AsyncFnOnce(&K) -> Result<Option<V>, E>,
+    {
+        let fetch = loop {
+            if let Some(value) = self.get(key) {
+                return Ok(Some(value));
+            }
+
+            match self.fetches.claim(key, Kind::Demand) {
+                Claim::Ours(fetch) => break fetch,
+                Claim::InFlight { mut outcome, .. } => match outcome.recv().await {
+                    Ok(value) => return Ok(value),
+                    Err(_) => continue,
+                },
+            }
+        };
+        self.perform(fetch, key, fetcher).await
+    }
+
+    /// Loads `key` into the cache as a speculative read-ahead.
+    ///
+    /// Nobody awaits the outcome, so a key already being fetched by anyone
+    /// is simply left to them. The claim this takes out is marked
+    /// speculative: a demand read that finds it takes the key over rather
+    /// than waiting, since a read-ahead only advances while its walk is
+    /// polled.
+    pub(crate) async fn warm<F, E>(&self, key: &K, fetcher: F) -> Result<(), E>
+    where
+        F: AsyncFnOnce(&K) -> Result<Option<V>, E>,
+    {
+        if self.get(key).is_some() {
+            return Ok(());
+        }
+        match self.fetches.claim(key, Kind::Speculative) {
+            Claim::Ours(fetch) => self.perform(fetch, key, fetcher).await.map(|_| ()),
+            Claim::InFlight { .. } => Ok(()),
+        }
+    }
+
+    /// Run `fetcher` under `fetch`'s claim, landing the value in the cache
+    /// and handing it to whoever waited. A failure returns early, dropping
+    /// the claim and releasing the key.
+    async fn perform<F, E>(&self, fetch: Fetch<K, V>, key: &K, fetcher: F) -> Result<Option<V>, E>
+    where
+        F: AsyncFnOnce(&K) -> Result<Option<V>, E>,
+    {
         let value = fetcher(key).await?;
-
         if let Some(value) = &value {
             self.insert(key.clone(), value.clone());
         }
         fetch.publish(&value);
-
         Ok(value)
     }
 
@@ -172,6 +240,39 @@ mod tests {
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A demand read that finds a speculative claim takes the key over
+    /// rather than waiting: the read-ahead behind that claim is polled only
+    /// by the walk that queued it, and here it is polled exactly once and
+    /// then never again — the shape of a walk parked between two yields.
+    // Native only: the bound is tokio's timer, which has no wasm runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_never_makes_a_demand_read_wait_on_a_read_ahead() -> Result<()> {
+        use std::task::{Context, Poll};
+
+        let cache = Cache::<u32, u32>::new();
+
+        let mut warm = Box::pin(cache.warm(&7, async |_| {
+            std::future::pending::<Result<Option<u32>, ()>>().await
+        }));
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(warm.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(cache.fetches.len(), 1, "the read-ahead holds its claim");
+
+        let read = cache.get_or_fetch(&7, async |_| Ok::<_, ()>(Some(70)));
+        let value = tokio::time::timeout(std::time::Duration::from_secs(2), read)
+            .await
+            .expect("a demand read must not wait on a read-ahead nobody drives")
+            .unwrap();
+        assert_eq!(value, Some(70));
+
+        // The superseded read-ahead withdraws nothing that is not its own.
+        drop(warm);
+        assert_eq!(cache.get(&7), Some(70));
+        Ok(())
+    }
 
     #[dialog_common::test]
     async fn it_clears_the_inflight_entry_when_a_fetch_fails() -> Result<()> {
