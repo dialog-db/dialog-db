@@ -919,6 +919,52 @@ definition. The explicit meaning-paced pin ("checkpoint", "adopted
 their release") remains as a *frozen* mount — `policy: pinned` — the
 submodule analogy's other half, now unified into the same relation.
 
+## The convergence boundary
+
+The theorem underneath this whole note, found by asking whether two
+peers who follow each other could converge on one root. They cannot:
+with pins in the tree, mutual convergence requires `R = H(data ∪
+pin(R))` — a hash containing itself. Each side must omit its own root,
+so their trees differ *definitionally*, before any content difference.
+And the generalization is decisive in practice: even a magic fixpoint
+for the symmetric pair dies when A and B follow different peer sets —
+which is always.
+
+The theorem does not say the design fails; it says **convergence and
+following are different relations**, achievable at different boundaries:
+
+- **Within a subject** (replicas of one node), hash equality is
+  achievable — precisely because replicas share their follow-set by
+  construction (the wiring is shared state) and positions live on the
+  head, not in the tree. The head/tree split is the architecture's
+  existing dodge of exactly this self-reference: a head is (root,
+  edition, context) — data about the tree that could not live inside
+  it, placed outside the hash it references. The watermark is on the
+  head for the same reason A∪B's root cannot exist.
+- **Across subjects**, root equality was never the goal and is
+  impossible. The achievable relation is **mutual inclusion** —
+  `ours.includes(theirs) ∧ theirs.includes(ours)` — causal equality at
+  the lattice level while hashes differ. The "settled" predicate is not
+  a convenience; it is the strongest cross-subject relation that can
+  exist. Two git repos with identical commits still have different
+  `.git` directories.
+
+Corollary, resolving the blurred-boundaries question from early in this
+note: names and storage can blur, but the convergence boundary is
+derived, not chosen. **A repository is precisely a maximal set of
+replicas that can share a root** — identical wiring, self-state
+out-of-band. Follow-edges necessarily cross those boundaries; "repo" is
+the equivalence class the theorem carves.
+
+Constructively, when a converged A∪B is genuinely wanted: do not try to
+make two follows converge — **mint a third subject C that both
+integrate into**. C converges because it is one subject with one
+follow-set; A and B remain sovereign. "A shared repo" is thereby
+derived from first principles, and the user-facing choice becomes
+explicit: *follow each other* (mutual inclusion, sovereign roots) or
+*share a space* (mint C, converged root) — two primitives with
+different guarantees, both honest.
+
 ## Determinism at the seams
 
 The worry the split state model raises: peer state changes without the
