@@ -29,6 +29,11 @@ The recommendation, in one line: **depend on the `beekem` crate, drive it from
 the revision DAG we already have, and spend our own effort on the content
 encryption layer, which is the part nobody can hand us.**
 
+And build that encryption layer *first*, against a static key — see
+[Suggested sequence](#suggested-sequence). It is the invasive, format-defining
+half, it is useful on its own, and BeeKEM slots into a one-function seam
+behind it.
+
 ## What BeeKEM actually is
 
 ### The tree
@@ -611,27 +616,62 @@ starts to matter.
 
 ## Suggested sequence
 
-1. **Spike: `beekem` on wasm.** A crate that does nothing but depend on
-   `beekem` and build for `wasm32-unknown-unknown` under the existing CI
-   feature flags. If this fails, every downstream decision changes. Cheap, and
-   the highest-information step available.
-2. **Adapters.** `MemberId`/`TreeId` from `Did`; `AsyncSigner<F>` for
-   `SignerCredential`; `ShareKey` from `X25519PublicKey::from_ed25519`. Small,
-   testable, no protocol work.
-3. **The keyring.** Plaintext op region in a space, written and replicated by
-   the branch path, with ops delivered to `Cgka::merge_concurrent_operation` in
-   causal order. Test the interesting case directly: two replicas, disjoint
-   updates while partitioned, converge to identical tree state after merge.
-4. **Capability binding.** UCAN proof carried on membership ops; `/ucan/revoke`
-   on a read delegation drives `Remove` + `Update`. This is where the two
-   planes meet and where the design is most ours.
-5. **Sealed buffers.** Encrypt-then-hash at the node-buffer seam, SIV nonce,
-   plaintext key-envelope header. The big one. Design it as its own note; it
-   subsumes and should update `notes/privacy.md`.
-6. **L1/L2/L3 layering.** Only after (5) works as a single envelope. The nested
-   scheme is a refinement of a working layer, not a prerequisite.
+**Encryption first.** The original ordering here put the CGKA first and the
+sealed buffers last; that was wrong. BeeKEM is *additive* — a new tree, a new
+op log, nothing existing changes shape. Encryption is *invasive*: it changes
+the on-disk node format, the hashes in every `Link`, and what sync diffs look
+like. Invasive format work should happen while the format is young, and it does
+not need BeeKEM to be useful.
 
-Steps 1–4 are additive: they land a working group key agreement over a space
-that encrypts nothing yet, which is both testable and useless on its own. Step
-5 is what makes it matter, and it is the step that has nothing to do with
-BeeKEM.
+Two properties make this order safe rather than merely appealing:
+
+- **The key provider is a narrow seam.** Everything the sealing layer needs
+  from key agreement is one function — given a content reference and its
+  predecessors, hand back a symmetric key and the epoch identifiers to record
+  in the header. A static-key implementation satisfies it on day one; the CGKA
+  implementation drops in later without touching the sealing layer.
+- **Ciphertext cannot shift tree shape.** Chunk boundaries come from
+  `distribution::rank(key, manifest)` — hashes of *keys*, decided while the
+  node is being built. Sealing a finished node buffer happens strictly after
+  that, so it cannot move a boundary. This was the scariest possible
+  interaction between the two layers and it is already ruled out.
+
+The revised order:
+
+1. **Sealed buffers, static key.** Encrypt-then-hash at the node-buffer seam,
+   SIV nonce so identical plaintext under one key yields identical ciphertext
+   and convergence survives, plaintext header carrying epoch identifiers. Key
+   delivered to the profile's own devices with `secret::Seal` — no group
+   protocol involved. This alone ships something real: a space an untrusted
+   blob store cannot read, which is `notes/privacy.md`'s L0 with nothing else
+   required.
+2. **Two epochs, still no BeeKEM.** A fake key provider that rotates on demand,
+   so nodes written under different epochs coexist in one tree and a reader
+   re-derives the right key per node from the header. This is the step that
+   keeps (1) honest: without it, it is far too easy to bake in an assumption
+   that the key is stable and discover it only when the CGKA arrives.
+3. **Spike: `beekem` on `wasm32-unknown-unknown`.** An hour's work, and it
+   gates only steps 4–6, so it can happen any time before them. If the crate
+   does not build for wasm we port instead — which changes nothing about
+   steps 1–2.
+4. **Adapters.** `MemberId`/`TreeId` from `Did`; `AsyncSigner<F>` for
+   `SignerCredential`; `ShareKey` from `X25519PublicKey::from_ed25519`.
+5. **The keyring, and swap the provider.** Plaintext op log (its own tree,
+   per [How it fits together](#how-it-fits-together-concretely)), ops delivered
+   to `Cgka::merge_concurrent_operation` in causal order, and the static key
+   provider from (1) replaced by a CGKA-backed one. Test the interesting case
+   directly: two replicas, disjoint updates while partitioned, converging to
+   identical tree state after merge.
+6. **Capability binding.** UCAN proof carried on membership ops; `/ucan/revoke`
+   on a read delegation drives `Remove` + `Update`. Where the two planes meet,
+   and where the design is most ours.
+7. **L1/L2/L3 layering.** A refinement of a working single envelope, not a
+   prerequisite for one. Folding the keyring into a tag-6 region falls out of
+   this.
+
+The failure mode this order avoids: building group key agreement that encrypts
+nothing, being unable to demonstrate it end to end, and only then discovering
+what sealing does to node sizes, read amplification, spilled values, and the
+blob index. The failure mode it introduces — hard-coding a single-key
+assumption into the sealing layer — is exactly what step 2 exists to prevent,
+and step 2 is cheap.
