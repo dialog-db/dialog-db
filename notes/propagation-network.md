@@ -1139,26 +1139,46 @@ by fetching them directly. This is flake.lock as a convergent, gossipable lattic
 the concrete and final form of the reflection region, and the one
 isolated piece of new machinery.
 
-**The map is the context's sibling, and must stay its sibling.** The
-context is the same genus — a per-actor version vector, lattice-joined
-per-key, riding the head — so the map is a second instance of a kind
-that already works, not a new invention. They cannot be one structure,
-for three reasons of increasing weight: context keys are *origins*
-(one-way hashes, many per peer — not invertible to a DID you can look
-up); context values carry no tree roots (nothing in a watermark
-dereferences to content, and `did → root` is the map's whole purpose);
-and decisively, the context is an *ancestry* summary whose exactness
-feeds `observes()` and the R1 screen — extending it with entries for
-followed-but-not-integrated peers would make their claims screen as
-already-seen and be silently discarded on a later genuine integration,
-the watermark-inflation failure mode self-inflicted. The clean split:
-**the context answers "what do I contain" (backward-looking, feeds the
-screens, exactly ancestral); the map answers "what can I reach"
-(outward-looking, feeds mounts and gossip, scoped to follows).** For
-integrate-peers they overlap — the earlier "the lockfile was on the
-head the whole time" observation; the map adds exactly what the
-context structurally cannot: dereferenceable roots, and coverage of
-peers mounted without integration.
+**The map and the context are one table, printed in two projections.**
+The context is the same genus — a per-actor version vector,
+lattice-joined per-key, riding the head — and its apparent differences
+from the map dissolve on inspection. Origin keys are recognizable by
+forward derivation (`derive(branch, issuer)`; anyone holding the DIDs
+can enumerate them, as `version-control.md` already notes), so the
+context was never un-indexable by identity — it just stores keys
+post-hash. And the one decisive-looking objection — that the context's
+ancestry-exactness feeds `observes()`/R1 and must not be polluted by
+followed-but-unintegrated positions — forbids conflating two *cursors*
+in one number, not cohabiting two cursors in one entry. Hence the
+**peer table**, the unified and final form:
+
+```text
+head = (tree, edition, peers, signature)        # same arity as today
+
+peers: { branch → {
+    known:      head-ref?                       # their signed head (absent for self)
+    integrated: { issuer → (edition, count) }   # today's watermark, grouped
+}}
+```
+
+- Today's context is exactly `flatten(peers[*].integrated)` — same data
+  regrouped; the opaque origin hash need not be stored at all, since it
+  re-derives from the adjacent `(branch, issuer)`. **The screens read
+  only the `integrated` cursor** — the real invariant, enforced by
+  field discipline rather than by structural separation.
+- The head map is exactly `peers[*].known`: present for follows, absent
+  where only merged, structurally absent for one's own entry (the
+  convergence theorem appearing as a `?`). The two join rules attach
+  here unchanged: replace only on strictly greater edition; scope to
+  the follow-set.
+- Adjacency makes the system invariant visible: `integrated ≤ known`
+  per branch — what you contain never exceeds what you can reach.
+  Mounts have `known` without `integrated`; pure merges the reverse;
+  tracked collaborators both.
+
+Size: same head field count as today (context subsumed into `peers`),
+one 32-byte head ref per followed branch on top of the watermark
+entries already paid for. Dozens of peers ≈ low kilobytes.
 
 **Phase 3 — the query surface over mounts.** `$bob` in queries via the
 session layering; `expose` first; the `index` policy (local
