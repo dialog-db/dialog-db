@@ -141,6 +141,13 @@ and private wiring differ only in which entity the edge hangs off.
 
 ## Schema
 
+Refined by the worked model below into five durable relations — sites,
+peers, nodes, rendezvous, flows — after noticing that today's
+remote+upstream is *not* an edge between nodes: same-subject sync is one
+node's replicas converging through a rendezvous site, and only
+cross-subject connections are true edges. The subsections here introduce
+the pieces; "The model, spelled out" assembles them.
+
 ### Peers: the address book
 
 The entity is the peer's DID — intrinsic, global, collision-free. Petnames
@@ -588,6 +595,111 @@ where nodes are densely wired with identity-join edges. "Repository"
 becomes an emergent label for a tightly-wired, co-located cluster, and
 archive sharing could in principle be derived from the wiring rather than
 declared. North star, not a commitment.
+
+## The model, spelled out
+
+Cast: Alice (profile `zAlice`, laptop + phone), her repo `zNotes` with
+branch `main`, a hub S3 bucket, Bob's repo `zBlog` she pulls from and may
+push to.
+
+**Sites** — where bytes live. Entity = hash of the address.
+
+```text
+site₁  dialog.site/address   <serialized SiteAddress for s3://hub…>
+```
+
+**Peers** — the address book. Entity = the DID (`did.this()`); the DID
+also stored as an attribute for reverse queries (the redundant-by-design
+convention `Replica` follows):
+
+```text
+bob    dialog.peer/did       "did:key:zBlog"
+bob    dialog.peer/petname   "bob"
+bob    dialog.peer/site      site₂
+```
+
+**Nodes** — the graph's vertices. Entity = `hash(subject, branch-name)`.
+For the repo's own branches this relation *is* the branch registry from
+the retirement plan: discovery of "which branches exist" and the vertex
+set are the same facts.
+
+```text
+notes-main   dialog.node/subject  "did:key:zNotes"
+notes-main   dialog.node/name     "main"
+blog-main    dialog.node/subject  "did:key:zBlog"
+blog-main    dialog.node/name     "main"
+```
+
+**Rendezvous** — what remote+upstream collapse into for the same-subject
+case: a node × site binding, "copies of this node converge here". This
+one fact replaces the `remote/{name}/address` cell and the identity half
+of the upstream entry; laptop and phone pull it from the tree and know
+where to sync.
+
+```text
+notes-main   dialog.node/rendezvous   site₁
+```
+
+**Flows** — true cross-subject edges. Entity = `hash(owner, source,
+sink)`, where `owner` is the repo entity for shared wiring or the
+`Replica` entity for device-local wiring — that one argument is the
+entire shared/private distinction. A NAS mirror is the same shape with a
+replica owner.
+
+```text
+flow₁  dialog.flow/source   blog-main          # input: we track Bob
+flow₁  dialog.flow/sink     notes-main
+flow₁  dialog.flow/of       <zNotes repo entity>
+
+flow₂  dialog.flow/source   notes-main         # output: we may push
+flow₂  dialog.flow/sink     blog-main
+flow₂  dialog.flow/of       <zNotes repo entity>
+flow₂  dialog.flow/proof    blob:bafy…         # Bob's delegation, retained
+```
+
+**Peer state, split by pacing** — most of it is deliberately not stored:
+
+| State                                  | Where                                    | Why |
+| -------------------------------------- | ---------------------------------------- | --- |
+| peer's live head ("where is Bob now")  | local cell (cached fetch) → query-time overlay concept | an observation, refreshed by fetch; `BranchRevision` is the overlay precedent |
+| settledness ("in sync with Bob")       | derived, stored nowhere: mutual watermark inclusion | a predicate, not a fact |
+| integrated position ("Bob as of this revision") | ephemeral segment (preferred; loop-proof by construction) or the inductive-rule fact `dialog.flow/at` | the one tree-worthy piece, novelty-paced |
+| push CAS token + residency             | local only, forever                      | per-replica observations; sharing corrupts CAS semantics |
+| trust pins                             | local, profile-scoped, sealed            | trust anchors cannot live inside what they protect |
+
+The sync daemon reduces to two queries. Pull sources: rendezvous sites
+of my nodes, plus sources of flows whose sink is mine and whose owner is
+my repo or my replica. Push targets: flows whose source is mine, gated
+by proof verification and the local pin. Slice mapping: slice 1 = sites
++ peers (+ resolver); slice 2 = nodes + rendezvous + flows, which now
+carries the branch registry for free; the state table's top rows are
+query-time projections needing no new storage.
+
+## The ephemeral segment, and commits as invocations
+
+Two ideas that are one idea. If a commit is a UCAN invocation, the
+revision record does not grow — it is *replaced* by the invocation
+envelope (same issuer, same signature, plus the proof reference), so
+record size stays flat while authorization becomes intrinsic to the
+commit. And "the chain held only by the tip" generalizes: a tree region
+whose entries live in the current revision only — **not retained in the
+indexes' history, minting no history records, riding no log** — an
+ephemeral segment.
+
+What it buys: invocations at the tip; cursor position, presence, and
+other per-moment state that is relevant now and must not accrete; and a
+cleaner resolution of the annotation loop than the rule damper — an
+ephemeral write mints no history record, hence no novelty, hence nothing
+a peer can counter-annotate. Peer positions become loop-proof *by
+construction*.
+
+What it costs: the region has no OR-set log behind it, so it needs its
+own merge rule — per-origin last-writer-wins is the honest one (exactly
+what a CAS cell provides today, now namespaced inside the tree) — and it
+must be excluded from watermark and coverage reasoning, since nothing in
+it is causally tracked. Conceptually it is the head's payload
+generalized into a structured region: the fixpoint-exempt state finally
+gets a home *inside* the tree hash without entering the fixpoint.
 
 ## Retiring the branch cells
 
