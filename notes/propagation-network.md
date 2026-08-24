@@ -885,8 +885,9 @@ peer-visible novelty), one principle in two forms.
 
 ### The reflection region: pins without ping-pong
 
-(Concrete form: the **lock root** of the staged plan's phase 2 — a
-second small tree beside the data tree, its root riding the head.)
+(Concrete form: the **head map** of the staged plan's phase 2 — a
+`{did → signed head}` lattice beside the data tree, its root riding the
+head, joined per-key by edition.)
 
 Mounted queries are deterministic only if the revision records *which*
 bob — the pin. Three desiderata: pins in the tree hash (determinism),
@@ -1091,21 +1092,42 @@ Deliverables: replicated versioned config, self-configuring replicas,
 branch enumeration, branch cells (except heads) retired. Output push
 targets additionally gate on retained proofs plus the local pin set.
 
-**Phase 2 — the lock root.** Each branch publishes two roots: the
+**Phase 2 — the head map.** Each branch publishes two roots: the
 **data root** (the tree as today — facts and config; what peers pin)
-and a **lock root** — a second small tree mapping *mounted node →
-pinned head* (the peer's signed head as a content-addressed blob, so
-one reference carries root, watermark, and signature). The head grows
-one field: `(tree, lock, edition, context)`. Theorem-compliant and
-ping-pong-free by construction: locks pin data roots and **locks are
-never pinned**, so the reference graph is bipartite (locks → data,
-nothing → locks) and acyclic however tangled the follow-graph is.
-Advancement is novelty-paced for free — a lock entry changes only when
-the pinned peer's data changed — and determinism holds: a derivation's
-input is the revision (data, lock, context), all fixed and signed at
-mint. This is flake.nix (config facts) + flake.lock (the lock tree)
-under one signature, and it is the concrete form of the reflection
-region: the isolated, bounded piece of new machinery.
+and a **head map** — `{did → signed head}`, one entry per followed
+peer, the entry a content-addressed blob of that peer's head (so one
+reference carries root, edition, watermark, and signature). The head
+grows one field: `(tree, map, edition, context)`.
+
+The map is a **lattice value**, and that is the load-bearing property.
+Merge is per-key: accept an incoming entry for `b` iff its signature
+verifies and its edition exceeds the current entry's — per-key max over
+each DID's own sequential chain, so the join is commutative,
+idempotent, absorbing: `{a→v1, b→v2} ⊔ {b→v3} = {a→v1, b→v3}`, and
+receiving `{b→v2}` again is a no-op. By the lattice-land principle,
+ping-pong is impossible with no special rules — echoes join to nothing.
+
+It also dodges the convergence theorem legitimately: the theorem
+forbids *tree* equality (each tree would contain the other's root); the
+map converges because entries reference only data roots and the map
+lives outside every data tree — no entry contains the map. So
+convergence returns at the meta level: **peers with the same follow-set
+converge on the identical map** while their data trees stay sovereign,
+and *settled* gets its strongest formulation — the maps are equal.
+
+Free consequences: **transitive gossip** (entries are self-certifying —
+b's head signed by b — so `b→v3` can be learned from anyone's map,
+verified per-entry, fixing the non-composability of private pins);
+**rollback protection** (per-key max: a relayer can withhold but
+neither forge nor roll back); **determinism** (a derivation reads its
+revision's map snapshot, fixed and signed at mint). One rule makes
+unfollow stick: the join is **scoped to the follow-set** — accept and
+publish entries only for DIDs you follow — else union-of-keys
+resurrects unfollowed peers; with scoping, same-follow-set peers still
+converge identically and different follow-sets agree on their
+intersection. This is flake.lock as a convergent, gossipable lattice —
+the concrete and final form of the reflection region, and the one
+isolated piece of new machinery.
 
 **Phase 3 — the query surface over mounts.** `$bob` in queries via the
 session layering; `expose` first; the `index` policy (local
