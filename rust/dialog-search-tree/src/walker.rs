@@ -1412,4 +1412,63 @@ mod prefetch_tests {
 
         Ok(())
     }
+
+    /// The first key stored beneath `hash`, down its leftmost descent.
+    async fn first_key_under(storage: &Storage, mut hash: Blake3Hash) -> Result<[u8; 4]> {
+        loop {
+            let node = load(storage, &hash).await?;
+            match node.body() {
+                ArchivedNodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
+                ArchivedNodeBody::Segment(segment) => {
+                    return Ok(segment.first_key::<[u8; 4]>()?.as_slice().try_into()?);
+                }
+            }
+        }
+    }
+
+    /// Two range scans over one tree share its node cache and, through it,
+    /// each other's read-aheads. Scan A is driven just past the root's first
+    /// child, so the read-aheads it queued are in flight, and then parked:
+    /// the shape of a consumer that reads scan B in full between two of A's
+    /// entries. B's own walk reaches nodes A has claimed and must not wait on
+    /// A's read-aheads, since only A's polling would ever finish them and A
+    /// is waiting on B.
+    // Native only: the bound is tokio's timer, which has no wasm runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_serves_one_scans_read_ahead_to_another_scan() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+
+        let root = load(&storage, tree.root()).await?;
+        let ArchivedNodeBody::Index(index) = root.body() else {
+            anyhow::bail!("the built tree has a single leaf; nothing to read ahead")
+        };
+        if index.len() < 3 {
+            anyhow::bail!("the root needs a third child for a read-ahead to be in flight")
+        }
+        let boundary = first_key_under(&storage, index.hash_at(1)?.clone()).await?;
+
+        let mut parked = std::pin::pin!(tree.stream(&storage));
+        loop {
+            let entry = parked
+                .try_next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("scan A ended before the root's second child"))?;
+            if entry.key >= boundary {
+                break;
+            }
+        }
+        assert!(
+            storage.backend().reads_in_flight() > 0,
+            "scan A holds read-aheads in flight while parked"
+        );
+
+        let scan = tree.stream(&storage).try_collect::<Vec<_>>();
+        let entries = tokio::time::timeout(std::time::Duration::from_secs(2), scan)
+            .await
+            .expect("a scan must not wait on another scan's read-ahead")?;
+        assert_eq!(entries.len() as u32, ENTRIES);
+        Ok(())
+    }
 }
