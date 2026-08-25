@@ -245,6 +245,17 @@ And where every kind of state lives, one row per thing:
 | `refs/remotes/*`          | cached remote-head cells        | local cache — **stays**                   |
 | (implicit in remote refs) | sync base                       | local cache (pull) / local observation (push) — **stays** |
 
+And the shape of the end-state, as one image: **a repository is a
+signed pair of trees — what I hold, and whom I follow.** The head signs
+a data root beside a network root (nesting either inside the other is
+the self-reference the convergence theorem forbids). The network tree's
+entries are other parties' heads, which contain *their* network roots —
+so no tree nests, yet the follow-trees of all participants weave into
+each other: my network tree → bob's head → bob's network tree →
+carol's data. Data trees stay sovereign; the weave is the network; the
+global graph is emergent and never materialized anywhere. Content-
+addressed pages, signed links: the shape of the web itself.
+
 Everything below this section is analysis defending that table
 (propagator framing, trust, quiescence) or generalizations deliberately
 deferred (flows between arbitrary nodes, the ephemeral segment) — not
