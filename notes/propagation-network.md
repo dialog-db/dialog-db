@@ -305,6 +305,24 @@ peer is a branch you follow; a repository presents itself as its meta
 branch* — following a repo is following its meta, then whatever the
 meta lists.
 
+One rule governs the implementation, because per-branch cells exist
+precisely to avoid coordination between branches and the naive meta
+would reintroduce it (every commit contending on one head): **the meta
+branch is never on the commit path.** A branch commit remains a CAS on
+its own cell, coordination-free; the meta *trails* the cells — an
+asynchronous, batched act folding current roots into entries, one meta
+commit absorbing many branch movements. The meta is an
+eventually-consistent index over the cells, never a participant in
+writes; staleness is fine for everything it serves (discovery,
+bootstrap, gossip) and freshness is the cells' job. Between devices,
+meta contention dissolves into merge: disjoint entries union, same
+entries resolve by Replace and self-heal since roots are monotone in
+time. The general principle: **cells are coordination points — one
+writer wins now; trees are coordination-free shared state — all
+writers win eventually.** Neither replaces the other; the meta indexes
+the cells. (Corollary: a just-created branch is discoverable only
+after its meta entry lands — DNS-style propagation lag, self-healing.)
+
 It recurses: a node following repositories is a workspace; following
 workspaces, an org. One type at every depth —
 
