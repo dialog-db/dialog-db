@@ -13,7 +13,7 @@ use dialog_artifacts::history::Origin;
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
 };
-use dialog_artifacts::tree::SpillCache;
+use dialog_artifacts::tree::{SpillCache, spill_cache};
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Did, Subject};
@@ -332,6 +332,26 @@ impl Branch {
     /// A shared handle to this branch's node cache, for seeding a read tree.
     pub(crate) fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
         self.node_cache.clone()
+    }
+
+    /// A handle on this branch that reads through caches of its own.
+    ///
+    /// Clones of a handle share its caches, and a node-cache miss is
+    /// single-flighted: a reader that finds a fetch of the same node in
+    /// flight waits for it. A handle from here never joins such a fetch,
+    /// which is what a reader needs when the fetch is waiting on IT. The
+    /// authorization walk is that reader: the proof for a fetch of the
+    /// access branch reads the access branch, and read through the
+    /// fetching handle's cache it would wait on the very fetch it is
+    /// proving. The head, upstream, and session overlay stay shared, so
+    /// the handle sees the same branch; only what it caches is its own.
+    pub fn with_own_caches(&self) -> Self {
+        Self {
+            node_cache: Cache::new(),
+            record_cache: Cache::new(),
+            spill_cache: spill_cache(),
+            ..self.clone()
+        }
     }
 
     /// The live-spine slot this branch's commits reuse.

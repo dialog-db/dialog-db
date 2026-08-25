@@ -3632,3 +3632,160 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
     }
     Ok(())
 }
+
+/// A proof walk that has to fetch a node of the access branch must never
+/// wait on that fetch's own proof.
+///
+/// The access branch is what authorization walks, and it is also a
+/// synced branch: a head adopted by root can reference nodes the local
+/// archive does not hold. The next proof then fetches such a node
+/// through the walk's reach, and that fetch is itself proven by a walk
+/// over the same branch that needs the same node. Read through one
+/// shared node cache, the inner walk joined the outer fetch's
+/// single-flight claim and waited on the proof it was itself producing:
+/// no I/O, nothing dropped, forever.
+///
+/// Bounded completion is the property; the outcome is not. An inner
+/// proof that resolves from what is local lets the fetch proceed, and
+/// one that cannot fails the operation it was proving.
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_archive(
+    ucan: UcanS3Address,
+) -> Result<()> {
+    use dialog_capability::access::{Access as AccessAttenuation, Retain};
+    use dialog_credentials::{Credential as RawCredential, Ed25519Signer, SignerCredential};
+    use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
+    use dialog_operator::DeriveOperator as _;
+    use dialog_ucan::{Ucan, UcanDelegation};
+    use dialog_ucan_core::subject::Subject as UcanSubject;
+    use dialog_ucan_core::{DelegationBuilder, DelegationChain};
+    use dialog_varsig::Principal as _;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    // The account publishes its access branch, holding one grant, to the
+    // access service.
+    let account_storage = Storage::volatile();
+    let account_signer = Ed25519Signer::generate().await?;
+    let account_name = unique_name("account");
+    StorageFx::profile(account_name.clone())
+        .create(RawCredential::Signer(SignerCredential::from(
+            account_signer.clone(),
+        )))
+        .perform(&account_storage)
+        .await?;
+    let account_profile = Profile::load(account_name)
+        .perform(&account_storage)
+        .await?;
+    let account_operator = account_profile
+        .derive(b"account-device")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(account_storage)
+        .await?;
+    let space = Ed25519Signer::generate().await?;
+    let space_grant = DelegationBuilder::new()
+        .issuer(dialog_credentials::Signer::from(space.clone()))
+        .audience(&account_signer)
+        .subject(UcanSubject::Specific(space.did()))
+        .command(vec!["storage".to_string()])
+        .try_build()
+        .await?;
+    Subject::from(account_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+            DelegationChain::new(space_grant),
+        )))
+        .perform(&account_operator)
+        .await?;
+    let account_repo = crate::Repository::from(&account_profile);
+    let account_origin = account_repo
+        .remote("origin")
+        .create(ucan_site.clone())
+        .perform(&account_operator)
+        .await?;
+    let account_branch = account_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    let account_remote_branch = account_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    account_branch
+        .set_upstream(account_remote_branch)
+        .perform(&account_operator)
+        .await?;
+    account_branch.push().perform(&account_operator).await?;
+    let head = account_branch
+        .revision()
+        .context("the push established a head")?;
+
+    // A device of the account: its login grant retained locally, the
+    // account tracked as its access upstream.
+    let device_storage = Storage::volatile();
+    let device_profile = Profile::open(unique_name("device"))
+        .perform(&device_storage)
+        .await?;
+    let device_operator = device_profile
+        .derive(b"device")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(device_storage)
+        .await?;
+    let login_grant = DelegationBuilder::new()
+        .issuer(dialog_credentials::Signer::from(account_signer.clone()))
+        .audience(&device_profile.did())
+        .subject(UcanSubject::Any)
+        .command(vec![])
+        .try_build()
+        .await?;
+    Subject::from(device_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+            DelegationChain::new(login_grant),
+        )))
+        .perform(&device_operator)
+        .await?;
+    let device_repo = crate::Repository::from(&device_profile);
+    let device_origin = device_repo
+        .remote("account")
+        .create(ucan_site)
+        .subject(account_profile.did())
+        .perform(&device_operator)
+        .await?;
+    let device_branch = device_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let device_remote_branch = device_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    device_branch
+        .set_upstream(device_remote_branch)
+        .perform(&device_operator)
+        .await?;
+
+    // The head runs ahead of the archive: the account's revision, none
+    // of its nodes. Every proof from here has to fetch to read.
+    device_branch.reset(head).perform(&device_operator).await?;
+
+    let outcome = timeout(
+        Duration::from_secs(30),
+        device_branch.pull().perform(&device_operator),
+    )
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "the proof over an access head that ran ahead of the archive waited on its own fetch"
+    );
+    Ok(())
+}

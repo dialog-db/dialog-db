@@ -144,6 +144,11 @@ impl OperatorBuilder {
             .perform(&operator)
             .await
             .map_err(|e| OperatorError::Delegation(format!("{e}")))?;
+        // The reach-less operator below reads the access branch through
+        // caches of its own: its walk proves the fetches this handle makes,
+        // so sharing a cache would have that proof wait on the fetch it is
+        // proving whenever both need the same node.
+        let anchor_access = branch.with_own_caches();
         operator
             .delegations
             .set(branch)
@@ -157,6 +162,7 @@ impl OperatorBuilder {
         // recursion a fork-inside-a-proof would otherwise open.
         let anchor = Operator {
             reach: Arc::new(OnceLock::new()),
+            delegations: Arc::new(OnceLock::from(anchor_access)),
             ..operator.clone()
         };
         let reach = WalkReach {
