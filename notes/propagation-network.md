@@ -256,20 +256,32 @@ carol's data. Data trees stay sovereign; the weave is the network; the
 global graph is emergent and never materialized anywhere. Content-
 addressed pages, signed links: the shape of the web itself.
 
-And the image completes itself: **the wrapper is the repository.** A
-node's own branch heads may be entries in its network tree — branch B's
-head is not the wrapper's head, so the theorem permits every entry
-except the wrapper's own — which means a repository *is* a node whose
-network tree indexes its branches (plus its follows), possibly with no
-data tree of its own. The branch registry and the head map, unified
-into one table above, turn out to be the repository itself. Bootstrap
-collapses to one hop: one cell (the repo head) → network tree → every
-branch head → everything. Per-branch revision cells survive as the
-write-coordination points (CAS per branch, no cross-branch
-contention), with the repo head trailing them lazily as gossip — safe
-by the peer-table argument: self-certifying entries, per-key
-max-by-edition join, so staleness costs nothing and concurrent updates
-of different branch entries merge instead of contending.
+And the image completes itself: **the wrapper is the repository, and
+it is only pointers.** The final layering, sharper than the peer-table
+form below (which it supersedes):
+
+- **Branch data trees carry the descriptions** — peers, petnames,
+  sites, tracking intent: the phase-1 facts, ordinary versioned data
+  under the OR-set merge. All *meaning* lives here.
+- **The wrapper carries only `{branch-or-peer → head hash}`** — one
+  flat pointer map, entries for own branches and followed peers
+  *uniformly*, no descriptions. All *position* lives here, lattice-
+  joined per-key by edition.
+
+Resolution reads naturally: the wrapper says `bob-main → hash`; the
+address-book facts say who `bob-main` is and which sites serve it.
+Meaning is slow and versioned; position is fast and joined; they never
+share a structure. Crucially this leaves the **context untouched** —
+the head stays `(tree, edition, context, signature)` plus one new
+field, the wrapper root; the integrated story remains the context
+as-is, and the wrapper is purely the known half. A branch's head is
+not the wrapper's head, so the theorem permits every entry except the
+wrapper's own; own-branch entries are maintained on commit (trailing
+the per-branch CAS cells, which survive as write-coordination points),
+peer entries on fetch, both lazily — safe because entries are
+self-certifying and per-key max-by-edition joins concurrent updates of
+different entries instead of contending. Bootstrap collapses to one
+hop: repo head cell → wrapper → every head → everything.
 
 It recurses: a node following repositories is a workspace; following
 workspaces, an org. One type at every depth —
@@ -1178,6 +1190,13 @@ the ripple stops after one hop, and a peer's latest map is still seen
 by fetching them directly. This is flake.lock as a convergent, gossipable lattice —
 the concrete and final form of the reflection region, and the one
 isolated piece of new machinery.
+
+*(Superseded in part by the pointer-map form in the short version: the
+final design keeps the context untouched and makes the wrapper pure
+pointers. The unification below is retained as analysis — it explains
+why the two structures are the same genus and why cursor discipline,
+not structural separation, is the invariant — but the implemented shape
+adds a field rather than regrouping the context.)*
 
 **The map and the context are one table, printed in two projections.**
 The context is the same genus — a per-actor version vector,
