@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     future::Future,
     marker::PhantomData,
     ops::{Bound, RangeBounds},
@@ -462,6 +463,7 @@ where
             let mut search_path = search_result.into_indexed();
             let mut entered_range = false;
             let mut warming = FuturesUnordered::new();
+            let mut queued = HashSet::new();
 
             while let Some((node, maybe_index)) = search_path.pop() {
                 let body = node.body();
@@ -480,22 +482,31 @@ where
                         // The scan will walk this node's remaining children in
                         // turn, so start reading them now and let them land in
                         // the cache while the walk descends into the first of
-                        // them.
+                        // them. A sibling still queued from an earlier descent
+                        // is not queued twice.
                         for sibling in (child_index + 1)..index.len() {
                             if warming.len() >= PREFETCH_CONCURRENCY {
                                 break;
                             }
-                            warming.push(accessor.warm(index.hash_at(sibling)?.clone()));
+                            let hash = index.hash_at(sibling)?.clone();
+                            if queued.insert(hash.clone()) {
+                                warming.push(accessor.warm(hash));
+                            }
                         }
 
-                        // The one read that may join an in-flight warm:
-                        // `while_warming` keeps polling the warms while
-                        // this read waits, so a joined warm always publishes.
-                        let next_node = while_warming(
-                            accessor.get_node_joining(index.hash_at(child_index)?),
-                            &mut warming,
-                        )
-                        .await?;
+                        // A child whose read-ahead is still in flight is joined
+                        // by driving that read-ahead to completion. This walk
+                        // queued it, so this walk polls it: the one join that
+                        // is sound. The read that follows is served from the
+                        // cache, or fetches for itself if the read-ahead
+                        // failed.
+                        let hash = index.hash_at(child_index)?;
+                        if queued.contains(hash) {
+                            until_warmed(hash, &mut warming, &mut queued).await;
+                        }
+                        let next_node =
+                            while_warming(accessor.get_node(hash), &mut warming, &mut queued)
+                                .await?;
                         search_path.push((node, Some(child_index)));
                         search_path.push((next_node, None));
                     } else {
@@ -740,12 +751,17 @@ where
 ///
 /// The queued reads only populate the cache; nothing waits on them and their
 /// outcomes are discarded, so this changes neither what `read` resolves to nor
-/// when its caller observes it. Reads still queued when the caller is dropped
-/// are dropped with it.
-async fn while_warming<Read, Warm>(read: Read, warming: &mut FuturesUnordered<Warm>) -> Read::Output
+/// when its caller observes it. A read that completes leaves `queued`, so the
+/// walk knows it no longer has to be joined. Reads still queued when the
+/// caller is dropped are dropped with it.
+async fn while_warming<Read, Warm>(
+    read: Read,
+    warming: &mut FuturesUnordered<Warm>,
+    queued: &mut HashSet<Blake3Hash>,
+) -> Read::Output
 where
     Read: Future,
-    Warm: Future<Output = ()>,
+    Warm: Future<Output = Blake3Hash>,
 {
     let mut read = std::pin::pin!(read);
 
@@ -754,11 +770,34 @@ where
             return Poll::Ready(output);
         }
 
-        while let Poll::Ready(Some(())) = warming.poll_next_unpin(context) {}
+        while let Poll::Ready(Some(warmed)) = warming.poll_next_unpin(context) {
+            queued.remove(&warmed);
+        }
 
         Poll::Pending
     })
     .await
+}
+
+/// Drives the queued cache-warming reads until the one for `hash` completes.
+///
+/// The walk that queued a read-ahead is the only thing that polls it, so a
+/// walk about to read that node joins its own read-ahead here instead of
+/// fetching the node a second time. Every read-ahead that completes on the
+/// way leaves `queued`.
+async fn until_warmed<Warm>(
+    hash: &Blake3Hash,
+    warming: &mut FuturesUnordered<Warm>,
+    queued: &mut HashSet<Blake3Hash>,
+) where
+    Warm: Future<Output = Blake3Hash>,
+{
+    while let Some(warmed) = warming.next().await {
+        queued.remove(&warmed);
+        if warmed == *hash {
+            break;
+        }
+    }
 }
 
 /// Walks the narrow "overflow" path for [`RightNeighbor`] prefetching.
@@ -1410,6 +1449,65 @@ mod prefetch_tests {
         let leaf = load(&storage, path.last().expect("a read")).await?;
         assert!(matches!(leaf.body(), ArchivedNodeBody::Segment(_)));
 
+        Ok(())
+    }
+
+    /// The first key stored beneath `hash`, down its leftmost descent.
+    async fn first_key_under(storage: &Storage, mut hash: Blake3Hash) -> Result<[u8; 4]> {
+        loop {
+            let node = load(storage, &hash).await?;
+            match node.body() {
+                ArchivedNodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
+                ArchivedNodeBody::Segment(segment) => {
+                    return Ok(segment.first_key::<[u8; 4]>()?.as_slice().try_into()?);
+                }
+            }
+        }
+    }
+
+    /// Two range scans over one tree share its node cache and, through it,
+    /// each other's read-aheads. Scan A is driven just past the root's first
+    /// child, so the read-aheads it queued are in flight, and then parked:
+    /// the shape of a consumer that reads scan B in full between two of A's
+    /// entries. B's own walk reaches nodes A has claimed and must not wait on
+    /// A's read-aheads, since only A's polling would ever finish them and A
+    /// is waiting on B.
+    // Native only: the bound is tokio's timer, which has no wasm runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_serves_one_scans_read_ahead_to_another_scan() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+
+        let root = load(&storage, tree.root()).await?;
+        let ArchivedNodeBody::Index(index) = root.body() else {
+            anyhow::bail!("the built tree has a single leaf; nothing to read ahead")
+        };
+        if index.len() < 3 {
+            anyhow::bail!("the root needs a third child for a read-ahead to be in flight")
+        }
+        let boundary = first_key_under(&storage, index.hash_at(1)?.clone()).await?;
+
+        let mut parked = std::pin::pin!(tree.stream(&storage));
+        loop {
+            let entry = parked
+                .try_next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("scan A ended before the root's second child"))?;
+            if entry.key >= boundary {
+                break;
+            }
+        }
+        assert!(
+            storage.backend().reads_in_flight() > 0,
+            "scan A holds read-aheads in flight while parked"
+        );
+
+        let scan = tree.stream(&storage).try_collect::<Vec<_>>();
+        let entries = tokio::time::timeout(std::time::Duration::from_secs(2), scan)
+            .await
+            .expect("a scan must not wait on another scan's read-ahead")?;
+        assert_eq!(entries.len() as u32, ENTRIES);
         Ok(())
     }
 }

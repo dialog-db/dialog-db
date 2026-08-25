@@ -341,6 +341,13 @@ impl ObservingBackend {
     pub fn peak_reads_in_flight(&self) -> usize {
         self.reads.lock().peak_in_flight
     }
+
+    /// The number of reads issued and not yet answered: each has been polled
+    /// at least once and has not completed, whether or not anything is still
+    /// polling it.
+    pub fn reads_in_flight(&self) -> usize {
+        self.reads.lock().in_flight
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
