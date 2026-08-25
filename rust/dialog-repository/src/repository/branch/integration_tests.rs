@@ -3648,7 +3648,10 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
 /// Bounded completion is the property; the outcome is not. An inner
 /// proof that resolves from what is local lets the fetch proceed, and
 /// one that cannot fails the operation it was proving.
-#[cfg(not(target_arch = "wasm32"))]
+// Native only: the bound is tokio's timer, which has no wasm runtime. Kept
+// out of the wasm integration run too, or its native half would provision
+// for a wasm half that was never compiled.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web-integration-tests")))]
 #[dialog_common::test]
 async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_archive(
     ucan: UcanS3Address,
