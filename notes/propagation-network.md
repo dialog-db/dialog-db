@@ -283,6 +283,28 @@ self-certifying and per-key max-by-edition joins concurrent updates of
 different entries instead of contending. Bootstrap collapses to one
 hop: repo head cell → wrapper → every head → everything.
 
+**The wrapper is the meta branch.** Tonk already runs this design: its
+"meta" branch encodes `{branch name → root}`. The identification
+removes the last piece of new machinery — the wrapper is an *ordinary
+branch* whose data is the pointer map, so there is **no head format
+change, no second tree instance, and possibly no new join**: the head
+stays exactly as today, the wrapper root is the meta branch's tree
+root published through its own ordinary revision cell, and entries can
+be ordinary Replace facts (entity = branch, attribute = root) whose
+concurrent updates resolve by existing machinery and self-heal on the
+next update, with the per-branch CAS cells remaining the authoritative
+coordination points. The derived constraints become *conventions on
+the meta branch's contents*: it never lists itself (the convergence
+theorem as a convention); own-branch entries are novelty-paced by
+construction (a meta entry moves only on a real commit — tonk's exact
+safe case); and if peer entries are ever added, one rule keeps them
+loop-free — **meta branches pin data branches, never other meta
+branches** (the bipartite/reflection argument with zero machinery).
+And "what is a peer" gets its final answer, recursive and uniform: *a
+peer is a branch you follow; a repository presents itself as its meta
+branch* — following a repo is following its meta, then whatever the
+meta lists.
+
 It recurses: a node following repositories is a workspace; following
 workspaces, an org. One type at every depth —
 
@@ -1132,6 +1154,11 @@ on dumb stores that cannot list keys.
 ## Staged plan
 
 Three phases; value ships at each; none breaks existing cells.
+Committed scope as of this revision: phase 1 (peer + site facts,
+decommissioning the remote/upstream records, cells retained for state)
+and the meta branch for own branches (tonk-aligned registry); peer
+entries in meta and query-over-mounts remain design-complete but
+uncommitted.
 
 **Phase 1 — config as facts. No new tree machinery.**
 `dialog.peer/*` (address book), `dialog.branch/*` (registry; derived
