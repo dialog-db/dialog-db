@@ -93,6 +93,7 @@ mod tests {
     use super::*;
     use dialog_capability::{Principal, Subject, did};
     use dialog_credentials::Ed25519Signer;
+    use dialog_effects::Use;
     use dialog_effects::archive::{Archive, ArchiveError, Catalog, Get};
     use dialog_remote_s3::Permit;
     use dialog_ucan::UcanInvocation;
@@ -146,6 +147,7 @@ mod tests {
     async fn it_retains_the_permit_after_a_transport_error() {
         let signer = Ed25519Signer::import(&[9u8; 32]).await.unwrap();
         let capability = Subject::from(did!("key:zPermitCacheTransportTest"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("blobs"))
             .invoke(Get::new([0u8; 32]));
@@ -181,6 +183,7 @@ mod tests {
     #[dialog_common::test]
     fn it_scopes_cached_permits_to_the_site() {
         let capability = Subject::from(did!("key:zPermitCacheScopeTest"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("blobs"))
             .invoke(Get::new([0u8; 32]));
@@ -225,6 +228,7 @@ mod tests {
             let signer = Ed25519Signer::import(&[7u8; 32]).await.unwrap();
             let digest = Blake3Hash::hash(b"not uploaded yet");
             let capability = Subject::from(did!("key:zPermitCacheProbeTest"))
+                .attenuate(Use)
                 .attenuate(Archive)
                 .blob()
                 .read(digest);
@@ -274,6 +278,7 @@ mod tests {
 
             let signer = Ed25519Signer::import(&[8u8; 32]).await.unwrap();
             let capability = Subject::from(did!("key:zPermitCacheRejectTest"))
+                .attenuate(Use)
                 .attenuate(Archive)
                 .attenuate(Catalog::new("blocks"))
                 .invoke(Get::new([2u8; 32]));

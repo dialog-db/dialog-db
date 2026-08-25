@@ -233,6 +233,7 @@ mod tests {
     use super::*;
     use dialog_capability::{Subject, did};
     use dialog_common::Blake3Hash;
+    use dialog_effects::Use;
     use dialog_effects::archive::{Archive, Catalog, Get};
 
     #[dialog_common::test]
@@ -257,11 +258,15 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_scope_from_archive_catalog() {
         let cap = Subject::from(did!("key:z6MkTest"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"));
         let scope = Scope::from(&cap);
 
-        assert_eq!(scope.command, Command::parse("/archive").unwrap());
+        // A catalog is a policy, not a command of its own: the level a
+        // delegation attenuates at is `/use`, and the verb comes from the
+        // effect.
+        assert_eq!(scope.command, Command::parse("/use").unwrap());
 
         let policy = scope.policy();
         assert_eq!(policy.len(), 1);
@@ -281,12 +286,16 @@ mod tests {
     fn it_builds_scope_from_archive_get() {
         let digest = Blake3Hash::hash(b"hello");
         let cap = Subject::from(did!("key:z6MkTest"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest.clone()));
         let scope = Scope::from(&cap);
 
-        assert_eq!(scope.command, Command::parse("/archive/get").unwrap());
+        assert_eq!(
+            scope.command,
+            Command::parse("/use/get/archive/block").unwrap()
+        );
 
         let policy = scope.policy();
         assert!(

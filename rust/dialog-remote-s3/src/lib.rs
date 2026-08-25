@@ -15,6 +15,7 @@
 //! ```no_run
 //! use dialog_remote_s3::{Address, S3Credential, S3Request};
 //! use dialog_effects::archive::{Archive, Catalog, Get};
+//! use dialog_effects::Use;
 //! use dialog_capability::{Subject, did};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,7 +32,7 @@
 //! );
 //!
 //! let capability = Subject::from(subject)
-//!     .attenuate(Archive)
+//!     .attenuate(Use).attenuate(Archive)
 //!     .attenuate(Catalog::new("blobs"))
 //!     .invoke(Get::new([0u8; 32]));
 //!

@@ -13,6 +13,7 @@
 //!               └── Import { blocks } → Effect → Result<(), ArchiveError>
 //! ```
 
+use crate::Use;
 use std::error::Error;
 
 use crate::Rejection;
@@ -29,12 +30,14 @@ use thiserror::Error;
 
 /// Archive ability - restricts to archive operations.
 ///
-/// Attaches to Subject and provides the `/archive` ability path segment.
+/// Attaches to Subject. Contributes no ability segment of its own: the
+/// effects name the whole command (`/use/get/archive/block`), so the
+/// verb sits above the resource in the path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Archive;
 
-impl Attenuation for Archive {
-    type Of = Subject;
+impl Policy for Archive {
+    type Of = Use;
 }
 
 /// Catalog policy that scopes operations to a named catalog.
@@ -81,6 +84,10 @@ impl Get {
 impl Effect for Get {
     type Of = Catalog;
     type Output = Result<Option<Vec<u8>>, ArchiveError>;
+
+    fn command() -> &'static str {
+        "get/archive/block"
+    }
 }
 
 /// Put operation - stores a single content-addressed block.
@@ -175,6 +182,10 @@ impl Put {
 impl Effect for Put {
     type Of = Catalog;
     type Output = Result<(), ArchiveError>;
+
+    fn command() -> &'static str {
+        "put/archive/block"
+    }
 }
 
 /// Import operation - stores a batch of content-addressed blocks.
@@ -226,6 +237,10 @@ impl Import {
 impl Effect for Import {
     type Of = Catalog;
     type Output = Result<(), ArchiveError>;
+
+    fn command() -> &'static str {
+        "put/archive/block"
+    }
 }
 
 pub mod prelude;
@@ -278,41 +293,46 @@ mod tests {
 
     #[test]
     fn it_builds_archive_claim_path() {
-        let claim = Subject::from(did!("key:zSpace")).attenuate(Archive);
+        let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
+            .attenuate(Archive);
 
         assert_eq!(claim.subject(), &did!("key:zSpace"));
-        assert_eq!(claim.ability(), "/archive");
+        assert_eq!(claim.ability(), "/use");
     }
 
     #[test]
     fn it_builds_catalog_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"));
 
         assert_eq!(claim.subject(), &did!("key:zSpace"));
         // Catalog is Policy, not Ability, so it doesn't add to path
-        assert_eq!(claim.ability(), "/archive");
+        assert_eq!(claim.ability(), "/use");
     }
 
     #[test]
     fn it_builds_get_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Get::new([0u8; 32]));
 
-        assert_eq!(claim.ability(), "/archive/get");
+        assert_eq!(claim.ability(), "/use/get/archive/block");
     }
 
     #[test]
     fn it_builds_put_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(Buffer::from(Vec::new())));
 
-        assert_eq!(claim.ability(), "/archive/put");
+        assert_eq!(claim.ability(), "/use/put/archive/block");
     }
 
     #[dialog_common::test]

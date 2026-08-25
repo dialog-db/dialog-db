@@ -523,6 +523,7 @@ mod tests {
         use dialog_capability::{Did, Subject};
         use dialog_common::Blake3Hash;
         use dialog_credentials::{Ed25519Signer, SignerCredential};
+        use dialog_effects::Use;
         use dialog_effects::archive::{Archive, Catalog, Put};
         use dialog_effects::memory::{Cell, Memory, Publish, Space};
         use dialog_effects::prelude::*;
@@ -540,6 +541,7 @@ mod tests {
 
         subject
             .clone()
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(Buffer::from(content)))
@@ -549,6 +551,7 @@ mod tests {
         // Memory creates "memory" store
         subject
             .clone()
+            .attenuate(Use)
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("head"))
