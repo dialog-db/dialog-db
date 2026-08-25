@@ -33,11 +33,12 @@ pub use dialog_capability::{
     access::AuthorizeError,
 };
 
-/// Blob store domain under the archive. Adds the `/blob` ability segment.
+/// Blob store domain under the archive. Contributes no ability segment of
+/// its own: the effects name the whole command (`/use/get/archive/blob`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Blob;
 
-impl Attenuation for Blob {
+impl Policy for Blob {
     type Of = Archive;
 }
 
@@ -112,6 +113,10 @@ impl Read {
 impl Effect for Read {
     type Of = Blob;
     type Output = Result<BlobReader, BlobError>;
+
+    fn command() -> &'static str {
+        "get/archive/blob"
+    }
 }
 
 /// Ingest a blob whose hash is **discovered** during the write. Carries no
@@ -136,6 +141,10 @@ impl Default for Write {
 impl Effect for Write {
     type Of = Blob;
     type Output = Result<BlobWriter, BlobError>;
+
+    fn command() -> &'static str {
+        "put/archive/blob"
+    }
 }
 
 /// Import a blob whose hash is **already known**: a content-bound write used by
@@ -167,6 +176,10 @@ impl Import {
 impl Effect for Import {
     type Of = Blob;
     type Output = Result<BlobWriter, BlobError>;
+
+    fn command() -> &'static str {
+        "put/archive/blob"
+    }
 }
 
 pub mod prelude;
@@ -180,34 +193,38 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::prelude::*;
+    use crate::Use;
     use crate::archive::Archive;
     use dialog_capability::{Subject, did};
 
     #[dialog_common::test]
     fn it_builds_blob_read_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Archive)
             .blob()
             .read([0u8; 32]);
         assert_eq!(claim.subject(), &did!("key:zSpace"));
-        assert_eq!(claim.ability(), "/archive/blob/read");
+        assert_eq!(claim.ability(), "/use/get/archive/blob");
     }
 
     #[dialog_common::test]
     fn it_builds_blob_write_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Archive)
             .blob()
             .write();
-        assert_eq!(claim.ability(), "/archive/blob/write");
+        assert_eq!(claim.ability(), "/use/put/archive/blob");
     }
 
     #[dialog_common::test]
     fn it_builds_blob_import_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Archive)
             .blob()
             .import([0u8; 32], 4096);
-        assert_eq!(claim.ability(), "/archive/blob/import");
+        assert_eq!(claim.ability(), "/use/put/archive/blob");
     }
 }

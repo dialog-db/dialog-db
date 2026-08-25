@@ -9,6 +9,7 @@ use dialog_capability::{Capability, Did, Policy, Subject};
 use dialog_common::{Blake3Hash, Buffer};
 
 use super::{Archive, Catalog, Get, Import, Put};
+use crate::Use;
 
 /// Extension trait to start an archive capability chain.
 pub trait ArchiveSubjectExt {
@@ -21,14 +22,14 @@ pub trait ArchiveSubjectExt {
 impl ArchiveSubjectExt for Subject {
     type Archive = Capability<Archive>;
     fn archive(self) -> Capability<Archive> {
-        self.attenuate(Archive)
+        self.attenuate(Use).attenuate(Archive)
     }
 }
 
 impl ArchiveSubjectExt for Did {
     type Archive = Capability<Archive>;
     fn archive(self) -> Capability<Archive> {
-        Subject::from(self).attenuate(Archive)
+        Subject::from(self).attenuate(Use).attenuate(Archive)
     }
 }
 

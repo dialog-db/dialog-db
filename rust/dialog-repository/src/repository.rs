@@ -645,6 +645,7 @@ mod tests {
             // Profile should be able to claim access to any memory space
             let capability = repo
                 .subject()
+                .attenuate(dialog_effects::Use)
                 .attenuate(fx_memory::Memory)
                 .attenuate(fx_memory::Space::new("data"));
 
@@ -670,6 +671,7 @@ mod tests {
             // Repo delegates only memory/space("data") to the profile
             let scoped_cap = repo
                 .subject()
+                .attenuate(dialog_effects::Use)
                 .attenuate(fx_memory::Memory)
                 .attenuate(fx_memory::Space::new("data"));
             let chain = repo
@@ -683,6 +685,7 @@ mod tests {
             // Claiming "data" space should succeed
             let data_cap = repo
                 .subject()
+                .attenuate(dialog_effects::Use)
                 .attenuate(fx_memory::Memory)
                 .attenuate(fx_memory::Space::new("data"));
             let result = profile.access().claim(data_cap).perform(&operator).await;
@@ -695,6 +698,7 @@ mod tests {
             // Claiming "secret" space should fail
             let secret_cap = repo
                 .subject()
+                .attenuate(dialog_effects::Use)
                 .attenuate(fx_memory::Memory)
                 .attenuate(fx_memory::Space::new("secret"));
             let result = profile.access().claim(secret_cap).perform(&operator).await;
@@ -718,6 +722,7 @@ mod tests {
             // Repo delegates memory/space("data") to the profile
             let scoped_cap = repo
                 .subject()
+                .attenuate(dialog_effects::Use)
                 .attenuate(fx_memory::Memory)
                 .attenuate(fx_memory::Space::new("data"));
             let chain = repo
@@ -731,6 +736,7 @@ mod tests {
             // Profile can re-delegate "data" space to operator
             let data_cap = repo
                 .subject()
+                .attenuate(dialog_effects::Use)
                 .attenuate(fx_memory::Memory)
                 .attenuate(fx_memory::Space::new("data"));
             let result = profile
@@ -748,6 +754,7 @@ mod tests {
             // Profile cannot delegate "secret" space (no chain)
             let secret_cap = repo
                 .subject()
+                .attenuate(dialog_effects::Use)
                 .attenuate(fx_memory::Memory)
                 .attenuate(fx_memory::Space::new("secret"));
             let result = profile

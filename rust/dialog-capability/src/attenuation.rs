@@ -2,6 +2,20 @@ use crate::settings::Caveat;
 use crate::{Constraint, Effect, Policy};
 use std::any::type_name;
 
+/// The last path component of a type name, without generics: what a type
+/// contributes to an ability path when it says nothing else.
+pub(crate) fn type_segment<T>() -> &'static str {
+    let full = type_name::<T>();
+    let without_generics = match full.find('<') {
+        Some(pos) => &full[..pos],
+        None => full,
+    };
+    without_generics
+        .rsplit("::")
+        .next()
+        .unwrap_or(without_generics)
+}
+
 /// Trait for constraints that narrow the ability path.
 ///
 /// Attenuation implies [`Policy`] via blanket impl. The `attenuation()` method
@@ -42,17 +56,7 @@ pub trait Attenuation: Sized + Caveat {
     /// By default, derives the segment from the struct name (lowercased).
     /// Override this method to use a custom segment.
     fn attenuation() -> &'static str {
-        let full = type_name::<Self>();
-        // Strip generic parameters first, then take the last path segment.
-        // e.g., "crate::credential::Retrieve<alloc::string::String>" → "Retrieve"
-        let without_generics = match full.find('<') {
-            Some(pos) => &full[..pos],
-            None => full,
-        };
-        without_generics
-            .rsplit("::")
-            .next()
-            .unwrap_or(without_generics)
+        type_segment::<Self>()
     }
 }
 
@@ -68,4 +72,8 @@ impl<T: Attenuation> Policy for T {
 // Effect implies Attenuation
 impl<T: Effect> Attenuation for T {
     type Of = <T as Effect>::Of;
+
+    fn attenuation() -> &'static str {
+        T::command()
+    }
 }

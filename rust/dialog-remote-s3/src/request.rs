@@ -13,6 +13,7 @@
 //! ```
 //! use dialog_capability::{Subject, did};
 //! use dialog_effects::archive::{Archive, Catalog, Get, Put};
+//! use dialog_effects::Use;
 //! use dialog_common::Blake3Hash;
 //! use dialog_remote_s3::request::S3Request;
 //!
@@ -21,7 +22,7 @@
 //! // Build a capability to get content from the "index" catalog
 //! let digest = Blake3Hash::hash(b"hello");
 //! let get = Subject::from(subject.clone())
-//!     .attenuate(Archive)
+//!     .attenuate(Use).attenuate(Archive)
 //!     .attenuate(Catalog::new("index"))
 //!     .invoke(Get::new(digest));
 //!
@@ -147,6 +148,7 @@ mod tests {
     use super::{IntoRequest, RequestMethod};
     use dialog_capability::{Subject, did};
     use dialog_common::{Blake3Hash, Buffer};
+    use dialog_effects::Use;
     use dialog_effects::archive::{Archive, Catalog, Get, Put};
     use dialog_effects::blob::prelude::{ArchiveBlobExt, BlobExt};
     use dialog_effects::memory::Version;
@@ -174,6 +176,7 @@ mod tests {
         let digest = Blake3Hash::hash(b"content");
         let catalog = || {
             subject()
+                .attenuate(Use)
                 .attenuate(Archive)
                 .attenuate(Catalog::new("index"))
         };
@@ -184,8 +187,20 @@ mod tests {
     #[dialog_common::test]
     fn it_reports_the_method_the_blob_translations_produce() {
         let digest = Blake3Hash::hash(b"content");
-        method_matches(&subject().attenuate(Archive).blob().read(digest.clone()));
-        method_matches(&subject().attenuate(Archive).blob().import(digest, 3));
+        method_matches(
+            &subject()
+                .attenuate(Use)
+                .attenuate(Archive)
+                .blob()
+                .read(digest.clone()),
+        );
+        method_matches(
+            &subject()
+                .attenuate(Use)
+                .attenuate(Archive)
+                .blob()
+                .import(digest, 3),
+        );
     }
 
     #[dialog_common::test]

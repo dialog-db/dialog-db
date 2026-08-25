@@ -147,6 +147,7 @@ mod tests {
     use super::{MAX_ENTRIES, PERMIT_TTL, PermitCache, PermitKey};
     use dialog_capability::{Capability, Subject, did};
     use dialog_common::{Buffer, time};
+    use dialog_effects::Use;
     use dialog_effects::archive::{Archive, Catalog, Get, Put};
     use dialog_remote_s3::request::{IntoRequest, S3Request};
     use dialog_remote_s3::{Permit, Precondition};
@@ -174,6 +175,7 @@ mod tests {
 
     fn catalog() -> Capability<Catalog> {
         Subject::from(did!("key:zPermitCacheTest"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("blocks"))
     }

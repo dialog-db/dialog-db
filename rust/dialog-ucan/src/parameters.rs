@@ -83,6 +83,7 @@ mod tests {
     use super::*;
     use dialog_capability::{Subject, did};
     use dialog_common::{Blake3Hash, Buffer};
+    use dialog_effects::Use;
     use dialog_effects::archive::{Archive, Catalog, Get, Put};
 
     #[dialog_common::test]
@@ -95,6 +96,7 @@ mod tests {
     #[dialog_common::test]
     fn it_collects_parameters_from_archive_catalog_chain() {
         let cap = Subject::from(did!("key:z6MkTest"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"));
         let params = parameters(&cap);
@@ -105,6 +107,7 @@ mod tests {
     fn it_collects_parameters_from_archive_get_invocation() {
         let digest = Blake3Hash::hash(b"my-content");
         let cap = Subject::from(did!("key:z6MkTest"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("data"))
             .invoke(Get::new(digest));
@@ -125,6 +128,7 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_equality_constraints_for_each_parameter() {
         let cap = Subject::from(did!("key:z6MkTest"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("data"));
         let policy = parameters_to_policy(parameters(&cap));
@@ -143,6 +147,7 @@ mod tests {
     fn it_produces_multiple_constraints_for_chain_with_payload() {
         let content = b"hello world";
         let cap = Subject::from(did!("key:z6MkTest"))
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(Buffer::from(content.to_vec())));

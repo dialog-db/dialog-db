@@ -58,7 +58,7 @@ use std::collections::BTreeMap;
 
 use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_did_web::{CachingResolver, PerformingResolver, Resolve, WebResolver};
-use dialog_effects::{archive, blob, memory};
+use dialog_effects::{Use, archive, blob, memory};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
 use dialog_ucan_core::invocation::CheckFailed;
 use dialog_ucan_core::promise::Promised;
@@ -102,6 +102,7 @@ where
     let cell: memory::Cell = deserialize_from_args(args)?;
     let claim: C = deserialize_from_args(args)?;
     Ok(dialog_capability::Subject::from(subject.clone())
+        .attenuate(Use)
         .attenuate(memory::Memory)
         .attenuate(space)
         .attenuate(cell)
@@ -117,6 +118,7 @@ where
     let catalog: archive::Catalog = deserialize_from_args(args)?;
     let claim: C = deserialize_from_args(args)?;
     Ok(dialog_capability::Subject::from(subject.clone())
+        .attenuate(Use)
         .attenuate(archive::Archive)
         .attenuate(catalog)
         .attenuate(claim))
@@ -133,6 +135,7 @@ where
 {
     let claim: C = deserialize_from_args(args)?;
     Ok(dialog_capability::Subject::from(subject.clone())
+        .attenuate(Use)
         .attenuate(archive::Archive)
         .attenuate(blob::Blob)
         .attenuate(claim))
@@ -164,6 +167,7 @@ impl FromUcanArgs for memory::Resolve {
         let space: memory::Space = deserialize_from_args(args)?;
         let cell: memory::Cell = deserialize_from_args(args)?;
         Ok(dialog_capability::Subject::from(subject.clone())
+            .attenuate(Use)
             .attenuate(memory::Memory)
             .attenuate(space)
             .attenuate(cell)
@@ -503,6 +507,17 @@ where
         let command_segments: Vec<&str> = command.0.iter().map(|s| s.as_str()).collect();
 
         dispatch!(self, subject_did, args, command_segments.as_slice(), {
+            ["use", "get", "memory", "cell"]     => dialog_effects::memory::Resolve,
+            ["use", "put", "memory", "cell"]     => dialog_effects::memory::Publish,
+            ["use", "delete", "memory", "cell"]  => dialog_effects::memory::Retract,
+            ["use", "get", "archive", "block"]   => dialog_effects::archive::Get,
+            ["use", "put", "archive", "block"]   => dialog_effects::archive::Put,
+            ["use", "get", "archive", "blob"]    => dialog_effects::blob::Read,
+            ["use", "put", "archive", "blob"]    => dialog_effects::blob::Import,
+            // The spellings before the `use` prefix. Clients minted
+            // against an earlier release still invoke these; their chains
+            // are `/`, which covers both. Dropped once no such client is
+            // deployed.
             ["memory", "resolve"]  => dialog_effects::memory::Resolve,
             ["memory", "publish"]  => dialog_effects::memory::Publish,
             ["memory", "retract"]  => dialog_effects::memory::Retract,

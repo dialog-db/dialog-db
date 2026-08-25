@@ -17,6 +17,7 @@
 //! use dialog_storage::provider::Volatile;
 //! use dialog_capability::{did, Did, Subject};
 //! use dialog_effects::archive::{Archive, Catalog, Get};
+//! use dialog_effects::Use;
 //! use dialog_common::Blake3Hash;
 //!
 //! # async fn example() -> anyhow::Result<()> {
@@ -24,7 +25,7 @@
 //! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from(did!("key:z6Mk..."))
-//!     .attenuate(Archive)
+//!     .attenuate(Use).attenuate(Archive)
 //!     .attenuate(Catalog::new("index"))
 //!     .invoke(Get::new(digest));
 //!
@@ -226,6 +227,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_supports_concurrent_access() -> anyhow::Result<()> {
         use dialog_capability::Subject;
+        use dialog_effects::Use;
         use dialog_effects::archive::{Archive, Catalog, Get, Put};
         use std::sync::Arc;
 
@@ -242,6 +244,7 @@ mod tests {
 
                 subject
                     .clone()
+                    .attenuate(Use)
                     .attenuate(Archive)
                     .attenuate(Catalog::new("index"))
                     .invoke(Put::new(Buffer::from(content)))
@@ -250,6 +253,7 @@ mod tests {
                     .unwrap();
 
                 let result = subject
+                    .attenuate(Use)
                     .attenuate(Archive)
                     .attenuate(Catalog::new("index"))
                     .invoke(Get::new(digest))

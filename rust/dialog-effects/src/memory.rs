@@ -14,6 +14,7 @@
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
 
+use crate::Use;
 use std::fmt;
 use std::str;
 
@@ -29,12 +30,14 @@ use thiserror::Error;
 
 /// Root attenuation for memory operations.
 ///
-/// Attaches to Subject and provides the `/memory` ability path segment.
+/// Attaches to Subject. Contributes no ability segment of its own: the
+/// effects name the whole command (`/use/get/memory/cell`), so the verb
+/// sits above the resource in the path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Memory;
 
-impl Attenuation for Memory {
-    type Of = Subject;
+impl Policy for Memory {
+    type Of = Use;
 }
 
 /// Space policy that scopes operations to a memory space.
@@ -187,6 +190,10 @@ pub struct Resolve;
 impl Effect for Resolve {
     type Of = Cell;
     type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
+
+    fn command() -> &'static str {
+        "get/memory/cell"
+    }
 }
 
 /// Publish operation - sets cell content with CAS semantics.
@@ -219,6 +226,10 @@ impl Publish {
 impl Effect for Publish {
     type Of = Cell;
     type Output = Result<Version, MemoryError>;
+
+    fn command() -> &'static str {
+        "put/memory/cell"
+    }
 }
 
 /// Retract operation - removes cell content with CAS semantics.
@@ -241,6 +252,10 @@ impl Retract {
 impl Effect for Retract {
     type Of = Cell;
     type Output = Result<(), MemoryError>;
+
+    fn command() -> &'static str {
+        "delete/memory/cell"
+    }
 }
 
 pub mod prelude;
@@ -284,65 +299,72 @@ mod tests {
 
     #[test]
     fn it_builds_memory_claim_path() {
-        let claim = Subject::from(did!("key:zSpace")).attenuate(Memory);
+        let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
+            .attenuate(Memory);
 
         assert_eq!(claim.subject(), &did!("key:zSpace"));
-        assert_eq!(claim.ability(), "/memory");
+        assert_eq!(claim.ability(), "/use");
     }
 
     #[test]
     fn it_builds_space_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Memory)
             .attenuate(Space::new("local"));
 
         assert_eq!(claim.subject(), &did!("key:zSpace"));
         // Space is Policy, not Ability, so it doesn't add to path
-        assert_eq!(claim.ability(), "/memory");
+        assert_eq!(claim.ability(), "/use");
     }
 
     #[test]
     fn it_builds_cell_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("main"));
 
         assert_eq!(claim.subject(), &did!("key:zSpace"));
         // Cell is Policy, not Ability, so it doesn't add to path
-        assert_eq!(claim.ability(), "/memory");
+        assert_eq!(claim.ability(), "/use");
     }
 
     #[test]
     fn it_builds_resolve_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("main"))
             .invoke(Resolve);
 
-        assert_eq!(claim.ability(), "/memory/resolve");
+        assert_eq!(claim.ability(), "/use/get/memory/cell");
     }
 
     #[test]
     fn it_builds_publish_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("main"))
             .invoke(Publish::new(b"test", None));
 
-        assert_eq!(claim.ability(), "/memory/publish");
+        assert_eq!(claim.ability(), "/use/put/memory/cell");
     }
 
     #[test]
     fn it_builds_retract_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Use)
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("main"))
             .invoke(Retract::new(b"v1"));
 
-        assert_eq!(claim.ability(), "/memory/retract");
+        assert_eq!(claim.ability(), "/use/delete/memory/cell");
     }
 }

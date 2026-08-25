@@ -8,6 +8,7 @@
 use dialog_capability::{Capability, Did, Policy, Subject};
 
 use super::{Cell, Memory, Publish, Resolve, Retract, Space, Version};
+use crate::Use;
 
 /// Extension trait to start a memory capability chain.
 pub trait MemorySubjectExt {
@@ -20,14 +21,14 @@ pub trait MemorySubjectExt {
 impl MemorySubjectExt for Subject {
     type Memory = Capability<Memory>;
     fn memory(self) -> Capability<Memory> {
-        self.attenuate(Memory)
+        self.attenuate(Use).attenuate(Memory)
     }
 }
 
 impl MemorySubjectExt for Did {
     type Memory = Capability<Memory>;
     fn memory(self) -> Capability<Memory> {
-        Subject::from(self).attenuate(Memory)
+        Subject::from(self).attenuate(Use).attenuate(Memory)
     }
 }
 

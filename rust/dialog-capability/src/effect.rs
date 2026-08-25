@@ -1,3 +1,4 @@
+use crate::attenuation::type_segment;
 use crate::{Attenuate, Caveat, Constraint};
 use dialog_common::ConditionalSend;
 
@@ -15,4 +16,16 @@ pub trait Effect: Sized + Caveat + Attenuate {
     type Of: Constraint;
     /// The output type produced by the invocation of this effect when performed.
     type Output: ConditionalSend;
+
+    /// The command this effect invokes: the path it appends to the ability
+    /// of the capability it attaches to.
+    ///
+    /// Defaults to the effect's type name as one segment. An effect may
+    /// name a longer path instead, which is how a verb prefix such as
+    /// `use/get` sits above the resource it applies to: the command is
+    /// what a delegation attenuates, so an effect that only reads says so
+    /// in its path rather than in the type of its parent.
+    fn command() -> &'static str {
+        type_segment::<Self>()
+    }
 }

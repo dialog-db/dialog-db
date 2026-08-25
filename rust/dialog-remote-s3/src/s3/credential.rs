@@ -250,6 +250,7 @@ mod tests {
     use crate::request::S3Request;
     use dialog_capability::{Subject, did};
     use dialog_common::Checksum;
+    use dialog_effects::Use;
     use dialog_effects::archive;
 
     fn test_subject() -> dialog_capability::Did {
@@ -276,6 +277,7 @@ mod tests {
     async fn it_signs_with_public_access() {
         let address = test_address();
         let get = Subject::from(test_subject())
+            .attenuate(Use)
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
@@ -291,6 +293,7 @@ mod tests {
     async fn it_signs_with_private_credentials() {
         let address = test_address();
         let get = Subject::from(test_subject())
+            .attenuate(Use)
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
@@ -307,6 +310,7 @@ mod tests {
         let address = test_address();
         let checksum = Checksum::Sha256([0u8; 32]);
         let put = Subject::from(test_subject())
+            .attenuate(Use)
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("index"))
             .attenuate(archive::PutAttenuation {
@@ -328,6 +332,7 @@ mod tests {
     async fn it_uses_path_style_for_localhost() {
         let address = localhost_address();
         let get = Subject::from(test_subject())
+            .attenuate(Use)
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));

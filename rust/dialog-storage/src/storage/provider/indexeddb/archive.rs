@@ -119,6 +119,7 @@ mod tests {
     use super::*;
     use crate::helpers::{unique_name, unique_subject};
     use dialog_common::{Blake3Hash, Buffer};
+    use dialog_effects::Use;
     use dialog_effects::archive::{Archive, Catalog};
 
     #[dialog_common::test]
@@ -128,6 +129,7 @@ mod tests {
         let digest = Blake3Hash::hash(b"nonexistent");
 
         let effect = subject
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest));
@@ -147,6 +149,7 @@ mod tests {
 
         subject
             .clone()
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(Buffer::from(content.clone())))
@@ -154,6 +157,7 @@ mod tests {
             .await?;
 
         let result = subject
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest))
@@ -175,6 +179,7 @@ mod tests {
 
         subject
             .clone()
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
             .invoke(Put::new(Buffer::from(content1.clone())))
@@ -183,6 +188,7 @@ mod tests {
 
         subject
             .clone()
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog2"))
             .invoke(Put::new(Buffer::from(content2.clone())))
@@ -191,6 +197,7 @@ mod tests {
 
         let result1 = subject
             .clone()
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
             .invoke(Get::new(digest1))
@@ -200,6 +207,7 @@ mod tests {
 
         let result2 = subject
             .clone()
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog2"))
             .invoke(Get::new(digest2.clone()))
@@ -208,6 +216,7 @@ mod tests {
         assert_eq!(result2, Some(content2));
 
         let cross = subject
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
             .invoke(Get::new(digest2))
@@ -231,6 +240,7 @@ mod tests {
 
         subject
             .clone()
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Import::new(blocks))
@@ -240,6 +250,7 @@ mod tests {
         for (i, digest) in digests.into_iter().enumerate() {
             let content = subject
                 .clone()
+                .attenuate(Use)
                 .attenuate(Archive)
                 .attenuate(Catalog::new("index"))
                 .invoke(Get::new(digest))
@@ -275,6 +286,7 @@ mod tests {
         for block in &blocks {
             subject
                 .clone()
+                .attenuate(Use)
                 .attenuate(Archive)
                 .attenuate(Catalog::new("puts"))
                 .invoke(Put::new(block.clone()))
@@ -286,6 +298,7 @@ mod tests {
         let start = js_sys::Date::now();
         subject
             .clone()
+            .attenuate(Use)
             .attenuate(Archive)
             .attenuate(Catalog::new("import"))
             .invoke(Import::new(blocks))

@@ -14,13 +14,14 @@
 //!
 //! ```
 //! use dialog_effects::archive::{Archive, Catalog, Get};
+//! use dialog_effects::Use;
 //! use dialog_capability::{did, Subject};
 //! use dialog_common::Blake3Hash;
 //!
 //! // Build a capability to get content from the "index" catalog
 //! let digest = Blake3Hash::hash(b"hello");
 //! let get_capability = Subject::from(did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"))
-//!     .attenuate(Archive)              // Domain: archive operations
+//!     .attenuate(Use).attenuate(Archive)              // Domain: archive operations
 //!     .attenuate(Catalog::new("index"))  // Policy: only the "index" catalog
 //!     .invoke(Get::new(digest));         // Effect: get this specific digest
 //! ```
@@ -61,3 +62,17 @@ pub mod prelude {
 // Re-export capability primitives for convenience
 pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
 pub use rejection::Rejection;
+use serde::{Deserialize, Serialize};
+
+/// Everything a holder needs to use a subject's data: every read and
+/// every write (`/use/get/...`, `/use/put/...`, `/use/delete/...`). A delegation
+/// attenuated to `Use` lets its holder read and write the subject's data
+/// without holding `/ucan` (delegation and revocation), which is what a
+/// member of a shared space is given. `/void` is reserved beside it for
+/// operations that destroy rather than change; nothing lives there yet.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Use;
+
+impl Attenuation for Use {
+    type Of = Subject;
+}
