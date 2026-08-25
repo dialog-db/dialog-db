@@ -256,6 +256,35 @@ carol's data. Data trees stay sovereign; the weave is the network; the
 global graph is emergent and never materialized anywhere. Content-
 addressed pages, signed links: the shape of the web itself.
 
+And the image completes itself: **the wrapper is the repository.** A
+node's own branch heads may be entries in its network tree — branch B's
+head is not the wrapper's head, so the theorem permits every entry
+except the wrapper's own — which means a repository *is* a node whose
+network tree indexes its branches (plus its follows), possibly with no
+data tree of its own. The branch registry and the head map, unified
+into one table above, turn out to be the repository itself. Bootstrap
+collapses to one hop: one cell (the repo head) → network tree → every
+branch head → everything. Per-branch revision cells survive as the
+write-coordination points (CAS per branch, no cross-branch
+contention), with the repo head trailing them lazily as gossip — safe
+by the peer-table argument: self-certifying entries, per-key
+max-by-edition join, so staleness costs nothing and concurrent updates
+of different branch entries merge instead of contending.
+
+It recurses: a node following repositories is a workspace; following
+workspaces, an org. One type at every depth —
+
+```text
+node = sign( data-root? , network-root , edition )
+```
+
+— a branch is a node that is mostly data; a repository, a node that is
+mostly its own branches; a workspace, a node that is mostly other
+repositories. The old boundaries are not blurred but unified: what
+remains distinct is only the convergence classes the theorem carves,
+and what a node chooses to hold versus follow. Submodules, monorepos,
+and forges become three depths of one weave.
+
 Everything below this section is analysis defending that table
 (propagator framing, trust, quiescence) or generalizations deliberately
 deferred (flows between arbitrary nodes, the ephemeral segment) — not
