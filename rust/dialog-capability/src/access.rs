@@ -19,6 +19,7 @@
 use crate::{Ability, Attenuate, Capability, Constraint, Did, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::marker::PhantomData;
 use thiserror::Error;
 
@@ -622,6 +623,35 @@ pub trait CertificateStore<P: Protocol> {
     }
 }
 
+/// Whether a [`Declined`](AuthorizeError::Declined) refusal can change
+/// without the caller doing anything.
+///
+/// The only thing this crate can say about another party's policy, and
+/// the only thing a caller can act on generically: keep the request in
+/// hand and try again, or stop. What the policy actually is stays
+/// opaque -- it belongs to whoever set it, and this crate does not model
+/// other people's rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Recourse {
+    /// The refusal stands until something changes elsewhere, and the
+    /// caller cannot make that happen by retrying. Stop.
+    None,
+    /// The condition is expected to clear on its own -- someone else
+    /// completes a step, a state settles -- so the same request may
+    /// succeed later. Retrying is the intended behavior, and a caller
+    /// waiting on it should hold what it has rather than start over.
+    Retry,
+}
+
+impl Display for Recourse {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(match self {
+            Self::None => "no recourse",
+            Self::Retry => "may succeed later",
+        })
+    }
+}
+
 /// Error during the authorize step.
 ///
 /// Most variants here are the caller's input failing to authorize what it
@@ -736,6 +766,31 @@ pub enum AuthorizeError {
         subject: Did,
     },
 
+    /// The chain authorizes the request and the responder declined it
+    /// anyway, on a policy of its own.
+    ///
+    /// Unlike every decision variant above, this says nothing about the
+    /// caller's proof: the authority is real and would be honored if the
+    /// responder were willing. What refused is a rule this crate does
+    /// not model and should not -- whose resources these are, what they
+    /// cost, what state an account is in are the responder's business.
+    ///
+    /// Mirrors no `CheckFailed` case, because no chain check produced it.
+    ///
+    /// So `reason` is opaque: it is whatever the responder said, kept
+    /// for logs and error surfaces, and matching on its text is the
+    /// mistake it looks like. The one thing a caller can act on
+    /// generically is [`Recourse`] -- whether the same request is worth
+    /// making again. A responder that wants to be understood more
+    /// precisely than that publishes its own vocabulary alongside.
+    #[error("The request was declined ({recourse}): {reason}")]
+    Declined {
+        /// Whether retrying the same request may succeed later.
+        recourse: Recourse,
+        /// The responder's own words, verbatim and unstructured.
+        reason: String,
+    },
+
     /// A proof's signature does not verify against its issuer's key.
     #[error("Proof does not carry a valid signature from '{issuer}'")]
     InvalidSignature {
@@ -811,7 +866,7 @@ mod tests {
     // Round-tripping every variant is what makes that safe -- a variant
     // that serializes but will not come back is a silent protocol break.
     mod wire {
-        use crate::access::AuthorizeError;
+        use crate::access::{AuthorizeError, Recourse};
         use crate::did;
 
         fn round_trip(error: AuthorizeError) {
@@ -836,6 +891,14 @@ mod tests {
                 },
                 AuthorizeError::PolicyViolation {
                     predicate: "size < 1024".into(),
+                },
+                AuthorizeError::Declined {
+                    recourse: Recourse::Retry,
+                    reason: "the subject's own registration awaits email activation".into(),
+                },
+                AuthorizeError::Declined {
+                    recourse: Recourse::None,
+                    reason: "the provider's registration is suspended".into(),
                 },
                 AuthorizeError::InvalidAudience {
                     claimed: audience.clone(),
@@ -871,8 +934,51 @@ mod tests {
     }
 
     mod reasons {
-        use crate::access::AuthorizeError;
+        use crate::access::{AuthorizeError, Recourse};
         use crate::did;
+
+        // Being declined is not failing to prove authority. The chain
+        // authorizes the request; what says no is a policy of the
+        // responder's, so a caller that reads this as "my credentials
+        // are wrong" would re-authenticate forever.
+        #[dialog_common::test]
+        async fn it_separates_a_declined_request_from_an_unproven_one() {
+            let declined = AuthorizeError::Declined {
+                recourse: Recourse::Retry,
+                reason: "awaiting something".into(),
+            };
+            assert!(matches!(declined, AuthorizeError::Declined { .. }));
+            assert!(!matches!(declined, AuthorizeError::UnprovenSubject { .. }));
+        }
+
+        // The one thing this crate says about someone else's policy.
+        // Everything about WHY stays in `reason`: the responder's own
+        // words, which are not ours to interpret.
+        #[dialog_common::test]
+        async fn it_says_only_whether_the_request_is_worth_repeating() {
+            let waiting = AuthorizeError::Declined {
+                recourse: Recourse::Retry,
+                reason: "settling".into(),
+            };
+            let final_answer = AuthorizeError::Declined {
+                recourse: Recourse::None,
+                reason: "withdrawn".into(),
+            };
+            assert!(matches!(
+                waiting,
+                AuthorizeError::Declined {
+                    recourse: Recourse::Retry,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                final_answer,
+                AuthorizeError::Declined {
+                    recourse: Recourse::None,
+                    ..
+                }
+            ));
+        }
 
         // The distinction the split exists for. Both mean "this proof does not
         // authorize you right now", and a single `Denied(String)` could not
