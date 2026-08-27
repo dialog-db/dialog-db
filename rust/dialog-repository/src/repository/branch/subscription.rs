@@ -89,6 +89,7 @@ use futures_util::TryStreamExt as _;
 
 use super::session::{QueryEnv, QueryLayer};
 use crate::layer::tombstones_from;
+use crate::repository::source::Source;
 use crate::{
     Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Upstream,
@@ -734,7 +735,7 @@ where
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
                 let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                    vec![self.branch.clone()],
+                    vec![Source::Branch(self.branch.clone())],
                     overlay,
                     Arc::new(tombstones),
                     env,
@@ -848,7 +849,7 @@ where
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let mut query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![self.branch.clone()],
+                vec![Source::Branch(self.branch.clone())],
                 overlay,
                 Arc::new(tombstones),
                 env,
@@ -902,7 +903,7 @@ where
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![self.branch.clone()],
+                vec![Source::Branch(self.branch.clone())],
                 overlay,
                 Arc::new(tombstones),
                 env,

@@ -63,9 +63,11 @@
 //! # }
 //! ```
 
+use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, TreeReference, Upstream,
+    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Snapshot, TreeReference,
+    Upstream,
 };
 use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
@@ -84,26 +86,53 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Delta;
 use futures_util::{Stream, StreamExt};
 
-/// A branch's blob store: the target that blob reads and writes bind to.
+/// A line's blob store: the target that blob reads and writes bind to.
 ///
-/// Holds a reference to the [`Branch`], so it carries the subject (for the
-/// capability chain), the blob index (for size lookups), and the upstream (for
-/// remote hydration). Obtain one with [`Branch::blobs`] or `branch.into()`.
+/// Holds a reference to the [`Branch`] or [`Snapshot`], so it carries the
+/// subject (for the capability chain), the blob index (for size lookups),
+/// and — for a branch — the upstream (for remote hydration). Obtain one
+/// with [`Branch::blobs`], [`Snapshot::blobs`], or `branch.into()`.
+///
+/// Reads bind to either kind. Writes and retractions advance the line,
+/// which a reference to a snapshot cannot do (its revision is held by
+/// value): they fail with [`CommitError::Detached`], and the snapshot is
+/// advanced by consuming it instead.
 #[derive(Clone, Copy)]
 pub struct BlobArchive<'a> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
 }
 
 impl<'a> From<&'a Branch> for BlobArchive<'a> {
     fn from(branch: &'a Branch) -> Self {
-        Self { branch }
+        Self {
+            source: SourceRef::from(branch),
+        }
+    }
+}
+
+impl<'a> From<&'a Snapshot> for BlobArchive<'a> {
+    fn from(snapshot: &'a Snapshot) -> Self {
+        Self {
+            source: SourceRef::from(snapshot),
+        }
+    }
+}
+
+impl<'a> BlobArchive<'a> {
+    /// The branch behind this archive, for the operations that advance
+    /// it; a snapshot's archive refuses them.
+    fn branch(&self) -> Result<&'a Branch, CommitError> {
+        match self.source {
+            SourceRef::Branch(branch) => Ok(branch),
+            SourceRef::Snapshot(_) => Err(CommitError::Detached),
+        }
     }
 }
 
 impl Branch {
     /// This branch's blob store, the target for [`Blob`] reads and writes.
     pub fn blobs(&self) -> BlobArchive<'_> {
-        BlobArchive { branch: self }
+        BlobArchive::from(self)
     }
 }
 
@@ -197,14 +226,18 @@ fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
 /// its blob index — after a fast-forward pull only the revision pointer is
 /// local, and the index nodes hydrate lazily. Fall back to the remote archive
 /// on a local miss (caching what lands), as `commit` does. With no remote
-/// upstream this degrades to a plain local index.
-pub(crate) async fn index_store<'e, Env>(branch: &Branch, env: &'e Env) -> NetworkedIndex<'e, Env>
+/// upstream (a snapshot never has one) this degrades to a plain local index.
+pub(crate) async fn index_store<'s, 'e, Env>(
+    source: impl Into<SourceRef<'s>>,
+    env: &'e Env,
+) -> NetworkedIndex<'e, Env>
 where
     Env: Provider<Resolve> + ConditionalSync + 'static,
 {
-    let remote = match branch.upstream() {
+    let source = source.into();
+    let remote = match source.upstream() {
         Some(Upstream::Remote { remote: name, .. }) => {
-            let loaded = branch
+            let loaded = source
                 .subject()
                 .remote(name.clone())
                 .load()
@@ -214,13 +247,13 @@ where
         }
         _ => RemoteFallback::None,
     };
-    NetworkedIndex::new(env, branch.archive().index(), remote)
+    NetworkedIndex::new(env, source.archive().index(), remote)
 }
 
-/// The size recorded for `hash` in the branch's blob index, or `None` if the
+/// The size recorded for `hash` in the line's blob index, or `None` if the
 /// current tree does not reference it.
 async fn index_size<Env>(
-    branch: &Branch,
+    source: SourceRef<'_>,
     hash: &Blake3Hash,
     env: &Env,
 ) -> Result<Option<u64>, CommitError>
@@ -232,10 +265,10 @@ where
         + ConditionalSync
         + 'static,
 {
-    let Some(revision) = branch.revision() else {
+    let Some(revision) = source.revision() else {
         return Ok(None);
     };
-    let store = index_store(branch, env).await;
+    let store = index_store(source, env).await;
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
     Ok(tree
         .get_blob(&store, hash.as_bytes())
@@ -261,7 +294,7 @@ impl BlobSize<'_> {
             + 'static,
     {
         let hash = blob_hash(&self.entity)?;
-        index_size(self.archive.branch, &hash, env).await
+        index_size(self.archive.source, &hash, env).await
     }
 }
 
@@ -293,11 +326,11 @@ impl ReadBlob<'_> {
             + ConditionalSync
             + 'static,
     {
-        let branch = self.archive.branch;
+        let line = self.archive.source;
         let hash = blob_hash(&self.entity)?;
         let range = self.range;
 
-        let local = branch
+        let local = line
             .archive()
             .blob()
             .invoke(BlobRead {
@@ -313,18 +346,19 @@ impl ReadBlob<'_> {
             Err(other) => return Err(other.into()),
         };
 
-        // Local miss. Hydrate from the remote upstream, if any.
-        let Some(Upstream::Remote { remote: name, .. }) = branch.upstream() else {
+        // Local miss. Hydrate from the remote upstream, if any (a
+        // snapshot has none: its reads are local).
+        let Some(Upstream::Remote { remote: name, .. }) = line.upstream() else {
             return Err(BlobError::NotFound(miss_key).into());
         };
 
         // The index must already reference the blob for us to import it; without
         // a size we have no import to issue and the miss is genuine.
-        let Some(size) = index_size(branch, &hash, env).await? else {
+        let Some(size) = index_size(line, &hash, env).await? else {
             return Err(BlobError::NotFound(miss_key).into());
         };
 
-        let remote = branch
+        let remote = line
             .subject()
             .remote(name)
             .load()
@@ -345,7 +379,7 @@ impl ReadBlob<'_> {
             .await?;
 
         // Write the bytes through a local digest-verified import sink.
-        let mut sink = branch
+        let mut sink = line
             .archive()
             .blob()
             .import(hash.clone(), size)
@@ -357,8 +391,7 @@ impl ReadBlob<'_> {
         sink.finish().await?;
 
         // Serve the requested read from the now-local copy.
-        branch
-            .archive()
+        line.archive()
             .blob()
             .invoke(BlobRead {
                 digest: hash,
@@ -404,7 +437,7 @@ where
             + ConditionalSync
             + 'static,
     {
-        let branch = self.archive.branch;
+        let branch = self.archive.branch()?;
 
         // 1. Stream the bytes into the local blob store. The hash is discovered
         //    as the bytes are written; the size is counted alongside. The bytes
@@ -628,9 +661,12 @@ impl RetractBlob<'_> {
             + ConditionalSync
             + 'static,
     {
-        let branch = self.archive.branch;
+        let branch = self.archive.branch()?;
         let hash = blob_hash(&self.entity)?;
-        if index_size(branch, &hash, env).await?.is_none() {
+        if index_size(SourceRef::from(branch), &hash, env)
+            .await?
+            .is_none()
+        {
             return Ok(());
         }
         advance_blob_index(

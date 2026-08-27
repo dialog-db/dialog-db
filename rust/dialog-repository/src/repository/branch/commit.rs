@@ -1,11 +1,14 @@
+use crate::repository::source::SourceRef;
 use crate::{
-    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteFallback,
-    RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
+    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
+    RepositoryArchiveExt as _, Revision, Snapshot, TreeReference, origin_of,
 };
-use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, context_of, extend_skips};
+use dialog_artifacts::history::{
+    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
+};
 use dialog_artifacts::tree::WriteScope;
-use dialog_artifacts::{Datum, DialogArtifactsError, Instruction, Key, State};
-use dialog_capability::{Fork, Provider};
+use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, State};
+use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogExt as _;
@@ -15,11 +18,13 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Delta;
 use futures_util::Stream;
 
-/// Command that commits a stream of changes (assert/retract) to a branch.
+/// Command that commits a stream of changes (assert/retract) to a branch
+/// or a snapshot.
 ///
-/// Created by [`Branch::commit`]. Execute with `.perform(&env)`.
+/// Created by [`Branch::commit`] or [`Snapshot::commit`]. Execute with
+/// `.perform(&env)`.
 pub struct Commit<'a, Changes> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     changes: Changes,
     allow_empty: bool,
     canonicalize: bool,
@@ -28,9 +33,9 @@ pub struct Commit<'a, Changes> {
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
-    fn new(branch: &'a Branch, changes: Changes) -> Self {
+    pub(crate) fn new(source: impl Into<SourceRef<'a>>, changes: Changes) -> Self {
         Self {
-            branch,
+            source: source.into(),
             changes,
             allow_empty: false,
             canonicalize: false,
@@ -116,16 +121,26 @@ impl Branch {
     }
 }
 
+impl Snapshot {
+    /// Commit a stream of changes to this snapshot: the same [`Commit`]
+    /// a branch runs. The minted revision is persisted and the snapshot
+    /// advances to it; no branch head moves. Mirrors [`Branch::commit`].
+    pub fn commit<Changes>(&self, changes: Changes) -> Commit<'_, Changes> {
+        Commit::new(self, changes)
+    }
+}
+
 impl<Changes> Commit<'_, Changes>
 where
     Changes: Stream<Item = Instruction> + ConditionalSend,
 {
     /// Execute the commit, returning the newly-published [`Revision`].
     ///
-    /// Load the branch's current search tree, apply every change in the
+    /// Load the line's current search tree, apply every change in the
     /// stream to the three (entity / attribute / value) indexes, then
-    /// publish a new [`Revision`] to the branch's revision cell with the
-    /// updated logical clock.
+    /// adopt the new [`Revision`] with the updated logical clock: a
+    /// branch publishes it to its revision cell, a snapshot advances its
+    /// own head.
     #[tracing::instrument(skip_all, name = "commit")]
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
@@ -141,8 +156,32 @@ where
             + ConditionalSync
             + 'static,
     {
-        let branch = self.branch;
-        let changes = self.changes;
+        match self.source {
+            SourceRef::Branch(branch) => self.perform_on_branch(branch, env).await,
+            SourceRef::Snapshot(snapshot) => self.perform_on_snapshot(snapshot, env).await,
+        }
+    }
+
+    /// The branch path: build on the checkpointed head, publish CAS'd
+    /// against it.
+    async fn perform_on_branch<Env>(
+        self,
+        branch: &Branch,
+        env: &Env,
+    ) -> Result<Revision, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
         // Checkpoint the head: capture the version we build this commit on top
         // of, so the publish below CAS's against it. A concurrent commit or
         // pull that advances the head while we apply changes then makes this
@@ -152,7 +191,211 @@ where
         let base_revision = branch.revision();
         let base_version = branch.revision.edition().map(|edition| edition.version);
 
-        // If the branch tracks a remote upstream, commits must be able
+        let minted = Mint {
+            source: SourceRef::from(branch),
+            base: base_revision,
+            changes: self.changes,
+            entries: self.entries,
+            scope: self.scope,
+            allow_empty: self.allow_empty,
+            canonicalize: self.canonicalize,
+        }
+        .perform(env, |profile, issuer| {
+            branch.commit_identity(profile, issuer)
+        })
+        .await?;
+
+        let Minted {
+            revision,
+            record,
+            context,
+        } = match minted {
+            // A no-op verdict is only true of the head it was judged
+            // against, and this early return never reaches the publish CAS
+            // below — so re-read the head before reporting "nothing to do".
+            // If another writer advanced it, the same instructions may not be
+            // no-ops against the current head (a re-assertion of a value the
+            // head has since retracted, for example): fail with the same
+            // `VersionMismatch` any other stale write gets, so the caller
+            // refreshes and retries against the fresh snapshot.
+            Outcome::Unchanged(base) => {
+                branch.revision.resolve().perform(env).await?;
+                let actual = branch.revision.edition().map(|edition| edition.version);
+                if actual != base_version {
+                    return Err(PublishError::VersionMismatch {
+                        expected: base_version,
+                        actual,
+                    }
+                    .into());
+                }
+                return Ok(base);
+            }
+            Outcome::Minted(minted) => *minted,
+        };
+
+        head.publish(revision.clone(), env).await?;
+
+        // Seed the memos with what was just published: the next commit's
+        // skip-table walk starts at this very record, and later pulls
+        // through this handle answer the context from memory. Seeded only
+        // once the head has actually advanced — a publish that lost its
+        // CAS is re-minted under the same version with a different
+        // parent, and a memo entry from the losing attempt would be wrong.
+        let version = revision.version();
+        branch.records().insert(version, record);
+        branch.contexts().insert(version, context);
+
+        Ok(revision)
+    }
+
+    /// The snapshot path: build on the head the snapshot holds, mint on
+    /// the snapshot's own lineage, and advance the head in place.
+    async fn perform_on_snapshot<Env>(
+        self,
+        snapshot: &Snapshot,
+        env: &Env,
+    ) -> Result<Revision, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        // The head this commit builds on and the line it mints on, read
+        // together. The lineage is inherited from the snapshot's earlier
+        // commits, or allocated now for its first: random rather than
+        // derived, because two clones of one base must not share it.
+        let (base, lineage) = snapshot.head();
+        let lineage = match lineage {
+            Some(lineage) => lineage,
+            None => Entity::new()?,
+        };
+
+        let minted = Mint {
+            source: SourceRef::from(snapshot),
+            base: Some(base.clone()),
+            changes: self.changes,
+            entries: self.entries,
+            scope: self.scope,
+            allow_empty: self.allow_empty,
+            canonicalize: self.canonicalize,
+        }
+        .perform(env, |_, issuer| {
+            (lineage.clone(), origin_of(&lineage, issuer))
+        })
+        .await?;
+
+        let Minted {
+            revision,
+            record,
+            context,
+        } = match minted {
+            Outcome::Unchanged(base) => return Ok(base),
+            Outcome::Minted(minted) => *minted,
+        };
+
+        // Adopt the revision: the in-memory CAS against the head this
+        // commit built on, refused if a commit through this same handle
+        // advanced it in the meantime.
+        snapshot.advance(&base, revision.clone(), lineage)?;
+
+        // Seed the memos once the head has moved, as the branch path
+        // does: the next commit's skip-table walk starts at this record,
+        // and the context memo answers the successor's context without
+        // an ancestry walk.
+        let version = revision.version();
+        snapshot.caches().records.insert(version, record);
+        snapshot.caches().contexts.insert(version, context);
+
+        Ok(revision)
+    }
+}
+
+/// A revision minted by [`Mint`] and persisted, but not yet adopted:
+/// the branch adopts it through its head cell, a snapshot by value.
+pub(crate) struct Minted {
+    /// The signed head, naming the persisted tree root.
+    pub(crate) revision: Revision,
+    /// Its signed in-tree record, for the verified-record memo.
+    pub(crate) record: RevisionRecord,
+    /// Its causal context, for the context memo.
+    pub(crate) context: Context,
+}
+
+/// How a [`Mint`] came out.
+pub(crate) enum Outcome {
+    /// The batch left the indexes untouched and `allow_empty` was not
+    /// asked for: nothing was minted or persisted, and the line keeps
+    /// the revision it had. Only possible when there was a base
+    /// revision to keep.
+    Unchanged(Revision),
+    /// A revision was minted and its blocks persisted.
+    Minted(Box<Minted>),
+}
+
+/// The commit procedure shared by every line: apply a change batch to
+/// the tree at `base`, mint the successor revision under the line's
+/// identity, sign it, and persist its blocks. What it deliberately does
+/// not do is adopt the result — a branch publishes it CAS'd against
+/// its head cell, a snapshot takes it by value — so the caller owns the
+/// step that makes the revision visible.
+pub(crate) struct Mint<'a, Changes> {
+    /// The line the commit builds on: where its store, caches, and
+    /// remote fallback come from.
+    pub(crate) source: SourceRef<'a>,
+    /// The revision the batch applies on top of, captured by the caller
+    /// (a branch checkpoints it for its CAS).
+    pub(crate) base: Option<Revision>,
+    /// The instruction stream to apply.
+    pub(crate) changes: Changes,
+    /// Pre-built machinery entries riding the same batch. See
+    /// [`Commit::with_entries`].
+    pub(crate) entries: Vec<(Key, State<Datum>)>,
+    /// Which attributes the stream may write. See [`Commit::machinery`].
+    pub(crate) scope: WriteScope,
+    /// Mint even when the batch changes nothing. See
+    /// [`Commit::allow_empty`].
+    pub(crate) allow_empty: bool,
+    /// Flush buffers to the leaves first. See [`Commit::canonicalize`].
+    pub(crate) canonicalize: bool,
+}
+
+impl<Changes> Mint<'_, Changes>
+where
+    Changes: Stream<Item = Instruction> + ConditionalSend,
+{
+    /// Run the commit procedure. `line` names the entity and origin the
+    /// revision is minted under, given the profile and issuer the
+    /// environment identifies as — a branch's content-derived branch
+    /// entity, a snapshot's own lineage.
+    pub(crate) async fn perform<Env>(
+        self,
+        env: &Env,
+        line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
+    ) -> Result<Outcome, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let source = self.source;
+        let base_revision = self.base;
+        let changes = self.changes;
+
+        // If the line tracks a remote upstream, commits must be able
         // to read remote-only blocks on demand (pull only merges the
         // tree metadata, not every block). `NetworkedIndex` falls back
         // to the remote when a block is missing locally. A remote that
@@ -161,26 +404,14 @@ where
         // from, so the failure is carried into the fallback and surfaces
         // — with its cause — on the first read that needed it, while a
         // commit every block of which is local proceeds untouched.
-        let upstreams = branch.upstreams();
-        let remote = match upstreams.remote_name() {
-            Some(name) => {
-                let loaded = branch
-                    .subject()
-                    .remote(name.to_string())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            None => RemoteFallback::None,
-        };
-        let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
+        let remote = source.fallback(env).await;
+        let mut store = NetworkedIndex::new(env, source.archive().index(), remote);
 
         // Discover who we are up front: the revision is attributed to the
         // profile / operator, and the commit's `Version` — the identifier
         // every datum and history record it writes is tagged with — derives
-        // from the issuer and the subject. The subject comes from the
-        // branch itself, not the identity chain.
+        // from the issuer and the line. The line comes from the caller,
+        // not the identity chain.
         let authority = Identify.perform(env).await?;
         let issuer = authority.did();
         let profile = authority.profile().clone();
@@ -189,23 +420,23 @@ where
             .as_ref()
             .map(|base| base.edition.successor())
             .unwrap_or(Edition::GENESIS);
-        let (branch_entity, origin) = branch.commit_identity(&profile, &issuer);
+        let (line_entity, origin) = line(&profile, &issuer);
         let version = Version::new(origin, edition);
 
-        // Walk forward from the current revision's tree root, or from
-        // the empty tree if the branch has no commits yet.
+        // Walk forward from the base revision's tree root, or from the
+        // empty tree if the line has no commits yet.
         let base_tree_hash = base_revision
             .as_ref()
             .map(|rev| *rev.tree.hash())
             .unwrap_or(EMPTY_TREE_HASH);
 
-        // Read through the branch's shared node cache: the commit's
+        // Read through the line's shared node cache: the commit's
         // supersession scans and history reads then hit blocks earlier
         // commits and queries already fetched (and blocks the persist below
         // seeds), instead of re-fetching everything into a cache that dies
         // with this commit.
         let mut tree =
-            Index::from_hash_with_cache(NodeHash::from(base_tree_hash), branch.node_cache());
+            Index::from_hash_with_cache(NodeHash::from(base_tree_hash), source.node_cache());
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, retraction — and, because the
@@ -232,7 +463,7 @@ where
         // `Commit::canonicalize`).
         let mut delta = Delta::zero();
         let batch = dialog_artifacts::BufferedBatch::apply_reusing(
-            branch.spine(),
+            source.spine(),
             &tree,
             &mut store,
             Some(version),
@@ -248,53 +479,34 @@ where
         // re-asserting metadata that is already in place) is a no-op:
         // keep the current revision rather than minting one that differs
         // only by edition (unless `allow_empty` asks for one). Only a
-        // branch with no revision at all still publishes, to establish
+        // line with no revision at all still publishes, to establish
         // its genesis.
-        //
-        // A no-op verdict is only true of the snapshot it was judged
-        // against, and this early return never reaches the publish CAS
-        // below — so re-read the head before reporting "nothing to do".
-        // If another writer advanced it, the same instructions may not be
-        // no-ops against the current head (a re-assertion of a value the
-        // head has since retracted, for example): fail with the same
-        // `VersionMismatch` any other stale write gets, so the caller
-        // refreshes and retries against the fresh snapshot.
         if !changed
             && !self.allow_empty
             && let Some(base) = base_revision
         {
-            branch.revision.resolve().perform(env).await?;
-            let actual = branch.revision.edition().map(|edition| edition.version);
-            if actual != base_version {
-                return Err(PublishError::VersionMismatch {
-                    expected: base_version,
-                    actual,
-                }
-                .into());
-            }
-            return Ok(base);
+            return Ok(Outcome::Unchanged(base));
         }
 
         // Mint the revision (the placeholder tree root is replaced below,
         // after its own records are in the tree) and record its DAG edge on
-        // the branch lineage entity, its skip links, plus its attribute
-        // claims on the revision entity, in the same batch delta. None of
-        // those records depend on the final root — a root cannot appear
-        // inside itself.
+        // the line entity, its skip links, plus its attribute claims on the
+        // revision entity, in the same batch delta. None of those records
+        // depend on the final root — a root cannot appear inside itself.
         //
         // The skip table (logarithmic leaps through the revision DAG for
         // `common_ancestor` — see `dialog_artifacts::history::extend_skips`)
         // is lifted from the parent's recorded table, read out of the base
-        // tree through the branch's shared node cache.
+        // tree through the line's shared node cache.
         let parent = base_revision.as_ref().map(Revision::version);
         let skips = match &parent {
             Some(parent) => {
                 let history = TreeHistory::from_root_with_cache(
                     &base_tree_hash,
                     store.clone(),
-                    branch.node_cache(),
+                    source.node_cache(),
                 )
-                .with_record_cache(branch.records());
+                .with_record_cache(source.records());
                 extend_skips(&history, parent).await?
             }
             None => Vec::new(),
@@ -302,10 +514,10 @@ where
 
         // The new head's causal context: the parent's plus this commit's
         // own version. Sourced from the parent head's published context,
-        // the branch memo, or (once, for lineages minted before heads
+        // the line's memo, or (once, for lineages minted before heads
         // carried contexts) the ancestry walk — so every head published
         // from here on carries its watermark for peers to read.
-        let contexts = branch.contexts();
+        let contexts = source.contexts();
         let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
         let context = {
             let mut context = match (&parent, base_context) {
@@ -317,9 +529,9 @@ where
                         let history = TreeHistory::from_root_with_cache(
                             &base_tree_hash,
                             store.clone(),
-                            branch.node_cache(),
+                            source.node_cache(),
                         )
-                        .with_record_cache(branch.records());
+                        .with_record_cache(source.records());
                         context_of(parent, &history).await?
                     }
                 },
@@ -329,8 +541,8 @@ where
         };
 
         let mut revision = match base_revision {
-            Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
-            None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
+            Some(base) => base.advance(TreeReference::default(), line_entity.clone(), issuer),
+            None => Revision::new(TreeReference::default(), line_entity.clone(), issuer),
         };
         debug_assert_eq!(revision.version(), version);
         // Sign the record before it enters the tree: the issuer's signature
@@ -352,11 +564,6 @@ where
         // and entries together.
         let batch = batch.record(&store, self.entries).await?;
         let batch = batch.record(&store, entries).await?;
-        // Seed the verified-record memo with what we just minted. The next
-        // commit's skip-table walk starts at this very record, so without this
-        // it is read back out of the tree and its signature re-verified on the
-        // immediately following commit.
-        branch.records().insert(version, record.clone());
 
         // ONE seal covers the data writes and the record entries, into the
         // batch delta (flushing buffers to the leaves first when the caller
@@ -369,7 +576,7 @@ where
         // reference-counted, so nothing is copied on the way in, and
         // providers with native batching persist it in a single round trip
         // (one IndexedDB transaction).
-        branch
+        source
             .archive()
             .index()
             .import(delta.flush().map(|(_, buffer)| buffer))
@@ -386,13 +593,11 @@ where
         // see `Pull`.
         revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
-        head.publish(revision.clone(), env).await?;
-
-        // Advance the branch memo so later pulls through this handle
-        // answer the context from memory.
-        contexts.insert(revision.version(), context);
-
-        Ok(revision)
+        Ok(Outcome::Minted(Box::new(Minted {
+            revision,
+            record,
+            context,
+        })))
     }
 }
 

@@ -2,8 +2,10 @@ mod induce;
 mod query;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 
-use crate::rules::{TriggerFootprint, on_attr, reads_attr};
-use crate::{Branch, CommitError, RemoteSite, Revision};
+use crate::Commit;
+use crate::repository::source::SourceRef;
+use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
+use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot};
 use dialog_artifacts::{Changes, Instruction, Statement, Update};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -11,18 +13,19 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
 
-/// A transaction on a branch.
+/// A transaction on a branch or a snapshot.
 ///
-/// Created by [`Branch::transaction`]. Accumulates durable changes via
-/// `.assert()` / `.retract()` and *transient* facts (commands) via
-/// `.dispatch()`, then commits atomically via `.commit().perform(&env)`.
+/// Created by [`Branch::transaction`] or [`Snapshot::transaction`].
+/// Accumulates durable changes via `.assert()` / `.retract()` and
+/// *transient* facts (commands) via `.dispatch()`, then commits
+/// atomically via `.commit().perform(&env)`.
 ///
 /// Transients are visible to every read through [`query`](Self::query)
 /// and to inductive-rule bodies during commit-time induction, but they
 /// never enter the durable batch: they live for exactly one induction
 /// round and leave no trace in the committed tree.
 pub struct Transaction<'a> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     changes: Changes,
     transients: Changes,
 }
@@ -77,18 +80,17 @@ impl<'a> Transaction<'a> {
     }
 
     /// Run queries against this transaction's "as-if committed" view of
-    /// the branch.
+    /// the line it runs on.
     ///
     /// Pending asserts and retracts are surfaced through a
     /// [`TransactionQuery`] handle — assertions show up alongside the
-    /// branch's stored facts; retractions tombstone matching facts in
-    /// the branch's stream before the merge. Dispatched transients are
-    /// part of the view too. The transaction itself stays open and
-    /// committable.
+    /// stored facts; retractions tombstone matching facts in the stored
+    /// stream before the merge. Dispatched transients are part of the
+    /// view too. The transaction itself stays open and committable.
     pub fn query(&self) -> TransactionQuery<'_> {
         let mut view = self.changes.clone();
         self.transients.clone().assert(&mut view);
-        TransactionQuery::new(self.branch, &view)
+        TransactionQuery::new(self.source, &view)
     }
 
     /// Finalize the transaction into a commit command.
@@ -102,7 +104,7 @@ impl<'a> Transaction<'a> {
     /// dropped, never written.
     pub fn commit(self) -> TransactionCommit<'a> {
         TransactionCommit {
-            branch: self.branch,
+            source: self.source,
             changes: self.changes,
             transients: self.transients,
             allow_empty: false,
@@ -118,7 +120,24 @@ impl Branch {
     /// then `.commit().perform(&env)` to apply them.
     pub fn transaction(&self) -> Transaction<'_> {
         Transaction {
-            branch: self,
+            source: SourceRef::from(self),
+            changes: Changes::new(),
+            transients: Changes::new(),
+        }
+    }
+}
+
+impl Snapshot {
+    /// Start a transaction on this snapshot: the same [`Transaction`]
+    /// a branch runs, committing through [`Snapshot::commit`].
+    ///
+    /// Use `.assert()` and `.retract()` to accumulate changes, then
+    /// `.commit().perform(&env)` to apply them; the snapshot advances to
+    /// the revision `perform` returns. Clone first to keep the view you
+    /// have.
+    pub fn transaction(&self) -> Transaction<'_> {
+        Transaction {
+            source: SourceRef::from(self),
             changes: Changes::new(),
             transients: Changes::new(),
         }
@@ -127,7 +146,7 @@ impl Branch {
 
 /// Command committing a [`Transaction`]: runs commit-time induction
 /// over the transaction's delta, then delegates the settled durable
-/// batch to [`Branch::commit`].
+/// batch to [`Branch::commit`] / [`Snapshot::commit`].
 ///
 /// Mirrors [`Commit`](crate::Commit)'s builder surface
 /// ([`allow_empty`](Self::allow_empty) /
@@ -135,7 +154,7 @@ impl Branch {
 /// induction step in front and that transients never reach the
 /// durable batch.
 pub struct TransactionCommit<'a> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     changes: Changes,
     transients: Changes,
     allow_empty: bool,
@@ -175,25 +194,12 @@ impl<'a> TransactionCommit<'a> {
             + 'static,
     {
         let mut changes = self.changes;
-        induce::induce(self.branch, &mut changes, self.transients, env).await?;
+        induce::induce(self.source, &mut changes, self.transients, env).await?;
 
-        // The trigger footprint is a pure function of the committed
-        // `dialog.rule/on` and `dialog.rule/reads` facts, so a commit
-        // touching neither (checked after induction, which may fold
-        // rule installs into the batch) carries the cached footprint
-        // forward to the head it publishes. Without this every commit
-        // advances the head past the cache's key and the steady-state
-        // no-rules commit re-pays both footprint range scans.
-        let previous = self.branch.revision();
-        let touches_rules = {
-            let on = on_attr();
-            let reads = reads_attr();
-            changes
-                .iter()
-                .any(|(_, attribute, _)| *attribute == on || *attribute == reads)
-        };
+        let previous = self.source.revision();
+        let touches_rules = touches_rules(&changes);
 
-        let mut commit = self.branch.commit(changes.into_stream());
+        let mut commit = Commit::new(self.source, changes.into_stream());
         if self.allow_empty {
             commit = commit.allow_empty();
         }
@@ -207,26 +213,55 @@ impl<'a> TransactionCommit<'a> {
         // plus any lag, and the settled batch is what `revision`
         // holds). A raced publish here at worst regresses the
         // watermark, which re-induces a covered span — idempotent
-        // under the novelty check.
-        let cell = self.branch.induction_cell();
-        if cell.content().as_ref() != Some(&revision) {
-            cell.publish(revision.clone()).perform(env).await?;
+        // under the novelty check. A snapshot keeps no watermark: its
+        // head moves only through commits like this one, every one of
+        // which induces, so it is always at the head.
+        if let SourceRef::Branch(branch) = self.source {
+            let cell = branch.induction_cell();
+            if cell.content().as_ref() != Some(&revision) {
+                cell.publish(revision.clone()).perform(env).await?;
+            }
         }
 
         if !touches_rules {
-            let footprint = match previous {
-                // A genesis commit sees an empty branch: no committed
-                // rules exist, so the empty footprint is exact.
-                None => Some(TriggerFootprint::default()),
-                Some(previous) => self.branch.rule_cache().footprint(&previous),
-            };
-            if let Some(footprint) = footprint {
-                self.branch
-                    .rule_cache()
-                    .record_footprint(revision.clone(), footprint);
-            }
+            carry_footprint(&self.source.rule_cache(), previous.as_ref(), &revision);
         }
         Ok(revision)
+    }
+}
+
+/// Whether a settled change batch touches the trigger structures, i.e.
+/// asserts or retracts `dialog.rule/on` or `dialog.rule/reads` facts.
+pub(crate) fn touches_rules(changes: &Changes) -> bool {
+    let on = on_attr();
+    let reads = reads_attr();
+    changes
+        .iter()
+        .any(|(_, attribute, _)| *attribute == on || *attribute == reads)
+}
+
+/// Carry the trigger footprint cached at `previous` forward to
+/// `revision`.
+///
+/// The footprint is a pure function of the committed `dialog.rule/on`
+/// and `dialog.rule/reads` facts, so a commit touching neither (checked
+/// after induction, which may fold rule installs into the batch) keys
+/// the same footprint under the head it minted. Without this every
+/// commit advances the head past the cache's key and the steady-state
+/// no-rules commit re-pays both footprint range scans.
+pub(crate) fn carry_footprint(
+    cache: &SharedRuleCache,
+    previous: Option<&Revision>,
+    revision: &Revision,
+) {
+    let footprint = match previous {
+        // A genesis commit sees an empty line: no committed rules
+        // exist, so the empty footprint is exact.
+        None => Some(TriggerFootprint::default()),
+        Some(previous) => cache.footprint(previous),
+    };
+    if let Some(footprint) = footprint {
+        cache.record_footprint(revision.clone(), footprint);
     }
 }
 

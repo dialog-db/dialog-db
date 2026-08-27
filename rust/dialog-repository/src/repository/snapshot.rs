@@ -1,11 +1,21 @@
-//! Immutable views of a repository at one revision, and the content
-//! transfer built on them.
+//! Views of a repository at one revision: readable, transactable, and
+//! the content transfer built on them.
 //!
-//! A [`Snapshot`] holds its revision by value, so what it names cannot
-//! change while you hold it -- unlike a [`Branch`](crate::Branch), whose
-//! head advances as it commits. Nothing here publishes or moves a head:
+//! A [`Snapshot`] holds its own head, so what it names moves only when
+//! it commits -- unlike a [`Branch`](crate::Branch), whose head lives in
+//! a memory cell every handle to the branch shares. It reads exactly
+//! like a branch ([`claims`](Snapshot::claims), [`select`](Snapshot::select),
+//! [`query`](Snapshot::query), [`history`](Snapshot::history), blob
+//! reads) and it transacts exactly like one
+//! ([`transaction`](Snapshot::transaction), [`commit`](Snapshot::commit)
+//! return the branch's own command types). Clone to keep the view you
+//! have before advancing.
+//!
+//! Nothing here publishes or moves a branch head. A snapshot's commits
+//! are minted on a line of their own (see [`Snapshot`]); making one
+//! visible under a name stays a separate act, as does content transfer:
 //! [`Snapshot::export`] reads content out, [`Repository::import`] writes
-//! content in, and making a revision visible stays a separate act.
+//! content in.
 //!
 //! # Two channels, not one
 //!
@@ -38,30 +48,46 @@
 //! upstream as the walk proceeds, which is what makes the result complete.
 
 use std::collections::HashSet;
-use std::marker::PhantomData;
 
 use async_stream::try_stream;
+use dialog_artifacts::history::{
+    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
+};
+use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{BlobIndexExt as _, Datum, Key, ShipmentRef, State, shipment_ref};
-use dialog_capability::{Capability, Fork, Provider, Subject};
+use dialog_artifacts::{
+    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, ShipmentRef,
+    State, Statement, shipment_ref,
+};
+use dialog_capability::{Capability, Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::{ArchiveSubjectExt as _, CatalogExt as _};
-use dialog_effects::archive::{Catalog, Get, Put};
+use dialog_effects::archive::{Archive, Catalog, Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
+use dialog_effects::memory;
+use dialog_query::query::Application;
 use dialog_search_tree::{
     ArchivedNodeBody, ContentAddressedStorage as TreeStorage, NoveltyOp, Traversable as _, Visit,
     into_owned,
 };
 use futures_util::{Stream, StreamExt as _, stream};
+use parking_lot::RwLock;
 
-use dialog_credentials::Credential;
 use dialog_varsig::Principal;
 
+use crate::repository::source::{Caches, SourceRef};
 use crate::{
-    Index, NetworkedIndex, RemoteRepository, RemoteSite, Repository, RepositoryArchiveExt as _,
-    Revision, SnapshotError,
+    BlobArchive, Branch, Index, NetworkedIndex, Overlay, PublishError, RemoteRepository,
+    RemoteSite, Repository, RepositoryArchiveExt as _, Revision, Select, SelectQuery,
+    SnapshotError,
 };
+
+#[cfg(test)]
+mod read_tests;
+
+#[cfg(test)]
+mod transaction_tests;
 
 /// How many spill or blob fetches an export keeps in flight at once.
 ///
@@ -99,57 +125,311 @@ impl Block {
     }
 }
 
-/// An immutable view of a repository at one revision.
+/// A view of a repository at one revision.
 ///
 /// Holds the repository's subject rather than the repository itself:
-/// everything an export touches — the archive catalog, the blob channel —
-/// derives from the subject, which lets a [`Branch`](crate::Branch) mint
-/// a snapshot of its own repository too (see
-/// [`Branch::download`](crate::Branch::download)).
-pub struct Snapshot<'a, C: Principal = Credential> {
+/// everything a read touches — the archive catalog, the blob channel —
+/// derives from the subject, which lets a [`Branch`] mint a snapshot of
+/// its own repository too (see [`Branch::snapshot`]).
+///
+/// # Pinned, and advanced only through itself
+///
+/// The head is held by the snapshot, not by a memory cell shared with
+/// other handles: nothing but a commit through *this* handle can move
+/// it. It reads and transacts with the same API a branch has —
+/// [`transaction`](Self::transaction) and [`commit`](Self::commit)
+/// return the branch's [`Transaction`](crate::Transaction) and
+/// [`Commit`](crate::Commit), and `perform` returns the minted
+/// [`Revision`] and advances the snapshot to it. A [`Clone`] copies the
+/// head, so it is how you keep the view you have:
+///
+/// ```no_run
+/// # use dialog_repository::Snapshot;
+/// # async fn example<Env>(snapshot: Snapshot, env: &Env, facts: dialog_artifacts::Changes)
+/// # -> anyhow::Result<()>
+/// # where Env: dialog_capability::Provider<dialog_effects::memory::Resolve> {
+/// # let _ = (env, facts);
+/// let before = snapshot.clone();
+/// // snapshot.transaction().integrate(facts).commit().perform(env).await?;
+/// // `before` still reads the base revision; `snapshot` reads the new one.
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Its own line
+///
+/// A revision's [`Version`] is `(origin, edition)`, and an origin must be
+/// a single sequential actor: two revisions minted under one origin at
+/// the same edition would be an equivocation. A snapshot is not the
+/// branch it was taken from — the branch may advance from the same base
+/// concurrently — so its commits are minted on a *lineage* of their own.
+/// The lineage is allocated on the snapshot's first commit and kept for
+/// the ones after, which is what makes a chain of transactions one
+/// origin with increasing editions. A clone starts a line of its own for
+/// the same reason: two clones transacting from the same base must not
+/// collide.
+///
+/// The base branch is still reachable: the minted record's parent is
+/// the base revision, so ancestry, causality, and
+/// [`log`](Self::log) walk straight through.
+///
+/// # Reads are local
+///
+/// A snapshot tracks no upstream. A read that misses a block the local
+/// store does not hold fails rather than fetching; materialize first
+/// with [`SnapshotExport::download`] (or
+/// [`Branch::download`](crate::Branch::download)) when the revision was
+/// pulled by reference.
+#[derive(Debug)]
+pub struct Snapshot {
     subject: Subject,
+    head: RwLock<Head>,
+    caches: Caches,
+    overlay: Overlay,
+}
+
+/// What a snapshot's commits move: the revision, and the line they are
+/// minted on once one has been allocated.
+#[derive(Debug, Clone)]
+struct Head {
     revision: Revision,
-    repository: PhantomData<&'a C>,
+    /// `None` until the first commit through this handle.
+    lineage: Option<Entity>,
 }
 
 impl<C: Principal> Repository<C> {
-    /// An immutable view at `revision`.
+    /// A view at `revision`.
     ///
     /// The revision is taken by value: whatever advances afterwards, this
     /// view keeps naming the same state. How the revision was obtained is
     /// the caller's business -- a snapshot does not require the branch it
-    /// was minted on to be present, which is why it also cannot hydrate
-    /// from an upstream (see [`SnapshotExport::download`]).
-    pub fn snapshot(&self, revision: Revision) -> Snapshot<'_, C> {
-        Snapshot {
-            subject: self.subject(),
-            revision,
-            repository: PhantomData,
-        }
+    /// was minted on to be present. Starts with cold caches; prefer
+    /// [`Branch::snapshot`] when a branch handle at the revision is at
+    /// hand, so its warm caches carry over.
+    pub fn snapshot(&self, revision: Revision) -> Snapshot {
+        Snapshot::new(self.subject(), revision)
     }
 }
 
-impl Snapshot<'static> {
-    /// An immutable view of `subject`'s repository at `revision`, for
-    /// callers that hold a branch rather than a repository.
-    pub(crate) fn of(subject: Subject, revision: Revision) -> Self {
+impl Branch {
+    /// A snapshot of this branch's current revision, or `None` before
+    /// its first commit.
+    ///
+    /// The snapshot shares this branch's caches: every one of them is
+    /// content- or version-addressed, so blocks, rules, and records the
+    /// branch has already read are warm for the snapshot, and what the
+    /// snapshot reads or mints warms the branch in turn. The head is
+    /// copied, not shared — the branch advancing afterwards leaves the
+    /// snapshot where it was, and the snapshot's commits never touch
+    /// the branch.
+    pub fn snapshot(&self) -> Option<Snapshot> {
+        let revision = self.revision()?;
+        Some(Snapshot {
+            subject: self.subject(),
+            head: RwLock::new(Head {
+                revision,
+                lineage: None,
+            }),
+            caches: self.caches(),
+            overlay: Overlay::default(),
+        })
+    }
+}
+
+impl Snapshot {
+    /// A view of `subject`'s repository at `revision`, with cold caches.
+    pub fn new(subject: Subject, revision: Revision) -> Self {
         Snapshot {
             subject,
-            revision,
-            repository: PhantomData,
+            head: RwLock::new(Head {
+                revision,
+                lineage: None,
+            }),
+            caches: Caches::new(),
+            overlay: Overlay::default(),
         }
     }
-}
 
-impl<C: Principal> Snapshot<'_, C> {
     /// The revision this snapshot names.
-    pub fn revision(&self) -> &Revision {
-        &self.revision
+    pub fn revision(&self) -> Revision {
+        self.head.read().revision.clone()
+    }
+
+    /// The subject (repository) this snapshot is a view of.
+    pub fn subject(&self) -> Subject {
+        self.subject.clone()
+    }
+
+    /// The DID of the repository this snapshot is a view of.
+    pub fn of(&self) -> &Did {
+        self.subject.did()
+    }
+
+    /// Archive capability for this snapshot's subject.
+    pub fn archive(&self) -> Capability<Archive> {
+        self.subject().archive()
     }
 
     /// The archive catalog this snapshot's blocks live in.
     pub(crate) fn index(&self) -> Capability<Catalog> {
         self.subject.clone().archive().index()
+    }
+
+    /// The revision a commit builds on and the line it mints on, read
+    /// together so they name the same head.
+    pub(crate) fn head(&self) -> (Revision, Option<Entity>) {
+        let head = self.head.read();
+        (head.revision.clone(), head.lineage.clone())
+    }
+
+    /// Move the head from `base` to `next`, recording the line `next`
+    /// was minted on.
+    ///
+    /// The in-memory counterpart of a branch's CAS publish: a commit
+    /// builds on the head it read, and if another commit through this
+    /// same handle advanced it in the meantime, adopting `next` would
+    /// silently drop that one — so the advance is refused with the same
+    /// [`VersionMismatch`](PublishError::VersionMismatch) a stale branch
+    /// write gets, carrying the tree roots as the versions.
+    pub(crate) fn advance(
+        &self,
+        base: &Revision,
+        next: Revision,
+        lineage: Entity,
+    ) -> Result<(), PublishError> {
+        let mut head = self.head.write();
+        if head.revision != *base {
+            return Err(PublishError::VersionMismatch {
+                expected: Some(memory::Version::from(base.tree.hash())),
+                actual: Some(memory::Version::from(head.revision.tree.hash())),
+            });
+        }
+        head.revision = next;
+        head.lineage = Some(lineage);
+        Ok(())
+    }
+
+    /// The shared caches this snapshot reads and commits through.
+    pub(crate) fn caches(&self) -> &Caches {
+        &self.caches
+    }
+
+    /// The snapshot's artifact index.
+    ///
+    /// Use `.select(selector).perform(&env)` to query artifacts.
+    pub fn claims(&self) -> SnapshotClaims<'_> {
+        SnapshotClaims { snapshot: self }
+    }
+
+    /// Query with an application. Shortcut for
+    /// `snapshot.query().select(query)`.
+    pub fn select<Q: Application>(&self, query: Q) -> SelectQuery<'_, Q> {
+        SelectQuery::new(self, query)
+    }
+
+    /// Open a query over this snapshot: a
+    /// [`QueryLayer`](crate::QueryLayer) rooted at it, to
+    /// [`with`](crate::QueryLayer::with) statements into,
+    /// [`join`](crate::QueryLayer::join) branches or other snapshots
+    /// onto, and [`select`](crate::QueryLayer::select) from. Schema
+    /// metadata is auto-injected at perform time, as for a branch.
+    pub fn query(&self) -> crate::QueryLayer<'_> {
+        crate::QueryLayer::from(self)
+    }
+
+    /// Open a query over this snapshot with `statement` folded into the
+    /// overlay in one step. Shorthand for `self.query().with(stmt)`.
+    pub fn with<S: Statement>(&self, statement: S) -> crate::QueryLayer<'_> {
+        self.query().with(statement)
+    }
+
+    /// The snapshot's transient session overlay: assert or retract
+    /// ephemeral facts that every read of this snapshot observes but no
+    /// commit persists. A [`Clone`] shares it, like branch clones do.
+    /// See [`Overlay`].
+    pub fn overlay(&self) -> &Overlay {
+        &self.overlay
+    }
+
+    /// This snapshot's blob store, the target for [`Blob`](crate::Blob)
+    /// reads. Blob writes advance the line through the branch's memory
+    /// cell, which a snapshot does not have — see [`BlobArchive`].
+    pub fn blobs(&self) -> BlobArchive<'_> {
+        BlobArchive::from(self)
+    }
+
+    /// The recorded claim lineage at this snapshot's revision. See
+    /// [`Branch::history`].
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Fork<RemoteSite, Get>>
+            + ConditionalSync
+            + 'static,
+    {
+        SourceRef::from(self).history(env)
+    }
+
+    /// The snapshot's committed history, newest first — at most `limit`
+    /// entries of `(version, record)`. See [`Branch::log`].
+    pub async fn log<Env>(
+        &self,
+        env: &Env,
+        limit: usize,
+    ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Fork<RemoteSite, Get>>
+            + ConditionalSync
+            + 'static,
+    {
+        SourceRef::from(self).log(env, limit).await
+    }
+
+    /// A shared handle to this snapshot's causal-verdict memo. See
+    /// [`Branch::causality`].
+    pub fn causality(&self) -> CausalityCache {
+        self.caches.causality.clone()
+    }
+
+    /// A shared handle to this snapshot's causal-context memo. See
+    /// [`Branch::contexts`].
+    pub fn contexts(&self) -> ContextCache {
+        self.caches.contexts.clone()
+    }
+}
+
+// A clone is the same view on its own line: it copies the head (so the
+// original advancing leaves it where it is, and vice versa), shares the
+// caches and the session overlay (both safe to share, like a branch
+// clone's), and starts without a lineage — see the type docs for why
+// two handles that may both transact from one base must mint under
+// different origins.
+impl Clone for Snapshot {
+    fn clone(&self) -> Self {
+        Snapshot {
+            subject: self.subject.clone(),
+            head: RwLock::new(Head {
+                revision: self.revision(),
+                lineage: None,
+            }),
+            caches: self.caches.clone(),
+            overlay: self.overlay.clone(),
+        }
+    }
+}
+
+/// The snapshot's artifact index. Created by [`Snapshot::claims`].
+pub struct SnapshotClaims<'a> {
+    snapshot: &'a Snapshot,
+}
+
+impl<'a> SnapshotClaims<'a> {
+    /// Select artifacts matching the selector.
+    pub fn select(self, selector: ArtifactSelector<Constrained>) -> Select<'a> {
+        Select::from_source(SourceRef::from(self.snapshot), selector)
     }
 }
 
@@ -223,14 +503,14 @@ pub enum Reach {
 /// than pushing into a consumer, so what happens to the content is the
 /// caller's decision: hand it to [`Repository::import`], write it to a
 /// file, count it, filter it.
-pub struct SnapshotExport<'a, C: Principal = Credential> {
-    snapshot: Snapshot<'a, C>,
+pub struct SnapshotExport {
+    snapshot: Snapshot,
     reach: Reach,
 }
 
-impl<'a, C: Principal> Snapshot<'a, C> {
+impl Snapshot {
     /// Prepare to read this snapshot's content.
-    pub fn export(self) -> SnapshotExport<'a, C> {
+    pub fn export(self) -> SnapshotExport {
         SnapshotExport {
             snapshot: self,
             reach: Reach::Complete,
@@ -238,7 +518,7 @@ impl<'a, C: Principal> Snapshot<'a, C> {
     }
 }
 
-impl<C: Principal> SnapshotExport<'_, C> {
+impl SnapshotExport {
     /// Export whatever is reachable locally instead of requiring
     /// everything.
     ///
@@ -294,7 +574,7 @@ impl<C: Principal> SnapshotExport<'_, C> {
         // travel their own channel, so the blob loop needs its own.
         let hydrate = upstream.clone();
         let sparse = matches!(self.reach, Reach::Sparse);
-        let root = NodeHash::from(*self.snapshot.revision.tree.hash());
+        let root = NodeHash::from(*self.snapshot.revision().tree.hash());
 
         try_stream! {
             // With an upstream a read-miss falls through to the remote and

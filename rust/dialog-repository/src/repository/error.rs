@@ -231,6 +231,17 @@ pub enum CommitError {
     /// Evaluating or loading an inductive rule during commit failed.
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
+
+    /// A write was attempted through a reference to a snapshot.
+    ///
+    /// A snapshot holds its revision by value, so nothing reached
+    /// through `&Snapshot` can advance it. Blob writes and retractions
+    /// through [`Snapshot::blobs`](crate::Snapshot::blobs) land here;
+    /// advance the snapshot by consuming it instead, through
+    /// [`Snapshot::transaction`](crate::Snapshot::transaction) or
+    /// [`Snapshot::commit`](crate::Snapshot::commit).
+    #[error("A snapshot cannot be advanced through a reference; transact it instead")]
+    Detached,
 }
 
 /// Errors specific to a pull operation.

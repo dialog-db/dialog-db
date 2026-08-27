@@ -12,34 +12,39 @@ use dialog_search_tree::{Buffer, DialogSearchTreeError};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
+use crate::repository::source::SourceRef;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
 };
 
-/// Command struct for selecting artifacts from a branch.
+/// Command struct for selecting artifacts from a branch or a snapshot.
 pub struct Select<'a> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     selector: ArtifactSelector<Constrained>,
 }
 
 impl<'a> Select<'a> {
     /// Create a select command for the given branch and artifact selector.
     pub fn new(branch: &'a Branch, selector: ArtifactSelector<Constrained>) -> Self {
-        Self { branch, selector }
+        Self::from_source(SourceRef::from(branch), selector)
+    }
+
+    /// Create a select command for the given line (branch or snapshot)
+    /// and artifact selector.
+    pub(crate) fn from_source(
+        source: SourceRef<'a>,
+        selector: ArtifactSelector<Constrained>,
+    ) -> Self {
+        Self { source, selector }
     }
 
     fn tree_hash(&self) -> Blake3Hash {
-        self.branch
-            .revision()
-            .as_ref()
-            .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPTY_TREE_HASH)
+        self.source.root()
     }
 
-    /// The catalog (archive index) scoped to this branch's subject.
+    /// The catalog (archive index) scoped to this line's subject.
     pub fn catalog(&self) -> Capability<Catalog> {
-        self.branch.subject().archive().index()
+        self.source.subject().archive().index()
     }
 }
 
@@ -60,8 +65,8 @@ impl<'a> Select<'a> {
 }
 
 impl Select<'_> {
-    /// Execute the select, using fallback to remote if the branch has
-    /// a remote upstream.
+    /// Execute the select, using fallback to remote if the line is a
+    /// branch with a remote upstream.
     ///
     /// Rows stream as borrowed-access [`ArtifactView`]s; chain
     /// [`to_owned`](Self::to_owned) before this call for owned
@@ -82,27 +87,13 @@ impl Select<'_> {
             + ConditionalSync
             + 'static,
     {
-        // Load a remote if the branch tracks one so the networked
-        // index can fall back to it for blocks missing locally. A
-        // failed load (e.g. no credentials) is carried into the
-        // fallback rather than swallowed: the local archive alone may
-        // still satisfy the query, but a read that misses fails with
-        // the load failure as its cause instead of a bare not-found.
-        let upstreams = self.branch.upstreams();
-        let remote = match upstreams.remote_name() {
-            Some(name) => {
-                let loaded = self
-                    .branch
-                    .subject()
-                    .remote(name.to_string())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            None => RemoteFallback::None,
-        };
-
+        // Load a remote if the line tracks one so the networked index
+        // can fall back to it for blocks missing locally. A failed load
+        // (e.g. no credentials) is carried into the fallback rather
+        // than swallowed: the local archive alone may still satisfy the
+        // query, but a read that misses fails with the load failure as
+        // its cause instead of a bare not-found.
+        let remote = self.source.fallback(env).await;
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.execute(store).await
     }
@@ -140,7 +131,7 @@ impl Select<'_> {
         // still fetching (and, through `NetworkedIndex`, replicating) on a
         // genuine miss and failing fast when the root is truly absent.
         let tree_hash = self.tree_hash();
-        let node_cache = self.branch.node_cache();
+        let node_cache = self.source.node_cache();
         if tree_hash != EMPTY_TREE_HASH {
             node_cache
                 .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
@@ -164,7 +155,7 @@ impl Select<'_> {
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
         // scans agree on key order — that adjacency invariant is what
         // the cardinality-one sliding window relies on.
-        Ok(tree.scan(store, self.branch.spill_cache(), self.selector))
+        Ok(tree.scan(store, self.source.spill_cache(), self.selector))
     }
 
     /// [`execute`](Self::execute) materializing every row from the scan's
@@ -186,7 +177,7 @@ impl Select<'_> {
     {
         // The same eager root probe as `execute`; see the comment there.
         let tree_hash = self.tree_hash();
-        let node_cache = self.branch.node_cache();
+        let node_cache = self.source.node_cache();
         if tree_hash != EMPTY_TREE_HASH {
             node_cache
                 .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
@@ -205,7 +196,7 @@ impl Select<'_> {
         }
 
         let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache);
-        Ok(tree.scan_owned(store, self.branch.spill_cache(), self.selector))
+        Ok(tree.scan_owned(store, self.source.spill_cache(), self.selector))
     }
 }
 
@@ -221,7 +212,7 @@ impl Select<'_> {
 pub struct SelectOwned<'a>(Select<'a>);
 
 impl SelectOwned<'_> {
-    /// The catalog (archive index) scoped to this branch's subject.
+    /// The catalog (archive index) scoped to this line's subject.
     pub fn catalog(&self) -> Capability<Catalog> {
         self.0.catalog()
     }
@@ -243,22 +234,7 @@ impl SelectOwned<'_> {
     {
         // The same remote fallback as `Select::perform`; see the comment
         // there.
-        let upstreams = self.0.branch.upstreams();
-        let remote = match upstreams.remote_name() {
-            Some(name) => {
-                let loaded = self
-                    .0
-                    .branch
-                    .subject()
-                    .remote(name.to_string())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            None => RemoteFallback::None,
-        };
-
+        let remote = self.0.source.fallback(env).await;
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.execute(store).await
     }

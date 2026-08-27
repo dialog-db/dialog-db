@@ -96,7 +96,7 @@ impl Download<'_> {
         // The items themselves carry nothing the local store does not
         // already hold by the time they are yielded, so draining the
         // stream is the whole job.
-        let items = Snapshot::of(branch.subject(), revision)
+        let items = Snapshot::new(branch.subject(), revision)
             .export()
             .download(remote)
             .perform(env);

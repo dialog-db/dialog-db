@@ -58,28 +58,30 @@ use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
 use std::sync::Arc;
 
+use crate::RemoteSite;
 use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
-use crate::{Branch, RemoteSite};
+use crate::repository::source::SourceRef;
 
 /// A non-composable query handle returned by
-/// [`Transaction::query`](crate::repository::branch::Transaction::query).
+/// [`Transaction::query`](crate::repository::branch::Transaction::query)
+/// and [`SnapshotTransaction::query`](crate::SnapshotTransaction::query).
 ///
 /// Holds an immutable snapshot of the transaction's pending changes
-/// plus a reference to the branch. The transaction itself remains
-/// open and committable.
+/// plus a reference to the line (branch or snapshot) it runs on. The
+/// transaction itself remains open and committable.
 ///
 /// See module docs for tombstone semantics.
 pub struct TransactionQuery<'a> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     changes: Changes,
 }
 
 impl<'a> TransactionQuery<'a> {
-    pub(crate) fn new(branch: &'a Branch, changes: &Changes) -> Self {
+    pub(crate) fn new(source: impl Into<SourceRef<'a>>, changes: &Changes) -> Self {
         Self {
-            branch,
+            source: source.into(),
             changes: changes.clone(),
         }
     }
@@ -88,7 +90,7 @@ impl<'a> TransactionQuery<'a> {
     /// [`perform`](TransactionSelectQuery::perform) to execute.
     pub fn select<Q: Application>(self, query: Q) -> TransactionSelectQuery<'a, Q> {
         TransactionSelectQuery {
-            branch: self.branch,
+            source: self.source,
             changes: self.changes,
             query,
         }
@@ -97,7 +99,7 @@ impl<'a> TransactionQuery<'a> {
 
 /// A staged query on a [`TransactionQuery`].
 pub struct TransactionSelectQuery<'a, Q> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     changes: Changes,
     query: Q,
 }
@@ -126,7 +128,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + 'static,
     {
         let TransactionSelectQuery {
-            branch,
+            source,
             changes,
             query,
         } = self;
@@ -143,17 +145,17 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // `with(changes)` preserves Assert/Replace/Retract
             // polarity via `Statement for Changes`, so the user's
             // retracts stay retracts and lift into tombstones below.
-            let overlay = QueryLayer::from(branch)
+            let overlay = QueryLayer::from(source)
                 .with(changes)
                 .overlay(&operator);
             let tombstones = tombstones_from(&overlay);
 
-            // A transaction query is just a single-branch `QueryEnv`.
+            // A transaction query is just a single-line `QueryEnv`.
             // Constructing the *same* env type the branch-session path
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let query_env = QueryEnv::new(vec![branch.clone()], overlay, Arc::new(tombstones), env);
+            let query_env = QueryEnv::new(vec![source.to_source()], overlay, Arc::new(tombstones), env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
