@@ -6,12 +6,13 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
-use crate::{NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
+use crate::repository::source::{Caches, SourceRef};
+use crate::{NetworkedIndex, RemoteSite};
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::Entity;
 use dialog_artifacts::history::Origin;
 use dialog_artifacts::history::{
-    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
+    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
 };
 use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
@@ -279,13 +280,7 @@ impl Branch {
             + ConditionalSync
             + 'static,
     {
-        let store = NetworkedIndex::new(env, self.archive().index(), None);
-        let root = self
-            .revision()
-            .map(|revision| *revision.tree.hash())
-            .unwrap_or(crate::EMPTY_TREE_HASH);
-        TreeHistory::from_root_with_cache(&root, store, self.node_cache())
-            .with_record_cache(self.records())
+        SourceRef::from(self).history(env)
     }
 
     /// The branch's committed history, newest first — at most `limit`
@@ -306,10 +301,7 @@ impl Branch {
             + ConditionalSync
             + 'static,
     {
-        let Some(head) = self.revision() else {
-            return Ok(Vec::new());
-        };
-        log(&head.version(), &self.history(env), limit).await
+        SourceRef::from(self).log(env, limit).await
     }
 
     /// Export all artifacts from this branch to the given exporter.
@@ -332,6 +324,23 @@ impl Branch {
     /// A shared handle to this branch's node cache, for seeding a read tree.
     pub(crate) fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
         self.node_cache.clone()
+    }
+
+    /// Shared handles to every cache this branch carries, for a
+    /// [`Snapshot`](crate::Snapshot) minted from it to read and commit
+    /// through. All content- or version-addressed, so sharing them
+    /// never serves a stale entry.
+    pub(crate) fn caches(&self) -> Caches {
+        Caches {
+            nodes: self.node_cache.clone(),
+            spills: self.spill_cache.clone(),
+            rules: self.rule_cache.clone(),
+            plans: self.plan_cache.clone(),
+            causality: self.causality_cache.clone(),
+            contexts: self.context_cache.clone(),
+            records: self.record_cache.clone(),
+            spine: self.spine.clone(),
+        }
     }
 
     /// The live-spine slot this branch's commits reuse.

@@ -26,53 +26,57 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
     assemble, builtin, conclusion_selector, hydrate, overlay_rules, rule_entities, source_bytes,
     source_selector,
 };
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
-use crate::{
-    Branch, NetworkedIndex, RemoteFallback, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Upstream,
-};
+use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snapshot};
 
-/// A composable query over one or more branches plus an in-memory
-/// overlay.
+/// A composable query over one or more lines (branches, snapshots)
+/// plus an in-memory overlay.
 ///
-/// `branch.query()` returns a `QueryLayer` rooted at that branch.
-/// From there:
+/// `branch.query()` (or `snapshot.query()`) returns a `QueryLayer`
+/// rooted at that line. From there:
 ///
 /// - [`with`](Self::with) folds any [`Statement`] (a concept
 ///   instance, an attribute expression, a [`Changes`] batch) into the
-///   overlay — its asserts/replaces surface alongside branch facts,
-///   its retracts tombstone matching branch facts.
-/// - [`join`](Self::join) merges in another branch or `QueryLayer`.
+///   overlay — its asserts/replaces surface alongside stored facts,
+///   its retracts tombstone matching stored facts.
+/// - [`join`](Self::join) merges in another branch, snapshot, or
+///   `QueryLayer`.
 /// - [`select`](Self::select) stages a query; `.perform(&env)` runs it.
 ///
-/// All branches in the layer are peers — there is no distinguished
-/// "primary". A query reads the union of every branch's facts plus
-/// the overlay.
+/// All lines in the layer are peers — there is no distinguished
+/// "primary". A query reads the union of every line's facts plus the
+/// overlay.
 ///
 /// # Auto-injected schema metadata
 ///
 /// At `.perform(env)` the layer resolves the operator's identity via
 /// [`Identify`] and folds in [`metadata`](Self::metadata): one
-/// [`Origin`](crate::schema::Replica) + [`Branch`](crate::schema::Branch)
+/// [`Replica`](crate::schema::Replica) + [`Branch`](crate::schema::Branch)
 /// (+ [`BranchRevision`](crate::schema::BranchRevision) when committed)
-/// per branch, plus a single [`Session`]. Callers don't pass the
-/// profile or operator DID, and nothing is written to any branch's
-/// tree.
+/// per branch, a [`Replica`](crate::schema::Replica) per snapshot,
+/// plus a single [`Session`]. Callers don't pass the profile or
+/// operator DID, and nothing is written to any line's tree.
 ///
-/// ```ignore
-/// branch.query()
-///     .join(&other_branch)            // another branch source
-///     .with(custom_concept_instance)  // user-asserted overlay facts
-///     .select(query)
-///     .perform(&env);                 // metadata auto-injected
+/// ```no_run
+/// # use dialog_repository::{Branch, Snapshot};
+/// # use dialog_query::query::Application;
+/// # fn example<Q: Application>(branch: &Branch, snapshot: &Snapshot, query: Q, facts: dialog_artifacts::Changes) {
+/// let layer = branch
+///     .query()
+///     .join(snapshot)                 // another line
+///     .with(facts);                   // user-asserted overlay facts
+/// let staged = layer.select(query);   // `.perform(&env)` injects metadata
+/// # let _ = staged;
+/// # }
 /// ```
 #[derive(Default, Clone)]
 pub struct QueryLayer<'a> {
-    branches: Vec<&'a Branch>,
+    sources: Vec<SourceRef<'a>>,
     changes: Changes,
 }
 
@@ -96,19 +100,37 @@ impl<'a> QueryLayer<'a> {
         self
     }
 
-    /// Merge another layer in: union the branches, fold the other
+    /// Merge another layer in: union the lines, fold the other
     /// layer's changes via its `Statement` impl. Accepts anything
-    /// convertible into a `QueryLayer` — a `&Branch` or a `Changes`.
+    /// convertible into a `QueryLayer` — a `&Branch`, a `&Snapshot`, or
+    /// a `Changes`.
     pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
         let other = other.into();
-        self.branches.extend(other.branches);
+        self.sources.extend(other.sources);
         other.changes.assert(&mut self.changes);
         self
     }
 
-    /// The branches this layer reads from.
-    pub fn branches(&self) -> &[&'a Branch] {
-        &self.branches
+    /// The branches this layer reads from, in join order.
+    pub fn branches(&self) -> Vec<&'a Branch> {
+        self.sources
+            .iter()
+            .filter_map(|source| match source {
+                SourceRef::Branch(branch) => Some(*branch),
+                SourceRef::Snapshot(_) => None,
+            })
+            .collect()
+    }
+
+    /// The snapshots this layer reads from, in join order.
+    pub fn snapshots(&self) -> Vec<&'a Snapshot> {
+        self.sources
+            .iter()
+            .filter_map(|source| match source {
+                SourceRef::Snapshot(snapshot) => Some(*snapshot),
+                SourceRef::Branch(_) => None,
+            })
+            .collect()
     }
 
     /// The caller-supplied overlay changes (no auto-injected metadata).
@@ -117,20 +139,21 @@ impl<'a> QueryLayer<'a> {
     }
 
     /// The schema-metadata [`Changes`] for this layer: every branch's
-    /// [`BranchMetadata`](super::metadata::BranchMetadata) plus a
-    /// single [`Session`] (with one cardinality-many
-    /// `dialog.session/branch` per branch in scope).
+    /// [`BranchMetadata`](super::metadata::BranchMetadata), every
+    /// snapshot's [`Replica`](crate::schema::Replica), plus a single
+    /// [`Session`] (with one cardinality-many `dialog.session/branch`
+    /// per branch in scope — a snapshot is not a branch and gets none).
     ///
     /// `operator` (from [`Identify`]) supplies the profile + operator
     /// DIDs the schema entities are derived from.
     pub fn metadata(&self, operator: &Capability<Operator>) -> Changes {
         let mut changes = Changes::new();
 
-        let mut branch_entities = Vec::with_capacity(self.branches.len());
-        for branch in &self.branches {
-            let metadata = branch.metadata(operator);
-            branch_entities.push(metadata.branch.this.clone());
-            metadata.assert(&mut changes);
+        let mut branch_entities = Vec::with_capacity(self.sources.len());
+        for source in &self.sources {
+            if let Some(entity) = source.metadata(operator, &mut changes) {
+                branch_entities.push(entity);
+            }
         }
 
         let session_entity = Session::entity();
@@ -172,24 +195,36 @@ impl<'a> QueryLayer<'a> {
     }
 }
 
-// Folds the branch's transient session overlay
-// ([`Branch::overlay`]): every read path — `branch.select`,
-// `branch.query`, transaction queries, subscription evaluations —
-// constructs through here, so session facts participate in all of
-// them with no per-path wiring.
+// Folds the line's transient session overlay ([`Branch::overlay`],
+// [`Snapshot::overlay`]): every read path — `select`, `query`,
+// transaction queries, subscription evaluations — constructs through
+// here, so session facts participate in all of them with no per-path
+// wiring.
+impl<'a> From<SourceRef<'a>> for QueryLayer<'a> {
+    fn from(source: SourceRef<'a>) -> Self {
+        Self {
+            sources: vec![source],
+            changes: source.overlay().changes(),
+        }
+    }
+}
+
 impl<'a> From<&'a Branch> for QueryLayer<'a> {
     fn from(branch: &'a Branch) -> Self {
-        Self {
-            branches: vec![branch],
-            changes: branch.overlay().changes(),
-        }
+        Self::from(SourceRef::from(branch))
+    }
+}
+
+impl<'a> From<&'a Snapshot> for QueryLayer<'a> {
+    fn from(snapshot: &'a Snapshot) -> Self {
+        Self::from(SourceRef::from(snapshot))
     }
 }
 
 impl From<Changes> for QueryLayer<'_> {
     fn from(changes: Changes) -> Self {
         Self {
-            branches: Vec::new(),
+            sources: Vec::new(),
             changes,
         }
     }
@@ -202,9 +237,9 @@ pub struct SelectQuery<'a, Q> {
 }
 
 impl<'a, Q> SelectQuery<'a, Q> {
-    pub(crate) fn new(branch: &'a Branch, query: Q) -> Self {
+    pub(crate) fn new(source: impl Into<SourceRef<'a>>, query: Q) -> Self {
         Self {
-            layer: QueryLayer::from(branch),
+            layer: QueryLayer::from(source.into()),
             query,
         }
     }
@@ -216,7 +251,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// Resolves the operator's identity via [`Identify`], builds the
     /// query overlay (caller changes + auto-injected schema metadata)
     /// via [`QueryLayer::overlay`], lifts any retracts in it into
-    /// tombstones, and unions every branch stream (tombstone-filtered)
+    /// tombstones, and unions every line's stream (tombstone-filtered)
     /// with the overlay.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
@@ -239,8 +274,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             let overlay = layer.overlay(&operator);
             let tombstones = Arc::new(tombstones_from(&overlay));
 
-            let branches = layer.branches.iter().map(|&branch| branch.clone()).collect();
-            let query_env = QueryEnv::new(branches, overlay, tombstones, env);
+            let sources = layer.sources.iter().map(|source| source.to_source()).collect();
+            let query_env = QueryEnv::new(sources, overlay, tombstones, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -249,7 +284,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     }
 }
 
-/// The runtime environment that bridges the layer's branches and
+/// The runtime environment that bridges the layer's lines and
 /// per-query overlay changes into the query engine's Provider bounds.
 ///
 /// Built fresh on each `.perform(env)`; the environment reference
@@ -262,7 +297,7 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// enclosing future `Send`-general on native (two independent
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
-    branches: Vec<Branch>,
+    sources: Vec<Source>,
     /// All overlay facts — caller-asserted + auto-injected metadata —
     /// merged into one batch. Queried via `Provider<Select> for Changes`.
     changes: Changes,
@@ -284,23 +319,24 @@ pub(crate) struct QueryEnv<'a, Env> {
 }
 
 impl<'a, Env> QueryEnv<'a, Env> {
-    /// Build a runtime env from already-resolved parts: the branches to
+    /// Build a runtime env from already-resolved parts: the lines to
     /// read, the per-query overlay (caller changes + injected metadata),
     /// the tombstones lifted from it, and the underlying capability env.
     ///
-    /// Both `Branch::query` and the transaction-query path construct
-    /// through here so there is exactly one query env — a transaction
-    /// query is just a single-branch `QueryEnv`. Deductive-rule
-    /// resolution is built in (a durable layer per branch + the overlay
-    /// as a transient layer), so the two paths can never diverge on it.
+    /// `Branch::query`, `Snapshot::query`, and the transaction-query
+    /// paths all construct through here so there is exactly one query
+    /// env — a transaction query is just a single-line `QueryEnv`.
+    /// Deductive-rule resolution is built in (a durable layer per line +
+    /// the overlay as a transient layer), so the paths can never
+    /// diverge on it.
     pub(crate) fn new(
-        branches: Vec<Branch>,
+        sources: Vec<Source>,
         changes: Changes,
         tombstones: Arc<HashSet<SortKey>>,
         env: &'a Env,
     ) -> Self {
         Self {
-            branches,
+            sources,
             changes,
             tombstones,
             demand: None,
@@ -336,7 +372,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
 impl<Env> Clone for QueryEnv<'_, Env> {
     fn clone(&self) -> Self {
         Self {
-            branches: self.branches.clone(),
+            sources: self.sources.clone(),
             changes: self.changes.clone(),
             tombstones: self.tombstones.clone(),
             demand: self.demand.clone(),
@@ -346,16 +382,16 @@ impl<Env> Clone for QueryEnv<'_, Env> {
     }
 }
 
-/// Execute a select against a single branch, transparently routing through
-/// the branch's remote upstream when configured. Extracted as a freestanding
-/// helper so every branch in a [`QueryEnv`] shares the exact same branch-read
-/// path (a transaction query is itself a single-branch `QueryEnv`).
+/// Execute a select against a single line, transparently routing through
+/// a branch's remote upstream when configured. Extracted as a freestanding
+/// helper so every line in a [`QueryEnv`] shares the exact same read path
+/// (a transaction query is itself a single-line `QueryEnv`).
 ///
-/// Takes the branch by value (a cheap clone: shared caches) and moves
-/// it into the returned stream, so the stream borrows only the env —
+/// Takes the line by value (a cheap clone: shared caches) and moves it
+/// into the returned stream, so the stream borrows only the env —
 /// errors surface as the stream's first item.
-pub(crate) fn select_from_branch<'a, Env>(
-    branch: Branch,
+pub(crate) fn select_from_source<'a, Env>(
+    source: Source,
     env: &'a Env,
     input: ArtifactSelector<Constrained>,
 ) -> ArtifactStream<'a>
@@ -369,21 +405,8 @@ where
         + 'static,
 {
     Box::pin(async_stream::try_stream! {
-        let select = branch.claims().select(input);
-
-        let remote = match branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => {
-                let loaded = branch
-                    .subject()
-                    .remote(name.clone())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            _ => RemoteFallback::None,
-        };
-
+        let select = crate::Select::from_source(source.as_ref(), input);
+        let remote = source.as_ref().fallback(env).await;
         let store = NetworkedIndex::new(env, select.catalog(), remote);
         let stream = select.execute(store).await?;
         for await artifact in stream {
@@ -422,14 +445,14 @@ where
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
         self.record_demand(&input);
-        let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.branches.len() + 1);
+        let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
 
-        // Branch streams — each filtered by tombstones from the
+        // Line streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
         // retract in `with(..)`) suppresses matching source facts. Each
-        // owns its branch clone and borrows only `self.env`.
-        for branch in &self.branches {
-            let raw = select_from_branch(branch.clone(), self.env, input.clone());
+        // owns its line clone and borrows only `self.env`.
+        for source in &self.sources {
+            let raw = select_from_source(source.clone(), self.env, input.clone());
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
@@ -457,11 +480,11 @@ where
 // co). No demand is recorded: the block behind a hash is
 // content-addressed and can never change, so no tree diff could ever
 // invalidate a row derived from it — the soundness argument lives in
-// `dialog_artifacts::inspect`. Reads go through each branch's archive
+// `dialog_artifacts::inspect`. Reads go through each line's archive
 // catalog capability with the same remote fallback a fact scan uses;
-// the first branch that has the block wins (content addressing makes
+// the first line that has the block wins (content addressing makes
 // them interchangeable), and a block absent everywhere contributes
-// nothing. Reads go through the branch's shared node cache (the same
+// nothing. Reads go through the line's shared node cache (the same
 // one the eager root probe in `select.rs` and `Subscription::touched`
 // use): a resolver join re-resolves the same reference once per outer
 // row, and a raw backend get would re-fetch that identical immutable
@@ -479,21 +502,11 @@ where
         + 'static,
 {
     async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
-        for branch in &self.branches {
-            let remote = match branch.upstream() {
-                Some(Upstream::Remote { remote: name, .. }) => {
-                    let loaded = branch
-                        .subject()
-                        .remote(name.clone())
-                        .load()
-                        .perform(self.env)
-                        .await;
-                    RemoteFallback::from_load(name, loaded)
-                }
-                _ => RemoteFallback::None,
-            };
-            let store = NetworkedIndex::new(self.env, branch.archive().index(), remote);
-            let cached = branch
+        for source in &self.sources {
+            let source = source.as_ref();
+            let remote = source.fallback(self.env).await;
+            let store = NetworkedIndex::new(self.env, source.archive().index(), remote);
+            let cached = source
                 .node_cache()
                 .get_or_fetch(&NodeHash::from(input), async |hash| {
                     StorageBackend::get(&store, hash.as_bytes())
@@ -519,14 +532,14 @@ where
         + ConditionalSync
         + 'static,
 {
-    /// Read a `dialog.rule/*` selector against a single branch's committed
+    /// Read a `dialog.rule/*` selector against a single line's committed
     /// tree only (NOT the overlay) and collect the matching artifacts.
     /// The durable layer's reads must be tree-only so the head-keyed
     /// discovery cache stays correct — overlay rules are handled
     /// separately, fresh, by the transient layer.
     async fn select_tree(
         &self,
-        branch: &Branch,
+        source: &Source,
         selector: ArtifactSelector<Constrained>,
     ) -> Result<Vec<Artifact>, DialogArtifactsError> {
         // Rule-discovery reads are demand too: a rule committed
@@ -539,23 +552,23 @@ where
         }
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
-        select_from_branch(branch.clone(), self.env, selector)
+        select_from_source(source.clone(), self.env, selector)
             .owned()
             .try_collect()
             .await
     }
 
-    /// The durable rules concluding `concept` on `branch`: the committed
-    /// `dialog.rule/*` rules, read from the tree and cached by branch head
+    /// The durable rules concluding `concept` on `source`: the committed
+    /// `dialog.rule/*` rules, read from the tree and cached by head
     /// (re-scanned only when the head moves), with hydrated bodies
     /// cached by content-addressed rule entity.
     async fn durable_rules(
         &self,
-        branch: &Branch,
+        source: &Source,
         concept: &Entity,
     ) -> Result<Vec<DeductiveRule>, EvaluationError> {
-        let cache = branch.rule_cache();
-        let head = branch.revision();
+        let cache = source.as_ref().rule_cache();
+        let head = source.as_ref().revision();
 
         // Discovery: which rule entities conclude this concept (committed).
         // Cached per (concept, head); a head move (commit/pull) re-scans.
@@ -563,7 +576,7 @@ where
             Some(entities) => entities,
             None => {
                 let claims = self
-                    .select_tree(branch, conclusion_selector(concept))
+                    .select_tree(source, conclusion_selector(concept))
                     .await
                     .map_err(|e| {
                         EvaluationError::Store(format!("rule conclusion lookup: {e:?}"))
@@ -585,7 +598,7 @@ where
                 continue;
             }
             let source_claims = self
-                .select_tree(branch, source_selector(&rule_entity))
+                .select_tree(source, source_selector(&rule_entity))
                 .await
                 .map_err(|e| EvaluationError::Store(format!("rule source lookup: {e:?}")))?;
             let Some(source) = source_bytes(source_claims) else {
@@ -612,7 +625,7 @@ where
         + 'static,
 {
     /// Resolve a concept's deductive rules by unioning across layers:
-    /// each branch is a durable layer (committed `dialog.rule/*`, head-cached),
+    /// each line is a durable layer (committed `dialog.rule/*`, head-cached),
     /// the overlay is a transient layer (uncommitted `dialog.rule/*`, fresh).
     /// The implicit per-descriptor rule is assembled once on top.
     ///
@@ -636,20 +649,20 @@ where
         // `dialog.revision/*`.
         rules.extend(builtin(&concept));
 
-        // Durable layers — one per branch.
-        for branch in &self.branches {
-            rules.extend(self.durable_rules(branch, &concept).await?);
+        // Durable layers — one per line.
+        for source in &self.sources {
+            rules.extend(self.durable_rules(source, &concept).await?);
         }
         // Transient layer — the per-query overlay, read fresh.
         rules.extend(overlay_rules(&self.changes, &concept));
 
-        // Plan cache rides a branch (peers share content-addressed plans;
-        // any branch's cache is correct). The overlay-only query has no
-        // branch, so it falls back to a private cache.
+        // Plan cache rides a line (peers share content-addressed plans;
+        // any line's cache is correct). The overlay-only query has no
+        // line, so it falls back to a private cache.
         let plan_cache = self
-            .branches
+            .sources
             .first()
-            .map(|branch| branch.plan_cache())
+            .map(|source| source.as_ref().plan_cache())
             .unwrap_or_default();
 
         let bundle = assemble(&input, rules, plan_cache);
@@ -721,8 +734,8 @@ where
                 continue;
             }
             let mut rules: Vec<DeductiveRule> = builtin(&entity);
-            for branch in &self.branches {
-                rules.extend(self.durable_rules(branch, &entity).await?);
+            for source in &self.sources {
+                rules.extend(self.durable_rules(source, &entity).await?);
             }
             rules.extend(overlay_rules(&self.changes, &entity));
             let bundle = assemble(&descriptor, rules, PlanCache::default());
