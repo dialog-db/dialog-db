@@ -695,12 +695,15 @@ impl<'a> Dispatch<'a> {
 }
 
 /// The watermark lag: instructions for every fact that entered or
-/// left the branch between the induction watermark and the current
+/// left the line between the induction watermark and the current
 /// head — arrivals as `Assert`, departures as `Retract`. Empty when
 /// the watermark is at the head (the steady state: the previous
-/// inducing instant advanced it), and always empty for a snapshot: a
-/// snapshot's head moves only through its own transactions, every one
-/// of which induces, so nothing can slip past.
+/// inducing instant advanced it).
+///
+/// A branch keeps its watermark in the induction cell; a snapshot keeps
+/// it in memory, alongside the head only it can move. Both lag the same
+/// way: a raw [`Commit`](crate::Commit) advances the head without
+/// inducing, and the next inducing transaction catches up over it.
 ///
 /// A `None` watermark (this replica has never induced) adopts the
 /// current head *without* catch-up: induction is fire-forward — a
@@ -726,19 +729,28 @@ where
     use dialog_common::Blake3Hash as NodeHash;
     use dialog_search_tree::{Change as TreeChange, ContentAddressedStorage};
 
-    let SourceRef::Branch(branch) = source else {
-        return Ok(Vec::new());
+    // The two tree roots the lag is the diff between: the head, and the
+    // one induction has already run over.
+    let (head, watermark) = match source {
+        SourceRef::Branch(branch) => {
+            let Some(head) = branch.revision() else {
+                return Ok(Vec::new());
+            };
+            let cell = branch.induction_cell();
+            cell.resolve().perform(env).await?;
+            let Some(watermark) = cell.content() else {
+                // Never induced: adopt the head, fire-forward only.
+                return Ok(Vec::new());
+            };
+            (head.tree, watermark.tree)
+        }
+        // A snapshot's watermark is in memory and always present: it
+        // opens at the tree it was taken on (fire-forward, like a branch
+        // adopting a head it never induced over) and moves with every
+        // inducing transaction.
+        SourceRef::Snapshot(snapshot) => (snapshot.revision().tree, snapshot.induced()),
     };
-    let Some(head) = branch.revision() else {
-        return Ok(Vec::new());
-    };
-    let cell = branch.induction_cell();
-    cell.resolve().perform(env).await?;
-    let Some(watermark) = cell.content() else {
-        // Never induced: adopt the head, fire-forward only.
-        return Ok(Vec::new());
-    };
-    if watermark.tree == head.tree {
+    if watermark == head {
         return Ok(Vec::new());
     }
 
@@ -747,15 +759,13 @@ where
     // select does: a pulled head's changed paths may reference
     // remote-only blocks.
     let remote = source.fallback(env).await;
-    let store = crate::NetworkedIndex::new(env, branch.archive().index(), remote);
+    let store = crate::NetworkedIndex::new(env, source.archive().index(), remote);
     let raw_store = store.clone();
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
-    let previous = crate::Index::from_hash_with_cache(
-        NodeHash::from(*watermark.tree.hash()),
-        branch.node_cache(),
-    );
+    let previous =
+        crate::Index::from_hash_with_cache(NodeHash::from(*watermark.hash()), source.node_cache());
     let next =
-        crate::Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), branch.node_cache());
+        crate::Index::from_hash_with_cache(NodeHash::from(*head.hash()), source.node_cache());
 
     let scope = vec![
         <EntityKey<Key> as KeyViewConstruct>::min().into_key()

@@ -309,11 +309,20 @@ impl<'a> SourceRef<'a> {
     }
 }
 
-/// The caches a line carries between its reads and commits. Every one
-/// is content- or version-addressed, so a set may be shared between a
-/// branch and the snapshots minted from it, and between a snapshot and
-/// the snapshots its transactions produce, without ever serving a
-/// stale entry.
+/// The caches a line carries between its reads and commits.
+///
+/// The content- and version-addressed ones — nodes, spills, plans,
+/// causality, contexts, records — are shared by handle between a branch
+/// and the snapshots minted from it: their keys are hashes or
+/// [`Version`]s, so a shared entry is never stale.
+///
+/// [`rules`](Self::rules) and [`spine`](Self::spine) are not shared, and
+/// [`Branch::caches`] hands a snapshot fresh ones. Both are single-slot:
+/// the rule cache keeps one head-tagged entry per key (one trigger
+/// footprint in total) and the spine slot one live buffered tree. A
+/// mismatched tag only misses, so sharing them would stay *correct* —
+/// but the two lines' heads diverge on the snapshot's first commit, and
+/// from there each write by one line evicts the other's.
 #[derive(Debug, Clone)]
 pub(crate) struct Caches {
     /// Tree nodes by hash, so blocks one read fetched stay warm for the next.

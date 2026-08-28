@@ -213,14 +213,18 @@ impl<'a> TransactionCommit<'a> {
         // plus any lag, and the settled batch is what `revision`
         // holds). A raced publish here at worst regresses the
         // watermark, which re-induces a covered span — idempotent
-        // under the novelty check. A snapshot keeps no watermark: its
-        // head moves only through commits like this one, every one of
-        // which induces, so it is always at the head.
-        if let SourceRef::Branch(branch) = self.source {
-            let cell = branch.induction_cell();
-            if cell.content().as_ref() != Some(&revision) {
-                cell.publish(revision.clone()).perform(env).await?;
+        // under the novelty check. A branch keeps the watermark in its
+        // induction cell; a snapshot keeps its own in memory, beside
+        // the head only it can move — a raw `Snapshot::commit` lags it
+        // exactly as a raw `Branch::commit` or a pull lags a branch's.
+        match self.source {
+            SourceRef::Branch(branch) => {
+                let cell = branch.induction_cell();
+                if cell.content().as_ref() != Some(&revision) {
+                    cell.publish(revision.clone()).perform(env).await?;
+                }
             }
+            SourceRef::Snapshot(snapshot) => snapshot.record_induction(&revision),
         }
 
         if !touches_rules {

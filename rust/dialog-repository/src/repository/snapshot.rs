@@ -80,7 +80,7 @@ use crate::repository::source::{Caches, SourceRef};
 use crate::{
     BlobArchive, Branch, Index, NetworkedIndex, Overlay, PublishError, RemoteRepository,
     RemoteSite, Repository, RepositoryArchiveExt as _, Revision, Select, SelectQuery,
-    SnapshotError,
+    SnapshotError, TreeReference,
 };
 
 #[cfg(test)]
@@ -173,6 +173,16 @@ impl Block {
 /// the base revision, so ancestry, causality, and
 /// [`log`](Self::log) walk straight through.
 ///
+/// # Induction lags like a branch's
+///
+/// Commit-time induction runs against a watermark — the revision rules
+/// were last evaluated through — and stimulates them with what has
+/// changed between it and the head. A snapshot keeps its own in memory,
+/// opened at the revision it was taken on, where a branch keeps its in a
+/// cell. A raw [`commit`](Self::commit) advances the head without
+/// inducing, exactly as it does on a branch, and the next
+/// [`transaction`](Self::transaction) catches up over that lag.
+///
 /// # Reads are local
 ///
 /// A snapshot tracks no upstream. A read that misses a block the local
@@ -184,6 +194,15 @@ impl Block {
 pub struct Snapshot {
     subject: Subject,
     head: RwLock<Head>,
+    /// The tree commit-time induction has already run over — the
+    /// in-memory counterpart of a branch's induction cell, which is all
+    /// the watermark is ever read for (the lag is a diff between two
+    /// tree roots). Starts at the tree the snapshot opened on (induction
+    /// is fire-forward: a handle does not re-derive over state it
+    /// inherited), and every inducing transaction moves it to the head
+    /// it minted. A raw [`Snapshot::commit`] leaves it behind, which is
+    /// exactly the lag the next transaction catches up over.
+    induced: RwLock<TreeReference>,
     caches: Caches,
     overlay: Overlay,
 }
@@ -215,17 +234,24 @@ impl Branch {
     /// A snapshot of this branch's current revision, or `None` before
     /// its first commit.
     ///
-    /// The snapshot shares this branch's caches: every one of them is
-    /// content- or version-addressed, so blocks, rules, and records the
-    /// branch has already read are warm for the snapshot, and what the
-    /// snapshot reads or mints warms the branch in turn. The head is
-    /// copied, not shared — the branch advancing afterwards leaves the
-    /// snapshot where it was, and the snapshot's commits never touch
-    /// the branch.
+    /// The snapshot shares this branch's content- and version-addressed
+    /// caches, so blocks, plans, and records the branch has already read
+    /// are warm for the snapshot, and what the snapshot reads or mints
+    /// warms the branch in turn. It gets its own rule cache and live
+    /// spine: those hold one head-tagged slot each, and two lines whose
+    /// heads diverge would only evict each other's (see
+    /// [`Branch::caches`]). The head is copied, not shared — the branch
+    /// advancing afterwards leaves the snapshot where it was, and the
+    /// snapshot's commits never touch the branch.
+    ///
+    /// Induction starts here too: the snapshot's watermark opens at this
+    /// revision, so its first transaction fires forward rather than
+    /// re-deriving over the branch's existing state.
     pub fn snapshot(&self) -> Option<Snapshot> {
         let revision = self.revision()?;
         Some(Snapshot {
             subject: self.subject(),
+            induced: RwLock::new(revision.tree.clone()),
             head: RwLock::new(Head {
                 revision,
                 lineage: None,
@@ -241,6 +267,7 @@ impl Snapshot {
     pub fn new(subject: Subject, revision: Revision) -> Self {
         Snapshot {
             subject,
+            induced: RwLock::new(revision.tree.clone()),
             head: RwLock::new(Head {
                 revision,
                 lineage: None,
@@ -307,6 +334,19 @@ impl Snapshot {
         head.revision = next;
         head.lineage = Some(lineage);
         Ok(())
+    }
+
+    /// The tree commit-time induction has already run over. The
+    /// in-memory counterpart of the branch induction cell: the facts
+    /// between it and the head are the lag an inducing transaction
+    /// stimulates its rules with.
+    pub(crate) fn induced(&self) -> TreeReference {
+        self.induced.read().clone()
+    }
+
+    /// Record that induction has run through `revision`.
+    pub(crate) fn record_induction(&self, revision: &Revision) {
+        *self.induced.write() = revision.tree.clone();
     }
 
     /// The shared caches this snapshot reads and commits through.
@@ -401,16 +441,18 @@ impl Snapshot {
     }
 }
 
-// A clone is the same view on its own line: it copies the head (so the
-// original advancing leaves it where it is, and vice versa), shares the
-// caches and the session overlay (both safe to share, like a branch
-// clone's), and starts without a lineage — see the type docs for why
-// two handles that may both transact from one base must mint under
-// different origins.
+// A clone is the same view on its own line: it copies the head and the
+// induction watermark (so the original advancing leaves it where it is,
+// and vice versa, and neither re-derives over what the other already
+// induced), shares the caches and the session overlay (both safe to
+// share, like a branch clone's), and starts without a lineage — see the
+// type docs for why two handles that may both transact from one base
+// must mint under different origins.
 impl Clone for Snapshot {
     fn clone(&self) -> Self {
         Snapshot {
             subject: self.subject.clone(),
+            induced: RwLock::new(self.induced()),
             head: RwLock::new(Head {
                 revision: self.revision(),
                 lineage: None,

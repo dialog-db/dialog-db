@@ -848,3 +848,178 @@ async fn it_commits_through_a_cold_handle() -> Result<()> {
     );
     Ok(())
 }
+
+/// A raw [`Snapshot::commit`] bypasses induction, exactly as a raw
+/// [`Branch::commit`] does. The snapshot's watermark records the lag,
+/// and the next inducing transaction catches up: the rule fires over
+/// the facts that arrived through the raw path.
+///
+/// The branch half of this is
+/// `induce::tests::it_catches_up_over_a_raw_commit`; without a
+/// watermark of its own a snapshot silently dropped the lag.
+#[dialog_common::test]
+async fn it_catches_up_over_a_raw_commit() -> Result<()> {
+    use dialog_query::InductiveRule;
+
+    let tagger: InductiveRule = serde_json::from_value(serde_json::json!({
+        "assert!": {
+            "with": { "tag": { "the": "derived/tag", "as": "Text" } }
+        },
+        "when": [{
+            "assert": {
+                "with": { "title": { "the": "doc/title", "as": "Text" } }
+            },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "title": { "?": { "name": "tag" } }
+            }
+        }]
+    }))
+    .expect("tagger rule compiles");
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    branch
+        .transaction()
+        .assert(tagger)
+        .commit()
+        .perform(&operator)
+        .await?;
+
+    let snapshot = branch.snapshot().expect("branch has a revision");
+    let doc: Entity = "doc:1".parse()?;
+    snapshot
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "doc/title".parse()?,
+            of: doc.clone(),
+            is: Value::String("hello".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    assert!(
+        values(&snapshot, &operator, "derived/tag", Some(&doc))
+            .await?
+            .is_empty(),
+        "a raw commit must not induce by itself"
+    );
+
+    // An ordinary transaction carrying an unrelated change: its
+    // induction sees the watermark lag and fires the rule over the raw
+    // commit's facts.
+    snapshot
+        .transaction()
+        .assert(the!("other/thing").of(doc.clone()).is("x".to_string()))
+        .commit()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        values(&snapshot, &operator, "derived/tag", Some(&doc)).await?,
+        vec![Value::String("hello".to_string())],
+        "catch-up must fire the rule over the raw commit's facts"
+    );
+    Ok(())
+}
+
+/// The rule cache holds one head-tagged entry per key — and exactly one
+/// trigger footprint — so a snapshot sharing the branch's would evict
+/// what the branch's rules-free commits carry forward. A snapshot gets
+/// its own; the branch's footprint survives a commit on the snapshot.
+#[dialog_common::test]
+async fn it_leaves_the_branch_footprint_alone() -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    branch
+        .transaction()
+        .assert(name("user:alice", "Alice"))
+        .commit()
+        .perform(&operator)
+        .await?;
+    let head = branch.revision().expect("committed");
+    assert!(
+        branch.rule_cache().footprint(&head).is_some(),
+        "a rules-free commit records the footprint at its new head"
+    );
+
+    let snapshot = branch.snapshot().expect("branch has a revision");
+    snapshot
+        .transaction()
+        .assert(name("user:bob", "Bob"))
+        .commit()
+        .perform(&operator)
+        .await?;
+
+    assert!(
+        branch.rule_cache().footprint(&head).is_some(),
+        "a commit on the snapshot must not evict the branch's footprint"
+    );
+    Ok(())
+}
+
+/// Branch and snapshot commit alternately from one base. They share a
+/// node cache, so this is where cross-line contamination of buffered
+/// state would surface: each line must read back exactly its own facts.
+#[dialog_common::test]
+async fn it_keeps_each_line_intact_across_interleaved_commits() -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let doc: Entity = "doc:1".parse()?;
+    branch
+        .transaction()
+        .assert(the!("doc/base").of(doc.clone()).is("shared".to_string()))
+        .commit()
+        .perform(&operator)
+        .await?;
+
+    let snapshot = branch.snapshot().expect("branch has a revision");
+    for round in 0..4u128 {
+        branch
+            .transaction()
+            .assert(the!("doc/branch").of(doc.clone()).is(round))
+            .commit()
+            .perform(&operator)
+            .await?;
+        snapshot
+            .transaction()
+            .assert(the!("doc/snapshot").of(doc.clone()).is(round))
+            .commit()
+            .perform(&operator)
+            .await?;
+    }
+
+    let rounds: Vec<Value> = (0..4u128).map(Value::UnsignedInt).collect();
+    let shared = vec![Value::String("shared".into())];
+    assert_eq!(
+        values(&branch, &operator, "doc/base", Some(&doc)).await?,
+        shared
+    );
+    assert_eq!(
+        values(&snapshot, &operator, "doc/base", Some(&doc)).await?,
+        shared,
+        "both lines keep the base they forked from"
+    );
+    assert_eq!(
+        values(&branch, &operator, "doc/branch", Some(&doc)).await?,
+        rounds
+    );
+    assert!(
+        values(&branch, &operator, "doc/snapshot", Some(&doc))
+            .await?
+            .is_empty(),
+        "nothing the snapshot committed reaches the branch"
+    );
+    assert_eq!(
+        values(&snapshot, &operator, "doc/snapshot", Some(&doc)).await?,
+        rounds
+    );
+    assert!(
+        values(&snapshot, &operator, "doc/branch", Some(&doc))
+            .await?
+            .is_empty(),
+        "nothing the branch committed after the fork reaches the snapshot"
+    );
+    Ok(())
+}

@@ -1,5 +1,5 @@
 use super::memory::Cell;
-use crate::rules::SharedRuleCache;
+use crate::rules::{RuleCache, SharedRuleCache};
 use crate::{ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
@@ -326,20 +326,31 @@ impl Branch {
         self.node_cache.clone()
     }
 
-    /// Shared handles to every cache this branch carries, for a
-    /// [`Snapshot`](crate::Snapshot) minted from it to read and commit
-    /// through. All content- or version-addressed, so sharing them
-    /// never serves a stale entry.
+    /// The caches a [`Snapshot`](crate::Snapshot) minted from this
+    /// branch reads and commits through.
+    ///
+    /// The content- and version-addressed ones are shared by handle:
+    /// keyed by a hash or a [`Version`], they can never serve a stale
+    /// entry, so what one line reads or mints stays warm for the other.
+    ///
+    /// The two single-slot ones are NOT: the rule cache holds one
+    /// head-tagged entry per key (and exactly one trigger footprint),
+    /// and the spine slot holds one live buffered tree. Both stay
+    /// correct when shared — a tag mismatch just misses — but the two
+    /// lines' heads diverge on the snapshot's first commit, so from
+    /// there on every write by one is an eviction of the other's, and
+    /// the branch loses the footprint its rules-free commits carry
+    /// forward. The snapshot gets its own.
     pub(crate) fn caches(&self) -> Caches {
         Caches {
             nodes: self.node_cache.clone(),
             spills: self.spill_cache.clone(),
-            rules: self.rule_cache.clone(),
+            rules: Arc::new(RuleCache::new()),
             plans: self.plan_cache.clone(),
             causality: self.causality_cache.clone(),
             contexts: self.context_cache.clone(),
             records: self.record_cache.clone(),
-            spine: self.spine.clone(),
+            spine: dialog_artifacts::SpineSlot::new(),
         }
     }
 
