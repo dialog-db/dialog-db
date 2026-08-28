@@ -926,6 +926,7 @@ mod tests {
 
     use crate::RemoteSite;
     use crate::helpers::test_repo;
+    use dialog_artifacts::{Attribute as ArtifactsAttribute, NameShape};
     use dialog_artifacts::{Entity, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::{ConditionalSend, ConditionalSync};
@@ -934,7 +935,8 @@ mod tests {
     use dialog_effects::memory::Resolve;
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::attribute::The;
-    use dialog_query::types::Any;
+    use dialog_query::type_system::Type as Kind;
+    use dialog_query::types::{Any, Type as ValueType};
     use dialog_query::{AttributeQuery, Claim, Term, the};
     use std::collections::BTreeMap;
 
@@ -1037,6 +1039,23 @@ mod tests {
     fn names_query() -> AttributeQuery {
         AttributeQuery::from(
             Term::<The>::from(the!("person/name"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        )
+    }
+
+    /// A scan of one half of the `todo.list` domain: the attribute is
+    /// a variable refined by the domain prefix and a name shape, which
+    /// is how an ordered collection (or a dictionary) is queried.
+    fn members_query(shape: NameShape) -> AttributeQuery {
+        let kind = Kind::from(ValueType::Symbol)
+            .with_prefix("todo.list/")
+            .expect("symbol is textual")
+            .with_name_shape(shape)
+            .expect("shapes compose with prefixes");
+        AttributeQuery::from(
+            Term::<The>::var("a")
+                .with_kind(kind)
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
         )
@@ -1485,6 +1504,157 @@ mod tests {
         // The pin advanced: polling again is a revision-equality
         // no-op, not another diff.
         assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// A subscription over one half of a mixed domain demands only
+    /// that half. Positions and symbols occupy disjoint first-byte
+    /// classes, so the demand cover is the shape's contiguous
+    /// sub-range: writing the OTHER half is as irrelevant as writing
+    /// an unrelated attribute, and must not re-evaluate.
+    ///
+    /// This is what makes an ordered collection cheap to watch. A
+    /// list's members and its named fields share one domain; without
+    /// the shape narrowing, renaming the list would wake every
+    /// subscription watching its contents.
+    #[dialog_common::test]
+    async fn it_ignores_the_other_half_of_a_mixed_domain() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(members_query(NameShape::Position));
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted.len(),
+            1,
+            "the one member is the initial result"
+        );
+
+        // A symbol-named fact in the SAME domain: the dictionary half.
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "the dictionary half is outside an ordered scan's cover"
+        );
+        assert_eq!(
+            subscription.results().len(),
+            1,
+            "results retained across the gated poll"
+        );
+        Ok(())
+    }
+
+    /// The complement: a write to the half the subscription DOES
+    /// demand re-evaluates and emits the new member. Without this the
+    /// test above would pass for a subscription that had simply
+    /// stopped working.
+    #[dialog_common::test]
+    async fn it_emits_a_new_member_of_the_demanded_half() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(members_query(NameShape::Position));
+        subscription.poll(&operator).await?.expect("initial");
+
+        // A second ordered member, appended after the first.
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a member landed in the demanded half");
+        assert_eq!(delta.asserted.len(), 1, "one new member");
+        assert!(delta.retracted.is_empty(), "nothing was removed");
+        assert_eq!(
+            subscription.results().len(),
+            2,
+            "both members are now in the result"
+        );
+        Ok(())
+    }
+
+    /// A domain scan must not flip the head flag. `selects_head`
+    /// treats an attribute-unconstrained scan conservatively, and a
+    /// scan that flipped it would recompute on EVERY commit —
+    /// silently turning incremental maintenance back into polling.
+    #[dialog_common::test]
+    async fn it_does_not_trip_the_head_gate_on_a_domain_scan() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(members_query(NameShape::Position));
+        subscription.poll(&operator).await?.expect("initial");
+        let baseline = subscription.recomputes();
+
+        // A commit in an entirely unrelated domain. A head-gated
+        // subscription would recompute here; a properly covered one
+        // advances its pin and does nothing.
+        branch
+            .transaction()
+            .assert(
+                the!("misc/tag")
+                    .of(Entity::new()?)
+                    .is("unrelated".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "an unrelated commit must not re-evaluate a domain scan"
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            baseline,
+            "and must not force a recompute"
+        );
         Ok(())
     }
 

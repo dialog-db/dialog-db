@@ -21,6 +21,7 @@
 //! have.
 
 pub mod unifier;
+pub mod wire;
 
 use crate::artifact::Type as ValueType;
 use crate::artifact::Value;
