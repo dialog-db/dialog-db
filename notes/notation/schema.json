@@ -4,6 +4,33 @@
   "title": "Dialog Schema",
   "description": "Schema for Dialog domain modeling: attributes, concepts, rules, formulas, and relations.",
   "$defs": {
+    "Collection": {
+      "type": "object",
+      "description": "Every entry of one domain, keyed by the name half of each attribute: the symbol-named half is a dictionary, the position-named half a sequence.",
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "The domain the entries share, without a trailing separator.",
+          "pattern": "^[a-z][a-z0-9.-]*[a-z0-9]?$"
+        },
+        "keyed": {
+          "type": "string",
+          "enum": ["dictionary", "sequence"],
+          "description": "Which half of the domain: symbol-named entries (dictionary) or position-named members in list order (sequence)."
+        }
+      },
+      "required": ["domain", "keyed"],
+      "additionalProperties": false
+    },
+    "Entry": {
+      "type": "object",
+      "description": "A binding for a keyed-collection field: the entry's key in `the` (the attribute's name half, as text) and its value in `is`. A constant `the` selects one entry; a variable binds every entry's key. Either slot may be omitted, which leaves it blank.",
+      "properties": {
+        "the": { "$ref": "#/$defs/Term" },
+        "is": { "$ref": "#/$defs/Term" }
+      },
+      "additionalProperties": false
+    },
     "Attribute": {
       "type": "object",
       "description": "A relation elevated with domain-specific invariants. An attribute's identity is structural: (the, type, cardinality).",
@@ -13,10 +40,16 @@
           "description": "Human-readable description of the attribute."
         },
         "the": {
-          "type": "string",
-          "description": "The relation in domain/name format (e.g. 'diy.cook/quantity'). Max 64 bytes total. Domain: lowercase letters, digits, hyphens, dots; must start with a letter. Name: lowercase kebab-case (no dots); must start with a letter.",
-          "maxLength": 64,
-          "pattern": "^[a-z][a-z0-9.-]*[a-z0-9]?/[a-z][a-z0-9-]*[a-z0-9]?$"
+          "description": "What the attribute selects: one relation in domain/name format, or every entry of a keyed collection.",
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "The relation in domain/name format (e.g. 'diy.cook/quantity'). Max 64 bytes total. Domain: lowercase letters, digits, hyphens, dots; must start with a letter. Name: lowercase kebab-case (no dots); must start with a letter.",
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9.-]*[a-z0-9]?/[a-z][a-z0-9-]*[a-z0-9]?$"
+            },
+            { "$ref": "#/$defs/Collection" }
+          ]
         },
         "cardinality": {
           "$ref": "#/$defs/Cardinality",
@@ -213,9 +246,12 @@
         },
         "where": {
           "type": "object",
-          "description": "Named terms mapping field names to variables or constants. For concepts, names correspond to the concept's attribute names. For formulas and constraints, names correspond to their parameter names.",
+          "description": "Named terms mapping field names to variables or constants. For concepts, names correspond to the concept's attribute names, and a keyed-collection field is bound as an entry. For formulas and constraints, names correspond to their parameter names.",
           "additionalProperties": {
-            "$ref": "#/$defs/Term"
+            "oneOf": [
+              { "$ref": "#/$defs/Term" },
+              { "$ref": "#/$defs/Entry" }
+            ]
           }
         }
       },

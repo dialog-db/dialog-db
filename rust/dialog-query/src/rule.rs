@@ -235,7 +235,6 @@ pub(crate) fn compile_rule<T: Compile>(
         .required_operands()
         .filter(|name| !reduced(name))
         .find(|name| !join.binds.contains(name))
-        .map(String::from)
         .or_else(|| {
             // A reducing rule's optional non-reduced fields join the
             // derived grouping set, and the fold looks every grouping

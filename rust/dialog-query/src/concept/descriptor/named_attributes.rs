@@ -210,6 +210,11 @@ impl NamedAttributes {
             return Err(TypeError::EmptyConcept);
         }
         for field in map.values() {
+            if field.is_optional() && field.the().attribute().is_none() {
+                return Err(TypeError::OptionalCollection {
+                    domain: field.domain().to_string(),
+                });
+            }
             if let Some(target) = field.conforms() {
                 if field.content_type() != Some(Type::Entity) {
                     return Err(TypeError::NonEntityConformance {

@@ -4,8 +4,9 @@ pub use named_attributes::{ConceptFieldDescriptor, NamedAttributes};
 
 use std::iter;
 
+use crate::Binding;
 use crate::Predicate;
-use crate::attribute::{AttributeDescriptor, Attribution};
+use crate::attribute::{AttributeDescriptor, Attribution, Relation};
 use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
@@ -14,6 +15,7 @@ use crate::selection::{Match, Selection};
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::type_system::{ConceptRef, Primitive, Type as Kind};
+use crate::types::Any;
 use crate::types::Scalar;
 use crate::{
     Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
@@ -111,13 +113,44 @@ impl ConceptDescriptor {
     /// `Absent`, so they are not subject to the required-head
     /// grounding check. Use [`Self::with`] to enumerate every
     /// attribute including optional ones.
-    pub fn required_operands(&self) -> impl Iterator<Item = &str> {
-        iter::once("this").chain(
+    pub fn required_operands(&self) -> impl Iterator<Item = String> + '_ {
+        iter::once("this".to_string()).chain(
             self.with()
                 .iter()
                 .filter(|(_, attribute)| !attribute.is_optional())
-                .map(|(name, _)| name),
+                .flat_map(|(name, field)| Self::field_operands(name, field)),
         )
+    }
+
+    /// Every operand of this concept: `this`, each field, and the
+    /// key operand of each keyed-collection field.
+    pub fn operands(&self) -> impl Iterator<Item = String> + '_ {
+        iter::once("this".to_string()).chain(
+            self.with()
+                .iter()
+                .flat_map(|(name, field)| Self::field_operands(name, field)),
+        )
+    }
+
+    /// The operands one field contributes: its own name, plus the
+    /// key operand when it is a keyed collection. A collection
+    /// entry is a `(key, value)` pair, and both halves are bound by
+    /// the concept's own rule, so both are operands a query may
+    /// bind and a conclusion carries.
+    fn field_operands(name: &str, field: &ConceptFieldDescriptor) -> Vec<String> {
+        match field.the() {
+            Relation::Attribute(_) => vec![name.to_string()],
+            Relation::Collection { .. } => {
+                vec![name.to_string(), Relation::key_operand(name)]
+            }
+        }
+    }
+
+    /// The keyed-collection fields of this concept.
+    pub fn collections(&self) -> impl Iterator<Item = (&str, &ConceptFieldDescriptor)> {
+        self.with()
+            .iter()
+            .filter(|(_, field)| field.the().attribute().is_none())
     }
 
     /// Derives a `Schema` from this descriptor's attributes.
@@ -356,6 +389,23 @@ impl From<&ConceptDescriptor> for Schema {
             );
         }
 
+        // A collection field's key rides as its own operand: the
+        // name half of the matched attribute, bound by the concept's
+        // rule through `dialog/attribute-parts`. Text, because a
+        // position and a symbol are both spelled as text once split
+        // from the domain.
+        for (name, field) in predicate.collections() {
+            schema.insert(
+                Relation::key_operand(name),
+                Field {
+                    description: format!("The key of an entry of {name}"),
+                    content_type: Some(Kind::from(Type::String)),
+                    requirement: Requirement::Optional,
+                    cardinality: field.cardinality(),
+                },
+            );
+        }
+
         if !schema.contains("this") {
             schema.insert(
                 "this".into(),
@@ -469,11 +519,46 @@ impl<'a> Builder<'a> {
 /// Field values are accessed by the term bindings from the query.
 /// The `terms` map provides the mapping from field names to variable terms
 /// used in the match.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ConceptConclusion {
     this: Entity,
     terms: Parameters,
     source: Match,
+}
+
+/// A conclusion is a row: its identity is the entity plus the value
+/// each operand resolved to. Whether an operand was supplied as a
+/// constant or bound through a variable is how the row was *asked
+/// for*, not what it *is* — a subscription re-deriving one entity
+/// pins `this` to a constant, and the rows it yields must still
+/// compare equal to the ones retained from the open query, or every
+/// maintenance emits a retract-and-reassert of unchanged rows.
+impl PartialEq for ConceptConclusion {
+    fn eq(&self, other: &Self) -> bool {
+        self.this == other.this && self.values() == other.values()
+    }
+}
+
+impl ConceptConclusion {
+    /// Each operand's resolved value, `None` when absent or unbound.
+    fn values(&self) -> BTreeMap<&str, Option<Value>> {
+        self.terms
+            .iter()
+            .map(|(operand, term)| {
+                let value = match term {
+                    Term::Constant(value) => Some(value.clone()),
+                    Term::Variable {
+                        name: Some(name), ..
+                    } => match self.source.lookup(&Term::<Any>::var(name.clone())) {
+                        Ok(Binding::Present(value)) => Some(value),
+                        _ => None,
+                    },
+                    Term::Variable { name: None, .. } => None,
+                };
+                (operand.as_str(), value)
+            })
+            .collect()
+    }
 }
 
 impl ConceptConclusion {

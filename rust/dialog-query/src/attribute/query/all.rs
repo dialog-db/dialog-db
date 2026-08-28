@@ -220,14 +220,27 @@ impl AttributeQueryAll {
     /// Returns the schema describing this application's parameters.
     pub fn schema(&self) -> Schema {
         let requirement = Requirement::new_group();
+        // A ranged attribute slot (a variable refined by a domain
+        // prefix) constrains the scan by itself: the AEV range over
+        // the prefix is the lookup, and every slot is derived from
+        // what it yields. Otherwise one of the slots has to be
+        // supplied for the scan to be more than a full sweep.
+        let slot = if self.the.is_ranged() {
+            Requirement::Optional
+        } else {
+            requirement.required()
+        };
         let mut schema = Schema::new();
 
+        // The slot carries the term's own kind, so a domain-refined
+        // attribute variable keeps its refinement through inference
+        // and the planner's re-stamping — the same way `is` does.
         schema.insert(
             "the".to_string(),
             Field {
                 description: "The relation identifier".to_string(),
-                content_type: Some(Kind::from(Type::Symbol)),
-                requirement: requirement.required(),
+                content_type: Some(self.the.kind().unwrap_or_else(|| Kind::from(Type::Symbol))),
+                requirement: slot.clone(),
                 cardinality: Cardinality::One,
             },
         );
@@ -237,7 +250,7 @@ impl AttributeQueryAll {
             Field {
                 description: "Entity of the relation".to_string(),
                 content_type: Some(Kind::from(Type::Entity)),
-                requirement: requirement.required(),
+                requirement: slot.clone(),
                 cardinality: Cardinality::One,
             },
         );
@@ -249,7 +262,7 @@ impl AttributeQueryAll {
             Field {
                 description: "Value of the relation".to_string(),
                 content_type: self.is.kind(),
-                requirement: requirement.required(),
+                requirement: slot.clone(),
                 cardinality: Cardinality::One,
             },
         );
@@ -259,7 +272,7 @@ impl AttributeQueryAll {
             Field {
                 description: "Causal stamp of the relation".to_string(),
                 content_type: Some(Kind::from(Type::Bytes)),
-                requirement: requirement.required(),
+                requirement: slot,
                 cardinality: Cardinality::One,
             },
         );
@@ -269,7 +282,10 @@ impl AttributeQueryAll {
 
     /// Estimate cost for Cardinality::Many semantics.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        let the = self.the.is_bound(env);
+        // A ranged attribute costs as a bound one: the prefix range
+        // is an AEV lookup, wider than one attribute's but the same
+        // access path.
+        let the = self.the.is_bound(env) || self.the.is_ranged();
         let of = self.of.is_bound(env);
         let is = self.is.is_bound(env);
 

@@ -489,6 +489,69 @@ mod tests {
         assert_eq!(roundtrip(&kind), kind);
     }
 
+    /// The cliff the `domain` slot exists to remove: a name shape
+    /// narrows a scan to the shape's contiguous byte class ONLY when
+    /// the prefix ends at the name boundary. One byte short and the
+    /// shape falls back to a per-entry filter over the whole prefix
+    /// range — same rows, a wider scan, and nothing to notice.
+    ///
+    /// Writing the domain without its separator makes the bad state
+    /// unwritable: there is no way to spell a prefix that stops one
+    /// byte early.
+    #[dialog_common::test]
+    async fn it_cannot_write_a_prefix_that_misses_the_name_boundary() {
+        use crate::artifact::{ArtifactSelector, Constrained};
+        use dialog_artifacts::tree::selector_range;
+        use dialog_search_tree::Manifest;
+
+        // What the format produces: a domain, separator included.
+        let whole = decode(&serde_json::json!({
+            "type": {"symbol": {}},
+            "domain": {"is": "todo.list"},
+            "name": {"case": "position"}
+        }))
+        .expect("a domain and a name shape");
+        let refinement = whole.refinement().expect("refined");
+        assert_eq!(
+            refinement.prefix.as_deref(),
+            Some("todo.list/"),
+            "the separator is supplied on the way in, not by the writer"
+        );
+
+        // The degraded shape is still expressible through the raw
+        // `starts-with` escape hatch — this pins the DIFFERENCE, so a
+        // future change that routed domains through it would fail
+        // here rather than quietly widen every collection scan.
+        let partial = decode(&serde_json::json!({
+            "type": {"symbol": {}},
+            "starts-with": "todo.list/N",
+            "name": {"case": "position"}
+        }))
+        .expect("a partial prefix is a valid lexical constraint");
+
+        let range = |kind: &Type| {
+            let selector: ArtifactSelector<Constrained> = ArtifactSelector::new()
+                .the_starting_with(
+                    kind.refinement()
+                        .and_then(|r| r.prefix.clone())
+                        .expect("a prefix"),
+                )
+                .with_name_shape(
+                    kind.refinement()
+                        .and_then(|r| r.name_shape)
+                        .expect("a shape"),
+                );
+            selector_range(&selector, &Manifest::default())
+        };
+
+        assert_ne!(
+            range(&whole),
+            range(&partial),
+            "a boundary prefix narrows to the shape's byte class; a partial \
+             one cannot, and scans wider"
+        );
+    }
+
     /// Reading is looser than writing: the derived shape a rule was
     /// stored under before this module still loads.
     #[dialog_common::test]

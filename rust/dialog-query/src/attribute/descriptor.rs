@@ -98,22 +98,56 @@ impl Relation {
         }
     }
 
-    /// How this relation is selected: a constant for one attribute, a
-    /// variable refined by the domain and key kind for a collection.
-    /// The refined form is what narrows a domain scan to the demanded
-    /// half — see `dialog_artifacts::NameShape`.
-    pub fn term(&self) -> Term<The> {
+    /// How this relation is selected when lowered for the field
+    /// `field`: a constant for one attribute, a variable refined by
+    /// the domain and key kind for a collection. The refined form is
+    /// what narrows a domain scan to the demanded half — see
+    /// `dialog_artifacts::NameShape`.
+    ///
+    /// The variable is named after the field (`<field>/the`) so two
+    /// collection fields on one concept scan independently rather
+    /// than unifying on a shared name.
+    pub fn term(&self, field: &str) -> Term<The> {
         match self {
             Relation::Attribute(the) => Term::Constant(Value::from(the.clone())),
-            Relation::Collection { domain, keyed } => {
-                let kind = Kind::from(Type::Symbol)
+            Relation::Collection { .. } => Term::<The>::var(Self::attribute_variable(field))
+                .with_kind(
+                    self.kind()
+                        .expect("a collection is refined by construction"),
+                ),
+        }
+    }
+
+    /// The kind a collection's attribute slot is refined to: a symbol
+    /// under the domain prefix, narrowed to the key kind's name shape.
+    /// `None` for a plain attribute, which is selected by constant.
+    pub fn kind(&self) -> Option<Kind> {
+        match self {
+            Relation::Attribute(_) => None,
+            Relation::Collection { domain, keyed } => Some(
+                Kind::from(Type::Symbol)
                     .with_prefix(format!("{}/", domain.as_str()))
                     .expect("symbol is textual")
                     .with_name_shape(NameShape::from(*keyed))
-                    .expect("a name shape composes with a domain prefix");
-                Term::<The>::var("the").with_kind(kind)
-            }
+                    .expect("a name shape composes with a domain prefix"),
+            ),
         }
+    }
+
+    /// The body variable a collection field's scan binds the matched
+    /// attribute to. Internal to the concept's own rule: the key an
+    /// author sees is the attribute's name half, bound to the
+    /// [`key_operand`](Self::key_operand) by `dialog/attribute-parts`.
+    pub fn attribute_variable(field: &str) -> String {
+        format!("{field}/the")
+    }
+
+    /// The operand carrying a collection field's key: the name half
+    /// of each matched attribute. `{?key: ?value}` under the field in
+    /// notation is this operand and the field's own, and the two
+    /// serialize back into that form.
+    pub fn key_operand(field: &str) -> String {
+        format!("{field}/key")
     }
 }
 
@@ -326,7 +360,7 @@ impl AttributeDescriptor {
         };
 
         Ok(AttributeQuery::new(
-            self.the().term(),
+            self.the().term("the"),
             of,
             is,
             cause,
@@ -690,7 +724,7 @@ mod collection_tests {
             Some(Type::String),
         );
         assert!(
-            matches!(descriptor.the().term(), Term::Constant(_)),
+            matches!(descriptor.the().term("title"), Term::Constant(_)),
             "an attribute pins `the`"
         );
         assert_eq!(descriptor.domain(), "todo.list");
@@ -707,7 +741,7 @@ mod collection_tests {
             (Keyed::Dictionary, NameShape::Symbol),
         ] {
             let descriptor = collection(keyed);
-            let term = descriptor.the().term();
+            let term = descriptor.the().term("member");
             assert!(
                 matches!(term, Term::Variable { .. }),
                 "a collection leaves `the` open"

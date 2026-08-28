@@ -169,7 +169,7 @@ impl AttributeQueryOnly {
     /// VERIFY overhead for VAE-based lookups, so no additional adjustment
     /// is needed here.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        let the = self.the().is_bound(env);
+        let the = self.the().is_bound(env) || self.the().is_ranged();
         let of = self.of().is_bound(env);
         let is = self.is().is_bound(env);
 

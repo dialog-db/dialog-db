@@ -683,7 +683,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         let value_param = <#field_types as dialog_query::ConceptField>::term(raw_param);
                         let descriptor = <<#field_types as dialog_query::ConceptField>::Attribute
                             as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor();
-                        let the_term = descriptor.the().term();
+                        let the_term = descriptor.the().term(stringify!(#field_names));
                         let cardinality = Some(descriptor.cardinality());
                         let query = dialog_query::AttributeQuery::new(
                             the_term,

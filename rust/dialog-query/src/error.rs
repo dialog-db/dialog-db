@@ -121,6 +121,19 @@ pub enum TypeError {
         /// The offending attribute selector.
         the: String,
     },
+    /// A keyed collection field is marked optional. A collection's
+    /// key is projected by a formula over the matched attribute, and
+    /// a formula filters an `Absent` input, so an optional collection
+    /// could never yield the widened row it promises. A collection
+    /// is already zero-or-more; leave it required.
+    #[error(
+        "collection field over {domain} is optional; a keyed collection is \
+         zero-or-more already and cannot be widened"
+    )]
+    OptionalCollection {
+        /// The collection's domain.
+        domain: String,
+    },
 
     /// A rule declares a parameter that none of its premises use.
     #[error("Rule {rule} does not use parameter \"{parameter}\"")]

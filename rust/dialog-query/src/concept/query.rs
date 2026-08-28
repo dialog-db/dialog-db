@@ -14,17 +14,20 @@ pub use rules::ConceptRules;
 
 use std::fmt;
 
+use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::Disjunction;
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
 use crate::source::SelectRules;
+use crate::types::Any;
 use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
 };
 use dialog_capability::Provider;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt::Display;
 
 /// Extract a Match with parameter names from a Match with user
@@ -106,14 +109,119 @@ fn merge_parameters(
 ///
 /// Serializes as the formal notation:
 /// `{ "assert": <ConceptDescriptor>, "where": <Parameters> }`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// A keyed-collection field is bound as an **entry**: under the field,
+/// `{"the": <key term>, "is": <value term>}` — a mini fact, in the
+/// slots an attribute query already uses. Internally the pair is two
+/// operands, the field and its key operand
+/// ([`Relation::key_operand`]), and the two forms convert on the
+/// wire: the entry is what a document holds, the operands are what
+/// the rule binds.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConceptQuery {
     /// The concept predicate being applied.
-    #[serde(rename = "assert")]
     pub predicate: ConceptDescriptor,
     /// The term bindings for this concept application.
-    #[serde(rename = "where")]
     pub terms: Parameters,
+}
+
+/// One binding of a `where` map on the wire: a term, or a
+/// collection entry.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Bound {
+    Entry {
+        #[serde(default = "Term::blank", skip_serializing_if = "Term::is_blank")]
+        the: Term<Any>,
+        #[serde(default = "Term::blank", skip_serializing_if = "Term::is_blank")]
+        is: Term<Any>,
+    },
+    Term(Term<Any>),
+}
+
+#[derive(Serialize)]
+struct ConceptQueryOut<'a> {
+    assert: &'a ConceptDescriptor,
+    #[serde(rename = "where")]
+    terms: BTreeMap<&'a str, Bound>,
+}
+
+#[derive(Deserialize)]
+struct ConceptQueryIn {
+    assert: ConceptDescriptor,
+    #[serde(rename = "where")]
+    terms: BTreeMap<String, serde_json::Value>,
+}
+
+impl Serialize for ConceptQuery {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut terms: BTreeMap<&str, Bound> = BTreeMap::new();
+        let mut keys: BTreeMap<String, &str> = BTreeMap::new();
+        for (name, _) in self.predicate.collections() {
+            keys.insert(Relation::key_operand(name), name);
+        }
+        for (name, term) in self.terms.iter() {
+            if let Some(field) = keys.get(name) {
+                // The key half of an entry: folded under its field.
+                let is = self.terms.get(field).cloned().unwrap_or_else(Term::blank);
+                terms.insert(
+                    field,
+                    Bound::Entry {
+                        the: term.clone(),
+                        is,
+                    },
+                );
+            } else if self.predicate.collections().any(|(field, _)| field == name) {
+                terms.entry(name).or_insert_with(|| Bound::Entry {
+                    the: Term::blank(),
+                    is: term.clone(),
+                });
+            } else {
+                terms.insert(name, Bound::Term(term.clone()));
+            }
+        }
+        ConceptQueryOut {
+            assert: &self.predicate,
+            terms,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ConceptQuery {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let raw = ConceptQueryIn::deserialize(deserializer)?;
+        let mut terms = Parameters::new();
+        for (name, value) in raw.terms {
+            let collection = raw.assert.collections().any(|(field, _)| field == name);
+            // An entry object carries `the`/`is` and no `?`; anything
+            // else under a collection field is a bare value term,
+            // which binds every entry (`{_: ?value}`).
+            let entry = collection
+                && value.as_object().is_some_and(|map| {
+                    !map.contains_key("?") && (map.contains_key("the") || map.contains_key("is"))
+                });
+            let bound: Bound = if entry {
+                serde_json::from_value(value).map_err(D::Error::custom)?
+            } else {
+                Bound::Term(serde_json::from_value(value).map_err(D::Error::custom)?)
+            };
+            match bound {
+                Bound::Entry { the, is } => {
+                    terms.insert(Relation::key_operand(&name), the);
+                    terms.insert(name, is);
+                }
+                Bound::Term(term) => {
+                    terms.insert(name, term);
+                }
+            }
+        }
+        Ok(ConceptQuery {
+            predicate: raw.assert,
+            terms,
+        })
+    }
 }
 
 impl ConceptQuery {
@@ -385,6 +493,97 @@ impl Display for ConceptQuery {
 
 #[cfg(test)]
 mod tests {
+    mod entry_form {
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+        use crate::attribute::{AttributeDescriptor, Keyed, Relation};
+        use crate::concept::descriptor::ConceptFieldDescriptor;
+        use crate::{Cardinality, ConceptDescriptor, ConceptQuery, Term, Type};
+        use dialog_artifacts::Symbol;
+        use std::str::FromStr;
+
+        fn ordered() -> ConceptDescriptor {
+            ConceptDescriptor::try_from(vec![(
+                "member".to_owned(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::over(
+                    Relation::collection(
+                        Symbol::from_str("todo.list").expect("a valid domain"),
+                        Keyed::Sequence,
+                    ),
+                    "members",
+                    Cardinality::Many,
+                    Some(Type::String),
+                )),
+            )])
+            .expect("a collection field builds a concept")
+        }
+
+        /// `member: {the: ?key, is: ?member}` on the wire is the two
+        /// operands `member/key` and `member` in the query, and
+        /// writes back as the entry.
+        #[dialog_common::test]
+        fn it_reads_and_writes_a_collection_entry() {
+            let wire = serde_json::json!({
+                "assert": ordered(),
+                "where": {
+                    "this": {"?": {"name": "list"}},
+                    "member": {"the": {"?": {"name": "key"}}, "is": {"?": {"name": "member"}}}
+                }
+            });
+            let query: ConceptQuery = serde_json::from_value(wire.clone()).expect("parses");
+            assert_eq!(query.terms.get("member/key"), Some(&Term::var("key")));
+            assert_eq!(query.terms.get("member"), Some(&Term::var("member")));
+            assert_eq!(query.terms.get("this"), Some(&Term::var("list")));
+
+            let written = serde_json::to_value(&query).expect("serializes");
+            assert_eq!(
+                written["where"], wire["where"],
+                "the entry form round-trips"
+            );
+        }
+
+        /// A literal key is a constant `the`; a bare term under a
+        /// collection field binds every entry with the key blank, and
+        /// the operand form is accepted on the way in.
+        #[dialog_common::test]
+        fn it_accepts_literal_bare_and_operand_forms() {
+            let literal: ConceptQuery = serde_json::from_value(serde_json::json!({
+                "assert": ordered(),
+                "where": {"member": {"the": "N5", "is": {"?": {"name": "m"}}}}
+            }))
+            .expect("parses");
+            assert_eq!(
+                literal.terms.get("member/key"),
+                Some(&Term::constant("N5".to_string()))
+            );
+
+            let bare: ConceptQuery = serde_json::from_value(serde_json::json!({
+                "assert": ordered(),
+                "where": {"member": {"?": {"name": "m"}}}
+            }))
+            .expect("parses");
+            assert_eq!(bare.terms.get("member"), Some(&Term::var("m")));
+            assert!(bare.terms.get("member/key").is_none());
+            let written = serde_json::to_value(&bare).expect("serializes");
+            assert_eq!(
+                written["where"]["member"],
+                serde_json::json!({"is": {"?": {"name": "m"}}}),
+                "a bare value writes as an entry with no key"
+            );
+
+            let operands: ConceptQuery = serde_json::from_value(serde_json::json!({
+                "assert": ordered(),
+                "where": {
+                    "member": {"?": {"name": "m"}},
+                    "member/key": {"?": {"name": "k"}}
+                }
+            }))
+            .expect("parses");
+            assert_eq!(operands.terms.get("member/key"), Some(&Term::var("k")));
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -1012,7 +1211,7 @@ mod tests {
         .unwrap();
         let rule = DeductiveRule::from(&predicate);
 
-        let params: HashSet<&str> = rule.parameters().collect();
+        let params: HashSet<String> = rule.parameters().collect();
         assert!(params.contains("this"));
         assert!(params.contains("name"));
         assert!(params.contains("age"));

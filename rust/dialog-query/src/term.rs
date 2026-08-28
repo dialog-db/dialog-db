@@ -247,6 +247,20 @@ impl<T: Typed> Term<T> {
         }
     }
 
+    /// Returns `true` if this term is a variable whose kind carries a
+    /// lexical prefix: not bound, but *ranged*. A ranged attribute
+    /// slot constrains a scan on its own (an AEV range over the
+    /// prefix), which is what lets a keyed collection's domain scan
+    /// plan without any of its slots bound.
+    pub fn is_ranged(&self) -> bool {
+        matches!(self, Term::Variable { .. })
+            && self
+                .kind()
+                .as_ref()
+                .and_then(type_system::Type::refinement)
+                .is_some_and(|refinement| refinement.prefix.is_some())
+    }
+
     /// Adds this term's variable name to the environment.
     ///
     /// Only named variables are added; constants and blanks are ignored.

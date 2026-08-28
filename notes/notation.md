@@ -343,6 +343,61 @@ rule sees that an absent binding can arrive through this boundary.
 Marking an attribute optional changes the concept's identity: a required
 attribute hashes as an empty map, an optional one as `{"optional": true}`.
 
+#### Keyed collections
+
+A field may select *every entry of a domain* rather than one attribute. Its
+`the` names a domain and which half of it (see [Name](#name)): the
+symbol-named half is a **dictionary**, the position-named half a
+**sequence**. `as` is the type of each entry's value.
+
+```json
+{
+  "with": {
+    "title": { "the": "todo.list/title", "as": "Text" },
+    "member": {
+      "description": "The list's members, in order",
+      "the": { "domain": "todo.list", "keyed": "sequence" },
+      "cardinality": "many",
+      "as": "Text"
+    }
+  }
+}
+```
+
+The facts behind such a field are ordinary claims whose attribute's name half
+is the entry's key: `todo.list/N` and `todo.list/N5` are two members. A
+collection field is therefore *many facts* by construction; `cardinality` is
+per entry (whether one key may hold two values), not about the collection.
+
+A collection field cannot be optional: it is zero-or-more already, and an
+entity with no entries simply yields no rows.
+
+Because a dictionary takes every symbol-named fact in its domain, a dictionary
+field's domain must be its own — a scalar attribute declared in the same
+domain would read as one more entry. A sequence shares a domain with scalars
+safely, since positions and symbols are disjoint by first byte.
+
+**Querying.** Each matched entry is one row binding the field to the entry's
+value and the field's **key** to the entry's key, the name half as text (`N5`,
+`title`). In a `where`, a collection field is bound as an **entry**, a mini
+fact in the slots an attribute query uses: `the` for the key, `is` for the
+value.
+
+```json
+{ "member": { "the": { "?": { "name": "key" } }, "is": { "?": { "name": "member" } } } }
+```
+
+A constant `the` selects one entry (`{"the": "N5", "is": …}`); a bare term
+under the field (`"member": {"?": {"name": "m"}}`) binds every entry with the
+key unconstrained. The key joins, filters, and feeds formulas like any other
+term; for a sequence it is what `dialog/position` reads to derive a neighbour's
+position. In a conclusion the pair is the field's operand and its key operand,
+`<field>/key`, which the entry form spells on the wire.
+
+Internally the concept's rule scans the domain with the attribute slot refined
+by `domain` and `name.case`, and projects the key with `dialog/attribute-parts`
+(`of` → `domain`, `name`).
+
 ### Deductive Rules
 
 An advanced form of composition that goes beyond stitching attributes together. Rules can impose additional constraints, compute derived values using formulas, and follow transitive paths across relations. A rule's body is a set of premises; its conclusion is a concept instance. Rules are resolved at query time by the semantic layer.

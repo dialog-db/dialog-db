@@ -324,18 +324,22 @@ pub fn analyze_with(
     kind: RuleKind,
     reduce: Vec<(String, ReduceSpec)>,
 ) -> Result<AnalyzedRule, AnalysisError> {
-    // Induction tracks a rule's reach per attribute (the `touched`
-    // sets in `transaction::induce`). A keyed collection spans a
-    // domain instead, so a rule concluding into one would derive
-    // facts nothing could see it had touched — its consumers would
-    // never re-evaluate. Refuse it here rather than let the induction
-    // machinery silently drop it.
-    for (field, descriptor) in conclusion.with().iter() {
-        if descriptor.descriptor().the().attribute().is_none() {
-            return Err(AnalysisError::CollectionHead {
-                field: field.to_string(),
-                domain: descriptor.descriptor().the().domain().to_owned(),
-            });
+    // A deductive head over a collection derives `(key, value)`
+    // rows, which is exactly what the concept's own self-rule does.
+    // An inductive head has to WRITE a fact, and induction tracks a
+    // rule's reach per attribute (the `touched` sets in
+    // `transaction::induce`); a collection spans a domain, so its
+    // facts would land where nothing recorded the rule had reached.
+    // Refuse that case until induction's reach is a cover.
+    if kind == RuleKind::Inductive {
+        for (field, descriptor) in conclusion.with().iter() {
+            let relation = descriptor.descriptor().the();
+            if relation.attribute().is_none() {
+                return Err(AnalysisError::CollectionHead {
+                    field: field.to_string(),
+                    domain: relation.domain().to_owned(),
+                });
+            }
         }
     }
 
@@ -517,9 +521,9 @@ mod tests {
                 Some(ValueType::Entity),
             ),
         )])
-        .expect("the concept itself is fine — only deriving one is not");
+        .expect("the concept itself is fine — only inducing one is not");
 
-        let error = analyze(conclusion, Vec::new(), RuleKind::Deductive)
+        let error = analyze(conclusion, Vec::new(), RuleKind::Inductive)
             .expect_err("a collection head is refused");
 
         assert!(

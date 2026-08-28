@@ -223,7 +223,7 @@ where
         let value: Term<A::Type> = is.into();
         let descriptor = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let query = DynamicAttributeQuery::new(
-            descriptor.the().term(),
+            descriptor.the().term("the"),
             of.into(),
             value.into(),
             cause.as_cause_term(),

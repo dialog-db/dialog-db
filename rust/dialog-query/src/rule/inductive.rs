@@ -128,7 +128,7 @@ impl InductiveRule {
     }
 
     /// Required operand names of the head.
-    pub fn required_operands(&self) -> impl Iterator<Item = &str> {
+    pub fn required_operands(&self) -> impl Iterator<Item = String> + '_ {
         self.conclusion().required_operands()
     }
 
