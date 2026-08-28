@@ -52,6 +52,18 @@ pub enum TypeError {
         actual: Box<Term<Any>>,
     },
 
+    /// A keyed collection field was asked to produce one fact.
+    #[error(
+        "Binding \"{binding}\" is the keyed collection {domain}: every \
+         entry needs its own key, so it cannot take a single value"
+    )]
+    UnkeyedCollection {
+        /// The binding's name.
+        binding: String,
+        /// The collection's domain.
+        domain: String,
+    },
+
     /// A required binding was not provided.
     #[error("Required binding \"{binding}\" was omitted")]
     OmittedRequirement {
@@ -168,6 +180,20 @@ pub enum TypeError {
     NegatedOptional {
         /// The offending rule.
         rule: Box<Rule>,
+    },
+
+    /// A rule concludes into a keyed collection field, which
+    /// induction cannot track. See
+    /// [`AnalysisError::CollectionHead`].
+    #[error(
+        "conclusion field {field} is a keyed collection ({domain}): a rule \
+         cannot derive one"
+    )]
+    CollectionHead {
+        /// The offending head field.
+        field: String,
+        /// The collection's domain.
+        domain: String,
     },
 
     /// A rule negates its own conclusion concept: a negative
@@ -411,6 +437,17 @@ pub enum FieldTypeError {
         /// Actual term provided.
         actual: Box<Term<Any>>,
     },
+    /// A collection field was asked to produce one fact. Its facts
+    /// are keyed per entry, so the key comes from the writer rather
+    /// than from the schema.
+    #[error(
+        "Cannot write a single fact for the keyed collection {domain}: \
+         every entry needs its own key"
+    )]
+    UnkeyedCollection {
+        /// The collection's domain.
+        domain: String,
+    },
     /// A required term is missing.
     #[error("Required term is missing")]
     OmittedRequirement,
@@ -433,6 +470,9 @@ impl FieldTypeError {
                 expected,
                 actual,
             },
+            FieldTypeError::UnkeyedCollection { domain } => {
+                TypeError::UnkeyedCollection { binding, domain }
+            }
             FieldTypeError::OmittedRequirement => TypeError::OmittedRequirement { binding },
             FieldTypeError::BlankRequirement => TypeError::BlankRequirement { binding },
         }
@@ -811,6 +851,21 @@ pub enum AnalysisError {
     Inference {
         /// Description of the conflict.
         reason: String,
+    },
+    /// A rule concludes into a keyed collection field. Induction
+    /// tracks which attributes a rule touches, per attribute; a
+    /// collection spans a domain and has no single attribute to
+    /// track, so a rule deriving one could not be re-evaluated when
+    /// its inputs changed.
+    #[error(
+        "conclusion field {field} is a keyed collection ({domain}): a rule \
+         cannot derive one"
+    )]
+    CollectionHead {
+        /// The offending head field.
+        field: String,
+        /// The collection's domain.
+        domain: String,
     },
     /// A conclusion variable's inferred type admits `Nothing`:
     /// the rule could produce `Absent` in a required slot.

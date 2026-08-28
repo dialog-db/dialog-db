@@ -32,8 +32,11 @@
 //! stored before this module loads unchanged. Only the form above is
 //! ever written.
 
+use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json};
+use std::error::Error as StdError;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use crate::artifact::{Type as ValueType, Value, decode_value};
 
@@ -78,8 +81,8 @@ pub enum WireError {
     Uninhabited(&'static str),
 }
 
-impl std::fmt::Display for WireError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for WireError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::UnknownVariant(name) => {
                 write!(f, "unknown type variant {name:?}")
@@ -93,7 +96,7 @@ impl std::fmt::Display for WireError {
     }
 }
 
-impl std::error::Error for WireError {}
+impl StdError for WireError {}
 
 /// A [`Type`] in its wire form: `serialize` writes the named shape,
 /// `deserialize` accepts it and the legacy derived shape alike.
@@ -109,7 +112,7 @@ impl Serialize for Wire {
 impl<'de> Deserialize<'de> for Wire {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let json = Json::deserialize(deserializer)?;
-        decode(&json).map(Wire).map_err(serde::de::Error::custom)
+        decode(&json).map(Wire).map_err(DeError::custom)
     }
 }
 

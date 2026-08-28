@@ -5,11 +5,14 @@ use crate::attribute::query::AttributeQuery;
 use crate::error::{FieldTypeError, TypeError};
 use crate::schema::Cardinality;
 use crate::term::Term;
+use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Type;
+use dialog_artifacts::{NameShape, Symbol};
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// A validated attribute–value pair with its cardinality, produced by
 /// [`AttributeDescriptor::resolve`]. Used inside [`ConceptStatement`](crate::concept::descriptor::ConceptStatement)
@@ -24,6 +27,114 @@ pub struct Attribution {
     pub cardinality: Cardinality,
 }
 
+/// What an attribute descriptor selects: one attribute, or every
+/// entry of a keyed collection.
+///
+/// Dialog stores a collection as facts sharing a domain whose *name*
+/// half is the entry's key — `todo.list/title` for a dictionary
+/// entry, `todo.list/N5` for a sequence member. The two key kinds are
+/// disjoint by their first byte (symbols lowercase, positions
+/// uppercase), so one domain can carry both and a scan can take
+/// either half as a contiguous key range.
+///
+/// The key kind is the variant rather than a field, so a collection
+/// cannot be described with a key kind that disagrees with it: there
+/// is no state to validate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Relation {
+    /// One attribute, named in full: `todo.list/title`.
+    Attribute(The),
+    /// Every entry of one domain, keyed by name.
+    Collection {
+        /// The domain the entries share, without a trailing separator.
+        domain: Symbol,
+        /// Which half of the domain: symbol-named entries
+        /// (a dictionary) or position-named members (a sequence).
+        keyed: Keyed,
+    },
+}
+
+/// Which half of a domain a [`Relation::Collection`] selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Keyed {
+    /// Symbol-named entries: a dictionary.
+    Dictionary,
+    /// Position-named members, in list order: a sequence.
+    Sequence,
+}
+
+impl From<Keyed> for NameShape {
+    fn from(keyed: Keyed) -> Self {
+        match keyed {
+            Keyed::Dictionary => NameShape::Symbol,
+            Keyed::Sequence => NameShape::Position,
+        }
+    }
+}
+
+impl Relation {
+    /// A collection of `domain`, keyed as `keyed`.
+    pub fn collection(domain: Symbol, keyed: Keyed) -> Self {
+        Relation::Collection { domain, keyed }
+    }
+
+    /// The domain these facts live under.
+    pub fn domain(&self) -> &str {
+        match self {
+            Relation::Attribute(the) => the.domain(),
+            Relation::Collection { domain, .. } => domain.as_str(),
+        }
+    }
+
+    /// The attribute's name half, or `None` for a collection — whose
+    /// name half is a key that varies per entry rather than a fixed
+    /// part of the selector.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Relation::Attribute(the) => Some(the.name()),
+            Relation::Collection { .. } => None,
+        }
+    }
+
+    /// How this relation is selected: a constant for one attribute, a
+    /// variable refined by the domain and key kind for a collection.
+    /// The refined form is what narrows a domain scan to the demanded
+    /// half — see `dialog_artifacts::NameShape`.
+    pub fn term(&self) -> Term<The> {
+        match self {
+            Relation::Attribute(the) => Term::Constant(Value::from(the.clone())),
+            Relation::Collection { domain, keyed } => {
+                let kind = Kind::from(Type::Symbol)
+                    .with_prefix(format!("{}/", domain.as_str()))
+                    .expect("symbol is textual")
+                    .with_name_shape(NameShape::from(*keyed))
+                    .expect("a name shape composes with a domain prefix");
+                Term::<The>::var("the").with_kind(kind)
+            }
+        }
+    }
+}
+
+impl Relation {
+    /// The concrete attribute to write a fact under, when there is
+    /// one. A collection has none: its facts are keyed per entry, so
+    /// the key has to come from the writer rather than the schema.
+    pub fn attribute(&self) -> Option<ArtifactsAttribute> {
+        match self {
+            Relation::Attribute(the) => Some(ArtifactsAttribute::from(the)),
+            Relation::Collection { .. } => None,
+        }
+    }
+}
+
+impl From<The> for Relation {
+    fn from(the: The) -> Self {
+        Relation::Attribute(the)
+    }
+}
+
 /// Static metadata for a single attribute: its storage-level selector
 /// ([`The`]), human-readable description, value type, and cardinality.
 ///
@@ -35,7 +146,7 @@ pub struct Attribution {
 ///    an [`Attribution`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttributeDescriptor {
-    the: The,
+    the: Relation,
     #[serde(default)]
     description: String,
     #[serde(default)]
@@ -52,6 +163,22 @@ impl AttributeDescriptor {
         cardinality: Cardinality,
         content_type: Option<Type>,
     ) -> Self {
+        Self::over(
+            Relation::Attribute(the),
+            description,
+            cardinality,
+            content_type,
+        )
+    }
+
+    /// Creates a descriptor over any [`Relation`] — one attribute, or
+    /// every entry of a keyed collection.
+    pub fn over(
+        the: Relation,
+        description: impl Into<String>,
+        cardinality: Cardinality,
+        content_type: Option<Type>,
+    ) -> Self {
         Self {
             the,
             description: description.into(),
@@ -61,7 +188,7 @@ impl AttributeDescriptor {
     }
 
     /// Returns a relation identifier comprised of the attribute's domain and name.
-    pub fn the(&self) -> &The {
+    pub fn the(&self) -> &Relation {
         &self.the
     }
 
@@ -70,8 +197,9 @@ impl AttributeDescriptor {
         self.the.domain()
     }
 
-    /// Returns the attribute name.
-    pub fn name(&self) -> &str {
+    /// Returns the attribute name, or `None` for a collection — whose
+    /// name half is a per-entry key rather than part of the selector.
+    pub fn name(&self) -> Option<&str> {
         self.the.name()
     }
 
@@ -118,8 +246,17 @@ impl AttributeDescriptor {
         };
 
         if type_matches {
+            // A collection field describes many facts, one per key,
+            // so there is no single attribute to write this value
+            // under: the key belongs to the entry, not the schema.
+            let the = self
+                .the
+                .attribute()
+                .ok_or_else(|| FieldTypeError::UnkeyedCollection {
+                    domain: self.the.domain().to_owned(),
+                })?;
             Ok(Attribution {
-                the: ArtifactsAttribute::from(&self.the),
+                the,
                 is: value.clone(),
                 cardinality: self.cardinality(),
             })
@@ -189,7 +326,7 @@ impl AttributeDescriptor {
         };
 
         Ok(AttributeQuery::new(
-            Term::Constant(Value::from(self.the().clone())),
+            self.the().term(),
             of,
             is,
             cause,
@@ -209,6 +346,12 @@ impl AttributeDescriptor {
     pub fn to_cbor_bytes(&self) -> Vec<u8> {
         use serde::Serialize;
 
+        // `name` carries the attribute's name half for a plain
+        // attribute and the key kind for a collection — the two are
+        // the same slot because they are the same thing: what the
+        // name half of these facts holds. A plain attribute therefore
+        // encodes exactly as it did before collections existed, so
+        // every existing identity is preserved.
         #[derive(Serialize)]
         struct CborAttributeDescriptor<'a> {
             domain: &'a str,
@@ -218,9 +361,16 @@ impl AttributeDescriptor {
             content_type: Option<Type>,
         }
 
+        let name = match &self.the {
+            Relation::Attribute(the) => the.name(),
+            Relation::Collection { keyed, .. } => match keyed {
+                Keyed::Dictionary => "<dictionary>",
+                Keyed::Sequence => "<sequence>",
+            },
+        };
         let schema = CborAttributeDescriptor {
             domain: self.domain(),
-            name: self.name(),
+            name,
             cardinality: self.cardinality(),
             content_type: self.content_type(),
         };
@@ -266,15 +416,34 @@ impl From<AttributeDescriptor> for Entity {
     }
 }
 
+/// A descriptor's concrete attribute. Panics for a keyed collection,
+/// which has no single attribute — use
+/// [`Relation::attribute`](Relation::attribute) where that is
+/// possible.
 impl From<&AttributeDescriptor> for ArtifactsAttribute {
     fn from(descriptor: &AttributeDescriptor) -> Self {
-        ArtifactsAttribute::from(&descriptor.the)
+        descriptor
+            .the
+            .attribute()
+            .expect("a keyed collection has no single attribute")
     }
 }
 
 impl From<AttributeDescriptor> for ArtifactsAttribute {
     fn from(descriptor: AttributeDescriptor) -> Self {
-        ArtifactsAttribute::from(descriptor.the)
+        ArtifactsAttribute::from(&descriptor)
+    }
+}
+
+impl Display for Relation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Relation::Attribute(the) => write!(f, "{the}"),
+            Relation::Collection { domain, keyed } => match keyed {
+                Keyed::Dictionary => write!(f, "{}/<symbol>", domain.as_str()),
+                Keyed::Sequence => write!(f, "{}/<position>", domain.as_str()),
+            },
+        }
     }
 }
 
@@ -356,7 +525,7 @@ mod tests {
         }"#;
         let attr: AttributeDescriptor = serde_json::from_str(json).unwrap();
         assert_eq!(attr.domain(), "io.gozala.person");
-        assert_eq!(attr.name(), "name");
+        assert_eq!(attr.name(), Some("name"));
         assert_eq!(attr.description(), "Name of the person");
         assert_eq!(attr.cardinality(), Cardinality::One);
         assert_eq!(attr.content_type(), Some(Type::String));
@@ -367,7 +536,7 @@ mod tests {
         let json = r#"{ "the": "person/name" }"#;
         let attr: AttributeDescriptor = serde_json::from_str(json).unwrap();
         assert_eq!(attr.domain(), "person");
-        assert_eq!(attr.name(), "name");
+        assert_eq!(attr.name(), Some("name"));
         assert_eq!(attr.description(), "");
         assert_eq!(attr.cardinality(), Cardinality::One);
         assert_eq!(attr.content_type(), None);
@@ -484,5 +653,155 @@ mod tests {
             result.is_err(),
             "should reject non-string cardinality value"
         );
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::the;
+    use dialog_artifacts::NameShape;
+    use std::str::FromStr;
+
+    fn domain() -> Symbol {
+        Symbol::from_str("todo.list").expect("a valid domain")
+    }
+
+    fn collection(keyed: Keyed) -> AttributeDescriptor {
+        AttributeDescriptor::over(
+            Relation::collection(domain(), keyed),
+            "the list's members",
+            Cardinality::Many,
+            Some(Type::Entity),
+        )
+    }
+
+    /// A plain attribute selects itself: the query pins `the` to a
+    /// constant, exactly as before collections existed.
+    #[dialog_common::test]
+    fn it_selects_one_attribute_by_constant() {
+        let descriptor = AttributeDescriptor::new(
+            the!("todo.list/title"),
+            "the list's title",
+            Cardinality::One,
+            Some(Type::String),
+        );
+        assert!(
+            matches!(descriptor.the().term(), Term::Constant(_)),
+            "an attribute pins `the`"
+        );
+        assert_eq!(descriptor.domain(), "todo.list");
+        assert_eq!(descriptor.name(), Some("title"));
+    }
+
+    /// A collection selects a whole domain: the query leaves `the` a
+    /// variable, refined by the domain and the key kind, so the scan
+    /// covers exactly the demanded half.
+    #[dialog_common::test]
+    fn it_selects_a_collection_by_refined_variable() {
+        for (keyed, shape) in [
+            (Keyed::Sequence, NameShape::Position),
+            (Keyed::Dictionary, NameShape::Symbol),
+        ] {
+            let descriptor = collection(keyed);
+            let term = descriptor.the().term();
+            assert!(
+                matches!(term, Term::Variable { .. }),
+                "a collection leaves `the` open"
+            );
+            let refinement = term
+                .kind()
+                .as_ref()
+                .and_then(Kind::refinement)
+                .cloned()
+                .expect("the term carries a refinement");
+
+            assert_eq!(
+                refinement.prefix.as_deref(),
+                Some("todo.list/"),
+                "the domain becomes the scan's prefix, separator included"
+            );
+            assert_eq!(
+                refinement.name_shape,
+                Some(shape),
+                "the key kind becomes the name shape"
+            );
+        }
+    }
+
+    /// A collection has no single name: its name half is a per-entry
+    /// key, not part of the selector.
+    #[dialog_common::test]
+    fn it_has_no_name_for_a_collection() {
+        let descriptor = collection(Keyed::Sequence);
+        assert_eq!(descriptor.domain(), "todo.list");
+        assert_eq!(descriptor.name(), None);
+        assert_eq!(descriptor.the().attribute(), None);
+    }
+
+    /// Writing one value to a collection is refused rather than
+    /// guessed at: every entry needs its own key, which the schema
+    /// does not carry.
+    #[dialog_common::test]
+    fn it_refuses_to_write_a_collection_without_a_key() {
+        let descriptor = collection(Keyed::Sequence);
+        let entity = Entity::new().expect("an entity");
+        assert_eq!(
+            descriptor.resolve(Value::Entity(entity)),
+            Err(FieldTypeError::UnkeyedCollection {
+                domain: "todo.list".to_owned()
+            })
+        );
+    }
+
+    /// Adding the collection variant must not move any existing
+    /// attribute's identity: a plain attribute hashes exactly what it
+    /// hashed before, and the two key kinds are distinct from it and
+    /// from each other.
+    #[dialog_common::test]
+    fn it_keeps_identities_distinct_and_stable() {
+        let attribute = AttributeDescriptor::new(
+            the!("todo.list/title"),
+            "",
+            Cardinality::Many,
+            Some(Type::Entity),
+        );
+        let sequence = collection(Keyed::Sequence);
+        let dictionary = collection(Keyed::Dictionary);
+
+        assert_ne!(sequence.hash(), dictionary.hash(), "key kinds differ");
+        assert_ne!(
+            sequence.hash(),
+            attribute.hash(),
+            "a collection is not an attribute"
+        );
+
+        // The encoding a plain attribute produces is the one it
+        // produced before collections existed: domain, name,
+        // cardinality, type — nothing added, nothing reordered.
+        let cbor = attribute.to_cbor_bytes();
+        let decoded: serde_json::Value =
+            serde_ipld_dagcbor::from_slice(&cbor).expect("valid dag-cbor");
+        assert_eq!(decoded["domain"], "todo.list");
+        assert_eq!(decoded["name"], "title");
+    }
+
+    /// The wire form round-trips, and a stored attribute still reads
+    /// as one: `"the": "todo.list/title"` is untagged, so documents
+    /// written before this variant existed load unchanged.
+    #[dialog_common::test]
+    fn it_round_trips_through_serde() {
+        let stored = r#"{"the":"todo.list/title","as":"Entity","cardinality":"one"}"#;
+        let attribute: AttributeDescriptor =
+            serde_json::from_str(stored).expect("a stored attribute still loads");
+        assert_eq!(attribute.name(), Some("title"));
+
+        let sequence = collection(Keyed::Sequence);
+        let json = serde_json::to_string(&sequence).expect("serializes");
+        let back: AttributeDescriptor = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, sequence, "a collection survives the round trip");
     }
 }

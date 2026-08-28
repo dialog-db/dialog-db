@@ -32,6 +32,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+/// A rule's conclusion cannot be a keyed collection: the
+/// analyzer refuses one (`AnalysisError::CollectionHead`) precisely
+/// because the per-attribute tracking below could not represent it.
+const RULE_HEAD_ATTRIBUTE: &str = "a rule head names one attribute";
+
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Attribute, Change, Changes, Entity, Instruction, Select, Statement,
@@ -185,7 +190,13 @@ where
             for (_, field) in body.conclusion().with().iter() {
                 // Inserted after the `direct` snapshot, so these land
                 // in the expanded set and force full evaluation.
-                touched.insert(field.descriptor().the().clone().into());
+                touched.insert(
+                    field
+                        .descriptor()
+                        .the()
+                        .attribute()
+                        .expect(RULE_HEAD_ATTRIBUTE),
+                );
             }
         }
 
@@ -531,7 +542,11 @@ impl<'a> Dispatch<'a> {
                     continue;
                 };
                 for (_, field) in body.conclusion().with().iter() {
-                    let derived: Attribute = field.descriptor().the().clone().into();
+                    let derived = field
+                        .descriptor()
+                        .the()
+                        .attribute()
+                        .expect(RULE_HEAD_ATTRIBUTE);
                     if touched.insert(derived.clone()) {
                         frontier.push(derived);
                     }
@@ -908,7 +923,13 @@ fn premise_attrs(rule: &InductiveRule) -> (BTreeSet<Attribute>, BTreeSet<Attribu
             _ => continue,
         };
         for (_, field) in query.predicate.with().iter() {
-            target.insert(field.descriptor().the().clone().into());
+            // A premise may read a keyed collection even though a
+            // head may not derive one; a collection spans a domain,
+            // so it contributes no single attribute to this set.
+            let Some(attribute) = field.descriptor().the().attribute() else {
+                continue;
+            };
+            target.insert(attribute);
         }
     }
     (positive, unless)
@@ -954,7 +975,9 @@ where
             let mut seeded = false;
             let mut compatible = true;
             for (name, field) in query.predicate.with().iter() {
-                let attribute: Attribute = field.descriptor().the().clone().into();
+                let Some(attribute) = field.descriptor().the().attribute() else {
+                    continue;
+                };
                 if attribute != row.the {
                     continue;
                 }
@@ -1059,7 +1082,11 @@ where
                 // nothing.
                 continue;
             };
-            let attribute: Attribute = field.descriptor().the().clone().into();
+            let attribute = field
+                .descriptor()
+                .the()
+                .attribute()
+                .expect(RULE_HEAD_ATTRIBUTE);
             match rule.polarity() {
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.

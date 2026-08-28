@@ -63,7 +63,7 @@ where
     fn from(query: StaticAttributeQuery<A>) -> Self {
         let descriptor = <A as Descriptor<AttributeDescriptor>>::descriptor();
         DynamicAttributeQuery::new(
-            Term::Constant(Value::from(descriptor.the().clone())),
+            descriptor.the().term(),
             query.of,
             query.is.into(),
             Term::blank(),

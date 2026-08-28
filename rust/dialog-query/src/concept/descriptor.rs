@@ -728,7 +728,7 @@ mod tests {
             .map(|(_, v)| v)
             .expect("Should have email attribute");
         assert_eq!(email_attr.domain(), "person");
-        assert_eq!(email_attr.name(), "email");
+        assert_eq!(email_attr.name(), Some("email"));
         assert_eq!(email_attr.description(), "Person's email address");
         assert_eq!(email_attr.content_type(), Some(Type::String));
 
@@ -739,7 +739,7 @@ mod tests {
             .map(|(_, v)| v)
             .expect("Should have active attribute");
         assert_eq!(active_attr.domain(), "person");
-        assert_eq!(active_attr.name(), "active");
+        assert_eq!(active_attr.name(), Some("active"));
         assert_eq!(active_attr.description(), "Whether person is active");
         assert_eq!(active_attr.content_type(), Some(Type::Boolean));
     }
@@ -1196,7 +1196,7 @@ mod tests {
         let (name, attr) = concept.with().iter().next().unwrap();
         assert_eq!(name, "status");
         assert_eq!(attr.domain(), "task");
-        assert_eq!(attr.name(), "status");
+        assert_eq!(attr.name(), Some("status"));
     }
 
     #[dialog_common::test]

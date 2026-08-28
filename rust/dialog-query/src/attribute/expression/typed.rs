@@ -12,7 +12,10 @@ use std::iter;
 use std::marker::PhantomData;
 use std::ops::Not;
 
-use crate::artifact::Value;
+/// A `#[derive(Attribute)]` type always names one concrete
+/// attribute; the keyed-collection variant has no derive path.
+const STATIC_ATTRIBUTE: &str = "a derived attribute names one relation";
+
 use crate::attribute::query::dynamic::DynamicAttributeQuery;
 
 use super::ExpressionCause;
@@ -159,13 +162,15 @@ where
     fn assert(self, update: &mut impl Update) {
         let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        let the = desc.the().clone();
+        // A `#[derive(Attribute)]` type names one concrete attribute:
+        // there is no derive path that produces a keyed collection.
+        let the = desc.the().attribute().expect(STATIC_ATTRIBUTE);
         let attr: A = is.into();
         let value = attr.value().clone().into();
         if desc.cardinality() == Cardinality::One {
-            update.associate_unique(the.into(), of, value);
+            update.associate_unique(the, of, value);
         } else {
-            update.associate(the.into(), of, value);
+            update.associate(the, of, value);
         }
     }
 
@@ -173,7 +178,11 @@ where
         let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let attr: A = is.into();
-        update.dissociate(desc.the().clone().into(), of, attr.value().clone().into());
+        update.dissociate(
+            desc.the().attribute().expect(STATIC_ATTRIBUTE),
+            of,
+            attr.value().clone().into(),
+        );
     }
 }
 
@@ -191,7 +200,7 @@ where
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let attr: A = is.into();
         iter::once(DynamicAttributeExpression {
-            the: desc.the().clone(),
+            the: desc.the().attribute().expect(STATIC_ATTRIBUTE).into(),
             of,
             is: attr.value().clone().into(),
             cause,
@@ -214,7 +223,7 @@ where
         let value: Term<A::Type> = is.into();
         let descriptor = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let query = DynamicAttributeQuery::new(
-            Term::Constant(Value::from(descriptor.the().clone())),
+            descriptor.the().term(),
             of.into(),
             value.into(),
             cause.as_cause_term(),
@@ -255,7 +264,7 @@ where
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let attr: A = is.into();
         DynamicAttributeExpression {
-            the: desc.the().clone(),
+            the: desc.the().attribute().expect(STATIC_ATTRIBUTE).into(),
             of,
             is: attr.value().clone().into(),
             cause,

@@ -1,6 +1,7 @@
 use crate::Cardinality;
 use crate::artifact::Type;
-use crate::attribute::{AttributeDescriptor, The};
+use crate::attribute::AttributeDescriptor;
+use crate::attribute::Relation;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
 use serde::de::Error as _;
@@ -117,8 +118,9 @@ impl ConceptFieldDescriptor {
         self.conforms.as_deref()
     }
 
-    /// Convenience: the attribute's relation identifier.
-    pub fn the(&self) -> &The {
+    /// Convenience: what this field selects — one attribute, or every
+    /// entry of a keyed collection.
+    pub fn the(&self) -> &Relation {
         self.descriptor.the()
     }
 
@@ -127,8 +129,9 @@ impl ConceptFieldDescriptor {
         self.descriptor.domain()
     }
 
-    /// Convenience: the attribute's name.
-    pub fn name(&self) -> &str {
+    /// Convenience: the attribute's name, or `None` for a keyed
+    /// collection, whose name half varies per entry.
+    pub fn name(&self) -> Option<&str> {
         self.descriptor.name()
     }
 

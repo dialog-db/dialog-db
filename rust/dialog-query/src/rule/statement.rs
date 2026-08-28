@@ -81,7 +81,12 @@ fn premise_trigger_entities<'p>(
     for proposition in propositions {
         if let Proposition::Concept(query) = proposition {
             for (_, field) in query.predicate.with().iter() {
-                let attribute: Attribute = field.descriptor().the().clone().into();
+                // A keyed collection names a domain rather than one
+                // attribute, so there is no single attribute to read
+                // an entity off.
+                let Some(attribute) = field.descriptor().the().attribute() else {
+                    continue;
+                };
                 if let Some(entity) = on_entity(&attribute) {
                     entities.insert(entity);
                 }

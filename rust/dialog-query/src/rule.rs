@@ -197,6 +197,9 @@ pub(crate) fn compile_rule<T: Compile>(
                     rule: Box::new(rule.into()),
                     reason,
                 },
+                AnalysisError::CollectionHead { field, domain } => {
+                    TypeError::CollectionHead { field, domain }
+                }
                 AnalysisError::NegatedOptional => TypeError::NegatedOptional {
                     rule: Box::new(rule.into()),
                 },
@@ -436,7 +439,7 @@ mod tests {
             .map(|(_, f)| f)
             .expect("name field present");
         assert_eq!(name.domain(), "macro-person");
-        assert_eq!(name.name(), "name");
+        assert_eq!(name.name(), Some("name"));
         assert_eq!(name.description(), "Name of the person");
         assert_eq!(name.content_type(), Some(Type::String));
 
@@ -446,7 +449,7 @@ mod tests {
             .map(|(_, f)| f)
             .expect("birthday field present");
         assert_eq!(birthday.domain(), "macro-person");
-        assert_eq!(birthday.name(), "birthday");
+        assert_eq!(birthday.name(), Some("birthday"));
         assert_eq!(birthday.description(), "Birthday of the person");
         assert_eq!(birthday.content_type(), Some(Type::UnsignedInt));
 
@@ -467,9 +470,9 @@ mod tests {
         let name_desc = macro_person::Name::descriptor();
         let birthday_desc = macro_person::Birthday::descriptor();
         assert_eq!(name_desc.domain(), "macro-person");
-        assert_eq!(name_desc.name(), "name");
+        assert_eq!(name_desc.name(), Some("name"));
         assert_eq!(birthday_desc.domain(), "macro-person");
-        assert_eq!(birthday_desc.name(), "birthday");
+        assert_eq!(birthday_desc.name(), Some("birthday"));
     }
 
     mod macro_employee {

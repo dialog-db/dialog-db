@@ -109,7 +109,7 @@ mod tests {
         use crate::descriptor::Descriptor;
         let _name = person::Name("hello".into());
         assert_eq!(person::Name::descriptor().domain(), "person");
-        assert_eq!(person::Name::descriptor().name(), "name");
+        assert_eq!(person::Name::descriptor().name(), Some("name"));
     }
 
     mod employee_derive {
@@ -149,7 +149,7 @@ mod tests {
             employee_derive::Name::descriptor().domain(),
             "employee-derive"
         );
-        assert_eq!(employee_derive::Name::descriptor().name(), "name");
+        assert_eq!(employee_derive::Name::descriptor().name(), Some("name"));
         assert_eq!(
             employee_derive::Name::descriptor().description(),
             "Name of the employee"
@@ -170,7 +170,7 @@ mod tests {
             employee_derive::Job::descriptor().domain(),
             "employee-derive"
         );
-        assert_eq!(employee_derive::Job::descriptor().name(), "job");
+        assert_eq!(employee_derive::Job::descriptor().name(), Some("job"));
         assert_eq!(
             employee_derive::Job::descriptor().description(),
             "Job title of the employee"
@@ -191,7 +191,7 @@ mod tests {
             employee_derive::Salary::descriptor().domain(),
             "employee-derive"
         );
-        assert_eq!(employee_derive::Salary::descriptor().name(), "salary");
+        assert_eq!(employee_derive::Salary::descriptor().name(), Some("salary"));
         assert_eq!(
             employee_derive::Salary::descriptor().description(),
             "Salary of the employee"
@@ -209,7 +209,7 @@ mod tests {
         let name = person_derive::Name("Bob".to_string());
 
         assert_eq!(person_derive::Name::descriptor().domain(), "person-derive");
-        assert_eq!(person_derive::Name::descriptor().name(), "name");
+        assert_eq!(person_derive::Name::descriptor().name(), Some("name"));
         assert_eq!(
             person_derive::Name::descriptor().the().to_string(),
             "person-derive/name"
@@ -244,7 +244,7 @@ mod tests {
         let field = custom_ns_derive::Field("value".to_string());
 
         assert_eq!(custom_ns_derive::Field::descriptor().domain(), "custom");
-        assert_eq!(custom_ns_derive::Field::descriptor().name(), "field");
+        assert_eq!(custom_ns_derive::Field::descriptor().name(), Some("field"));
         assert_eq!(
             custom_ns_derive::Field::descriptor().the().to_string(),
             "custom/field"
@@ -295,7 +295,7 @@ mod tests {
     #[dialog_common::test]
     fn it_converts_underscores_to_hyphens() {
         assert_eq!(account_name::Name::descriptor().domain(), "account-name");
-        assert_eq!(account_name::Name::descriptor().name(), "name");
+        assert_eq!(account_name::Name::descriptor().name(), Some("name"));
         assert_eq!(
             account_name::Name::descriptor().the().to_string(),
             "account-name/name"
@@ -305,7 +305,7 @@ mod tests {
     #[dialog_common::test]
     fn it_derives_nested_module_domain() {
         assert_eq!(ns_my::config::Key::descriptor().domain(), "config");
-        assert_eq!(ns_my::config::Key::descriptor().name(), "key");
+        assert_eq!(ns_my::config::Key::descriptor().name(), Some("key"));
         assert_eq!(
             ns_my::config::Key::descriptor().the().to_string(),
             "config/key"
@@ -315,7 +315,7 @@ mod tests {
     #[dialog_common::test]
     fn it_overrides_domain_explicitly() {
         assert_eq!(NsValue::descriptor().domain(), "my.custom.namespace");
-        assert_eq!(NsValue::descriptor().name(), "ns-value");
+        assert_eq!(NsValue::descriptor().name(), Some("ns-value"));
         assert_eq!(
             NsValue::descriptor().the().to_string(),
             "my.custom.namespace/ns-value"
@@ -325,7 +325,7 @@ mod tests {
     #[dialog_common::test]
     fn it_accepts_domain_identifier_syntax() {
         assert_eq!(NsCustomValue::descriptor().domain(), "custom");
-        assert_eq!(NsCustomValue::descriptor().name(), "ns-custom-value");
+        assert_eq!(NsCustomValue::descriptor().name(), Some("ns-custom-value"));
         assert_eq!(
             NsCustomValue::descriptor().the().to_string(),
             "custom/ns-custom-value"
@@ -335,7 +335,7 @@ mod tests {
     #[dialog_common::test]
     fn it_accepts_domain_string_literal() {
         assert_eq!(NsDottedValue::descriptor().domain(), "io.gozala");
-        assert_eq!(NsDottedValue::descriptor().name(), "ns-dotted-value");
+        assert_eq!(NsDottedValue::descriptor().name(), Some("ns-dotted-value"));
         assert_eq!(
             NsDottedValue::descriptor().the().to_string(),
             "io.gozala/ns-dotted-value"
@@ -348,7 +348,10 @@ mod tests {
             ns_my_app::user_profile::Email::descriptor().domain(),
             "user-profile"
         );
-        assert_eq!(ns_my_app::user_profile::Email::descriptor().name(), "email");
+        assert_eq!(
+            ns_my_app::user_profile::Email::descriptor().name(),
+            Some("email")
+        );
         assert_eq!(
             ns_my_app::user_profile::Email::descriptor()
                 .the()
@@ -362,7 +365,7 @@ mod tests {
         let name = account_name::Name("John Doe".to_string());
 
         assert_eq!(account_name::Name::descriptor().domain(), "account-name");
-        assert_eq!(account_name::Name::descriptor().name(), "name");
+        assert_eq!(account_name::Name::descriptor().name(), Some("name"));
         assert_eq!(
             account_name::Name::descriptor().description(),
             "Account holder's name"
@@ -386,16 +389,19 @@ mod tests {
 
     #[dialog_common::test]
     fn it_converts_pascal_to_kebab() {
-        assert_eq!(test_pascal::UserName::descriptor().name(), "user-name");
+        assert_eq!(
+            test_pascal::UserName::descriptor().name(),
+            Some("user-name")
+        );
     }
 
     #[dialog_common::test]
     fn it_converts_consecutive_capitals() {
         assert_eq!(
             test_pascal::HTTPRequest::descriptor().name(),
-            "http-request"
+            Some("http-request")
         );
-        assert_eq!(test_pascal::APIKey::descriptor().name(), "api-key");
+        assert_eq!(test_pascal::APIKey::descriptor().name(), Some("api-key"));
     }
 
     #[dialog_common::test]
@@ -403,14 +409,14 @@ mod tests {
         let descriptor = test_pascal::UserName::descriptor();
 
         assert!(!descriptor.domain().is_empty());
-        assert_eq!(descriptor.name(), "user-name");
+        assert_eq!(descriptor.name(), Some("user-name"));
         let _ = descriptor.description();
     }
 
     #[dialog_common::test]
     fn it_exposes_static_schema() {
         let schema = &test_pascal::UserName::descriptor();
-        assert_eq!(schema.name(), "user-name");
+        assert_eq!(schema.name(), Some("user-name"));
         assert_eq!(schema.cardinality(), Cardinality::One);
     }
 

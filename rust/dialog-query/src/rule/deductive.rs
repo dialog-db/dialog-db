@@ -338,7 +338,7 @@ fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
 
         let premise: Premise = if field.is_optional() {
             OptionalAttributeQuery::new(
-                Term::Constant(Value::from(field.the().clone())),
+                field.the().term(),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
@@ -347,7 +347,7 @@ fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
             .into()
         } else {
             AttributeQuery::new(
-                Term::Constant(Value::from(field.the().clone())),
+                field.the().term(),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
