@@ -11,14 +11,16 @@
 //! provides defense-in-depth: even if an attacker gains code execution in your
 //! service worker, they cannot exfiltrate the private key material.
 
+use std::cell::Cell;
+
 use crate::key::KeyExport;
 use dialog_varsig::eddsa::Ed25519Signature;
-use js_sys::{Object, Reflect, Uint8Array};
+use js_sys::{Function, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{CryptoKey, SubtleCrypto};
 
-use crate::key::AgreementKeyPair;
+use crate::key::{AgreementArchive, AgreementKeyPair, WrappedAgreementKey};
 
 // Re-export for backwards compatibility
 pub use crate::key::{ExtractableAgreementKey, ExtractableKey, WebCryptoError};
@@ -180,10 +182,8 @@ impl SigningKey {
                 // from the archive. Without one the signing key still works;
                 // only key agreement is unavailable.
                 match agreement {
-                    Some(pair) => {
-                        let agreement =
-                            AgreementSecretKey::from_crypto_keys(pair.private_key, pair.public_key)
-                                .await?;
+                    Some(archive) => {
+                        let agreement = AgreementSecretKey::from_archive(archive).await?;
                         Ok(key.with_agreement(agreement))
                     }
                     None => Ok(key),
@@ -226,10 +226,7 @@ impl SigningKey {
             Ok(KeyExport::NonExtractable {
                 private_key: self.private_key.clone(),
                 public_key: self.public_key.clone(),
-                agreement: self.agreement.as_ref().map(|key| AgreementKeyPair {
-                    private_key: key.private_key().clone(),
-                    public_key: key.public_key().clone(),
-                }),
+                agreement: self.agreement.as_ref().map(AgreementSecretKey::archive),
             })
         }
     }
@@ -656,10 +653,8 @@ impl ExtractableKey for SigningKey {
                 let public_key_bytes = export_public_key_raw(&subtle, &public_key).await?;
                 let key = SigningKey::new(private_key, public_key, public_key_bytes);
                 match agreement {
-                    Some(pair) => {
-                        let agreement =
-                            AgreementSecretKey::from_crypto_keys(pair.private_key, pair.public_key)
-                                .await?;
+                    Some(archive) => {
+                        let agreement = AgreementSecretKey::from_archive(archive).await?;
                         Ok(key.with_agreement(agreement))
                     }
                     None => Ok(key),
@@ -689,6 +684,23 @@ pub struct AgreementSecretKey {
     public_key: CryptoKey,
     /// Cached raw public key bytes.
     public_key_bytes: [u8; 32],
+    /// How this key is archived next to its signing key.
+    archive: Archive,
+}
+
+/// The archival form of an [`AgreementSecretKey`], decided when the key is
+/// derived and kept so every export of the same key writes the same shape.
+#[derive(Debug, Clone)]
+enum Archive {
+    /// The `CryptoKey`s themselves; the browser can clone them.
+    Keys,
+    /// The private key wrapped under `wrapping_key`, for a browser that
+    /// cannot deserialize an X25519 `CryptoKey` (see
+    /// [`AgreementArchive::Wrapped`]).
+    Wrapped {
+        wrapping_key: CryptoKey,
+        wrapped_key: Vec<u8>,
+    },
 }
 
 impl AgreementSecretKey {
@@ -698,6 +710,7 @@ impl AgreementSecretKey {
             private_key,
             public_key,
             public_key_bytes,
+            archive: Archive::Keys,
         }
     }
 
@@ -707,13 +720,95 @@ impl AgreementSecretKey {
     /// The derivation matches the native path exactly, so the same Ed25519 seed
     /// yields the same X25519 public key on both platforms.
     ///
+    /// This is the one place the X25519 secret is in hand, so it is also
+    /// where the archival form is decided: the `CryptoKey`s themselves when
+    /// the browser can clone them, otherwise the private key wrapped under
+    /// an AES-KW key (see [`AgreementArchive::Wrapped`]).
+    ///
     /// # Errors
     ///
     /// Returns an error if the WebCrypto import fails or the browser does not
     /// support X25519.
     pub async fn from_ed25519_seed(seed: &[u8; 32]) -> Result<Self, WebCryptoError> {
         let secret = super::agreement_secret_bytes(seed);
-        Self::import_secret(&secret, false).await
+        let key = Self::import_secret(&secret, false).await?;
+        if x25519_keys_are_cloneable(&key.public_key) {
+            Ok(key)
+        } else {
+            key.wrapped(&secret).await
+        }
+    }
+
+    /// Switch this key's archival form to wrapped.
+    ///
+    /// `wrapKey` needs an extractable key to read, and the working key is
+    /// not, so the secret is imported once more as extractable for the wrap
+    /// alone and dropped here. The wrapping key is non-extractable, so
+    /// nothing readable is archived.
+    async fn wrapped(mut self, secret: &[u8; 32]) -> Result<Self, WebCryptoError> {
+        let subtle = get_subtle_crypto()?;
+        let wrapping_key = generate_wrapping_key(&subtle).await?;
+        let extractable = import_agreement_private_key(&subtle, secret, true).await?;
+        let wrapped_key = wrap_agreement_private_key(&subtle, &extractable, &wrapping_key).await?;
+        self.archive = Archive::Wrapped {
+            wrapping_key,
+            wrapped_key,
+        };
+        Ok(self)
+    }
+
+    /// Restore from an archive written by [`archive`](Self::archive).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the public key's raw bytes cannot be exported, or
+    /// a wrapped private key cannot be unwrapped.
+    pub async fn from_archive(archive: AgreementArchive) -> Result<Self, WebCryptoError> {
+        match archive {
+            AgreementArchive::Keys(pair) => {
+                Self::from_crypto_keys(pair.private_key, pair.public_key).await
+            }
+            AgreementArchive::Wrapped(wrapped) => Self::from_wrapped(wrapped).await,
+        }
+    }
+
+    /// Reconstruct from a wrapped archive: unwrap the private key (back to a
+    /// non-extractable `CryptoKey`) and import the public bytes. The wrapping
+    /// material is kept so a later export writes the same archive.
+    async fn from_wrapped(wrapped: WrappedAgreementKey) -> Result<Self, WebCryptoError> {
+        let subtle = get_subtle_crypto()?;
+        let private_key =
+            unwrap_agreement_private_key(&subtle, &wrapped.wrapped_key, &wrapped.wrapping_key)
+                .await?;
+        let public_key = import_agreement_public_key_raw(&subtle, &wrapped.public_key).await?;
+        Ok(Self {
+            private_key,
+            public_key,
+            public_key_bytes: wrapped.public_key,
+            archive: Archive::Wrapped {
+                wrapping_key: wrapped.wrapping_key,
+                wrapped_key: wrapped.wrapped_key,
+            },
+        })
+    }
+
+    /// The archival form of this key, for a [`KeyExport`].
+    #[must_use]
+    pub fn archive(&self) -> AgreementArchive {
+        match &self.archive {
+            Archive::Keys => AgreementArchive::Keys(AgreementKeyPair {
+                private_key: self.private_key.clone(),
+                public_key: self.public_key.clone(),
+            }),
+            Archive::Wrapped {
+                wrapping_key,
+                wrapped_key,
+            } => AgreementArchive::Wrapped(WrappedAgreementKey {
+                wrapping_key: wrapping_key.clone(),
+                wrapped_key: wrapped_key.clone(),
+                public_key: self.public_key_bytes,
+            }),
+        }
     }
 
     /// Import a raw X25519 secret as a non-extractable key.
@@ -727,32 +822,7 @@ impl AgreementSecretKey {
     /// Import a raw X25519 secret with the given extractability.
     async fn import_secret(secret: &[u8; 32], extractable: bool) -> Result<Self, WebCryptoError> {
         let subtle = get_subtle_crypto()?;
-
-        let pkcs8 = X25519Pkcs8::from(secret);
-
-        let algorithm = Object::new();
-        Reflect::set(&algorithm, &"name".into(), &"X25519".into())
-            .map_err(|e| WebCryptoError::JsError(format!("{e:?}")))?;
-
-        let key_usages = js_sys::Array::new();
-        key_usages.push(&"deriveBits".into());
-
-        let pkcs8_array = Uint8Array::from(pkcs8.as_bytes());
-
-        let promise = subtle
-            .import_key_with_object(
-                "pkcs8",
-                &pkcs8_array.buffer(),
-                &algorithm,
-                extractable,
-                &key_usages,
-            )
-            .map_err(|e| WebCryptoError::KeyImport(format!("{e:?}")))?;
-
-        let private_key: CryptoKey = JsFuture::from(promise)
-            .await
-            .map_err(|e| WebCryptoError::KeyImport(format!("X25519 import failed: {e:?}")))?
-            .unchecked_into();
+        let private_key = import_agreement_private_key(&subtle, secret, extractable).await?;
 
         // The public key is the Montgomery point for this secret. Derive it in
         // Rust (WebCrypto cannot export it from a non-extractable private key)
@@ -908,6 +978,155 @@ async fn import_agreement_public_key_raw(
     Ok(key.unchecked_into())
 }
 
+/// Import a raw X25519 secret as a WebCrypto private key with `deriveBits`.
+async fn import_agreement_private_key(
+    subtle: &SubtleCrypto,
+    secret: &[u8; 32],
+    extractable: bool,
+) -> Result<CryptoKey, WebCryptoError> {
+    let pkcs8 = X25519Pkcs8::from(secret);
+    let pkcs8_array = Uint8Array::from(pkcs8.as_bytes());
+
+    let promise = subtle
+        .import_key_with_object(
+            "pkcs8",
+            &pkcs8_array.buffer(),
+            &x25519_algorithm()?,
+            extractable,
+            &derive_bits_usage(),
+        )
+        .map_err(|e| WebCryptoError::KeyImport(format!("{e:?}")))?;
+
+    Ok(JsFuture::from(promise)
+        .await
+        .map_err(|e| WebCryptoError::KeyImport(format!("X25519 import failed: {e:?}")))?
+        .unchecked_into())
+}
+
+/// `{ name: "X25519" }`.
+fn x25519_algorithm() -> Result<Object, WebCryptoError> {
+    let algorithm = Object::new();
+    Reflect::set(&algorithm, &"name".into(), &"X25519".into())
+        .map_err(|e| WebCryptoError::JsError(format!("{e:?}")))?;
+    Ok(algorithm)
+}
+
+/// `["deriveBits"]`.
+fn derive_bits_usage() -> js_sys::Array {
+    let key_usages = js_sys::Array::new();
+    key_usages.push(&"deriveBits".into());
+    key_usages
+}
+
+// ============================================================================
+// Wrapped archival
+// ============================================================================
+
+/// Whether this browser can clone an X25519 `CryptoKey`, decided once per
+/// thread from `sample` and remembered.
+///
+/// `structuredClone` is the serializer IndexedDB and `postMessage` use, so a
+/// clone that throws (WebKit: `TypeError: Unable to deserialize data`) means
+/// an archive holding the key would come back `null`. A browser without
+/// `structuredClone` at all is treated the same way; wrapping works
+/// everywhere AES-KW does.
+fn x25519_keys_are_cloneable(sample: &CryptoKey) -> bool {
+    X25519_KEYS_ARE_CLONEABLE.with(|known| {
+        if let Some(cloneable) = known.get() {
+            return cloneable;
+        }
+        let cloneable =
+            structured_clone(sample).is_some_and(|clone| clone.is_instance_of::<CryptoKey>());
+        known.set(Some(cloneable));
+        cloneable
+    })
+}
+
+thread_local! {
+    /// The remembered answer of [`x25519_keys_are_cloneable`]; `None` until
+    /// the first key is derived on this thread.
+    static X25519_KEYS_ARE_CLONEABLE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Override what [`x25519_keys_are_cloneable`] answers on this thread, or
+/// `None` to probe again. Lets a browser that clones X25519 keys exercise the
+/// path taken by one that cannot.
+#[cfg(test)]
+pub(crate) fn assume_x25519_keys_are_cloneable(cloneable: Option<bool>) {
+    X25519_KEYS_ARE_CLONEABLE.with(|known| known.set(cloneable));
+}
+
+/// `structuredClone(value)`, or `None` if it throws or does not exist.
+fn structured_clone(value: &JsValue) -> Option<JsValue> {
+    let global = js_sys::global();
+    let clone = Reflect::get(&global, &"structuredClone".into()).ok()?;
+    let clone = clone.dyn_ref::<Function>()?;
+    clone.call1(&global, value).ok()
+}
+
+/// Generate the non-extractable AES-KW key an agreement key is wrapped under.
+async fn generate_wrapping_key(subtle: &SubtleCrypto) -> Result<CryptoKey, WebCryptoError> {
+    let algorithm = Object::new();
+    Reflect::set(&algorithm, &"name".into(), &"AES-KW".into())
+        .map_err(|e| WebCryptoError::JsError(format!("{e:?}")))?;
+    Reflect::set(&algorithm, &"length".into(), &256.into())
+        .map_err(|e| WebCryptoError::JsError(format!("{e:?}")))?;
+
+    let key_usages = js_sys::Array::new();
+    key_usages.push(&"wrapKey".into());
+    key_usages.push(&"unwrapKey".into());
+
+    let promise = subtle
+        .generate_key_with_object(&algorithm, false, &key_usages)
+        .map_err(|e| WebCryptoError::JsError(format!("{e:?}")))?;
+
+    Ok(JsFuture::from(promise)
+        .await
+        .map_err(|e| WebCryptoError::KeyGeneration(format!("AES-KW generate failed: {e:?}")))?
+        .unchecked_into())
+}
+
+/// Wrap an extractable X25519 private key's PKCS#8 form under `wrapping_key`.
+///
+/// PKCS#8 is 48 bytes, a multiple of the 8 AES-KW needs; the JWK form is not.
+async fn wrap_agreement_private_key(
+    subtle: &SubtleCrypto,
+    private_key: &CryptoKey,
+    wrapping_key: &CryptoKey,
+) -> Result<Vec<u8>, WebCryptoError> {
+    let promise = subtle
+        .wrap_key_with_str("pkcs8", private_key, wrapping_key, "AES-KW")
+        .map_err(|e| WebCryptoError::KeyExport(format!("wrapKey: {e:?}")))?;
+    let wrapped = JsFuture::from(promise)
+        .await
+        .map_err(|e| WebCryptoError::KeyExport(format!("wrapKey failed: {e:?}")))?;
+    Ok(Uint8Array::new(&wrapped).to_vec())
+}
+
+/// Unwrap a private key wrapped by [`wrap_agreement_private_key`] back into
+/// a non-extractable X25519 `CryptoKey`.
+async fn unwrap_agreement_private_key(
+    subtle: &SubtleCrypto,
+    wrapped_key: &[u8],
+    wrapping_key: &CryptoKey,
+) -> Result<CryptoKey, WebCryptoError> {
+    let promise = subtle
+        .unwrap_key_with_u8_array_and_str_and_object(
+            "pkcs8",
+            wrapped_key,
+            wrapping_key,
+            "AES-KW",
+            &x25519_algorithm()?,
+            false,
+            &derive_bits_usage(),
+        )
+        .map_err(|e| WebCryptoError::KeyImport(format!("unwrapKey: {e:?}")))?;
+    Ok(JsFuture::from(promise)
+        .await
+        .map_err(|e| WebCryptoError::KeyImport(format!("unwrapKey failed: {e:?}")))?
+        .unchecked_into())
+}
+
 /// PKCS#8 wrapper for an X25519 private key.
 ///
 /// Same DER shape as the Ed25519 wrapper, with OID 1.3.101.110 (X25519).
@@ -940,5 +1159,208 @@ impl ExtractableAgreementKey for AgreementSecretKey {
     async fn from_ed25519_seed(seed: &[u8; 32]) -> Result<Self, WebCryptoError> {
         let secret = super::agreement_secret_bytes(seed);
         Self::import_secret(&secret, true).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
+
+    /// A guard that makes this thread behave like a browser that cannot
+    /// clone X25519 keys, and probes again once dropped.
+    struct UncloneableX25519;
+
+    impl UncloneableX25519 {
+        fn assume() -> Self {
+            assume_x25519_keys_are_cloneable(Some(false));
+            Self
+        }
+    }
+
+    impl Drop for UncloneableX25519 {
+        fn drop(&mut self) {
+            assume_x25519_keys_are_cloneable(None);
+        }
+    }
+
+    async fn shared_secret(key: &SigningKey, peer: &AgreementSecretKey) -> [u8; 32] {
+        key.agreement_key()
+            .expect("key should carry an agreement key")
+            .diffie_hellman(&peer.agreement_public_key())
+            .await
+            .unwrap()
+    }
+
+    fn archived_wrapped(export: &KeyExport) -> bool {
+        matches!(
+            export,
+            KeyExport::NonExtractable {
+                agreement: Some(AgreementArchive::Wrapped(_)),
+                ..
+            }
+        )
+    }
+
+    #[dialog_common::test]
+    async fn it_remembers_whether_x25519_keys_clone() {
+        assume_x25519_keys_are_cloneable(None);
+        let sample = AgreementSecretKey::from_secret_bytes(&[7u8; 32])
+            .await
+            .unwrap();
+
+        let probed = x25519_keys_are_cloneable(sample.public_key());
+        let direct = structured_clone(sample.public_key())
+            .is_some_and(|clone| clone.is_instance_of::<CryptoKey>());
+        assert_eq!(
+            probed, direct,
+            "the probe should report what structuredClone does"
+        );
+
+        // Remembered: a sample that could never clone does not change the answer.
+        assert_eq!(
+            x25519_keys_are_cloneable(sample.private_key()),
+            probed,
+            "the answer should be remembered, not re-probed"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn the_same_seed_derives_the_same_agreement_key_either_way() {
+        let seed = [42u8; 32];
+        let peer = AgreementSecretKey::from_secret_bytes(&[9u8; 32])
+            .await
+            .unwrap();
+
+        assume_x25519_keys_are_cloneable(None);
+        let native = SigningKey::import(&seed).await.unwrap();
+        let native_secret = shared_secret(&native, &peer).await;
+
+        let _uncloneable = UncloneableX25519::assume();
+        let wrapped = SigningKey::import(&seed).await.unwrap();
+        let wrapped_secret = shared_secret(&wrapped, &peer).await;
+
+        assert_eq!(
+            native
+                .agreement_key()
+                .unwrap()
+                .agreement_public_key()
+                .to_bytes(),
+            wrapped
+                .agreement_key()
+                .unwrap()
+                .agreement_public_key()
+                .to_bytes(),
+            "the archival form should not change the derived public key"
+        );
+        assert_eq!(
+            native_secret, wrapped_secret,
+            "the archival form should not change the derived secret"
+        );
+        assert!(
+            archived_wrapped(&wrapped.export().await.unwrap()),
+            "a browser that cannot clone X25519 keys should archive wrapped"
+        );
+        assert!(
+            !wrapped.agreement_key().unwrap().private_key().extractable(),
+            "the working key should stay non-extractable"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn a_wrapped_archive_survives_a_js_value_roundtrip() {
+        let _uncloneable = UncloneableX25519::assume();
+        let seed = [43u8; 32];
+        let peer = AgreementSecretKey::from_secret_bytes(&[10u8; 32])
+            .await
+            .unwrap();
+
+        let original = SigningKey::import(&seed).await.unwrap();
+        let before = shared_secret(&original, &peer).await;
+
+        // Through the shape storage sees, as IndexedDB would hand it back.
+        let archived: JsValue = original.export().await.unwrap().into();
+        let restored = SigningKey::import(KeyExport::try_from(archived).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            shared_secret(&restored, &peer).await,
+            before,
+            "the unwrapped key should agree on the same secret"
+        );
+        assert!(
+            !restored
+                .agreement_key()
+                .unwrap()
+                .private_key()
+                .extractable(),
+            "the unwrapped key should be non-extractable"
+        );
+        assert_eq!(
+            restored.verifying_key().to_bytes(),
+            original.verifying_key().to_bytes(),
+            "the signing key should be untouched"
+        );
+
+        // A restored key archives the way it was archived, under the same
+        // wrapping key, so a re-save writes the same record.
+        let (first, second) = match (
+            original.export().await.unwrap(),
+            restored.export().await.unwrap(),
+        ) {
+            (
+                KeyExport::NonExtractable {
+                    agreement: Some(AgreementArchive::Wrapped(first)),
+                    ..
+                },
+                KeyExport::NonExtractable {
+                    agreement: Some(AgreementArchive::Wrapped(second)),
+                    ..
+                },
+            ) => (first, second),
+            _ => panic!("both exports should archive wrapped"),
+        };
+        assert_eq!(first.wrapped_key, second.wrapped_key);
+        assert_eq!(first.public_key, second.public_key);
+    }
+
+    #[dialog_common::test]
+    async fn a_generated_key_archives_wrapped_when_keys_do_not_clone() {
+        let _uncloneable = UncloneableX25519::assume();
+        let peer = AgreementSecretKey::from_secret_bytes(&[11u8; 32])
+            .await
+            .unwrap();
+
+        let generated = SigningKey::generate().await.unwrap();
+        let export = generated.export().await.unwrap();
+        assert!(
+            archived_wrapped(&export),
+            "generate should archive wrapped too"
+        );
+
+        let restored = SigningKey::import(export).await.unwrap();
+        assert_eq!(
+            shared_secret(&restored, &peer).await,
+            shared_secret(&generated, &peer).await,
+        );
+    }
+
+    #[dialog_common::test]
+    async fn a_keys_archive_is_still_written_where_keys_clone() {
+        assume_x25519_keys_are_cloneable(Some(true));
+        let key = SigningKey::import(&[44u8; 32]).await.unwrap();
+        assert!(
+            matches!(
+                key.export().await.unwrap(),
+                KeyExport::NonExtractable {
+                    agreement: Some(AgreementArchive::Keys(_)),
+                    ..
+                }
+            ),
+            "a browser that clones X25519 keys should archive the keys themselves"
+        );
+        assume_x25519_keys_are_cloneable(None);
     }
 }
