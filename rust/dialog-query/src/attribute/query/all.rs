@@ -220,14 +220,27 @@ impl AttributeQueryAll {
     /// Returns the schema describing this application's parameters.
     pub fn schema(&self) -> Schema {
         let requirement = Requirement::new_group();
+        // A ranged attribute slot (a variable refined by a domain
+        // prefix) constrains the scan by itself: the AEV range over
+        // the prefix is the lookup, and every slot is derived from
+        // what it yields. Otherwise one of the slots has to be
+        // supplied for the scan to be more than a full sweep.
+        let slot = if self.the.is_ranged() {
+            Requirement::Optional
+        } else {
+            requirement.required()
+        };
         let mut schema = Schema::new();
 
+        // The slot carries the term's own kind, so a domain-refined
+        // attribute variable keeps its refinement through inference
+        // and the planner's re-stamping — the same way `is` does.
         schema.insert(
             "the".to_string(),
             Field {
                 description: "The relation identifier".to_string(),
-                content_type: Some(Kind::from(Type::Symbol)),
-                requirement: requirement.required(),
+                content_type: Some(self.the.kind().unwrap_or_else(|| Kind::from(Type::Symbol))),
+                requirement: slot.clone(),
                 cardinality: Cardinality::One,
             },
         );
@@ -237,7 +250,7 @@ impl AttributeQueryAll {
             Field {
                 description: "Entity of the relation".to_string(),
                 content_type: Some(Kind::from(Type::Entity)),
-                requirement: requirement.required(),
+                requirement: slot.clone(),
                 cardinality: Cardinality::One,
             },
         );
@@ -249,7 +262,7 @@ impl AttributeQueryAll {
             Field {
                 description: "Value of the relation".to_string(),
                 content_type: self.is.kind(),
-                requirement: requirement.required(),
+                requirement: slot.clone(),
                 cardinality: Cardinality::One,
             },
         );
@@ -259,7 +272,7 @@ impl AttributeQueryAll {
             Field {
                 description: "Causal stamp of the relation".to_string(),
                 content_type: Some(Kind::from(Type::Bytes)),
-                requirement: requirement.required(),
+                requirement: slot,
                 cardinality: Cardinality::One,
             },
         );
@@ -269,7 +282,10 @@ impl AttributeQueryAll {
 
     /// Estimate cost for Cardinality::Many semantics.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        let the = self.the.is_bound(env);
+        // A ranged attribute costs as a bound one: the prefix range
+        // is an AEV lookup, wider than one attribute's but the same
+        // access path.
+        let the = self.the.is_bound(env) || self.the.is_ranged();
         let of = self.of.is_bound(env);
         let is = self.is.is_bound(env);
 
@@ -1066,6 +1082,82 @@ mod tests {
         assert_eq!(members[0].is(), &Value::String("Milk".to_string()));
 
         let entries = scan(NameShape::Symbol).perform(&source).try_vec().await?;
+        assert_eq!(entries.len(), 1, "only the symbol-named entry matches");
+        assert_eq!(entries[0].is(), &Value::String("Groceries".to_string()));
+
+        Ok(())
+    }
+
+    /// A name-shape refinement survives a JSON round trip and still
+    /// drives the scan. This is the `/query` endpoint's path: a
+    /// request body carries `Term`s, and a term serializes its full
+    /// `type_system::Type` — so a keyed-collection query (a domain
+    /// prefix plus a name shape) is expressible over the wire
+    /// without the stored `AttributeDescriptor` declaring it.
+    #[dialog_common::test]
+    async fn it_preserves_a_name_shape_scan_across_a_json_round_trip() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        // One domain, both name shapes: a dictionary entry plus two
+        // ordered members. Position names are uppercase, outside the
+        // `the!` notation, so they are composed at runtime.
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let scan = |shape: NameShape| -> anyhow::Result<AttributeQueryAll> {
+            let kind = Kind::from(Type::Symbol)
+                .with_prefix("todo.list/")
+                .expect("symbol is textual")
+                .with_name_shape(shape)
+                .expect("shapes compose with prefixes");
+            let term: Term<The> = Term::<The>::var("a").with_kind(kind);
+            let restored: Term<The> = serde_json::from_str(&serde_json::to_string(&term)?)?;
+            assert_eq!(restored, term, "the refined term survives the round trip");
+            Ok(AttributeQueryAll::new(
+                restored,
+                Term::<Entity>::var("e"),
+                Term::var("v"),
+                Term::var("cause"),
+            ))
+        };
+
+        let members = scan(NameShape::Position)?
+            .perform(&source)
+            .try_vec()
+            .await?;
+        // `Value` has no `Ord`, so compare the rendered forms.
+        let mut ordered: Vec<String> = members
+            .iter()
+            .map(|row| format!("{:?}", row.is()))
+            .collect();
+        ordered.sort();
+        assert_eq!(
+            ordered,
+            vec![
+                format!("{:?}", Value::String("Bread".to_string())),
+                format!("{:?}", Value::String("Milk".to_string())),
+            ],
+            "the ordered half, after the wire hop"
+        );
+
+        let entries = scan(NameShape::Symbol)?.perform(&source).try_vec().await?;
         assert_eq!(entries.len(), 1, "only the symbol-named entry matches");
         assert_eq!(entries[0].is(), &Value::String("Groceries".to_string()));
 

@@ -926,6 +926,7 @@ mod tests {
 
     use crate::RemoteSite;
     use crate::helpers::test_repo;
+    use dialog_artifacts::{Attribute as ArtifactsAttribute, NameShape, Symbol};
     use dialog_artifacts::{Entity, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::{ConditionalSend, ConditionalSync};
@@ -934,9 +935,14 @@ mod tests {
     use dialog_effects::memory::Resolve;
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::attribute::The;
-    use dialog_query::types::Any;
+    use dialog_query::attribute::{AttributeDescriptor, Keyed, Relation};
+    use dialog_query::concept::descriptor::ConceptFieldDescriptor;
+    use dialog_query::type_system::Type as Kind;
+    use dialog_query::types::{Any, Type as ValueType};
     use dialog_query::{AttributeQuery, Claim, Term, the};
+    use dialog_query::{Cardinality, ConceptDescriptor, ConceptQuery, Output as _};
     use std::collections::BTreeMap;
+    use std::str::FromStr;
 
     /// The head flag flips only for scans that can actually read the
     /// overlay-injected metadata: a head attribute pinned by `the`,
@@ -1037,6 +1043,23 @@ mod tests {
     fn names_query() -> AttributeQuery {
         AttributeQuery::from(
             Term::<The>::from(the!("person/name"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        )
+    }
+
+    /// A scan of one half of the `todo.list` domain: the attribute is
+    /// a variable refined by the domain prefix and a name shape, which
+    /// is how an ordered collection (or a dictionary) is queried.
+    fn members_query(shape: NameShape) -> AttributeQuery {
+        let kind = Kind::from(ValueType::Symbol)
+            .with_prefix("todo.list/")
+            .expect("symbol is textual")
+            .with_name_shape(shape)
+            .expect("shapes compose with prefixes");
+        AttributeQuery::from(
+            Term::<The>::var("a")
+                .with_kind(kind)
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
         )
@@ -1485,6 +1508,534 @@ mod tests {
         // The pin advanced: polling again is a revision-equality
         // no-op, not another diff.
         assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// A subscription over one half of a mixed domain demands only
+    /// that half. Positions and symbols occupy disjoint first-byte
+    /// classes, so the demand cover is the shape's contiguous
+    /// sub-range: writing the OTHER half is as irrelevant as writing
+    /// an unrelated attribute, and must not re-evaluate.
+    ///
+    /// This is what makes an ordered collection cheap to watch. A
+    /// list's members and its named fields share one domain; without
+    /// the shape narrowing, renaming the list would wake every
+    /// subscription watching its contents.
+    #[dialog_common::test]
+    async fn it_ignores_the_other_half_of_a_mixed_domain() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(members_query(NameShape::Position));
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted.len(),
+            1,
+            "the one member is the initial result"
+        );
+
+        // A symbol-named fact in the SAME domain: the dictionary half.
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "the dictionary half is outside an ordered scan's cover"
+        );
+        assert_eq!(
+            subscription.results().len(),
+            1,
+            "results retained across the gated poll"
+        );
+        Ok(())
+    }
+
+    /// The complement: a write to the half the subscription DOES
+    /// demand re-evaluates and emits the new member. Without this the
+    /// test above would pass for a subscription that had simply
+    /// stopped working.
+    #[dialog_common::test]
+    async fn it_emits_a_new_member_of_the_demanded_half() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(members_query(NameShape::Position));
+        subscription.poll(&operator).await?.expect("initial");
+
+        // A second ordered member, appended after the first.
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a member landed in the demanded half");
+        assert_eq!(delta.asserted.len(), 1, "one new member");
+        assert!(delta.retracted.is_empty(), "nothing was removed");
+        assert_eq!(
+            subscription.results().len(),
+            2,
+            "both members are now in the result"
+        );
+        Ok(())
+    }
+
+    /// A domain scan must not flip the head flag. `selects_head`
+    /// treats an attribute-unconstrained scan conservatively, and a
+    /// scan that flipped it would recompute on EVERY commit —
+    /// silently turning incremental maintenance back into polling.
+    #[dialog_common::test]
+    async fn it_does_not_trip_the_head_gate_on_a_domain_scan() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(members_query(NameShape::Position));
+        subscription.poll(&operator).await?.expect("initial");
+        let baseline = subscription.recomputes();
+
+        // A commit in an entirely unrelated domain. A head-gated
+        // subscription would recompute here; a properly covered one
+        // advances its pin and does nothing.
+        branch
+            .transaction()
+            .assert(
+                the!("misc/tag")
+                    .of(Entity::new()?)
+                    .is("unrelated".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "an unrelated commit must not re-evaluate a domain scan"
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            baseline,
+            "and must not force a recompute"
+        );
+        Ok(())
+    }
+
+    /// A concept whose field is a keyed collection: one field, many
+    /// facts, one per ordered member. This is the end-to-end shape —
+    /// the descriptor holds a `Relation::Collection`, its `term()`
+    /// lowers to a domain scan refined by name shape, and the query
+    /// comes back with one conclusion per member, each carrying the
+    /// entry as `(key, value)`: the wire form `member: {?key: ?member}`.
+    fn ordered_query() -> ConceptQuery {
+        serde_json::from_value(serde_json::json!({
+            "assert": ordered_members(),
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "member": {"the": {"?": {"name": "key"}}, "is": {"?": {"name": "member"}}}
+            }
+        }))
+        .expect("the entry form parses")
+    }
+
+    /// The `(key, value)` entries a frame holds, in key order — which
+    /// for positions is list order.
+    fn entries(rows: &[dialog_query::ConceptConclusion]) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String>("member/key").expect("the key is bound"),
+                    row.get::<String>("member").expect("the member is bound"),
+                )
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    fn ordered_members() -> ConceptDescriptor {
+        ConceptDescriptor::try_from(vec![(
+            "member".to_owned(),
+            ConceptFieldDescriptor::required(AttributeDescriptor::over(
+                Relation::collection(
+                    Symbol::from_str("todo.list").expect("a valid domain"),
+                    Keyed::Sequence,
+                ),
+                "the list's members, in order",
+                Cardinality::Many,
+                Some(ValueType::String),
+            )),
+        )])
+        .expect("a collection field builds a concept")
+    }
+
+    /// Assert one member, and the concept query returns it — the
+    /// whole path from a stored fact under a position-named attribute
+    /// to a bound conclusion field.
+    #[dialog_common::test]
+    async fn it_queries_a_concept_over_a_collection() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            // A named field in the same domain: the dictionary half,
+            // which an ordered field must not pick up.
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let rows = branch
+            .query()
+            .select(ordered_query())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+
+        assert_eq!(
+            entries(&rows),
+            vec![
+                ("N".to_string(), "Milk".to_string()),
+                ("N5".to_string(), "Bread".to_string()),
+            ],
+            "both ordered members bind with their keys, in list order, \
+             and the dictionary entry does not"
+        );
+        Ok(())
+    }
+
+    /// A subscription over a collection-field concept maintains
+    /// incrementally: appending a member emits it as a delta, and a
+    /// write to the domain's other half does not wake the
+    /// subscription at all.
+    #[dialog_common::test]
+    async fn it_maintains_a_collection_subscription() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(ordered_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted.len(), 1, "the one member");
+        let baseline = subscription.recomputes();
+
+        // Appending a member is inside the cover: it must arrive.
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("a new member");
+        assert_eq!(delta.asserted.len(), 1, "the appended member");
+        assert!(delta.retracted.is_empty(), "nothing was removed");
+        assert_eq!(subscription.results().len(), 2, "both members retained");
+
+        // The dictionary half of the same domain is outside the
+        // cover: an ordered subscription must not wake for it.
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "the other half of the domain is not this subscription's demand"
+        );
+        assert_eq!(
+            subscription.results().len(),
+            2,
+            "results retained across the gated poll"
+        );
+        let _ = baseline;
+        Ok(())
+    }
+
+    /// Retracting a member removes it from a live subscription: the
+    /// collection scan maintains in both directions, not just on
+    /// append.
+    #[dialog_common::test]
+    async fn it_retracts_a_member_from_a_collection_subscription() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .assert(second.clone().of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(ordered_query());
+        assert_eq!(
+            subscription
+                .poll(&operator)
+                .await?
+                .expect("initial")
+                .asserted
+                .len(),
+            2
+        );
+
+        branch
+            .transaction()
+            .retract(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("a retraction");
+        assert_eq!(delta.retracted.len(), 1, "the removed member");
+        assert_eq!(subscription.results().len(), 1, "one member remains");
+        Ok(())
+    }
+
+    /// A literal key selects one entry: `member: {N5: ?member}` binds
+    /// only the member stored under `todo.list/N5`.
+    #[dialog_common::test]
+    async fn it_selects_one_entry_by_literal_key() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+            "assert": ordered_members(),
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "member": {"the": "N5", "is": {"?": {"name": "member"}}}
+            }
+        }))?;
+        let rows = branch
+            .query()
+            .select(query)
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            entries(&rows),
+            vec![("N5".to_string(), "Bread".to_string())],
+            "a literal key matches exactly one entry"
+        );
+        Ok(())
+    }
+
+    /// A dictionary field selects the symbol-named half of the same
+    /// domain, keyed by name, and leaves the ordered members alone.
+    #[dialog_common::test]
+    async fn it_queries_a_dictionary_field() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .assert(
+                the!("todo.list/owner")
+                    .of(list.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(member.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let fields = ConceptDescriptor::try_from(vec![(
+            "field".to_owned(),
+            ConceptFieldDescriptor::required(AttributeDescriptor::over(
+                Relation::collection(
+                    Symbol::from_str("todo.list").expect("a valid domain"),
+                    Keyed::Dictionary,
+                ),
+                "the list's named fields",
+                Cardinality::Many,
+                Some(ValueType::String),
+            )),
+        )])?;
+        let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+            "assert": fields,
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "field": {"the": {"?": {"name": "name"}}, "is": {"?": {"name": "value"}}}
+            }
+        }))?;
+        let rows = branch
+            .query()
+            .select(query)
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let mut named: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String>("field/key").expect("the name is bound"),
+                    row.get::<String>("field").expect("the value is bound"),
+                )
+            })
+            .collect();
+        named.sort();
+        assert_eq!(
+            named,
+            vec![
+                ("owner".to_string(), "Alice".to_string()),
+                ("title".to_string(), "Groceries".to_string()),
+            ],
+            "the dictionary half, by name, without the ordered member"
+        );
+        Ok(())
+    }
+
+    /// Two collection fields on one concept scan independently: each
+    /// has its own attribute variable, so their entries cross rather
+    /// than unify on a shared name.
+    #[dialog_common::test]
+    async fn it_scans_two_collection_fields_independently() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .assert(member.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let collection = |keyed: Keyed, description: &str| {
+            ConceptFieldDescriptor::required(AttributeDescriptor::over(
+                Relation::collection(
+                    Symbol::from_str("todo.list").expect("a valid domain"),
+                    keyed,
+                ),
+                description,
+                Cardinality::Many,
+                Some(ValueType::String),
+            ))
+        };
+        let both = ConceptDescriptor::try_from(vec![
+            ("member".to_owned(), collection(Keyed::Sequence, "members")),
+            ("field".to_owned(), collection(Keyed::Dictionary, "fields")),
+        ])?;
+        let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+            "assert": both,
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "member": {"the": {"?": {"name": "position"}}, "is": {"?": {"name": "member"}}},
+                "field": {"the": {"?": {"name": "name"}}, "is": {"?": {"name": "value"}}}
+            }
+        }))?;
+        let rows = branch
+            .query()
+            .select(query)
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "one member crossed with one field");
+        let row = &rows[0];
+        assert_eq!(row.get::<String>("member/key")?, "N");
+        assert_eq!(row.get::<String>("member")?, "Milk");
+        assert_eq!(row.get::<String>("field/key")?, "title");
+        assert_eq!(row.get::<String>("field")?, "Groceries");
         Ok(())
     }
 

@@ -21,9 +21,10 @@
 use std::collections::BTreeSet;
 
 use crate::artifact::{Entity, Value};
+use crate::attribute::Relation;
 use crate::rule::{DeductiveRule, InductiveRule, Rule};
 use crate::{Proposition, Statement, Update, the};
-use dialog_artifacts::Attribute;
+use dialog_artifacts::{Attribute, NameShape, Symbol};
 
 /// The `dialog.rule/source` body attribute, validated at compile time.
 /// Shared by both rule kinds — hydration dispatches on the decoded
@@ -70,6 +71,98 @@ pub fn on_entity(attribute: &Attribute) -> Option<Entity> {
     format!("on:{attribute}").parse().ok()
 }
 
+/// What a rule reaches through one concept field: a single attribute,
+/// or one keyed half of a domain. Induction tracks a rule's reach in
+/// these units — the attributes a stimulus touches, the attributes a
+/// premise reads, the attributes a head writes — and a fact is inside
+/// a reach when the reach [`covers`](Reach::covers) its attribute.
+///
+/// The trigger index stores one `on:` entity per reach: an attribute's
+/// own `on:<domain>/<name>`, and for a domain half a cover key,
+/// `on:<domain>/_position` or `on:<domain>/_symbol`, spelled with a
+/// leading underscore so it can never collide with a stored name
+/// (symbols begin with a letter, positions with an uppercase one). A
+/// touched attribute probes both its own key and its half's cover
+/// key, so a rule reading a collection wakes for any member write.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Reach {
+    /// One attribute.
+    Attribute(Attribute),
+    /// Every attribute of `domain` whose name has `shape`.
+    Domain {
+        /// The domain the attributes share.
+        domain: Symbol,
+        /// Which half of the domain.
+        shape: NameShape,
+    },
+}
+
+impl Reach {
+    /// The reach of a concept field.
+    pub fn of(relation: &Relation) -> Reach {
+        match relation {
+            Relation::Attribute(the) => Reach::Attribute(the.into()),
+            Relation::Collection { domain, keyed } => Reach::Domain {
+                domain: domain.clone(),
+                shape: NameShape::from(*keyed),
+            },
+        }
+    }
+
+    /// The cover key for one half of a domain.
+    fn cover_entity(domain: &str, shape: NameShape) -> Option<Entity> {
+        let half = match shape {
+            NameShape::Position => "_position",
+            NameShape::Symbol => "_symbol",
+        };
+        format!("on:{domain}/{half}").parse().ok()
+    }
+
+    /// Whether `attribute` is inside this reach.
+    pub fn covers(&self, attribute: &Attribute) -> bool {
+        match self {
+            Reach::Attribute(the) => the == attribute,
+            Reach::Domain { domain, shape } => attribute
+                .split()
+                .is_ok_and(|(of, name)| &of == domain && name.shape() == *shape),
+        }
+    }
+
+    /// Whether the two reaches share an attribute.
+    pub fn overlaps(&self, other: &Reach) -> bool {
+        match (self, other) {
+            (Reach::Attribute(the), other) | (other, Reach::Attribute(the)) => other.covers(the),
+            (Reach::Domain { .. }, Reach::Domain { .. }) => self == other,
+        }
+    }
+
+    /// The trigger-index entity a rule is filed under for this reach.
+    pub fn on_entity(&self) -> Option<Entity> {
+        match self {
+            Reach::Attribute(the) => on_entity(the),
+            Reach::Domain { domain, shape } => Self::cover_entity(domain.as_str(), *shape),
+        }
+    }
+
+    /// The trigger-index entities a touched reach probes: an attribute
+    /// probes its own key and its half's cover key, so both a rule
+    /// reading that attribute and a rule reading the collection it
+    /// belongs to are found; a domain half probes its cover key.
+    pub fn probes(&self) -> Vec<Entity> {
+        match self {
+            Reach::Attribute(the) => {
+                let mut probes = Vec::new();
+                probes.extend(on_entity(the));
+                if let Ok((domain, name)) = the.split() {
+                    probes.extend(Self::cover_entity(domain.as_str(), name.shape()));
+                }
+                probes
+            }
+            Reach::Domain { .. } => self.on_entity().into_iter().collect(),
+        }
+    }
+}
+
 /// The `on:` entities for the attributes a set of propositions' concept
 /// premises name. Formula and constraint premises contribute nothing;
 /// attribute-query premises can't occur in stored rules (they have no
@@ -81,8 +174,7 @@ fn premise_trigger_entities<'p>(
     for proposition in propositions {
         if let Proposition::Concept(query) = proposition {
             for (_, field) in query.predicate.with().iter() {
-                let attribute: Attribute = field.descriptor().the().clone().into();
-                if let Some(entity) = on_entity(&attribute) {
+                if let Some(entity) = Reach::of(field.descriptor().the()).on_entity() {
                     entities.insert(entity);
                 }
             }

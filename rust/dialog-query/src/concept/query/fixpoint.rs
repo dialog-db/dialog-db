@@ -265,10 +265,9 @@ fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, row: &Row) ->
 /// resolved to `Absent` (or never bound) are omitted.
 pub(crate) fn project(descriptor: &ConceptDescriptor, matched: &Match) -> Row {
     let mut row = Row::new();
-    let operands = iter::once("this").chain(descriptor.with().keys());
-    for operand in operands {
-        if let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(operand)) {
-            row.insert(operand.to_string(), value);
+    for operand in descriptor.operands() {
+        if let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(&operand)) {
+            row.insert(operand, value);
         }
     }
     row
