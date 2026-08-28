@@ -31,7 +31,12 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
             None => format!("{}/_/", audience),
         };
 
-        let has_store = self.connection.borrow().stores.contains(CERTIFICATE);
+        let has_store = self
+            .connection
+            .current
+            .borrow()
+            .stores
+            .contains(CERTIFICATE);
         if !has_store {
             return Ok(Vec::new());
         }
@@ -67,7 +72,12 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
     }
 
     async fn export(&self) -> Result<Vec<P::Certificate>, AuthorizeError> {
-        let has_store = self.connection.borrow().stores.contains(CERTIFICATE);
+        let has_store = self
+            .connection
+            .current
+            .borrow()
+            .stores
+            .contains(CERTIFICATE);
         if !has_store {
             return Ok(Vec::new());
         }
@@ -95,7 +105,12 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
     }
 
     async fn forget(&self, certificates: &[P::Certificate]) -> Result<(), AuthorizeError> {
-        let has_store = self.connection.borrow().stores.contains(CERTIFICATE);
+        let has_store = self
+            .connection
+            .current
+            .borrow()
+            .stores
+            .contains(CERTIFICATE);
         if has_store {
             let store = self.store(CERTIFICATE).await?;
             for cert in certificates {

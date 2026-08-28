@@ -93,7 +93,7 @@ impl OpenProfile {
 
                 match load_result {
                     Ok(cred) => cred,
-                    Err(_) => {
+                    Err(storage_fx::StorageError::NotFound(_)) => {
                         let signer = Ed25519Signer::generate()
                             .await
                             .map_err(|e| ProfileError::Key(e.to_string()))?;
@@ -106,6 +106,7 @@ impl OpenProfile {
                             .await
                             .map_err(|e| ProfileError::Storage(e.to_string()))?
                     }
+                    Err(error) => return Err(ProfileError::Storage(error.to_string())),
                 }
             }
         };
