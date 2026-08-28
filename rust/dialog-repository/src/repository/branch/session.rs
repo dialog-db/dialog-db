@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Select, SortKey, Statement,
+    DialogArtifactsError, Entity, Select, SortKey, Statement, Value,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -19,7 +19,7 @@ use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
-use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
+use dialog_query::{DeductiveRule, InductiveRule, Negation, Premise, Proposition, Rule};
 use dialog_search_tree::Buffer;
 use dialog_storage::{Blake3Hash, StorageBackend};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -28,8 +28,8 @@ use std::sync::Arc;
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
-    assemble, builtin, conclusion_selector, hydrate, overlay_rules, rule_entities, source_bytes,
-    source_selector,
+    assemble, builtin, conclusion_selector, description_attr, hydrate, overlay_rules,
+    rule_entities, source_attr, source_bytes, source_selector,
 };
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
 use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snapshot};
@@ -767,6 +767,79 @@ impl Branch {
     pub fn with<S: Statement>(&self, statement: S) -> QueryLayer<'_> {
         self.query().with(statement)
     }
+
+    /// Every rule stored on this branch — deductive and inductive —
+    /// hydrated from its canonical `dialog.rule/source` body, in
+    /// entity order.
+    ///
+    /// An introspection surface, not a query-path one: evaluation
+    /// never enumerates rules (discovery is always "rules concluding
+    /// *this* concept", head-cached — see
+    /// [`rules`](crate::rules)), but tools that synthesize, migrate,
+    /// or audit a branch need the full set without depending on how
+    /// the facts are laid out. Each body is verified against the
+    /// entity it was stored under; an entry whose body does not hash
+    /// back to its entity is inert and skipped, the same stance the
+    /// query path takes. The sidecar `dialog.rule/description`
+    /// prose — deliberately outside the content address — is
+    /// re-attached to each hydrated rule.
+    pub async fn stored_rules<Env>(&self, env: &Env) -> Result<Vec<Rule>, DialogArtifactsError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let sources: Vec<Artifact> = select_from_branch(
+            self.clone(),
+            env,
+            ArtifactSelector::new().the(source_attr()),
+        )
+        .owned()
+        .try_collect()
+        .await?;
+        let prose: Vec<Artifact> = select_from_branch(
+            self.clone(),
+            env,
+            ArtifactSelector::new().the(description_attr()),
+        )
+        .owned()
+        .try_collect()
+        .await?;
+        let mut descriptions: HashMap<Entity, String> = prose
+            .into_iter()
+            .filter_map(|artifact| match artifact.is {
+                Value::String(text) => Some((artifact.of, text)),
+                _ => None,
+            })
+            .collect();
+
+        let mut rules: Vec<(Entity, Rule)> = Vec::with_capacity(sources.len());
+        for artifact in sources {
+            let Value::Bytes(bytes) = artifact.is else {
+                continue;
+            };
+            // The two kinds share the source attribute; the decoded
+            // descriptor's head field decides which one this is.
+            let rule = if let Ok(rule) = InductiveRule::decode(&bytes) {
+                Rule::Inductive(rule)
+            } else if let Ok(rule) = DeductiveRule::decode(&bytes) {
+                Rule::Deductive(rule)
+            } else {
+                continue;
+            };
+            if rule.try_this().as_ref() != Some(&artifact.of) {
+                continue;
+            }
+            let rule = rule.with_description(descriptions.remove(&artifact.of));
+            rules.push((artifact.of, rule));
+        }
+        rules.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Ok(rules.into_iter().map(|(_, rule)| rule).collect())
+    }
 }
 
 /// Layered deductive-rule resolution — exhaustive coverage of the
@@ -872,6 +945,83 @@ mod rule_tests {
 
         let employees = query_employees(&branch, &operator).await?;
         assert!(employees.contains(&alice), "committed rule must resolve");
+        Ok(())
+    }
+
+    /// `stored_rules` reads back every committed rule — both kinds —
+    /// with the sidecar description re-attached and the content
+    /// address untouched by it.
+    #[dialog_common::test]
+    async fn it_reads_back_stored_rules_with_descriptions() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let deductive =
+            employee_from_person().with_description(Some("Employees from people".into()));
+        let inductive_json = serde_json::json!({
+            "assert!": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "when": [{
+                "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        });
+        let inductive: dialog_query::InductiveRule = serde_json::from_value(inductive_json)?;
+        let inductive = inductive.with_description(Some("Copies people into employees".into()));
+        // The description must not participate in the identity: the
+        // described rule stores under the same entity its
+        // description-less twin would.
+        assert_eq!(
+            deductive.this(),
+            employee_from_person().this(),
+            "description must stay outside the content address"
+        );
+
+        branch
+            .transaction()
+            .assert(&deductive)
+            .assert(&inductive)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let stored = branch.stored_rules(&operator).await?;
+        assert_eq!(stored.len(), 2, "both kinds must enumerate");
+        let read_deductive = stored
+            .iter()
+            .find(|rule| matches!(rule, Rule::Deductive(_)))
+            .expect("deductive rule read back");
+        let read_inductive = stored
+            .iter()
+            .find(|rule| matches!(rule, Rule::Inductive(_)))
+            .expect("inductive rule read back");
+        assert_eq!(
+            read_deductive.description(),
+            Some("Employees from people"),
+            "sidecar prose re-attaches"
+        );
+        assert_eq!(
+            read_inductive.description(),
+            Some("Copies people into employees")
+        );
+        assert_eq!(read_deductive.try_this(), Some(deductive.this()));
+        assert_eq!(read_inductive.try_this(), Some(inductive.this()));
+
+        // Retracting the described rule erases the sidecar with the
+        // body: nothing remains to enumerate.
+        branch
+            .transaction()
+            .retract(&deductive)
+            .retract(&inductive)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        assert!(branch.stored_rules(&operator).await?.is_empty());
         Ok(())
     }
 
