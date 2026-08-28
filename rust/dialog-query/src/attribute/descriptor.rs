@@ -13,6 +13,7 @@ use dialog_artifacts::{NameShape, Symbol};
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::str::FromStr;
 
 /// A validated attribute–value pair with its cardinality, produced by
 /// [`AttributeDescriptor::resolve`]. Used inside [`ConceptStatement`](crate::concept::descriptor::ConceptStatement)
@@ -161,11 +162,85 @@ impl Relation {
             Relation::Collection { .. } => None,
         }
     }
+
+    /// The attribute one entry of a collection is written under:
+    /// `domain/key`, where the key must have the collection's name
+    /// shape — a position for a sequence, a symbol for a dictionary.
+    /// A plain attribute ignores the key and is its own entry.
+    pub fn entry(&self, key: &str) -> Result<ArtifactsAttribute, FieldTypeError> {
+        match self {
+            Relation::Attribute(the) => Ok(ArtifactsAttribute::from(the)),
+            Relation::Collection { domain, keyed } => {
+                let mismatch = || FieldTypeError::KeyShape {
+                    domain: domain.as_str().to_owned(),
+                    key: key.to_owned(),
+                    keyed: *keyed,
+                };
+                let attribute = ArtifactsAttribute::try_from(format!("{}/{key}", domain.as_str()))
+                    .map_err(|_| mismatch())?;
+                let (_, name) = attribute.split().map_err(|_| mismatch())?;
+                if name.shape() != NameShape::from(*keyed) {
+                    return Err(mismatch());
+                }
+                Ok(attribute)
+            }
+        }
+    }
 }
 
 impl From<The> for Relation {
     fn from(the: The) -> Self {
         Relation::Attribute(the)
+    }
+}
+
+/// A relation spells as an attribute does, `domain/name`, with a
+/// collection's name half naming the key kind in brackets:
+/// `todo.list/[position]` for a sequence, `todo.list/[symbol]` for a
+/// dictionary — the same bracket the declaration form uses. A
+/// bracketed name can never be a stored attribute's name, so the two
+/// forms are disjoint and the spelling round-trips.
+impl Display for Relation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Relation::Attribute(the) => write!(f, "{the}"),
+            Relation::Collection { domain, keyed } => {
+                write!(f, "{}/{}", domain.as_str(), keyed.bracketed())
+            }
+        }
+    }
+}
+
+impl Keyed {
+    /// The bracketed key kind a collection's name slot spells:
+    /// `[position]` or `[symbol]`.
+    pub fn bracketed(self) -> &'static str {
+        match self {
+            Keyed::Sequence => "[position]",
+            Keyed::Dictionary => "[symbol]",
+        }
+    }
+
+    fn from_bracketed(name: &str) -> Option<Keyed> {
+        match name {
+            "[position]" => Some(Keyed::Sequence),
+            "[symbol]" => Some(Keyed::Dictionary),
+            _ => None,
+        }
+    }
+}
+
+impl FromStr for Relation {
+    type Err = <The as FromStr>::Err;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if let Some((domain, name)) = text.split_once('/')
+            && let Some(keyed) = Keyed::from_bracketed(name)
+            && let Ok(domain) = Symbol::from_str(domain)
+        {
+            return Ok(Relation::Collection { domain, keyed });
+        }
+        text.parse::<The>().map(Relation::Attribute)
     }
 }
 
@@ -469,18 +544,6 @@ impl From<AttributeDescriptor> for ArtifactsAttribute {
     }
 }
 
-impl Display for Relation {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Relation::Attribute(the) => write!(f, "{the}"),
-            Relation::Collection { domain, keyed } => match keyed {
-                Keyed::Dictionary => write!(f, "{}/<symbol>", domain.as_str()),
-                Keyed::Sequence => write!(f, "{}/<position>", domain.as_str()),
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,6 +774,31 @@ mod collection_tests {
             Cardinality::Many,
             Some(Type::Entity),
         )
+    }
+
+    /// A relation spells as `domain/name`, a collection with its key
+    /// kind bracketed, and either form parses back.
+    #[dialog_common::test]
+    fn it_spells_and_parses_a_relation() {
+        let sequence = Relation::collection(
+            Symbol::from_str("todo.list").expect("a valid domain"),
+            Keyed::Sequence,
+        );
+        assert_eq!(sequence.to_string(), "todo.list/[position]");
+        let parse = |text: &str| text.parse::<Relation>().expect("a relation parses");
+        assert_eq!(parse("todo.list/[position]"), sequence);
+        assert_eq!(
+            parse("todo.list/[symbol]"),
+            Relation::collection(
+                Symbol::from_str("todo.list").expect("a valid domain"),
+                Keyed::Dictionary
+            )
+        );
+        assert_eq!(
+            parse("todo.list/title"),
+            Relation::Attribute(the!("todo.list/title"))
+        );
+        assert!("todo.list/[list]".parse::<Relation>().is_err());
     }
 
     /// A plain attribute selects itself: the query pins `the` to a

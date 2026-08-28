@@ -324,25 +324,6 @@ pub fn analyze_with(
     kind: RuleKind,
     reduce: Vec<(String, ReduceSpec)>,
 ) -> Result<AnalyzedRule, AnalysisError> {
-    // A deductive head over a collection derives `(key, value)`
-    // rows, which is exactly what the concept's own self-rule does.
-    // An inductive head has to WRITE a fact, and induction tracks a
-    // rule's reach per attribute (the `touched` sets in
-    // `transaction::induce`); a collection spans a domain, so its
-    // facts would land where nothing recorded the rule had reached.
-    // Refuse that case until induction's reach is a cover.
-    if kind == RuleKind::Inductive {
-        for (field, descriptor) in conclusion.with().iter() {
-            let relation = descriptor.descriptor().the();
-            if relation.attribute().is_none() {
-                return Err(AnalysisError::CollectionHead {
-                    field: field.to_string(),
-                    domain: relation.domain().to_owned(),
-                });
-            }
-        }
-    }
-
     let mut types = TypeEnv::infer(&premises).map_err(|err| AnalysisError::Inference {
         reason: err.to_string(),
     })?;
@@ -496,44 +477,6 @@ mod tests {
             ),
         )])
         .unwrap()
-    }
-
-    /// A rule cannot derive into a keyed collection. Induction tracks
-    /// a rule's reach per attribute, and a collection spans a domain —
-    /// so such a rule's consumers would never learn it had written
-    /// anything. The refusal is what lets `transaction::induce` treat
-    /// every head field as naming one attribute.
-    #[dialog_common::test]
-    fn it_refuses_a_rule_that_derives_into_a_collection() {
-        use crate::attribute::{Keyed, Relation};
-        use dialog_artifacts::Symbol;
-        use std::str::FromStr;
-
-        let conclusion = ConceptDescriptor::try_from(vec![(
-            "member",
-            AttributeDescriptor::over(
-                Relation::collection(
-                    Symbol::from_str("todo.list").expect("a valid domain"),
-                    Keyed::Sequence,
-                ),
-                "",
-                Cardinality::Many,
-                Some(ValueType::Entity),
-            ),
-        )])
-        .expect("the concept itself is fine — only inducing one is not");
-
-        let error = analyze(conclusion, Vec::new(), RuleKind::Inductive)
-            .expect_err("a collection head is refused");
-
-        assert!(
-            matches!(
-                error,
-                AnalysisError::CollectionHead { ref field, ref domain }
-                    if field == "member" && domain == "todo.list"
-            ),
-            "expected a CollectionHead rejection naming the field, got {error:?}"
-        );
     }
 
     /// Analysis output carries the inferred type environment.

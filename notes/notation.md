@@ -398,6 +398,17 @@ Internally the concept's rule scans the domain with the attribute slot refined
 by `domain` and `name.case`, and projects the key with `dialog/attribute-parts`
 (`of` → `domain`, `name`).
 
+**Deriving.** A rule head may be a collection field. A deductive head yields
+`(key, value)` rows like the concept itself; an inductive head writes the
+entry under `<domain>/<key>`, so the body must bind the key operand, and a
+key of the wrong shape for the collection (an uppercase name for a
+dictionary, a lowercase one for a sequence) fails the commit rather than
+landing in the other half of the domain. The trigger index files a
+collection premise under the half's cover key (`on:<domain>/_position` or
+`on:<domain>/_symbol`), which every write in that half probes alongside its
+own attribute's key, so a rule reading a collection wakes for any member
+write.
+
 ### Deductive Rules
 
 An advanced form of composition that goes beyond stitching attributes together. Rules can impose additional constraints, compute derived values using formulas, and follow transitive paths across relations. A rule's body is a set of premises; its conclusion is a concept instance. Rules are resolved at query time by the semantic layer.

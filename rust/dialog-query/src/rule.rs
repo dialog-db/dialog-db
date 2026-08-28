@@ -197,9 +197,6 @@ pub(crate) fn compile_rule<T: Compile>(
                     rule: Box::new(rule.into()),
                     reason,
                 },
-                AnalysisError::CollectionHead { field, domain } => {
-                    TypeError::CollectionHead { field, domain }
-                }
                 AnalysisError::NegatedOptional => TypeError::NegatedOptional {
                     rule: Box::new(rule.into()),
                 },

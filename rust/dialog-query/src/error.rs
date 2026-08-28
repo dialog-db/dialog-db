@@ -6,6 +6,7 @@ use std::error;
 use std::fmt;
 
 use crate::artifact::{ArtifactTypeError, DialogArtifactsError, Type, Value};
+use crate::attribute::Keyed;
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
 use crate::reduce::Aggregator;
@@ -62,6 +63,23 @@ pub enum TypeError {
         binding: String,
         /// The collection's domain.
         domain: String,
+    },
+
+    /// A collection entry's key has the wrong name shape for its
+    /// collection.
+    #[error(
+        "Binding \"{binding}\" key {key:?} is not a valid {keyed:?} key for \
+         collection {domain}"
+    )]
+    KeyShape {
+        /// The binding's name.
+        binding: String,
+        /// The collection's domain.
+        domain: String,
+        /// The offending key.
+        key: String,
+        /// The collection's key kind.
+        keyed: Keyed,
     },
 
     /// A required binding was not provided.
@@ -193,20 +211,6 @@ pub enum TypeError {
     NegatedOptional {
         /// The offending rule.
         rule: Box<Rule>,
-    },
-
-    /// A rule concludes into a keyed collection field, which
-    /// induction cannot track. See
-    /// [`AnalysisError::CollectionHead`].
-    #[error(
-        "conclusion field {field} is a keyed collection ({domain}): a rule \
-         cannot derive one"
-    )]
-    CollectionHead {
-        /// The offending head field.
-        field: String,
-        /// The collection's domain.
-        domain: String,
     },
 
     /// A rule negates its own conclusion concept: a negative
@@ -461,6 +465,19 @@ pub enum FieldTypeError {
         /// The collection's domain.
         domain: String,
     },
+    /// A collection entry's key does not have the collection's name
+    /// shape: a sequence is keyed by positions, a dictionary by
+    /// symbols, and a key of the other shape would land in the other
+    /// half of the domain.
+    #[error("key {key:?} is not a valid {keyed:?} key for collection {domain}")]
+    KeyShape {
+        /// The collection's domain.
+        domain: String,
+        /// The offending key.
+        key: String,
+        /// The collection's key kind.
+        keyed: Keyed,
+    },
     /// A required term is missing.
     #[error("Required term is missing")]
     OmittedRequirement,
@@ -486,6 +503,12 @@ impl FieldTypeError {
             FieldTypeError::UnkeyedCollection { domain } => {
                 TypeError::UnkeyedCollection { binding, domain }
             }
+            FieldTypeError::KeyShape { domain, key, keyed } => TypeError::KeyShape {
+                binding,
+                domain,
+                key,
+                keyed,
+            },
             FieldTypeError::OmittedRequirement => TypeError::OmittedRequirement { binding },
             FieldTypeError::BlankRequirement => TypeError::BlankRequirement { binding },
         }
@@ -864,21 +887,6 @@ pub enum AnalysisError {
     Inference {
         /// Description of the conflict.
         reason: String,
-    },
-    /// A rule concludes into a keyed collection field. Induction
-    /// tracks which attributes a rule touches, per attribute; a
-    /// collection spans a domain and has no single attribute to
-    /// track, so a rule deriving one could not be re-evaluated when
-    /// its inputs changed.
-    #[error(
-        "conclusion field {field} is a keyed collection ({domain}): a rule \
-         cannot derive one"
-    )]
-    CollectionHead {
-        /// The offending head field.
-        field: String,
-        /// The collection's domain.
-        domain: String,
     },
     /// A conclusion variable's inferred type admits `Nothing`:
     /// the rule could produce `Absent` in a required slot.
