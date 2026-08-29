@@ -612,19 +612,19 @@ mod tests {
     }
 
     /// Test that a delegation for archive capability roundtrips correctly.
-    /// This tests creating a delegation that grants /archive access.
+    /// This tests creating a delegation that grants /use access.
     #[dialog_common::test]
     async fn it_roundtrips_archive_delegation() {
         let subject_signer = generate_signer().await;
         let subject_did = subject_signer.did();
         let operator_signer = generate_signer().await;
 
-        // Create delegation granting /archive capability
+        // Create delegation granting /use capability
         let delegation = DelegationBuilder::new()
             .issuer(subject_signer.clone())
             .audience(&operator_signer)
             .subject(Subject::Specific(subject_did.clone()))
-            .command(vec!["archive".to_string()])
+            .command(vec!["use".to_string()])
             .try_build()
             .await
             .unwrap();
@@ -632,14 +632,14 @@ mod tests {
         let chain = DelegationChain::new(delegation);
 
         // Verify ability path
-        assert_eq!(chain.ability(), "/archive");
+        assert_eq!(chain.ability(), "/use");
 
         // Serialize and deserialize
         let bytes = chain.to_bytes().unwrap();
         let restored = DelegationChain::try_from(bytes.as_slice()).unwrap();
 
         assert_eq!(chain, restored);
-        assert_eq!(restored.ability(), "/archive");
+        assert_eq!(restored.ability(), "/use");
     }
 
     #[dialog_common::test]
@@ -737,7 +737,12 @@ mod tests {
             .issuer(subject_signer.clone())
             .audience(&operator_signer)
             .subject(Subject::Specific(subject_did.clone()))
-            .command(vec!["archive".to_string(), "put".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "put".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ])
             .try_build()
             .await
             .unwrap();
@@ -745,13 +750,13 @@ mod tests {
         let chain = DelegationChain::new(delegation);
 
         // Verify ability path
-        assert_eq!(chain.ability(), "/archive/put");
+        assert_eq!(chain.ability(), "/use/put/archive/block");
 
         // Serialize via serde to DAG-CBOR
         let cbor_bytes = serde_ipld_dagcbor::to_vec(&chain).unwrap();
         let restored: DelegationChain = serde_ipld_dagcbor::from_slice(&cbor_bytes).unwrap();
 
         assert_eq!(chain, restored);
-        assert_eq!(restored.ability(), "/archive/put");
+        assert_eq!(restored.ability(), "/use/put/archive/block");
     }
 }
