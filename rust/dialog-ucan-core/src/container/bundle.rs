@@ -63,6 +63,32 @@ impl InvocationBundle {
         &self.blocks
     }
 
+    /// The root invocation together with the carried blocks its `prf`
+    /// field names, as an [`InvocationChain`] ready to verify.
+    ///
+    /// A bundle's container is not an invocation chain — that is the
+    /// whole reason this view exists — but the invocation at its root is
+    /// still an invocation with proofs, and authorizing it is the same
+    /// job as ever. This assembles exactly that: the proofs it names,
+    /// and none of the other blocks, which are arguments rather than
+    /// authority.
+    ///
+    /// Errors when a named proof is absent or is not a delegation, since
+    /// a chain missing its proofs cannot verify and silently dropping
+    /// one would let an unproven invocation through.
+    pub fn chain(&self) -> Result<InvocationChain<AnySignature>, ContainerError> {
+        let mut delegations = HashMap::new();
+        for link in self.invocation.proofs() {
+            let bytes = self.require(link)?;
+            let delegation: crate::Delegation<AnySignature> = serde_ipld_dagcbor::from_slice(bytes)
+                .map_err(|e| {
+                    ContainerError::Invocation(format!("proof {link} is not a delegation: {e}"))
+                })?;
+            delegations.insert(*link, std::sync::Arc::new(delegation));
+        }
+        Ok(InvocationChain::new(self.invocation.clone(), delegations))
+    }
+
     /// Read the block `link` names as an invocation and its proofs.
     ///
     /// For an argument naming an invocation to be redeemed later: the
@@ -245,6 +271,25 @@ mod tests {
         assert!(bundle.block(&absent).is_none());
         assert!(bundle.resolve_invocation(&absent).is_err());
         assert!(bundle.resolve_delegation(&absent).is_err());
+    }
+
+    /// The root invocation still authorizes normally: its proofs are
+    /// among the carried blocks, and `chain()` is how they come back
+    /// together.
+    #[dialog_common::test]
+    async fn it_rebuilds_the_root_chain_for_verification() {
+        let (original, _) = create_test_invocation_chain().await;
+        let bytes = original.to_bytes().expect("chain encodes");
+        let bundle = InvocationBundle::try_from(bytes.as_slice()).expect("bundle decodes");
+
+        let rebuilt = bundle.chain().expect("the proofs are carried");
+        assert_eq!(rebuilt.proofs(), original.proofs());
+        for link in original.proofs() {
+            assert!(
+                rebuilt.delegation(link).is_some(),
+                "every named proof comes back"
+            );
+        }
     }
 
     /// A bundle survives being forwarded, which is the whole reason its
