@@ -425,7 +425,12 @@ mod tests {
         let operator = Ed25519Signer::import(&[42; 32])
             .await
             .expect("operator key");
-        let command = vec!["memory".to_string(), "resolve".to_string()];
+        let command = vec![
+            "use".to_string(),
+            "get".to_string(),
+            "memory".to_string(),
+            "cell".to_string(),
+        ];
         let delegation = DelegationBuilder::new()
             .issuer(dialog_credentials::Signer::from(subject.clone()))
             .audience(&operator)
@@ -450,7 +455,7 @@ mod tests {
         let authorization = UcanAuthorization::from(UcanInvocation {
             chain: Box::new(InvocationChain::new(invocation, delegations)),
             subject: subject.did(),
-            ability: "/memory/resolve".to_string(),
+            ability: "/use/get/memory/cell".to_string(),
         });
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");

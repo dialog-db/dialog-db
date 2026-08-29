@@ -426,21 +426,21 @@ mod tests {
                 issuer,
                 &audience,
                 &subject,
-                vec!["archive".into(), "get".into()],
+                vec!["use".into(), "get".into(), "archive".into(), "block".into()],
             )
             .await;
             let certificate = UcanCertificate(delegation);
 
             // Ask for a sibling ability the delegation does not cover.
-            let scope = scope_for(&subject, "/archive/put");
+            let scope = scope_for(&subject, "/use/put/archive/block");
 
             match certificate.verify(&scope) {
                 Err(AuthorizeError::CommandEscalation {
                     claimed,
                     authorized,
                 }) => {
-                    assert_eq!(claimed, "/archive/put");
-                    assert_eq!(authorized, "/archive/get");
+                    assert_eq!(claimed, "/use/put/archive/block");
+                    assert_eq!(authorized, "/use/get/archive/block");
                 }
                 other => panic!("expected CommandEscalation, got {other:?}"),
             }
@@ -455,10 +455,10 @@ mod tests {
             let subject = signer(9).await.did();
 
             let delegation =
-                build_delegation_for(issuer, &audience, &subject, vec!["archive".into()]).await;
+                build_delegation_for(issuer, &audience, &subject, vec!["use".into()]).await;
             let certificate = UcanCertificate(delegation);
 
-            let scope = scope_for(&subject, "/archive/get");
+            let scope = scope_for(&subject, "/use/get/archive/block");
 
             certificate
                 .verify(&scope)

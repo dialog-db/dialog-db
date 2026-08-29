@@ -116,7 +116,12 @@ mod tests {
             .issuer(dialog_credentials::Signer::from(signer.clone()))
             .audience(&did)
             .subject(&did)
-            .command(vec!["archive".to_string(), "get".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "get".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ])
             .proofs(vec![])
             .try_build()
             .await
@@ -125,7 +130,7 @@ mod tests {
         UcanInvocation {
             chain: Box::new(chain),
             subject: did,
-            ability: "/archive/get".to_string(),
+            ability: "/use/get/archive/block".to_string(),
         }
         .into()
     }
