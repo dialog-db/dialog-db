@@ -16,6 +16,7 @@
 //! - [`DelegationChain`] - A chain of delegations
 //! - [`InvocationChain`] - An invocation with its delegation chain
 
+pub mod bundle;
 pub mod delegation;
 pub mod invocation;
 pub mod revocation;
