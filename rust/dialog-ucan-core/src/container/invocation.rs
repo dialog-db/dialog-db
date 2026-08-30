@@ -296,7 +296,7 @@ impl<'de> Deserialize<'de> for InvocationChain<AnySignature> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::command::Command;
     use crate::helpers::{create_delegation, generate_signer};
@@ -327,7 +327,7 @@ mod tests {
     }
 
     /// Create a test invocation chain with a valid delegation.
-    async fn create_test_invocation_chain() -> (InvocationChain<AnySignature>, Did) {
+    pub(crate) async fn create_test_invocation_chain() -> (InvocationChain<AnySignature>, Did) {
         let subject_signer = generate_signer().await;
         let subject_did = subject_signer.did();
         let operator_signer = generate_signer().await;
