@@ -21,6 +21,10 @@ function grab(id) {
     return element ? element.textContent : '';
 }
 
+// Tests may replace window.fetch while exercising application networking.
+// Keep the daemon control channel independent from that test-owned global.
+const daemonFetch = globalThis.fetch.bind(globalThis);
+
 let reported = false;
 async function report(ok, error) {
     if (reported) {
@@ -32,7 +36,7 @@ async function report(ok, error) {
         const detail = error && error.stack ? error.stack : String(error);
         output += '\nharness error: ' + detail + '\n';
     }
-    await fetch('report', {
+    await daemonFetch('report', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
