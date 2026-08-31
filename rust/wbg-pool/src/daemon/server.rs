@@ -65,6 +65,11 @@ async fn isolate_origin_headers(mut response: Response) -> Response {
             HeaderValue::from_static("require-corp"),
         );
     }
+    // Closed tabs leave Chrome's HTTP/1 keep-alive sockets open, eventually
+    // exhausting the daemon's descriptors on macOS (soft limit 256).
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
     response
 }
 
@@ -380,4 +385,18 @@ async fn asset(
         bytes,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn it_closes_browser_connections_after_each_response() {
+        let response = isolate_origin_headers(StatusCode::OK.into_response()).await;
+        assert_eq!(
+            response.headers().get(header::CONNECTION),
+            Some(&HeaderValue::from_static("close"))
+        );
+    }
 }
