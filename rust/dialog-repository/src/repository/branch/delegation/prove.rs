@@ -669,7 +669,7 @@ mod tests {
         let proof = harness
             .parity(
                 &holder.did(),
-                scope(&space, &["archive"]),
+                scope(&space, &["use"]),
                 TimeRange::unbounded(),
             )
             .await;
