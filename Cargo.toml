@@ -40,6 +40,7 @@ members = [
     "rust/dialog-identity",
     "rust/dialog-operator",
     "rust/dialog-repository",
+    "rust/dialog-soak",
     "rust/dialog-varsig",
     "rust/wbg-pool",
 ]

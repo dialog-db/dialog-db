@@ -1,0 +1,150 @@
+{
+  "scenario": "join",
+  "network": "broadband",
+  "latency_ms": 30.0,
+  "auth_ms": 50.0,
+  "bandwidth_mbps": 100.0,
+  "fanout_n": 8,
+  "max_segment": 65536,
+  "entities": 4000,
+  "facts": 24011,
+  "commits": 33,
+  "vault_files": 401,
+  "vault_bytes": 19304457,
+  "phases": [
+    {
+      "name": "pull",
+      "virtual_ms": 82,
+      "traffic": {
+        "rows": [
+          [
+            "memory.resolve",
+            1,
+            333
+          ]
+        ],
+        "requests": 1,
+        "bytes": 333
+      }
+    },
+    {
+      "name": "probe",
+      "virtual_ms": 175,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            2,
+            150368
+          ]
+        ],
+        "requests": 2,
+        "bytes": 150368
+      }
+    },
+    {
+      "name": "roster",
+      "virtual_ms": 82,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            1,
+            5056
+          ]
+        ],
+        "requests": 1,
+        "bytes": 5056
+      }
+    },
+    {
+      "name": "claim",
+      "virtual_ms": 341,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            1,
+            106560
+          ],
+          [
+            "archive.put",
+            1,
+            69420
+          ],
+          [
+            "memory.resolve",
+            1,
+            333
+          ],
+          [
+            "memory.publish",
+            1,
+            373
+          ]
+        ],
+        "requests": 4,
+        "bytes": 176686
+      }
+    },
+    {
+      "name": "render",
+      "virtual_ms": 226,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            21,
+            800080
+          ]
+        ],
+        "requests": 21,
+        "bytes": 800080
+      }
+    },
+    {
+      "name": "entity",
+      "virtual_ms": 89,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            1,
+            93576
+          ]
+        ],
+        "requests": 1,
+        "bytes": 93576
+      }
+    },
+    {
+      "name": "requery",
+      "virtual_ms": 0,
+      "traffic": {
+        "rows": [],
+        "requests": 0,
+        "bytes": 0
+      }
+    },
+    {
+      "name": "download",
+      "virtual_ms": 2487,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            399,
+            19308172
+          ],
+          [
+            "memory.resolve",
+            1,
+            373
+          ]
+        ],
+        "requests": 400,
+        "bytes": 19308545
+      }
+    }
+  ]
+}

@@ -60,6 +60,7 @@ where
                 permit
             }
         };
+        let redeemed = time::now();
 
         // A retry presents the capability a second time, so it is
         // cloned only when a cached permit makes a retry possible.
@@ -67,9 +68,35 @@ where
         let presented = key.map(|key| (key, permit.clone()));
         let outcome = permit.invoke(invocation.capability).perform(&S3).await;
 
+        // The two halves of every remote effect, separately attributed:
+        // a slow sync can be blamed on the redeem (access service, one
+        // HTTP round trip unless cached) or on storage (S3, always one)
+        // without guessing. `debug` because this fires once per block on
+        // a cold replica.
+        tracing::debug!(
+            target: "dialog::remote::ucan",
+            command = Fx::command(),
+            permit_cache_hit = from_cache,
+            redeem_ms = redeemed
+                .duration_since(now)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or_default(),
+            storage_ms = time::now()
+                .duration_since(redeemed)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or_default(),
+            ok = outcome.is_ok(),
+            "remote effect"
+        );
+
         match (outcome, presented) {
             (Err(error), Some((key, permit))) if error.is_permit_rejection() => {
                 cache.invalidate(&key, &permit);
+                tracing::debug!(
+                    target: "dialog::remote::ucan",
+                    command = Fx::command(),
+                    "cached permit rejected; re-redeeming"
+                );
                 match retry {
                     Some(capability) => {
                         let fresh = invocation.authorization.redeem(&invocation.address).await?;

@@ -1521,6 +1521,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
+ "tracing",
  "wasm-bindgen-test",
 ]
 
@@ -1598,6 +1599,28 @@ dependencies = [
  "tokio-test",
  "tracing",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-soak"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dialog-artifacts",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-operator",
+ "dialog-remote-fs",
+ "dialog-repository",
+ "dialog-search-tree",
+ "dialog-storage",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
