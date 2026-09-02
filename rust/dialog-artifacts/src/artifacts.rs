@@ -77,7 +77,7 @@ use crate::tree::{
     spill_cache,
 };
 use crate::{
-    DialogArtifactsError, HASH_SIZE, Key, State,
+    BlobChange, BlobIndexExt as _, BlobRecord, DialogArtifactsError, HASH_SIZE, Key, State,
     artifacts::selector::Constrained,
     buffered::{BufferedBatch, SpineSlot, apply_buffered_reusing},
     make_reference,
@@ -517,6 +517,99 @@ where
         }
     }
 
+    /// Record a blob reference in the blob index, publishing the resulting
+    /// revision the way a commit does.
+    ///
+    /// Only the reference and its intrinsic [`BlobRecord`] enter the tree; the
+    /// blob's bytes live in a blob store, which this triple store does not
+    /// keep. Recording the reference is what makes the blob visible to
+    /// [`blob_changes`](Artifacts::blob_changes), so a replica knows the blob
+    /// is owed.
+    pub async fn put_blob(
+        &mut self,
+        reference: &Blake3Hash,
+        record: BlobRecord,
+    ) -> Result<Blake3Hash, DialogArtifactsError> {
+        let base_revision = self.revision().await?;
+
+        let transaction_result = async {
+            let mut index = self.index.write().await;
+            let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
+
+            index
+                .put_blob(&mut self.storage, &mut delta, reference, record)
+                .await?;
+
+            Self::publish_root(&mut self.storage, &self.identifier, index.root(), delta).await
+        }
+        .await;
+
+        match transaction_result {
+            Ok(revision) => Ok(revision),
+            Err(error) => {
+                self.reset(Some(base_revision)).await?;
+                Err(error)
+            }
+        }
+    }
+
+    /// The [`BlobRecord`] the blob index holds for `reference`, or `None` if
+    /// the current revision does not reference that blob. Answered from the
+    /// index alone, so it costs no blob fetch.
+    pub async fn get_blob(
+        &self,
+        reference: &Blake3Hash,
+    ) -> Result<Option<BlobRecord>, DialogArtifactsError> {
+        let index = self.index.read().await;
+        index.get_blob(&self.storage, reference).await
+    }
+
+    /// Stream the blob references added and removed between two revisions, in
+    /// reference order.
+    ///
+    /// Runs the tree differential over the blob index, so the cost is
+    /// proportional to what changed rather than to the number of facts. This
+    /// is what a replication or backup pass reads to learn which blobs it owes
+    /// since its checkpoint.
+    pub fn blob_changes(
+        &self,
+        checkpoint: Blake3Hash,
+        current: Blake3Hash,
+    ) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        let storage = self.storage.clone();
+
+        try_stream! {
+            let checkpoint = Self::index_at(&storage, &checkpoint).await?;
+            let current = Self::index_at(&storage, &current).await?;
+            let changes = crate::blob_changes(checkpoint, current, storage);
+            tokio::pin!(changes);
+            for await change in changes {
+                yield change?;
+            }
+        }
+    }
+
+    /// The index tree as of `revision`, for reads that need a version other
+    /// than the live one.
+    async fn index_at(
+        storage: &Storage<CborEncoder, Backend>,
+        revision: &Blake3Hash,
+    ) -> Result<ArtifactTree, DialogArtifactsError> {
+        if revision == &NULL_REVISION_HASH {
+            return Ok(ArtifactTree::empty());
+        }
+
+        let root = storage.read::<IndexRoot>(revision).await?.ok_or_else(|| {
+            DialogArtifactsError::InvalidRevision(format!(
+                "Block ({}) not found in storage",
+                revision.to_base58()
+            ))
+        })?;
+
+        Ok(ArtifactTree::from_hash(NodeHash::from(*root.index())))
+    }
+
     /// Persists `delta`'s pending nodes, mints a revision for `root`, and
     /// advances the store's head pointer to it. The flush completes before the
     /// revision is written: a revision must only reference durable blocks.
@@ -630,12 +723,45 @@ mod tests {
     use crate::tree::distribution;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStoreMutExt, ArtifactViewStream, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, NameShape, Symbol, Value,
-        make_reference,
+        BlobChange, BlobRecord, DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH,
+        NameShape, Symbol, Value, make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// The blob index is reachable through [`Artifacts`] itself: a recorded
+    /// reference reads back with its record, and the differential between the
+    /// revisions before and after the write names exactly that blob — without
+    /// any fact having been committed.
+    #[dialog_common::test]
+    async fn it_records_a_blob_reference_and_reports_it_as_added() -> Result<()> {
+        let mut artifacts =
+            Artifacts::open("blob-index".into(), MemoryStorageBackend::default()).await?;
+
+        let bytes = b"the bytes of a blob";
+        let reference = make_reference(bytes);
+        let record = BlobRecord::new(bytes.len() as u64);
+
+        let checkpoint = artifacts.revision().await?;
+        let current = artifacts.put_blob(&reference, record).await?;
+
+        assert_eq!(artifacts.get_blob(&reference).await?, Some(record));
+        assert_eq!(
+            artifacts
+                .get_blob(&make_reference(b"some other blob"))
+                .await?,
+            None
+        );
+
+        let changes: Vec<_> = artifacts
+            .blob_changes(checkpoint, current)
+            .try_collect()
+            .await?;
+        assert_eq!(changes, vec![BlobChange::Added(reference)]);
+
+        Ok(())
+    }
 
     /// A store that keeps its live spine across commits must publish exactly
     /// the revisions a store that re-opens its root from bytes before every

@@ -42,8 +42,8 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, ArtifactViewStream as _,
-    Artifacts, Attribute, Cause, DialogArtifactsError, Entity, HASH_SIZE, Instruction, Value,
-    ValueDataType, artifacts::selector::Constrained,
+    Artifacts, Attribute, BlobChange, BlobRecord, Cause, DialogArtifactsError, Entity, HASH_SIZE,
+    Instruction, Value, ValueDataType, artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -115,6 +115,36 @@ interface ArtifactSelector {
  * The shape of the "async iterable" that is returned by `Artifacts.select`
  */
 type ArtifactIterable = AsyncIterable<Artifact & ArtifactApi>;
+
+/**
+ * A reference to a blob: the BLAKE3 hash of the blob's complete bytes. It
+ * must be exactly 32-bytes long, and may be produced with `makeReference`.
+ */
+type BlobReference = Uint8Array;
+
+/**
+ * The intrinsic, content-derived metadata that the blob index keeps for a
+ * referenced blob. The `version` is the encoding version of the record, so
+ * that new fields may be added to it over time.
+ */
+interface BlobRecord {
+  version: number,
+  size: number
+}
+
+/**
+ * A blob reference that was added or removed between two revisions.
+ */
+interface BlobChange {
+  type: BlobChangeType,
+  reference: BlobReference
+}
+
+/**
+ * The shape of the "async iterable" that is returned by
+ * `Artifacts.blobChanges`
+ */
+type BlobChangeIterable = AsyncIterable<BlobChange>;
 "#;
 
 #[wasm_bindgen]
@@ -177,6 +207,17 @@ pub enum InstructionTypeBinding {
     Assert = 0,
     /// The `Instruction` is a retraction
     Retract = 1,
+}
+
+/// Used to specify if a `BlobChange` newly references a blob or drops a
+/// reference to one
+#[repr(u8)]
+#[wasm_bindgen(js_name = "BlobChangeType")]
+pub enum BlobChangeTypeBinding {
+    /// The blob is referenced by the later revision, but not the earlier one
+    Added = 0,
+    /// The blob is referenced by the earlier revision, but not the later one
+    Removed = 1,
 }
 
 type WebStorageBackend = Arc<Mutex<dyn ObjectSafeStorageBackend>>;
@@ -311,6 +352,66 @@ impl ArtifactsBinding {
 
         Ok(iterable)
     }
+
+    /// Record a blob of `size` bytes in the blob index, under the
+    /// `BlobReference` that identifies it. The returned promise resolves to
+    /// the new revision, as `Artifacts.commit` does.
+    ///
+    /// The blob's bytes are the caller's to keep: the index carries only the
+    /// reference and the size, which is what a replication or backup pass
+    /// reads. Recording the reference is what makes the blob visible to
+    /// `Artifacts.blobChanges`.
+    #[wasm_bindgen(js_name = "putBlob")]
+    pub async fn put_blob(&self, reference: Vec<u8>, size: f64) -> Result<Vec<u8>, JsError> {
+        let reference = blob_reference(reference)?;
+
+        Ok(self
+            .artifacts
+            .write()
+            .await
+            .put_blob(&reference, BlobRecord::new(size as u64))
+            .await?
+            .to_vec())
+    }
+
+    /// Get the `BlobRecord` that the blob index holds for a `BlobReference`,
+    /// or `undefined` if the current revision does not reference that blob.
+    /// The record is read from the index alone, so no blob bytes are fetched.
+    #[wasm_bindgen(js_name = "getBlob", unchecked_return_type = "BlobRecord|undefined")]
+    pub async fn get_blob(&self, reference: Vec<u8>) -> Result<JsValue, JsError> {
+        let reference = blob_reference(reference)?;
+
+        match self.artifacts.read().await.get_blob(&reference).await? {
+            Some(record) => JsValue::try_from(record),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
+    /// Query for the blob references that were added or removed between two
+    /// revisions. Matching results are provided via an async iterator, in
+    /// reference order.
+    ///
+    /// The work is proportional to what changed between the revisions, not to
+    /// the number of facts in the store, so a sync or backup layer can learn
+    /// which blobs it owes without walking every artifact.
+    #[wasm_bindgen(js_name = "blobChanges", unchecked_return_type = "BlobChangeIterable")]
+    pub fn blob_changes(&self, checkpoint: Vec<u8>, current: Vec<u8>) -> Result<JsValue, JsError> {
+        let checkpoint = revision_hash(checkpoint)?;
+        let current = revision_hash(current)?;
+        let artifacts = self.artifacts.clone();
+
+        let iterable = JsValue::from(Object::new());
+        let async_iterator: Closure<dyn FnMut() -> BlobChangeIteratorBinding> =
+            Closure::new(move || {
+                BlobChangeIteratorBinding::new(checkpoint, current, artifacts.clone())
+            });
+        let async_iterator = async_iterator.into_js_value();
+
+        Reflect::set(&iterable, &Symbol::async_iterator(), &async_iterator)
+            .map_err(js_value_to_error)?;
+
+        Ok(iterable)
+    }
 }
 
 /// An async iterator that lazily yields `Artifact`s
@@ -363,11 +464,83 @@ impl ArtifactIteratorBinding {
     }
 }
 
+/// An async iterator that lazily yields the `BlobChange`s between two
+/// revisions
+#[wasm_bindgen(js_name = "BlobChangeIterator")]
+pub struct BlobChangeIteratorBinding {
+    checkpoint: Blake3Hash,
+    current: Blake3Hash,
+    artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
+    stream: Option<Pin<Box<dyn Stream<Item = Result<BlobChange, DialogArtifactsError>>>>>,
+}
+
+#[wasm_bindgen(js_class = "BlobChangeIterator")]
+impl BlobChangeIteratorBinding {
+    fn new(
+        checkpoint: Blake3Hash,
+        current: Blake3Hash,
+        artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
+    ) -> Self {
+        Self {
+            checkpoint,
+            current,
+            artifacts,
+            stream: None,
+        }
+    }
+
+    /// Get the next `BlobChange` yielded by this iterator
+    #[wasm_bindgen(unchecked_return_type = "IteratorResult<BlobChange>")]
+    pub async fn next(&mut self) -> Result<JsValue, JsError> {
+        if self.stream.is_none() {
+            self.stream = Some(Box::pin(
+                self.artifacts
+                    .read()
+                    .await
+                    .blob_changes(self.checkpoint, self.current),
+            ));
+        }
+
+        let Some(stream) = &mut self.stream else {
+            return iterable_result(None);
+        };
+
+        let Some(next_element) = stream.next().await else {
+            return iterable_result(None);
+        };
+
+        let next_element = JsValue::try_from(next_element?)?;
+
+        iterable_result(Some(next_element))
+    }
+}
+
 // NOTE: Everything below this line is a conversion to support duck typing on the
 // JavaScript side of the API boundary
 
 fn js_value_to_error(value: JsValue) -> JsError {
     JsError::new(&format!("{:?}", value))
+}
+
+/// Interpret bytes handed across the boundary as a `BlobReference`
+fn blob_reference(bytes: Vec<u8>) -> Result<Blake3Hash, JsError> {
+    Ok(Blake3Hash::try_from(bytes).map_err(|bytes: Vec<u8>| {
+        DialogArtifactsError::InvalidReference(format!(
+            "Incorrect byte length (expected {HASH_SIZE}, received {})",
+            bytes.len()
+        ))
+    })?)
+}
+
+/// Interpret bytes handed across the boundary as a revision, of the kind that
+/// `Artifacts.revision` returns
+fn revision_hash(bytes: Vec<u8>) -> Result<Blake3Hash, JsError> {
+    Ok(Blake3Hash::try_from(bytes).map_err(|bytes: Vec<u8>| {
+        DialogArtifactsError::InvalidRevision(format!(
+            "Incorrect byte length (expected {HASH_SIZE}, received {})",
+            bytes.len()
+        ))
+    })?)
 }
 
 fn iterable_result(value: Option<JsValue>) -> Result<JsValue, JsError> {
@@ -426,6 +599,53 @@ impl TryFrom<Value> for JsValue {
 
         Reflect::set(&object, &"type".into(), &data_type).map_err(js_value_to_error)?;
         Reflect::set(&object, &"value".into(), &value).map_err(js_value_to_error)?;
+
+        Ok(object)
+    }
+}
+
+impl TryFrom<BlobRecord> for JsValue {
+    type Error = JsError;
+
+    fn try_from(record: BlobRecord) -> Result<Self, Self::Error> {
+        let object = JsValue::from(Object::new());
+
+        Reflect::set(
+            &object,
+            &"version".into(),
+            &JsValue::from_f64(record.version as f64),
+        )
+        .map_err(js_value_to_error)?;
+        // TODO: BigNum support
+        Reflect::set(
+            &object,
+            &"size".into(),
+            &JsValue::from_f64(record.size as f64),
+        )
+        .map_err(js_value_to_error)?;
+
+        Ok(object)
+    }
+}
+
+impl TryFrom<BlobChange> for JsValue {
+    type Error = JsError;
+
+    fn try_from(change: BlobChange) -> Result<Self, Self::Error> {
+        let change_type = match change {
+            BlobChange::Added(_) => BlobChangeTypeBinding::Added,
+            BlobChange::Removed(_) => BlobChangeTypeBinding::Removed,
+        };
+
+        let reference = Uint8Array::new_with_length(HASH_SIZE as u32);
+        reference.copy_from(change.hash().as_ref());
+
+        let object = JsValue::from(Object::new());
+
+        Reflect::set(&object, &"type".into(), &JsValue::from(change_type))
+            .map_err(js_value_to_error)?;
+        Reflect::set(&object, &"reference".into(), &JsValue::from(reference))
+            .map_err(js_value_to_error)?;
 
         Ok(object)
     }

@@ -1,4 +1,4 @@
-import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "./dialog-artifacts";
+import init, { Artifacts, generateEntity, encode, makeReference, BlobChangeType, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "./dialog-artifacts";
 import { assert, expect } from "@open-wc/testing";
 
 await init();
@@ -289,6 +289,32 @@ describe('artifacts', () => {
         }
 
         expect(count).to.be.eql(5);
+    });
+
+    it('reports the blob references added between two revisions', async () => {
+        let artifacts = await Artifacts.anonymous();
+
+        let bytes = new TextEncoder().encode("the bytes of a blob");
+        let reference = makeReference(bytes);
+
+        let checkpoint = await artifacts.revision();
+        let current = await artifacts.putBlob(reference, bytes.length);
+
+        let record = await artifacts.getBlob(reference);
+
+        expect(record).to.be.ok;
+        expect(record!.size).to.be.eql(bytes.length);
+        expect(await artifacts.getBlob(makeReference(new Uint8Array()))).to.be.undefined;
+
+        let changes = [];
+
+        for await (const change of artifacts.blobChanges(checkpoint, current)) {
+            changes.push(change);
+        }
+
+        expect(changes.length).to.be.eql(1);
+        expect(changes[0].type).to.be.eql(BlobChangeType.Added);
+        expect(encode(changes[0].reference)).to.be.eql(encode(reference));
     });
 
 });
