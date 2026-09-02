@@ -60,6 +60,7 @@ anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util", "fs"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+dialog-credentials = { workspace = true }
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }

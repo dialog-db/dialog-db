@@ -1051,6 +1051,7 @@ dependencies = [
  "csv-async",
  "dialog-capability",
  "dialog-common",
+ "dialog-credentials",
  "dialog-effects",
  "dialog-search-tree",
  "dialog-storage",

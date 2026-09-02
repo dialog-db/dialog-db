@@ -46,6 +46,9 @@ use crate::{
     ValueDataType, artifacts::selector::Constrained,
 };
 
+mod secret;
+pub use secret::{KeyExportDuckType, SignerBinding, conceal};
+
 #[wasm_bindgen(typescript_custom_section)]
 const ARTIFACT_INTERFACE: &'static str = r#"
 /**
