@@ -1305,6 +1305,7 @@ dependencies = [
  "dialog-ucan",
  "dialog-ucan-core",
  "dialog-varsig",
+ "ipld-core",
  "serde",
  "thiserror 2.0.18",
  "tokio",
