@@ -31,6 +31,7 @@ use dialog_varsig::Did;
 use dialog_varsig::Resolver;
 use dialog_varsig::Signature;
 use ipld_core::cid::Cid;
+use ipld_core::ipld::Ipld;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -142,6 +143,25 @@ impl<S: Signature> InvocationChain<S> {
                     ),
                 },
             })
+    }
+
+    /// The value this container carries for `key` in signed meta: the
+    /// invocation's own entry first — it is the artifact minted last, at
+    /// invoke time — then its `prf` delegations leaf-to-root, so the hop
+    /// minted closest to the invoker wins among the proofs.
+    ///
+    /// Meta is informational — verification ignores it — so nothing
+    /// authority-bearing belongs behind this.
+    #[must_use]
+    pub fn meta(&self, key: &str) -> Option<&Ipld> {
+        if let Some(value) = self.invocation.meta().get(key) {
+            return Some(value);
+        }
+        self.proofs()
+            .iter()
+            .rev()
+            .filter_map(|cid| self.delegations.get(cid))
+            .find_map(|delegation| delegation.meta().get(key))
     }
 
     /// Look up a delegation the container carries as a block.
@@ -359,6 +379,63 @@ pub(crate) mod tests {
         delegations.insert(delegation_cid, Arc::new(delegation));
 
         (InvocationChain::new(invocation, delegations), subject_did)
+    }
+
+    /// The invocation's own meta entry wins over a proof delegation's;
+    /// a key only a proof carries still resolves through the container.
+    #[dialog_common::test]
+    async fn it_reads_meta_from_the_invocation_before_its_proofs() {
+        use ipld_core::ipld::Ipld;
+        use std::collections::BTreeMap;
+
+        let subject_signer = generate_signer().await;
+        let subject_did = subject_signer.did();
+        let operator_signer = generate_signer().await;
+
+        let delegation = DelegationBuilder::new()
+            .issuer(subject_signer.clone())
+            .audience(&operator_signer.did())
+            .subject(Subject::Specific(subject_did.clone()))
+            .command(vec![])
+            .meta(BTreeMap::from([
+                (
+                    "home.address".to_owned(),
+                    Ipld::String("https://proof.example/ucan/".to_owned()),
+                ),
+                ("origin".to_owned(), Ipld::String("proof".to_owned())),
+            ]))
+            .try_build()
+            .await
+            .unwrap();
+        let delegation_cid = delegation.to_cid();
+
+        let invocation = InvocationBuilder::new()
+            .issuer(operator_signer)
+            .audience(&subject_did)
+            .subject(&subject_did)
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![delegation_cid])
+            .meta(BTreeMap::from([(
+                "home.address".to_owned(),
+                Ipld::String("https://invocation.example/ucan/".to_owned()),
+            )]))
+            .try_build()
+            .await
+            .unwrap();
+
+        let mut delegations = HashMap::new();
+        delegations.insert(delegation_cid, Arc::new(delegation));
+        let chain = InvocationChain::new(invocation, delegations);
+
+        assert_eq!(
+            chain.meta("home.address"),
+            Some(&Ipld::String("https://invocation.example/ucan/".to_owned())),
+        );
+        assert_eq!(
+            chain.meta("origin"),
+            Some(&Ipld::String("proof".to_owned())),
+        );
+        assert_eq!(chain.meta("absent"), None);
     }
 
     #[dialog_common::test]

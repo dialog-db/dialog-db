@@ -11,6 +11,8 @@ use dialog_ucan::Scope;
 use dialog_ucan::{Ucan, UcanDelegation, UcanProof};
 use dialog_ucan_core::time::Timestamp;
 use dialog_varsig::{Did, Principal};
+use ipld_core::ipld::Ipld;
+use std::collections::BTreeMap;
 
 /// Access handle scoped to a profile's credential.
 ///
@@ -95,6 +97,7 @@ impl<'a, C: Constraint> Claim<'a, C> {
         Delegate {
             claim: self,
             audience: audience.into(),
+            meta: None,
         }
     }
 
@@ -174,6 +177,20 @@ fn signer_of(credential: &SignerCredential) -> dialog_credentials::Signer {
 pub struct Delegate<'a, C: Constraint> {
     claim: Claim<'a, C>,
     audience: Did,
+    meta: Option<BTreeMap<String, Ipld>>,
+}
+
+impl<C: Constraint> Delegate<'_, C> {
+    /// Entries for the minted delegation's signed `meta`.
+    ///
+    /// Meta travels inside the signed envelope, so whatever the grant
+    /// carries here cannot be swapped independently of the grant.
+    /// Verification ignores it.
+    #[must_use]
+    pub fn meta(mut self, meta: BTreeMap<String, Ipld>) -> Self {
+        self.meta = Some(meta);
+        self
+    }
 }
 
 impl<C: Constraint> Delegate<'_, C>
@@ -194,6 +211,9 @@ where
         }
         if let Some(exp) = duration.expiration {
             authorization = authorization.expires(exp)?;
+        }
+        if let Some(meta) = self.meta {
+            authorization = authorization.meta(meta);
         }
         authorization.delegate(self.audience).await
     }
