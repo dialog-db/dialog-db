@@ -18,6 +18,7 @@ use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::Disjunction;
 use crate::rule::deductive::DeductiveRule;
+use crate::rule::project::rename_row;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
 use crate::source::SelectRules;
@@ -409,8 +410,12 @@ impl ConceptQuery {
                         // relation, and the caller's bindings join
                         // against the output — the fixpoint-table
                         // shape. The plain rules plan as usual.
-                        for rule in rules.reducing() {
-                            reduced.extend(reduce_rows(rule, env).await?);
+                        for (rule, rename) in rules.reducing() {
+                            let rows = reduce_rows(rule, env).await?;
+                            reduced.extend(rows.into_iter().map(|row| match rename {
+                                Some(rename) => rename_row(&row, rename),
+                                None => row,
+                            }));
                         }
                         plan = Some(rules.plan(&app.terms, &input));
                     }

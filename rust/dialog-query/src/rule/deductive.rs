@@ -6,6 +6,7 @@ use crate::artifact::Entity;
 use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::descriptor::ConceptFieldDescriptor;
 use crate::error::TypeError;
 use crate::formula::attribute::AttributeParts;
 use crate::negation::Negation;
@@ -230,6 +231,20 @@ impl DeductiveRule {
             .expect("storable rule must have a content-addressed identity")
     }
 
+    /// Whether two rules are the same rule: by content address when
+    /// both have one, by structural equality otherwise.
+    ///
+    /// Compilation is not equality-stable — two hydrations of the same
+    /// bytes can differ in the order analysis records its narrowings —
+    /// so deduplication across layers and caches goes by identity,
+    /// which is a pure function of the body.
+    pub fn same(&self, other: &DeductiveRule) -> bool {
+        match (self.try_this(), other.try_this()) {
+            (Some(this), Some(that)) => this == that,
+            _ => self == other,
+        }
+    }
+
     /// Rebuild a rule from its canonical dag-cbor [`encode`](Self::encode)
     /// bytes. `Err` carries a human-readable reason — either the cbor
     /// decode failed or the decoded descriptor didn't compile.
@@ -306,96 +321,121 @@ impl DeductiveRule {
 /// premise per concept-typed field. Shared by
 /// `From<&ConceptDescriptor>` and [`DeductiveRule::variants`].
 fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
-    use crate::concept::query::ConceptQuery;
+    let this = Term::<Entity>::var("this");
+    let mut premises = Vec::new();
+    for (name, field) in concept.with().iter() {
+        premises.extend(field_scan_premises(name, field, &this));
+        premises.extend(field_conformance_premise(name, field));
+    }
+    premises
+}
+
+/// The value term a concept field binds in its own rule: the field's
+/// name, typed by the attribute's content type and, for a
+/// concept-typed field, carrying the conformance refinement.
+pub(crate) fn field_value_term(name: &str, field: &ConceptFieldDescriptor) -> Term<Any> {
     use crate::type_system::ConceptRef;
 
+    // The value term stays scalar in both cases; the
+    // associative layer never carries optionality. A
+    // required field lowers to a plain scan (a missing fact
+    // filters the row out); an optional field lowers to a
+    // `OptionalAttributeQuery` left-join, which set-widens at the
+    // projection: `this` is bound by the required fields, so
+    // a miss yields one row with the slot bound to
+    // `Binding::Absent`.
+    //
+    // A concept-typed field's slot additionally carries the
+    // conformance refinement, and the constraint itself is
+    // enforced structurally: the target concept is conjoined
+    // as a premise over the field's variable.
+    let kind = match (field.content_type().map(Kind::from), field.conforms()) {
+        (Some(kind), Some(target)) => Some(
+            kind.with_conformance(ConceptRef(target.this().to_string()))
+                .expect("a conforming field is entity-valued by construction"),
+        ),
+        (kind, _) => kind,
+    };
+    match kind {
+        Some(kind) => Term::<Any>::typed_var(name, kind),
+        None => Term::var(name),
+    }
+}
+
+/// The scan premises one concept field contributes to a rule body: the
+/// attribute lookup (a left-join when optional) and, for a keyed
+/// collection, the `dialog/attribute-parts` projection of the key.
+pub(crate) fn field_scan_premises(
+    name: &str,
+    field: &ConceptFieldDescriptor,
+    this: &Term<Entity>,
+) -> Vec<Premise> {
     let mut premises = Vec::new();
+    let value = field_value_term(name, field);
 
-    let this = Term::<Entity>::var("this");
+    let premise: Premise = if field.is_optional() {
+        OptionalAttributeQuery::new(
+            field.the().term(name),
+            this.clone(),
+            value,
+            Term::blank(),
+            Some(field.cardinality()),
+        )
+        .into()
+    } else {
+        AttributeQuery::new(
+            field.the().term(name),
+            this.clone(),
+            value,
+            Term::blank(),
+            Some(field.cardinality()),
+        )
+        .into()
+    };
+    premises.push(premise);
 
-    for (name, field) in concept.with().iter() {
-        // The value term stays scalar in both cases; the
-        // associative layer never carries optionality. A
-        // required field lowers to a plain scan (a missing fact
-        // filters the row out); an optional field lowers to a
-        // `OptionalAttributeQuery` left-join, which set-widens at the
-        // projection: `this` is bound by the required fields, so
-        // a miss yields one row with the slot bound to
-        // `Binding::Absent`.
-        //
-        // A concept-typed field's slot additionally carries the
-        // conformance refinement, and the constraint itself is
-        // enforced structurally: the target concept is conjoined
-        // as a premise over the field's variable below.
-        let kind = match (field.content_type().map(Kind::from), field.conforms()) {
-            (Some(kind), Some(target)) => Some(
-                kind.with_conformance(ConceptRef(target.this().to_string()))
-                    .expect("a conforming field is entity-valued by construction"),
-            ),
-            (kind, _) => kind,
-        };
-        let value = match kind {
-            Some(kind) => Term::<Any>::typed_var(name, kind),
-            None => Term::var(name),
-        };
-
-        let premise: Premise = if field.is_optional() {
-            OptionalAttributeQuery::new(
-                field.the().term(name),
-                this.clone(),
-                value.clone(),
-                Term::blank(),
-                Some(field.cardinality()),
-            )
-            .into()
-        } else {
-            AttributeQuery::new(
-                field.the().term(name),
-                this.clone(),
-                value.clone(),
-                Term::blank(),
-                Some(field.cardinality()),
-            )
-            .into()
-        };
-        premises.push(premise);
-
-        // A keyed collection's scan binds the whole attribute
-        // (`domain/key`) to an internal variable; the author-facing
-        // key is its name half, projected onto the field's key
-        // operand. One entry, one row, `(key, value)` bound flat.
-        if let Relation::Collection { .. } = field.the() {
-            let mut parts = Parameters::new();
-            parts.insert(
-                "of".to_string(),
-                Term::var(Relation::attribute_variable(name)),
-            );
-            parts.insert("domain".to_string(), Term::blank());
-            parts.insert("name".to_string(), Term::var(Relation::key_operand(name)));
-            premises.push(
-                AttributeParts::apply(parts)
-                    .expect("attribute-parts operands are well-formed by construction")
-                    .into(),
-            );
-        }
-
-        // Conformance is "facts exist", not a property of the
-        // scalar, so it desugars to the target concept applied
-        // to the field's entity: the row survives only when the
-        // target entity satisfies the concept. Only `this` is
-        // projected; the target's own fields stay internal to
-        // the premise.
-        if let Some(target) = field.conforms() {
-            let mut terms = Parameters::new();
-            terms.insert("this".to_string(), value);
-            premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
-                terms,
-                predicate: target.clone(),
-            })));
-        }
+    // A keyed collection's scan binds the whole attribute
+    // (`domain/key`) to an internal variable; the author-facing
+    // key is its name half, projected onto the field's key
+    // operand. One entry, one row, `(key, value)` bound flat.
+    if let Relation::Collection { .. } = field.the() {
+        let mut parts = Parameters::new();
+        parts.insert(
+            "of".to_string(),
+            Term::var(Relation::attribute_variable(name)),
+        );
+        parts.insert("domain".to_string(), Term::blank());
+        parts.insert("name".to_string(), Term::var(Relation::key_operand(name)));
+        premises.push(
+            AttributeParts::apply(parts)
+                .expect("attribute-parts operands are well-formed by construction")
+                .into(),
+        );
     }
 
     premises
+}
+
+/// The conformance premise of a concept-typed field, if any.
+///
+/// Conformance is "facts exist", not a property of the scalar, so it
+/// desugars to the target concept applied to the field's entity: the
+/// row survives only when the target entity satisfies the concept.
+/// Only `this` is projected; the target's own fields stay internal to
+/// the premise.
+pub(crate) fn field_conformance_premise(
+    name: &str,
+    field: &ConceptFieldDescriptor,
+) -> Option<Premise> {
+    use crate::concept::query::ConceptQuery;
+
+    let target = field.conforms()?;
+    let mut terms = Parameters::new();
+    terms.insert("this".to_string(), field_value_term(name, field));
+    Some(Premise::Assert(Proposition::Concept(ConceptQuery {
+        terms,
+        predicate: target.clone(),
+    })))
 }
 
 impl From<&ConceptDescriptor> for DeductiveRule {

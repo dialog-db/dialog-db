@@ -24,13 +24,22 @@ one implementation and cannot diverge.
 
 ## Rule storage (`dialog.rule/*`)
 
-A deductive rule is stored as two facts (see `rules.rs`):
+A deductive rule is stored as these facts (see `rules.rs` and
+`dialog-query`'s `rule/statement.rs`):
 
-- `dialog.rule/conclusion` `of` rule-entity `is` concept-entity — the index;
-  "which rules conclude concept X".
+- `dialog.rule/derives` `of` rule-entity `is` `on:<domain>/<name>` — one
+  per head attribute; the discovery index. "Which rules derive attribute
+  a", whatever the rest of their heads look like. This is what makes a
+  query over any subset of a rule's head see the rule; see
+  [`attribute-level-deduction.md`](./attribute-level-deduction.md).
+- `dialog.rule/conclusion` `of` rule-entity `is` concept-entity — the
+  exact-head index, kept for tooling and for rules committed before
+  `derives` existed (the legacy path below).
 - `dialog.rule/source` `of` rule-entity `is` the rule body as canonical
   dag-cbor `DeductiveRuleDescriptor` (a `Value::Bytes`), hydrated with
   `DeductiveRule::decode`.
+- `dialog.rule/reads` `of` rule-entity `is` `on:<domain>/<name>` — one per
+  attribute the body reads; commit-time dispatch's support index.
 
 The rule-entity is content-addressed:
 `rule:<base58(blake3(dag-cbor(descriptor))))>` (`DeductiveRule::this`).
@@ -45,16 +54,35 @@ These attribute names are a dialog-repository convention, like
 
 ## Resolution
 
-`QueryEnv`'s `Provider<SelectRules>::execute(concept_descriptor)`:
+`QueryEnv`'s `Provider<SelectRules>::execute(concept_descriptor)`, via
+`resolve_bundle`:
 
 1. Build the **implicit** per-descriptor rule once (`ConceptRules::new`).
    It reads the concept's attributes directly; it is not stored and has
    no content identity.
-2. For each branch, gather its **durable** rules: look up
-   `dialog.rule/conclusion = concept` against the tree, hydrate each body.
-3. Gather **transient** rules from the overlay `Changes`.
-4. Install the durable + transient rules onto the implicit one and
-   return the `ConceptRules`.
+2. Per attribute of the descriptor, gather every rule whose head derives
+   it: the built-in rules (indexed by head attribute), each branch's
+   **durable** rules (`dialog.rule/derives = on:<attribute>` against the
+   tree, hydrated), and the **transient** rules staged in the overlay
+   `Changes`. Each rule is taken once, by content address.
+3. Project each of those rules onto the descriptor
+   (`dialog_query::rule::project`): the head becomes the descriptor, the
+   shared attributes' variables take the descriptor's field names, and
+   the descriptor's remaining attributes are read through their own
+   single-attribute concept when something derives them, scanned
+   otherwise. A rule concluding the descriptor exactly is its own
+   projection.
+4. **Legacy**: look up `dialog.rule/conclusion = concept` against each
+   tree and the overlay, and install as an exact-head rule any rule the
+   attribute index did not already return. A rule committed before the
+   `derives` index existed keeps resolving for its exact head this way,
+   and joins the attribute index once re-asserted.
+5. Install the projections and the legacy rules onto the implicit one
+   and return the `ConceptRules`.
+
+Rule demand records one narrow slice per attribute of the descriptor
+plus the legacy slice, so a subscription is woken only by rules that
+derive an attribute it reads.
 
 The single consumer is `ConceptQuery::evaluate`
 (`dialog-query/.../concept/query.rs`): it calls `SelectRules`, then
@@ -68,13 +96,16 @@ Two caches with different correctness disciplines.
 **Discovery + hydration** — per branch, on `Branch` (`RuleCache`,
 alongside `node_cache`; configured once per opened handle):
 
-- *Discovery* ("which rule entities conclude concept X, committed") is
-  keyed by concept and tagged with the branch head (`Revision`). A head
-  advance — commit or pull — re-scans that concept. Read from the tree
-  only.
+- *Discovery* ("which rule entities derive attribute a, committed", and
+  the legacy "which conclude concept X") is keyed by attribute (or
+  concept) and tagged with the branch head (`Revision`). A head advance
+  — commit or pull — re-scans that key. Read from the tree only.
 - *Hydration* (compiled bodies) is keyed by the content-addressed rule
   entity, so an entry is never stale and is reused across concepts and
   head changes.
+- *Projection* (a rule projected onto a descriptor) is keyed by the rule
+  entity and the descriptor's canonical bytes — a pure function of the
+  two, so never stale.
 
 The **overlay is never head-cached**: it does not move the head, so a
 head-keyed "skip the scan" cache would mask an uncommitted `.with(rule)`.

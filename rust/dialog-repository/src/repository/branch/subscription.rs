@@ -2336,6 +2336,219 @@ mod tests {
         Ok(())
     }
 
+    mod projection {
+        //! A superset head and the subset a subscription reads it
+        //! through, for the attribute-level resolution tests.
+
+        use dialog_artifacts::Entity;
+        use dialog_query::{Attribute, Concept};
+
+        /// A source record's label (`source/label`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("source")]
+        pub struct Label(pub String);
+
+        /// A source record's position (`source/position`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("source")]
+        pub struct Position(pub String);
+
+        /// A derived name (`derived/name`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("derived")]
+        pub struct Name(pub String);
+
+        /// A derived role (`derived/role`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("derived")]
+        pub struct Role(pub String);
+
+        /// An unrelated derived attribute (`derived/other`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("derived")]
+        pub struct Other(pub String);
+
+        /// The rule body.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Source {
+            pub this: Entity,
+            pub label: Label,
+            pub position: Position,
+        }
+
+        /// The rule head: two derived attributes.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Wide {
+            pub this: Entity,
+            pub name: Name,
+            pub role: Role,
+        }
+
+        /// A subset of the head, what the subscription reads.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Narrow {
+            pub this: Entity,
+            pub name: Name,
+        }
+
+        /// A head sharing no attribute with `Narrow`.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Unrelated {
+            pub this: Entity,
+            pub other: Other,
+        }
+    }
+
+    fn wide_rule() -> dialog_query::DeductiveRule {
+        use projection::{Source, Wide};
+        concept_rule(
+            Wide::descriptor(),
+            vec![concept_premise(
+                Source::descriptor(),
+                &[("this", "this"), ("label", "name"), ("position", "role")],
+            )],
+        )
+    }
+
+    fn unrelated_rule() -> dialog_query::DeductiveRule {
+        use projection::{Source, Unrelated};
+        concept_rule(
+            Unrelated::descriptor(),
+            vec![concept_premise(
+                Source::descriptor(),
+                &[("this", "this"), ("label", "other"), ("position", "_p")],
+            )],
+        )
+    }
+
+    /// A subscription over a subset of a committed rule's head is
+    /// maintained incrementally: the projected rule is entity-local
+    /// like its source, so a new source record re-derives one entity.
+    #[dialog_common::test]
+    async fn it_maintains_a_subset_subscription_over_a_superset_rule() -> anyhow::Result<()> {
+        use dialog_query::Query;
+        use projection::{Label, Name, Narrow, Position, Source};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let transaction = branch.transaction().assert(Source {
+            this: alice.clone(),
+            label: Label("Alice".into()),
+            position: Position("cryptographer".into()),
+        });
+        with_rule(transaction, &wide_rule())
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<Narrow>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted,
+            vec![Narrow {
+                this: alice.clone(),
+                name: Name("Alice".into()),
+            }],
+            "the subset sees the superset head's derivation"
+        );
+        assert_eq!(subscription.recomputes(), 1);
+
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(Source {
+                this: bob.clone(),
+                label: Label("Bob".into()),
+                position: Position("archivist".into()),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("covered write");
+        assert_eq!(
+            delta.asserted,
+            vec![Narrow {
+                this: bob,
+                name: Name("Bob".into()),
+            }]
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the projected rule re-derived the touched entity, no recompute"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+        Ok(())
+    }
+
+    /// Rule demand stays proportional: a rule installed for an
+    /// attribute the subscription does not read lands outside its
+    /// cover and does not wake it, while a rule whose head covers the
+    /// subscribed attribute does.
+    #[dialog_common::test]
+    async fn it_wakes_a_subscription_only_for_rules_deriving_its_attributes() -> anyhow::Result<()>
+    {
+        use dialog_query::Query;
+        use projection::{Label, Name, Narrow, Position, Source};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(Source {
+                this: alice.clone(),
+                label: Label("Alice".into()),
+                position: Position("cryptographer".into()),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<Narrow>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty(), "nothing derives a name yet");
+        assert_eq!(subscription.recomputes(), 1);
+
+        with_rule(branch.transaction(), &unrelated_rule())
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "a rule deriving an unrelated attribute is outside the cover"
+        );
+        assert_eq!(subscription.recomputes(), 1);
+
+        with_rule(branch.transaction(), &wide_rule())
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a rule deriving the subscribed attribute re-triggers");
+        assert_eq!(
+            delta.asserted,
+            vec![Narrow {
+                this: alice,
+                name: Name("Alice".into()),
+            }]
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            2,
+            "a rule install can affect any row, so the whole result recomputes"
+        );
+        Ok(())
+    }
+
     mod concepts {
         //! Derived concepts + attributes shared by the incremental
         //! maintenance tests below.

@@ -2212,3 +2212,182 @@ mod test {
         Ok(())
     }
 }
+
+/// Attribute markers for the derived [`Member`] concept the rule
+/// benchmarks conclude from [`Stuff`].
+pub mod member {
+    use ::dialog_query::Attribute;
+
+    /// The `member/title` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Title(pub String);
+
+    /// The `member/level` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Level(pub String);
+}
+
+/// A concept derived from [`Stuff`] by [`member_rule`]: nothing is ever
+/// stored under `member/*`, so every row comes from the rule.
+#[derive(Clone, Debug, PartialEq, Concept)]
+pub struct Member {
+    /// The entity the member facts hang off.
+    pub this: Entity,
+    /// The member's title (the stuff name).
+    pub title: member::Title,
+    /// The member's level (the stuff role).
+    pub level: member::Level,
+}
+
+/// A subset of [`Member`]'s head: the attribute-level resolution case,
+/// where a query over one derived attribute must see the rule
+/// concluding both.
+#[derive(Clone, Debug, PartialEq, Concept)]
+pub struct Titled {
+    /// The entity the title hangs off.
+    pub this: Entity,
+    /// The member's title.
+    pub title: member::Title,
+}
+
+/// `Member { title, level } :- Stuff { name: title, role: level }`.
+pub fn member_rule() -> ::dialog_query::DeductiveRule {
+    ::dialog_query::DeductiveRule::new(
+        Member::descriptor().clone(),
+        vec![
+            Query::<Stuff> {
+                this: Term::var("this"),
+                name: Term::var("title"),
+                role: Term::var("level"),
+            }
+            .into(),
+        ],
+    )
+    .expect("the member rule compiles")
+}
+
+impl<Env> BenchEnv<Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn rule_env(&self) -> Result<(Branch, RuleRegistry)> {
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .load()
+            .perform(&self.operator)
+            .await?;
+        let mut rules = RuleRegistry::new();
+        rules.register(member_rule())?;
+        Ok((branch, rules))
+    }
+
+    /// [`query_stuff`](Self::query_stuff) with [`member_rule`] registered:
+    /// the rule reads `stuff/*` but derives nothing the query selects, so
+    /// the read counts must match the rule-free join exactly.
+    pub async fn query_stuff_with_rule(&self) -> Result<JoinRun> {
+        let (branch, rules) = self.rule_env().await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules,
+            journal: ReadJournal::default(),
+        };
+        env.journal().clear();
+        let results = Query::<Stuff> {
+            this: Term::var("this"),
+            name: Term::var("name"),
+            role: Term::var("role"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// The exact-head derived query: every [`Member`] row comes from
+    /// [`member_rule`].
+    pub async fn query_member(&self) -> Result<JoinRun> {
+        let (branch, rules) = self.rule_env().await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules,
+            journal: ReadJournal::default(),
+        };
+        env.journal().clear();
+        let results = Query::<Member> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            level: Term::var("level"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// The subset query: [`Titled`] selects one of [`Member`]'s two
+    /// derived attributes.
+    pub async fn query_titled(&self) -> Result<JoinRun> {
+        let (branch, rules) = self.rule_env().await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules,
+            journal: ReadJournal::default(),
+        };
+        env.journal().clear();
+        let results = Query::<Titled> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// The point-shaped derived query: one [`Member`] by entity.
+    pub async fn query_member_of(&self, of: &Entity) -> Result<JoinRun> {
+        let (branch, rules) = self.rule_env().await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules,
+            journal: ReadJournal::default(),
+        };
+        env.journal().clear();
+        let results = Query::<Member> {
+            this: Term::from(of.clone()),
+            title: Term::var("title"),
+            level: Term::var("level"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+}

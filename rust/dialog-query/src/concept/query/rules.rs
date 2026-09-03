@@ -14,9 +14,14 @@ use super::adornment::Adornment;
 use super::fixpoint::Continuation;
 use super::plan_cache::PlanCache;
 use crate::DeductiveRule;
-use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
+use crate::error::TypeError;
+use crate::negation::Negation;
 use crate::parameters::Parameters;
 use crate::planner::Disjunction;
+use crate::premise::Premise;
+use crate::proposition::Proposition;
+use crate::rule::project::{Projected, Rename, project};
 use crate::selection::Match;
 use crate::session::ProgramAnalysis;
 use std::collections::HashMap;
@@ -31,6 +36,10 @@ use std::sync::{Arc, RwLock};
 pub struct ConceptRules {
     implicit: DeductiveRule,
     installed: Vec<DeductiveRule>,
+    /// Reducing rules projected from a superset head: evaluated as
+    /// themselves (a fold groups by its own head fields), their rows
+    /// renamed onto this concept's operands.
+    renamed: Vec<(DeductiveRule, Rename)>,
     plans: Arc<RwLock<HashMap<Adornment, Arc<Disjunction>>>>,
     /// Cross-query cache of planned per-rule [`Conjunction`]s, keyed by
     /// content-addressed `(rule, adornment)`. Shared from the owning
@@ -68,6 +77,7 @@ impl ConceptRules {
         Self {
             implicit: DeductiveRule::from(descriptor),
             installed: Vec::new(),
+            renamed: Vec::new(),
             plans: Arc::new(RwLock::new(HashMap::new())),
             plan_cache,
             recursion: None,
@@ -101,13 +111,72 @@ impl ConceptRules {
         self.continuation.as_ref()
     }
 
-    /// Install a deductive rule, deduplicating by equality.
-    /// Clears the plan cache when a genuinely new rule is added.
+    /// Assemble the rules of `descriptor` from every rule whose head
+    /// overlaps it: the implicit rule over stored facts plus the
+    /// projection of each candidate onto the descriptor (see
+    /// [`project`]). `derived` says which of the descriptor's fields
+    /// some rule derives, so a projection reads an uncovered derived
+    /// field through its single-attribute concept rather than by scan.
+    ///
+    /// A candidate whose head shares no attribute with the descriptor
+    /// contributes nothing; a candidate concluding exactly the
+    /// descriptor is installed as itself.
+    pub fn assemble(
+        descriptor: &ConceptDescriptor,
+        candidates: impl IntoIterator<Item = DeductiveRule>,
+        derived: &dyn Fn(&str, &ConceptFieldDescriptor) -> bool,
+        plan_cache: PlanCache,
+    ) -> Result<Self, TypeError> {
+        let mut rules = Self::with_plan_cache(descriptor, plan_cache);
+        for candidate in candidates {
+            if let Some(projected) = project(&candidate, descriptor, derived)? {
+                rules.install_projected(projected);
+            }
+        }
+        Ok(rules)
+    }
+
+    /// Install a deductive rule, deduplicating by identity (see
+    /// [`DeductiveRule::same`]). Clears the plan cache when a
+    /// genuinely new rule is added.
     pub fn install(&mut self, rule: DeductiveRule) {
-        if !self.installed.contains(&rule) {
+        if !self.installed.iter().any(|known| known.same(&rule)) {
             self.installed.push(rule);
             self.plans.write().unwrap().clear();
         }
+    }
+
+    /// Install a projected rule: a rule concluding this concept goes
+    /// in as itself; a reducing rule projected from a wider head is
+    /// kept with the renaming its rows need.
+    pub fn install_projected(&mut self, projected: Projected) {
+        let Projected { rule, rename } = projected;
+        if rename.is_empty() {
+            self.install(rule);
+        } else if !self
+            .renamed
+            .iter()
+            .any(|(existing, _)| existing.same(&rule))
+        {
+            self.renamed.push((rule, rename));
+        }
+    }
+
+    /// The concepts this concept's rules read through concept
+    /// premises, positive or negated: the next step of the dependency
+    /// closure a program analysis walks.
+    pub fn referenced(&self) -> impl Iterator<Item = &ConceptDescriptor> {
+        self.rules().flat_map(|rule| {
+            rule.analysis()
+                .premises()
+                .filter_map(|premise| match premise {
+                    Premise::Assert(Proposition::Concept(query))
+                    | Premise::Unless(Negation(Proposition::Concept(query))) => {
+                        Some(&query.predicate)
+                    }
+                    _ => None,
+                })
+        })
     }
 
     /// The explicitly installed rules (does not include the implicit rule).
@@ -119,19 +188,29 @@ impl ConceptRules {
     /// the descriptor) followed by the installed ones. This is the
     /// rule set the program-level dependency analysis walks.
     pub fn rules(&self) -> impl Iterator<Item = &DeductiveRule> {
-        iter::once(&self.implicit).chain(self.installed.iter())
+        iter::once(&self.implicit)
+            .chain(self.installed.iter())
+            .chain(self.renamed.iter().map(|(rule, _)| rule))
     }
 
-    /// The installed *reducing* rules — those carrying a `reduce`
-    /// clause. They are excluded from [`plan`](Self::plan)'s
-    /// disjunction: a fold reads the rule's whole body relation, so
-    /// evaluation computes each reducing rule's folded rows once and
-    /// joins caller bindings against them (the fixpoint-table shape),
-    /// instead of piping caller bindings into the body.
-    pub fn reducing(&self) -> impl Iterator<Item = &DeductiveRule> {
+    /// The *reducing* rules — those carrying a `reduce` clause — each
+    /// with the renaming its rows need to land on this concept's
+    /// operands (`None` when it concludes this concept directly). They
+    /// are excluded from [`plan`](Self::plan)'s disjunction: a fold
+    /// reads the rule's whole body relation, so evaluation computes
+    /// each reducing rule's folded rows once and joins caller bindings
+    /// against them (the fixpoint-table shape), instead of piping
+    /// caller bindings into the body.
+    pub fn reducing(&self) -> impl Iterator<Item = (&DeductiveRule, Option<&Rename>)> {
         self.installed
             .iter()
             .filter(|rule| !rule.reduce().is_empty())
+            .map(|rule| (rule, None))
+            .chain(
+                self.renamed
+                    .iter()
+                    .map(|(rule, rename)| (rule, Some(rename))),
+            )
     }
 
     /// Install every rule from `other` into this `ConceptRules`.
@@ -143,6 +222,12 @@ impl ConceptRules {
     pub fn extend(&mut self, other: &ConceptRules) {
         for rule in &other.installed {
             self.install(rule.clone());
+        }
+        for (rule, rename) in &other.renamed {
+            self.install_projected(Projected {
+                rule: rule.clone(),
+                rename: rename.clone(),
+            });
         }
     }
 

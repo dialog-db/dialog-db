@@ -42,6 +42,7 @@ use dialog_artifacts::{
     Artifact, ArtifactSelector, Attribute, Changes, Entity, Statement, Update, Value,
 };
 use dialog_query::concept::descriptor::ConceptDescriptor;
+#[cfg(test)]
 use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
@@ -59,7 +60,11 @@ use crate::{Revision, schema};
 // install/uninstall a rule by plain assertion/retraction live with the
 // rule types themselves; this module re-uses them for its selectors,
 // caches, and dispatch probing.
-pub(crate) use dialog_query::rule::statement::{conclusion_attr, on_attr, reads_attr, source_attr};
+use dialog_query::rule::project::Projected;
+use dialog_query::rule::statement::head_entities;
+pub(crate) use dialog_query::rule::statement::{
+    conclusion_attr, derives_attr, on_attr, reads_attr, source_attr,
+};
 
 /// The `dialog.concept/transient` marker attribute. A concept carrying it
 /// is a *command*: facts of it dispatched into a transaction (and heads
@@ -100,6 +105,18 @@ pub(crate) fn conclusion_selector(concept: &Entity) -> ArtifactSelector<Constrai
     ArtifactSelector::new()
         .the(conclusion_attr())
         .is(Value::Entity(concept.clone()))
+}
+
+/// Selector for `dialog.rule/derives is = <on:attribute>` — finds the
+/// rule entities whose heads derive an attribute, whatever the rest of
+/// their heads look like. One narrow slice per attribute: this is what
+/// keeps attribute-level discovery proportional (a subscription's rule
+/// demand covers only the attributes it reads) and keeps every rule
+/// from ever being enumerated.
+pub(crate) fn derives_selector(on: &Entity) -> ArtifactSelector<Constrained> {
+    ArtifactSelector::new()
+        .the(derives_attr())
+        .is(Value::Entity(on.clone()))
 }
 
 /// Selector for `dialog.rule/source of = <rule>` — fetches a rule's body.
@@ -145,60 +162,60 @@ pub(crate) fn source_bytes(source_claims: Vec<Artifact>) -> Option<Vec<u8>> {
 /// *concept* rather than re-scanning records keeps the trust boundary
 /// in one place: every edge the closure walks was signature-verified
 /// by the projection rule.
+#[cfg(test)]
 pub(crate) fn builtin(concept: &Entity) -> Vec<DeductiveRule> {
-    static REVISION: OnceLock<DeductiveRule> = OnceLock::new();
-    static PARENT: OnceLock<DeductiveRule> = OnceLock::new();
-    static ANCESTOR: OnceLock<Vec<DeductiveRule>> = OnceLock::new();
+    builtin_rules()
+        .iter()
+        .filter(|rule| rule.conclusion().this() == *concept)
+        .cloned()
+        .collect()
+}
 
-    let revision = <schema::Revision as Descriptor<ConceptDescriptor>>::descriptor();
-    if *concept == revision.this() {
-        return vec![
-            REVISION
-                .get_or_init(|| {
-                    projection_rule(
-                        revision.clone(),
-                        RevisionQuery {
-                            of: Term::var("record"),
-                            this: Term::var("this"),
-                            branch: Term::var("branch"),
-                            issuer: Term::var("issuer"),
-                            authority: Term::var("authority"),
-                            edition: Term::var("edition"),
-                        }
-                        .into(),
-                    )
-                })
-                .clone(),
+/// The built-in rules whose heads derive the attribute keyed by `on`
+/// (its `on:` entity): the attribute-level view of [`builtin`], so a
+/// query over any subset of a version-control concept's attributes
+/// sees the record projection like any other derivation.
+pub(crate) fn builtin_deriving(on: &Entity) -> Vec<DeductiveRule> {
+    builtin_rules()
+        .iter()
+        .filter(|rule| head_entities(rule.conclusion()).contains(on))
+        .cloned()
+        .collect()
+}
+
+/// Every built-in rule, compiled once.
+fn builtin_rules() -> &'static [DeductiveRule] {
+    static RULES: OnceLock<Vec<DeductiveRule>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let revision = <schema::Revision as Descriptor<ConceptDescriptor>>::descriptor();
+        let parent = <schema::RevisionParent as Descriptor<ConceptDescriptor>>::descriptor();
+        let ancestor = <schema::RevisionAncestor as Descriptor<ConceptDescriptor>>::descriptor();
+        let mut rules = vec![
+            projection_rule(
+                revision.clone(),
+                RevisionQuery {
+                    of: Term::var("record"),
+                    this: Term::var("this"),
+                    branch: Term::var("branch"),
+                    issuer: Term::var("issuer"),
+                    authority: Term::var("authority"),
+                    edition: Term::var("edition"),
+                }
+                .into(),
+            ),
+            projection_rule(
+                parent.clone(),
+                RevisionParentQuery {
+                    of: Term::var("record"),
+                    this: Term::var("this"),
+                    parent: Term::var("parent"),
+                }
+                .into(),
+            ),
         ];
-    }
-
-    let parent = <schema::RevisionParent as Descriptor<ConceptDescriptor>>::descriptor();
-    if *concept == parent.this() {
-        return vec![
-            PARENT
-                .get_or_init(|| {
-                    projection_rule(
-                        parent.clone(),
-                        RevisionParentQuery {
-                            of: Term::var("record"),
-                            this: Term::var("this"),
-                            parent: Term::var("parent"),
-                        }
-                        .into(),
-                    )
-                })
-                .clone(),
-        ];
-    }
-
-    let ancestor = <schema::RevisionAncestor as Descriptor<ConceptDescriptor>>::descriptor();
-    if *concept == ancestor.this() {
-        return ANCESTOR
-            .get_or_init(|| ancestor_rules(ancestor.clone(), parent.clone()))
-            .clone();
-    }
-
-    Vec::new()
+        rules.extend(ancestor_rules(ancestor.clone(), parent.clone()));
+        rules
+    })
 }
 
 /// The recursive pair concluding [`schema::RevisionAncestor`]:
@@ -301,6 +318,16 @@ struct RuleCacheInner {
     /// Committed deductive-rule entities whose bodies read an `on:`
     /// entity, as of a branch head.
     reads: HashMap<Entity, (Revision, Vec<Entity>)>,
+    /// Committed deductive-rule entities whose heads derive an `on:`
+    /// entity, as of a branch head — the attribute-level discovery
+    /// index, one entry per attribute rather than per concept.
+    derives: HashMap<Entity, (Revision, Vec<Entity>)>,
+    /// Projections of a rule onto a concept, keyed by the rule's
+    /// content address and the concept's canonical bytes (identity
+    /// and field spelling). A projection is a pure function of the
+    /// two, so an entry is never stale; `None` records that the rule
+    /// does not project onto the concept.
+    projections: HashMap<(Entity, Vec<u8>), Option<Projected>>,
     /// Hydrated inductive bodies, content-addressed — never stale.
     inductive: HashMap<Entity, InductiveRule>,
     /// Whether a concept carries the committed `dialog.concept/transient`
@@ -386,6 +413,46 @@ impl RuleCache {
         self.inner.write().reads.insert(on, (head, entities));
     }
 
+    /// Cached committed deductive-rule entities deriving `on` if
+    /// scanned at `head`.
+    pub(crate) fn derived(&self, on: &Entity, head: &Revision) -> Option<Vec<Entity>> {
+        match self.inner.read().derives.get(on) {
+            Some((scanned_at, entities)) if scanned_at == head => Some(entities.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the committed deductive-rule entities deriving `on` at
+    /// `head`.
+    pub(crate) fn record_derived(&self, on: Entity, head: Revision, entities: Vec<Entity>) {
+        self.inner.write().derives.insert(on, (head, entities));
+    }
+
+    /// The cached projection of `rule` onto the concept with canonical
+    /// bytes `concept`, if computed: `Some(None)` when the rule is known
+    /// not to project onto it.
+    pub(crate) fn projection(&self, rule: &Entity, concept: &[u8]) -> Option<Option<Projected>> {
+        self.inner
+            .read()
+            .projections
+            .get(&(rule.clone(), concept.to_vec()))
+            .cloned()
+    }
+
+    /// Record the projection of `rule` onto the concept with canonical
+    /// bytes `concept`.
+    pub(crate) fn record_projection(
+        &self,
+        rule: Entity,
+        concept: Vec<u8>,
+        projected: Option<Projected>,
+    ) {
+        self.inner
+            .write()
+            .projections
+            .insert((rule, concept), projected);
+    }
+
     /// A cached hydrated inductive body by rule entity, if present.
     pub(crate) fn inductive(&self, rule: &Entity) -> Option<InductiveRule> {
         self.inner.read().inductive.get(rule).cloned()
@@ -424,6 +491,7 @@ impl RuleCache {
 ///
 /// `plan_cache` is the owning branch's shared plan cache, so the
 /// per-query re-assembly reuses plans earlier queries computed.
+#[cfg(test)]
 pub(crate) fn assemble(
     concept: &ConceptDescriptor,
     rules: impl IntoIterator<Item = DeductiveRule>,
@@ -459,6 +527,44 @@ pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<Deductiv
     }
 
     // each rule entity's source body, hydrated.
+    let mut out = Vec::new();
+    for rule_entity in rule_entities {
+        for (entity, attribute, change) in changes.iter() {
+            if *entity == rule_entity
+                && *attribute == source
+                && let Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) =
+                    change
+                && let Ok(rule) = hydrate(bytes)
+            {
+                out.push(rule);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Read rules from an overlay [`Changes`] batch whose heads derive the
+/// attribute keyed by `on`: the transient layer's half of attribute-level
+/// discovery, walked fresh every query like [`overlay_rules`].
+pub(crate) fn overlay_rules_deriving(changes: &Changes, on: &Entity) -> Vec<DeductiveRule> {
+    use dialog_artifacts::Change;
+
+    let derives = derives_attr();
+    let source = source_attr();
+
+    let mut rule_entities: Vec<Entity> = Vec::new();
+    for (entity, attribute, change) in changes.iter() {
+        if *attribute == derives
+            && let Change::Assert(Value::Entity(target)) | Change::Replace(Value::Entity(target)) =
+                change
+            && target == on
+            && !rule_entities.contains(entity)
+        {
+            rule_entities.push(entity.clone());
+        }
+    }
+
     let mut out = Vec::new();
     for rule_entity in rule_entities {
         for (entity, attribute, change) in changes.iter() {

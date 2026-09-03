@@ -7,8 +7,9 @@
 //! erases them — install and uninstall are ordinary writes, no dedicated
 //! API. The kind decides the fact shape:
 //!
-//! - deductive: the `conclusion` discovery index, the `source` body,
-//!   and the `reads` reverse index over the body's attributes;
+//! - deductive: the `conclusion` discovery index, the `derives` head
+//!   index (one claim per head attribute), the `source` body, and the
+//!   `reads` reverse index over the body's attributes;
 //! - inductive: the shared `source` body, the `induces` head index,
 //!   and the `on` trigger index commit-time dispatch probes by touched
 //!   attribute.
@@ -62,6 +63,17 @@ pub fn on_attr() -> Attribute {
 /// so an entry is never stale; the closure itself is never stored.
 pub fn reads_attr() -> Attribute {
     the!("dialog.rule/reads").into()
+}
+
+/// The `dialog.rule/derives` head index for *deductive* rules: one claim
+/// per attribute the rule's head names, valued `on:<domain>/<name>`
+/// (a keyed collection contributes its half's cover key). This is the
+/// index attribute-level resolution discovers rules by: a query for a
+/// concept probes one narrow slice per attribute of the concept, so a
+/// rule whose head merely *overlaps* the concept is found, and nothing
+/// enumerates all rules. See `notes/attribute-level-deduction.md`.
+pub fn derives_attr() -> Attribute {
+    the!("dialog.rule/derives").into()
 }
 
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
@@ -201,6 +213,23 @@ pub fn reads_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
     premise_trigger_entities(descriptor.when.iter().chain(descriptor.unless.iter()))
 }
 
+/// The head-index entities for a deductive rule: one per attribute
+/// its conclusion names. Stored as `dialog.rule/derives` so a concept
+/// query can discover, per attribute, every rule deriving that
+/// attribute — whatever the rest of the rule's head looks like.
+pub fn derives_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
+    head_entities(rule.conclusion())
+}
+
+/// The `on:` entities of every field of a concept descriptor.
+pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
+    concept
+        .with()
+        .iter()
+        .filter_map(|(_, field)| Reach::of(field.descriptor().the()).on_entity())
+        .collect()
+}
+
 /// Asserting a [`DeductiveRule`] installs it as `dialog.rule/*` facts:
 /// the `conclusion` discovery index, the `source` body, and the `reads`
 /// reverse index over the body's attributes that lets commit-time
@@ -231,6 +260,9 @@ impl Statement for &DeductiveRule {
         for reads in reads_entities(self) {
             update.associate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
         }
+        for derives in derives_entities(self) {
+            update.associate(derives_attr(), rule_entity.clone(), Value::Entity(derives));
+        }
     }
 
     fn retract(self, update: &mut impl Update) {
@@ -247,6 +279,9 @@ impl Statement for &DeductiveRule {
         );
         for reads in reads_entities(self) {
             update.dissociate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
+        }
+        for derives in derives_entities(self) {
+            update.dissociate(derives_attr(), rule_entity.clone(), Value::Entity(derives));
         }
     }
 }

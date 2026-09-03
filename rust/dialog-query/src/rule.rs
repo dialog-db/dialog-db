@@ -31,6 +31,9 @@ pub mod deductive;
 pub mod inductive;
 /// Premises collection type.
 pub mod premises;
+
+/// Projecting a rule onto a concept its head overlaps.
+pub mod project;
 /// Rules as statements: `dialog.rule/*` vocabulary and install-by-assert.
 pub mod statement;
 /// Type inference over a rule's premises.
