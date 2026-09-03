@@ -151,6 +151,13 @@ impl RuleRegistry {
             if !seen.insert(entity.clone()) {
                 continue;
             }
+            // A concept no rule derives contributes only its structural
+            // (`conforms`) edges, which the analysis adds for any
+            // referenced descriptor without an entry; assembling its
+            // bundle would compile an implicit rule for nothing.
+            if self.candidates(&descriptor)?.0.is_empty() {
+                continue;
+            }
             let bundle = self.bundle(&descriptor)?;
             queue.extend(bundle.referenced().cloned());
             entries.push((entity, bundle));
