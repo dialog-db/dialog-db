@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::artifact::Entity;
+use crate::artifact::{Entity, Value};
 use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
@@ -342,10 +342,7 @@ fn rename_json(value: &mut serde_json::Value, map: &Rename) {
 }
 
 /// Rename the operands of one derived row.
-pub fn rename_row(
-    row: &BTreeMap<String, crate::Value>,
-    map: &Rename,
-) -> BTreeMap<String, crate::Value> {
+pub fn rename_row(row: &BTreeMap<String, Value>, map: &Rename) -> BTreeMap<String, Value> {
     if map.is_empty() {
         return row.clone();
     }
@@ -365,10 +362,12 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::Constraint;
+    use crate::constraint::Equality;
     use crate::reduce::{Aggregator, ReduceSpec};
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
-    use crate::{Concept, Descriptor, Query};
+    use crate::{Concept, Query};
     use anyhow::Result;
     use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
@@ -579,7 +578,7 @@ mod tests {
                     position: Term::var("label"),
                 }
                 .into(),
-                crate::Constraint::from(crate::constraint::Equality::new(
+                Constraint::from(Equality::new(
                     Term::<Any>::var("role"),
                     Term::<Any>::var("label"),
                 ))
@@ -614,7 +613,7 @@ mod tests {
                     parent: Term::var("ancestor"),
                 }
                 .into(),
-                crate::Constraint::from(crate::constraint::Equality::new(
+                Constraint::from(Equality::new(
                     Term::<Any>::var("via"),
                     Term::<Any>::var("ancestor"),
                 ))

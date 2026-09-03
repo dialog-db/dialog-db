@@ -4,11 +4,15 @@ use crate::EvaluationError;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::{ConceptRules, PlanCache};
 use crate::rule::deductive::DeductiveRule;
-use crate::rule::statement::head_entities;
+use crate::rule::statement::{Reach, head_entities};
 use crate::source::SelectRules;
 use dialog_capability::Provider;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::sync::{Arc, RwLock};
+
+/// An assembled bundle and the analysis of its dependency closure.
+type Assembled = (ConceptRules, Arc<ProgramAnalysis>);
 
 /// Thread-safe registry of *deductive* rules, keyed by the attributes
 /// their heads derive. Inductive rules
@@ -44,7 +48,7 @@ pub struct RuleRegistry {
     /// closure, keyed by the queried descriptor's canonical bytes
     /// (identity *and* field spelling, since a projection is named
     /// after the querying descriptor). Cleared on every install.
-    bundles: Arc<RwLock<HashMap<Vec<u8>, (ConceptRules, Arc<ProgramAnalysis>)>>>,
+    bundles: Arc<RwLock<HashMap<Vec<u8>, Assembled>>>,
     /// Lazily computed program-level dependency analysis over every
     /// registered head (recursion and stratification), shared across
     /// clones and invalidated by [`register`](Self::register) /
@@ -52,7 +56,7 @@ pub struct RuleRegistry {
     analysis: Arc<RwLock<Option<Arc<ProgramAnalysis>>>>,
 }
 
-fn poisoned<E: std::fmt::Display>(error: E) -> EvaluationError {
+fn poisoned<E: Display>(error: E) -> EvaluationError {
     EvaluationError::Store(error.to_string())
 }
 
@@ -96,8 +100,7 @@ impl RuleRegistry {
         let mut candidates: Vec<DeductiveRule> = Vec::new();
         let mut derived = HashSet::new();
         for (name, field) in descriptor.with().iter() {
-            let Some(on) = crate::rule::statement::Reach::of(field.descriptor().the()).on_entity()
-            else {
+            let Some(on) = Reach::of(field.descriptor().the()).on_entity() else {
                 continue;
             };
             let Some(rules) = by_head.get(&on) else {
