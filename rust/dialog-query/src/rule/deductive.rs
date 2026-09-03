@@ -27,6 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::iter;
+use std::sync::{Arc, OnceLock};
 
 /// A deductive rule that has passed analysis: verified for every
 /// invariant and plannable by construction.
@@ -34,22 +35,37 @@ use std::iter;
 /// Holds the analysis (the narrowed premises, inferred types, and
 /// dependency graph) rather than a pre-baked plan. A concrete
 /// execution plan is produced per scope by [`plan`](Self::plan).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct DeductiveRule {
     /// The narrowed premises, inferred types, and dependency graph
     /// produced by analysis.
     analysis: AnalyzedRule,
+    /// The content address, computed once on first use and shared by
+    /// every clone: it keys plan caches and deduplication, both of
+    /// which ask for it far more often than a rule is compiled.
+    identity: Arc<OnceLock<Option<Entity>>>,
 }
+
+impl PartialEq for DeductiveRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.analysis == other.analysis
+    }
+}
+
 impl Compile for DeductiveRule {
     const KIND: RuleKind = RuleKind::Deductive;
 
     fn from_analysis(analysis: AnalyzedRule) -> Self {
-        DeductiveRule { analysis }
+        DeductiveRule {
+            analysis,
+            identity: Arc::new(OnceLock::new()),
+        }
     }
 
     fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self {
         DeductiveRule {
             analysis: AnalyzedRule::in_progress(conclusion, premises),
+            identity: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -208,10 +224,14 @@ impl DeductiveRule {
     /// collision-free key for plan caching and the entity a rule's facts
     /// are stored under.
     pub fn try_this(&self) -> Option<Entity> {
-        use base58::ToBase58;
-        let hash = blake3::hash(&self.try_encode()?);
-        let encoded = hash.as_bytes().as_ref().to_base58();
-        format!("rule:{encoded}").parse().ok()
+        self.identity
+            .get_or_init(|| {
+                use base58::ToBase58;
+                let hash = blake3::hash(&self.try_encode()?);
+                let encoded = hash.as_bytes().as_ref().to_base58();
+                format!("rule:{encoded}").parse().ok()
+            })
+            .clone()
     }
 
     /// Canonical dag-cbor encoding, panicking if the rule has no
@@ -239,6 +259,9 @@ impl DeductiveRule {
     /// so deduplication across layers and caches goes by identity,
     /// which is a pure function of the body.
     pub fn same(&self, other: &DeductiveRule) -> bool {
+        if Arc::ptr_eq(&self.identity, &other.identity) {
+            return true;
+        }
         match (self.try_this(), other.try_this()) {
             (Some(this), Some(that)) => this == that,
             _ => self == other,

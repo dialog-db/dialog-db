@@ -70,8 +70,7 @@ pub fn project(
     // name to the rule's head field name for the same attribute.
     let mut covered: Vec<(&str, &str)> = Vec::new();
     for (name, field) in target.with().iter() {
-        let uri = field.to_uri();
-        if let Some((head_name, _)) = head.with().iter().find(|(_, f)| f.to_uri() == uri) {
+        if let Some((head_name, _)) = head.with().iter().find(|(_, f)| same_attribute(f, field)) {
             covered.push((name, head_name));
         }
     }
@@ -176,6 +175,13 @@ pub fn project(
         Err(TypeError::RequiredHeadFromOptional { .. }) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Whether two concept fields select the same attribute: the identity
+/// triple of relation, value type and cardinality (descriptions and
+/// concept-membership flags are not part of an attribute's identity).
+fn same_attribute(a: &ConceptFieldDescriptor, b: &ConceptFieldDescriptor) -> bool {
+    a.the() == b.the() && a.content_type() == b.content_type() && a.cardinality() == b.cardinality()
 }
 
 /// The premise reading one target field through the single-attribute
