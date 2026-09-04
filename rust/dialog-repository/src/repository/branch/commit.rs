@@ -804,9 +804,11 @@ mod history_tests {
     use anyhow::Result;
     use dialog_operator::helpers::test_operator_with_profile;
 
-    use dialog_artifacts::history::{Causality, History as _, causality, common_ancestor};
+    use dialog_artifacts::history::{
+        Causality, History as _, HistorySelector, causality, common_ancestor,
+    };
     use dialog_artifacts::{Artifact, Instruction, Value};
-    use futures_util::stream;
+    use futures_util::{TryStreamExt as _, stream};
 
     fn title(of: &str, value: &str) -> Artifact {
         Artifact {
@@ -847,7 +849,10 @@ mod history_tests {
 
         // Both claims are recorded, and the replacement's cause lists the
         // version of the claim it superseded.
-        let records = history.records().await?;
+        let records = history
+            .select(HistorySelector::All)
+            .try_collect::<Vec<_>>()
+            .await?;
         let claims: Vec<_> = records
             .iter()
             .filter(|(_, record)| record.claim().the.to_string() == "post/title")
