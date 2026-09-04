@@ -6,14 +6,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use dialog_storage::MemoryStorageBackend;
 use ed25519_dalek::SigningKey;
+use futures_util::TryStreamExt as _;
 
 use crate::key::default_manifest;
 use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
 use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value, encode_bytes};
 
 use super::{
-    Authority, Causality, CausalityCache, Cause, Claim, Edition, History, MemoryHistory, Origin,
-    Revision, RevisionRecord, TreeHistory, Version, causality, common_ancestor, extend_skips, log,
+    Authority, Causality, CausalityCache, Cause, Claim, Edition, History, HistorySelector,
+    MemoryHistory, Origin, Revision, RevisionRecord, TreeHistory, Version, causality,
+    common_ancestor, extend_skips, log,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -590,7 +592,10 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
     // The replacement's record supersedes the first claim, detectable via
     // the tiered conflict detection over the same tree
     let history = TreeHistory::new(tree.clone(), store.clone());
-    let records = history.records().await?;
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
     assert_eq!(records.len(), 2);
     let (first_version, hej) = &records[0];
     let (second_version, hi) = &records[1];
@@ -613,7 +618,10 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
     )
     .await?;
     let history = TreeHistory::new(tree.clone(), store.clone());
-    let records = history.records().await?;
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
     assert_eq!(records.len(), 3);
     let (_, retraction) = &records[2];
     assert!(!retraction.is_assertion());
@@ -623,6 +631,184 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
             .await?
             .is_empty()
     );
+
+    Ok(())
+}
+
+/// `select(version)` returns exactly the records one revision wrote, and
+/// `select(All)` the whole region — the same records `records()` collects.
+///
+/// The three versions here deliberately span TWO origins: the history key
+/// is origin-major, so a version scan must not spill into the neighbouring
+/// writer's span, and the two editions under origin 8 must not collapse
+/// into one another.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_selects_the_records_of_one_revision() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "post/title".parse()?;
+    let title = |value: &str| Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String(value.into()),
+        cause: None,
+    };
+
+    let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let second = Version::new(Origin::from([8u8; 32]), Edition::new(1));
+    let third = Version::new(Origin::from([8u8; 32]), Edition::new(2));
+
+    let mut tree = ArtifactTree::empty();
+    let apply = async |tree: &mut ArtifactTree,
+                       store: &mut Storage<
+        CborEncoder,
+        MemoryStorageBackend<dialog_storage::Blake3Hash, Vec<u8>>,
+    >,
+                       version: Version,
+                       instructions: Vec<Instruction>|
+           -> Result<()> {
+        let mut delta = Delta::zero();
+        tree.apply_versioned(store, &mut delta, Some(version), stream::iter(instructions))
+            .await?;
+        for (digest, buffer) in delta.flush() {
+            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+        }
+        Ok(())
+    };
+
+    // The middle revision writes TWO claims, so the scan has to return a
+    // set rather than a single record.
+    let other: Attribute = "post/slug".parse()?;
+    apply(
+        &mut tree,
+        &mut store,
+        first,
+        vec![Instruction::Assert(title("Hej"))],
+    )
+    .await?;
+    apply(
+        &mut tree,
+        &mut store,
+        second,
+        vec![
+            Instruction::Replace(title("Hi")),
+            Instruction::Assert(Artifact {
+                the: other.clone(),
+                of: entity.clone(),
+                is: Value::String("hi".into()),
+                cause: None,
+            }),
+        ],
+    )
+    .await?;
+    apply(
+        &mut tree,
+        &mut store,
+        third,
+        vec![Instruction::Retract(title("Hi"))],
+    )
+    .await?;
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+
+    // The lone claim of the first revision, in the neighbouring origin.
+    let at_first: Vec<_> = history.select(first).try_collect().await?;
+    assert_eq!(at_first.len(), 1);
+    assert_eq!(at_first[0].0, first);
+    assert!(at_first[0].1.is_assertion());
+    assert_eq!(at_first[0].1.claim().is, Value::String("Hej".into()));
+
+    // Both claims of the second, and neither of its origin-mate's.
+    let at_second: Vec<_> = history.select(second).try_collect().await?;
+    assert_eq!(at_second.len(), 2);
+    assert!(at_second.iter().all(|(version, _)| *version == second));
+    let mut attributes: Vec<_> = at_second
+        .iter()
+        .map(|(_, record)| record.claim().the.as_str().to_string())
+        .collect();
+    attributes.sort();
+    assert_eq!(attributes, vec!["post/slug", "post/title"]);
+
+    // The retraction alone, adjacent in the same origin to the above.
+    let at_third: Vec<_> = history.select(third).try_collect().await?;
+    assert_eq!(at_third.len(), 1);
+    assert!(!at_third[0].1.is_assertion());
+    assert!(at_third[0].1.claim().cause.contains(&second));
+
+    // A revision that wrote nothing selects nothing, rather than
+    // spilling into an adjacent version's span.
+    let absent = Version::new(Origin::from([8u8; 32]), Edition::new(3));
+    let at_absent: Vec<_> = history.select(absent).try_collect().await?;
+    assert!(at_absent.is_empty());
+
+    // `All` is the whole region: every revision's records together.
+    let all: Vec<_> = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
+    assert_eq!(all.len(), 4);
+    #[allow(deprecated)]
+    let collected = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
+    assert_eq!(all, collected);
+
+    Ok(())
+}
+
+/// A value large enough to spill out of its key still reconstructs through
+/// a version scan: the record's value lives in an archive block, and
+/// `select` must fetch it rather than hand back a truncated claim.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_selects_records_whose_values_spilled() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "post/body".parse()?;
+    // Well above any inline threshold, so the value lands in its own block.
+    let body = "x".repeat(4096);
+    let version = Version::new(Origin::from([9u8; 32]), Edition::new(0));
+
+    let mut tree = ArtifactTree::empty();
+    let mut delta = Delta::zero();
+    tree.apply_versioned(
+        &mut store,
+        &mut delta,
+        Some(version),
+        stream::iter(vec![Instruction::Assert(Artifact {
+            the: the.clone(),
+            of: entity.clone(),
+            is: Value::String(body.clone()),
+            cause: None,
+        })]),
+    )
+    .await?;
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records: Vec<_> = history.select(version).try_collect().await?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].1.claim().is, Value::String(body));
 
     Ok(())
 }
@@ -829,7 +1015,10 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
     }
 
     let history = TreeHistory::new(tree.clone(), store.clone());
-    let records = history.records().await?;
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
     assert_eq!(records.len(), 1, "the retraction overwrites the assertion");
     let (recorded_version, record) = &records[0];
     assert_eq!(*recorded_version, version);
@@ -903,7 +1092,10 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
     assert_eq!(claims.len(), 1, "the spilled claim reads back");
     assert_eq!(claims[0].is, big, "with its full value resolved");
 
-    let records = history.records().await?;
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
     assert_eq!(records.len(), 2, "the whole log lists, spilled or not");
     Ok(())
 }
@@ -952,7 +1144,11 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
 
     let history = TreeHistory::new(tree.clone(), store.clone());
     assert!(
-        history.records().await?.is_empty(),
+        history
+            .select(HistorySelector::All)
+            .try_collect::<Vec<_>>()
+            .await?
+            .is_empty(),
         "no record is minted for a withdrawal that never happened"
     );
     Ok(())
@@ -1026,7 +1222,10 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
     // assertion citing the version it overrode — not a genesis assert
     // that forgot the retract's cause.
     let history = TreeHistory::new(tree.clone(), store.clone());
-    let records = history.records().await?;
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
     let at_new: Vec<_> = records
         .iter()
         .filter(|(version, _)| *version == new)
@@ -1116,12 +1315,11 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
 
     let history = TreeHistory::new(tree.clone(), store.clone());
     let retract = history
-        .records()
+        .select(retractor)
+        .try_collect::<Vec<_>>()
         .await?
         .into_iter()
-        .find_map(|(version, record)| {
-            (version == retractor && !record.is_assertion()).then_some(record)
-        })
+        .find_map(|(_, record)| (!record.is_assertion()).then_some(record))
         .expect("the retraction is recorded");
     let mut covered = retract.claim().cause.versions().to_vec();
     covered.sort();
@@ -1345,7 +1543,10 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
     );
 
     let history = TreeHistory::new(tree.clone(), store.clone());
-    let records = history.records().await?;
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
     assert_eq!(records.len(), 3);
     let (_, replacement) = &records[2];
     assert!(replacement.claim().cause.contains(&first));
