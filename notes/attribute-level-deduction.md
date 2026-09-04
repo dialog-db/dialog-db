@@ -227,6 +227,16 @@ subscription over a subset `D` of a recursive `H` recomputes `H`'s
 fixpoint per poll, as any non-recursive concept referencing a recursive
 one does today; retaining per referenced component is a follow-up.
 
+## Stratification
+
+Cycles are detected at attribute granularity, which is finer than the
+concept graph was: a cycle that existed only because two concepts
+shared a hash is no longer reported, and a cycle through a subset
+concept, invisible to the concept-keyed graph, now is. The unit an
+edge belongs to is still the rule, since a multi-head rule is one
+stored object with one cause. How an ill-stratified program is handled
+is [`stratification-policy.md`](./stratification-policy.md).
+
 ## What this does not do
 
 - No deduplication. An entity whose `D` row is both stored and derived
