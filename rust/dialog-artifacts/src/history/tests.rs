@@ -1036,6 +1036,95 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
     Ok(())
 }
 
+/// A batch that RETRACTS a standing fact and re-asserts it keeps the
+/// fact, and the record cites what it overrode.
+///
+/// The sibling above pins the other order, where the fact ends absent
+/// and the pair cancels. This order is what an update looks like —
+/// withdraw the old set, assert the new one, in a single atomic commit —
+/// and the overlap between the two sets lands here. If the erase won,
+/// an unchanged fact would vanish from an update that should have left
+/// it alone.
+#[dialog_common::test]
+async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "post/title".parse()?;
+    let title = Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String("Hej".into()),
+        cause: None,
+    };
+    let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
+
+    let mut tree = ArtifactTree::empty();
+    let mut delta = Delta::zero();
+
+    // Establish the fact, so the retraction below has something standing
+    // to withdraw — a retract of an absent fact is a no-op and would
+    // prove nothing.
+    tree.apply_versioned(
+        &mut store,
+        &mut delta,
+        Some(first),
+        stream::iter(vec![Instruction::Assert(title.clone())]),
+    )
+    .await?;
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+
+    // The update: withdraw it, then assert it again, one batch.
+    let changed = tree
+        .apply_versioned(
+            &mut store,
+            &mut delta,
+            Some(second),
+            stream::iter(vec![
+                Instruction::Retract(title.clone()),
+                Instruction::Assert(title.clone()),
+            ]),
+        )
+        .await?;
+    assert!(changed);
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+
+    assert!(
+        !tree
+            .select_data(store.clone(), &entity, &the)
+            .await?
+            .is_empty(),
+        "the fact survives: the re-assert follows the erase"
+    );
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records: Vec<_> = history.select(second).try_collect().await?;
+    let (_, folded) = records.first().expect("the update recorded a version");
+    assert!(
+        folded.is_assertion(),
+        "the later polarity wins, so the update reads as an assertion"
+    );
+    assert!(
+        folded.claim().cause.versions().contains(&first),
+        "the re-assert cites the version it overrode: {:?}",
+        folded.claim().cause
+    );
+
+    Ok(())
+}
+
 /// A claim on a value that spilled out of its key (larger than the inline
 /// threshold) must still read back through the history API: the raw bytes
 /// live in the archive under the key's 32-byte reference, and the reader
