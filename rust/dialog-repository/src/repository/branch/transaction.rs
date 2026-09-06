@@ -6,11 +6,12 @@ use crate::Commit;
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot};
+use dialog_artifacts::history::{Edition, Version};
 use dialog_artifacts::{Changes, Instruction, Statement, Update};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 
 /// A transaction on a branch or a snapshot.
@@ -44,6 +45,48 @@ impl<'a> Transaction<'a> {
     pub fn retract<C: Statement>(mut self, claim: C) -> Self {
         claim.retract(&mut self.changes);
         self
+    }
+
+    /// The [`Version`] this transaction's commit will mint.
+    ///
+    /// A version is `(origin, edition)`: the issuer's line and a counter.
+    /// Neither depends on what the commit contains — the edition is the
+    /// head's successor, the origin derives from the branch and the
+    /// issuer — so it is knowable before the batch is written, which is
+    /// why [`Commit`] computes it up front and tags every datum and
+    /// history record with it.
+    ///
+    /// Exposing it lets a writer record a fact that NAMES its own commit:
+    /// a caller that wants to find its claims again later (through
+    /// [`TreeHistory::select`](dialog_artifacts::history::TreeHistory::select))
+    /// can store this alongside them, in the same batch, rather than
+    /// committing twice.
+    ///
+    /// A [`Revision`] cannot be self-named this way — it includes the
+    /// tree the commit produces — which is the distinction this accessor
+    /// exists to make usable.
+    ///
+    /// `None` only for a snapshot that has never committed: its lineage
+    /// is allocated at that first commit, so there is nothing to report
+    /// beforehand. A snapshot that has committed reuses that lineage and
+    /// reports a version like a branch does.
+    ///
+    /// Resolves the issuer through the environment, so it takes the same
+    /// `env` the commit will.
+    pub async fn version<Env>(&self, env: &Env) -> Result<Option<Version>, CommitError>
+    where
+        Env: Provider<Identify> + ConditionalSync + 'static,
+    {
+        let authority = Identify.perform(env).await?;
+        let edition = self
+            .source
+            .revision()
+            .map(|base| base.edition.successor())
+            .unwrap_or(Edition::GENESIS);
+        Ok(self
+            .source
+            .commit_identity(authority.profile(), &authority.did())
+            .map(|(_, origin)| Version::new(origin, edition)))
     }
 
     /// Dispatch a claim as a *transient* fact (a command): visible to

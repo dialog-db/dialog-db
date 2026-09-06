@@ -13,7 +13,8 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::tree::{SpillCache, spill_cache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
-use dialog_capability::{Capability, Fork, Provider, Subject};
+use dialog_capability::history::Origin;
+use dialog_capability::{Capability, Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Archive, Get as ArchiveGet, Put as ArchivePut};
@@ -106,6 +107,25 @@ impl<'a> SourceRef<'a> {
         match self {
             SourceRef::Branch(branch) => branch.subject(),
             SourceRef::Snapshot(snapshot) => snapshot.subject(),
+        }
+    }
+
+    /// The line entity and [`Origin`] this line's next commit mints on.
+    ///
+    /// A branch derives both from its identity, so it always has one. A
+    /// snapshot's lineage is allocated at its FIRST commit — random
+    /// rather than derived, so two clones of one base do not share it —
+    /// and reused after, so it reports one only once it has committed.
+    pub(crate) fn commit_identity(self, profile: &Did, issuer: &Did) -> Option<(Entity, Origin)> {
+        match self {
+            SourceRef::Branch(branch) => Some(branch.commit_identity(profile, issuer)),
+            SourceRef::Snapshot(snapshot) => {
+                let (_, lineage) = snapshot.head();
+                lineage.map(|lineage| {
+                    let origin = crate::origin_of(&lineage, issuer);
+                    (lineage, origin)
+                })
+            }
         }
     }
 
