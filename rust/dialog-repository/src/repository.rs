@@ -1861,6 +1861,79 @@ mod tests {
             Ok(())
         }
 
+        /// The version a transaction reports is the one its commit mints.
+        ///
+        /// This is what lets a writer record a fact NAMING its own commit
+        /// — storing the version alongside the claims it tags, in the same
+        /// batch, rather than committing twice. If the two ever drifted,
+        /// that fact would point at a revision that never existed.
+        #[dialog_common::test]
+        async fn it_reports_the_version_its_commit_will_mint() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let txn = branch.transaction().assert(Employee {
+                this: Entity::new()?,
+                name: employee::Name("Alice".into()),
+                role: employee::Role("Engineer".into()),
+            });
+            let predicted = txn
+                .version(&operator)
+                .await?
+                .expect("a branch transaction knows its version");
+
+            let revision = txn.commit().perform(&operator).await?;
+            assert_eq!(
+                revision.version(),
+                predicted,
+                "the reported version is the one the commit minted"
+            );
+
+            // And it advances: the next transaction reports the successor,
+            // not the version just used.
+            let next = branch
+                .transaction()
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Bob".into()),
+                    role: employee::Role("Engineer".into()),
+                })
+                .version(&operator)
+                .await?
+                .expect("a branch transaction knows its version");
+            assert_ne!(next, predicted, "a second commit mints a new version");
+
+            // A snapshot allocates its lineage at its first commit, so it
+            // has no version to report until then — and reports one after.
+            let snapshot = branch.snapshot().expect("a committed branch snapshots");
+            assert!(
+                snapshot.transaction().version(&operator).await?.is_none(),
+                "a snapshot that has not committed has no lineage yet"
+            );
+            let committed = snapshot
+                .transaction()
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Carol".into()),
+                    role: employee::Role("Engineer".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+            assert_eq!(
+                snapshot
+                    .transaction()
+                    .version(&operator)
+                    .await?
+                    .map(|version| version.origin),
+                Some(committed.version().origin),
+                "once it has committed, a snapshot reports the line it minted on"
+            );
+
+            Ok(())
+        }
+
         #[dialog_common::test]
         async fn it_starts_with_only_its_branch_and_empty_overlay() -> anyhow::Result<()> {
             let (operator, profile) = test_operator_with_profile().await;
