@@ -250,6 +250,30 @@ impl Snapshot {
         }
     }
 
+    /// The staged view inside a [`TransactionBatch`](crate::TransactionBatch):
+    /// reads like any snapshot of `revision`, but its line is pre-seeded
+    /// with the branch entity, so commits through it mint on the branch's
+    /// OWN origin — successor editions of the head the batch was staged
+    /// from — instead of allocating a random lineage of their own. That
+    /// is what lets [`BatchPublish`](crate::BatchPublish) move the branch
+    /// head to the staged tip with the versions exactly as minted.
+    pub(crate) fn staged(
+        subject: Subject,
+        revision: Revision,
+        caches: Caches,
+        line: Entity,
+    ) -> Self {
+        Snapshot {
+            subject,
+            head: RwLock::new(Head {
+                revision,
+                lineage: Some(line),
+            }),
+            caches,
+            overlay: Overlay::default(),
+        }
+    }
+
     /// The revision this snapshot names.
     pub fn revision(&self) -> Revision {
         self.head.read().revision.clone()

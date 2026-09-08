@@ -865,6 +865,7 @@ mod rule_tests {
             )
             .assert(employee_from_person())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         // refresh handle so the durable layer sees the new head
@@ -923,6 +924,7 @@ mod rule_tests {
             .assert(the!("org/salary").of(bob.clone()).is(4u32))
             .assert(&rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -962,6 +964,7 @@ mod rule_tests {
             .transaction()
             .assert(the!("org/person-name").of(alice).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -988,6 +991,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1030,6 +1034,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1075,6 +1080,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1123,6 +1129,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1135,6 +1142,7 @@ mod rule_tests {
             .transaction()
             .assert(employee_from_person())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1182,6 +1190,7 @@ mod rule_tests {
             .assert(&r1)
             .assert(&r2)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1225,6 +1234,7 @@ mod rule_tests {
             )
             .assert(&r1)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1275,6 +1285,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1290,6 +1301,7 @@ mod rule_tests {
             .transaction()
             .assert(employee_from_person())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1333,6 +1345,7 @@ mod rule_tests {
             )
             .assert(&r_person)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1351,6 +1364,7 @@ mod rule_tests {
             )
             .assert(&r_contractor)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1402,6 +1416,7 @@ mod rule_tests {
             )
             .assert(&rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1413,6 +1428,7 @@ mod rule_tests {
             .transaction()
             .retract(&rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1448,6 +1464,7 @@ mod rule_tests {
             )
             .assert(&v1)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1469,6 +1486,7 @@ mod rule_tests {
             )
             .assert(&v2)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1520,7 +1538,7 @@ mod resolver_tests {
                     .is(format!("entry-{at}")),
             );
         }
-        tx.commit().perform(operator).await?;
+        tx.commit().publish().perform(operator).await?;
         let revision = branch
             .revision()
             .expect("branch has a revision after commit");
@@ -1618,7 +1636,7 @@ mod resolver_tests {
                     .is(format!("entry-{at}-{pad}")),
             );
         }
-        tx.commit().perform(operator).await?;
+        tx.commit().publish().perform(operator).await?;
         let revision = branch
             .revision()
             .expect("branch has a revision after commit");
@@ -1758,6 +1776,7 @@ mod resolver_tests {
             .transaction()
             .assert(the!("probe/tree").of(probe.clone()).is(root.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1791,6 +1810,7 @@ mod resolver_tests {
             .transaction()
             .assert(&rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1934,6 +1954,7 @@ mod resolver_tests {
             .transaction()
             .assert(the!("test/name").of(Entity::new()?).is("later".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let revision = branch.revision().expect("second revision");
@@ -1988,6 +2009,7 @@ mod resolver_tests {
             .transaction()
             .assert(the!("test/big").of(Entity::new()?).is(big.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let revision = branch.revision().expect("committed");
@@ -2121,6 +2143,7 @@ mod ordered_relation_tests {
             .assert(membership(&list, &at_milk, &milk))
             .assert(membership(&list, &at_bread, &bread))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2139,6 +2162,7 @@ mod ordered_relation_tests {
                 cardinality: None,
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
