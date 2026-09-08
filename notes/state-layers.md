@@ -78,7 +78,7 @@ entity rather than a fact on the enclosed line because a composite
 read unions every tree: local and gossip both link shared, at
 different revisions, and only a link entity keeps the two apart.
 
-### Two identities per line
+### Two identities per line, and the descriptor blob
 
 A line has an **address**, where its head lives: repository DID plus
 branch name for a branch, a nonce for an ephemeral line. A branch
@@ -86,38 +86,48 @@ entity today is derived from the repository DID, the profile, and the
 name, which differs per profile for the same branch, so it is not
 usable as a link target; the address is.
 
-A line also has a **stack identity**, derived from its address and
-the identities of the lines it links:
+A line also has a **stack identity**: the hash of its **descriptor**,
+a canonical dag-cbor blob in the archive, exactly the way a rule or a
+concept descriptor is content-addressed and hydrated on read:
 
 ```
-id(line) = blake3({ address(line), links: sorted [(name, id(to))] })
+descriptor(line) = { address(line), links: sorted [(name, id(to))] }
+id(line)         = stack:<base58(blake3(descriptor))>
 ```
 
-The bottom line, linking nothing, has `id = blake3({address})`. A
-link's `to` is the enclosed line's stack identity; `from` is the
-enclosing line's *address*, since the link is part of what defines
-the encloser's identity and would otherwise be self-referential. The
-link entity is `link:blake3({address(from), id(to)})`, so re-asserting
-a link is idempotent and `revision` is a clean cardinality-one
-replace.
+The bottom line, linking nothing, has the descriptor `{address}` and
+so the same identity on every replica. The descriptor holds the
+*shape* and nothing that moves: what an encloser last saw is the
+`dialog.link/revision` fact in its tree, keyed by
+`link:blake3({address(from), id(to)})`, refreshed lazily. `from` is
+an address, not an identity, because the link is part of what defines
+the encloser's identity. The descriptor names the shape; the facts
+name the time.
 
 Consequences of merkelizing the stack this way:
 
+- **A stack is one hash.** `Stack::open("stack:...")` fetches the
+  descriptor, opens each line by its address, and recurses. A stack
+  can be handed to another process as a string.
 - **Cycles are unconstructible.** `id(A)` needs `id(B)`, which would
   need `id(A)`. The ladder (mutual one-rung-stale links) is gone with
   them, since it needs both directions.
-- **Fabricated topology fails verification.** `open` recomputes each
-  line's identity from its links as it walks and rejects a mismatch,
-  so no cycle search is needed.
+- **Tampering is detected on fetch.** A blob that does not hash to
+  the identity a link claims is rejected, so no cycle search and no
+  separate verification pass.
+- **Descriptors deduplicate.** Every replica's descriptor for
+  `shared` is the same blob, and stacks with the same shape below a
+  point share the blobs below it. The archive's blob replication path
+  carries them, so a peer holding only a hash can resolve it.
 - **`to` is audience-independent.** A stack identity is a pure
   function of addresses and structure, so every reader anywhere
   computes the same one.
-- **Topology is part of identity.** Adding a link under local changes
-  `id(local)`, so every link *to* local is stale and must be
-  rewritten. That is ordinary Merkle behaviour; it is free for
+- **Shape is identity.** Adding a link under local, or renaming a
+  layer, changes `id(local)`, so every link *to* local is stale and
+  must be rewritten. That is ordinary Merkle behaviour; it is free for
   ephemeral lines, which are rebuilt per process, and it is a
-  migration for any durable line above a re-linked durable line.
-  In the layout below nothing durable sits above local, so it costs
+  migration for any durable line above a re-shaped durable line. In
+  the layout below nothing durable sits above local, so it costs
   nothing today, and it is the constraint to remember when a second
   durable layer is added.
 
@@ -153,9 +163,9 @@ questions and both stay answerable.
 
 ### Recovery
 
-`Stack::open(&line)` walks links downward from any line, verifying
-each identity as it goes (a visited set only spares re-walking a
-diamond). The durable part of a tab stack recovers from
+`Stack::open` takes a line or a stack identity and walks descriptors
+downward, each fetch verifying its hash (a visited set only spares
+re-walking a diamond). The durable part of a tab stack recovers from
 `main.local`; the ephemeral layers above it are rebuilt by the
 process, as they would be anyway. If that rebuild should be
 data-driven too, a durable line may hold template facts pointing up,
@@ -199,8 +209,9 @@ beneath it, and a flat stack makes the top pay every capture.
   fails with a clear error. A catch-all layer is a possible flag; it
   is deliberately not the default, since it turns a schema and stack
   mismatch into silent misplacement.
-- **Identities verify.** Cycles cannot be built (see Two identities
-  per line); a mismatched identity is a configuration error.
+- **Descriptors resolve.** Cycles cannot be built (see the descriptor
+  blob); a blob that does not hash to its claimed identity is a
+  configuration error.
 - **The audience rule.** A line may link a line beneath it only if
   that line's audience contains its own. A capture is a revision
   hash; if gossip captured local, every gossip instant a peer received
@@ -374,12 +385,12 @@ on an epoch; `Transaction` gains the stack fan-out and capture.
    Subscriptions become incremental over session changes for free.
 2. Placement by layer entity plus the repository default fact, with
    the unbound-layer error.
-3. `Stack` over `QueryLayer`: links as `dialog.link/*` facts with
-   addresses and merkelized stack identities, the builder with
+3. `Stack` over `QueryLayer`: descriptor blobs in the archive with
+   `dialog.link/revision` facts beside them, the builder with
    explicit `link`, the `build`-time checks (every targetable name
-   bound, identities verify, the audience rule), `Stack::open` by
-   walking and verifying links, `named`, the registry metadata,
-   `transaction` with bottom-to-top commit and lazy link refresh.
+   bound, descriptors resolve, the audience rule), `Stack::open` by
+   hash, `named`, the registry metadata, `transaction` with
+   bottom-to-top commit and lazy link refresh.
 4. Tonk migration: `layer:state` and `layer:tab` declared in the
    library, one stack per connection with its own tab line,
    inspector over the registry, `navigate` as a tab-layer
