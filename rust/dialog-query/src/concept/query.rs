@@ -630,6 +630,7 @@ mod tests {
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .assert(the!("person/age").of(bob.clone()).is(30u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -736,6 +737,7 @@ mod tests {
             )
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -852,6 +854,7 @@ mod tests {
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .assert(the!("person/bio").of(bob.clone()).is("Hi".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -985,6 +988,7 @@ mod tests {
             )
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1036,6 +1040,7 @@ mod tests {
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1351,6 +1356,7 @@ mod tests {
             )
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1414,6 +1420,7 @@ mod tests {
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .assert(the!("person/age").of(bob.clone()).is(30u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1486,6 +1493,7 @@ mod tests {
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .assert(the!("person/age").of(bob.clone()).is(30u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1737,6 +1745,7 @@ mod tests {
                 )
                 .assert(the!("org.employee/salary").of(carol.clone()).is(70u32))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1803,6 +1812,7 @@ mod tests {
                 .assert(the!("org.employee/dept").of(bob.clone()).is(dept_a.clone()))
                 .assert(the!("org.employee/salary").of(bob.clone()).is(50u32))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1904,6 +1914,7 @@ mod tests {
                 .assert(the!("org.employee/dept").of(carol.clone()).is(dept.clone()))
                 .assert(the!("org.employee/salary").of(carol.clone()).is(200u32))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1990,6 +2001,7 @@ mod tests {
                 .assert(the!("org.employee/bonus").of(alice.clone()).is(25u32))
                 .assert(the!("org.employee/dept").of(bob.clone()).is(dept_b.clone()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -2087,6 +2099,7 @@ mod tests {
                 .assert(the!("org.employee/dept").of(bob.clone()).is(dept_a.clone()))
                 .assert(the!("org.employee/salary").of(bob.clone()).is(50u32))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -2167,6 +2180,7 @@ mod tests {
                 )
                 .assert(the!("org.employee/salary").of(carol.clone()).is(7u32))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -2267,7 +2281,7 @@ mod tests {
                         )
                         .assert(the!("org.employee/salary").of(person.clone()).is(*salary));
                 }
-                tx.commit().perform(&operator).await?;
+                tx.commit().publish().perform(&operator).await?;
 
                 let rule = dept_total_rule();
                 let conclusion = rule.conclusion().clone();

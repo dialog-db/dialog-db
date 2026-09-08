@@ -659,6 +659,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -727,6 +728,7 @@ mod tests {
                     .is("Hacker".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -797,6 +799,7 @@ mod tests {
             .transaction()
             .assert(alice_person.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -843,6 +846,7 @@ mod tests {
             .transaction()
             .retract(alice_person)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -905,6 +909,7 @@ mod tests {
             .transaction()
             .assert(name_relation.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -928,6 +933,7 @@ mod tests {
             .transaction()
             .retract(name_relation)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -999,6 +1005,7 @@ mod tests {
             .transaction()
             .assert(alice.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1063,6 +1070,7 @@ mod tests {
             .assert(alice)
             .assert(bob)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1115,6 +1123,7 @@ mod tests {
             .assert(alice)
             .assert(bob)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1152,6 +1161,7 @@ mod tests {
             .transaction()
             .assert(alice_with_email)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1165,6 +1175,7 @@ mod tests {
             .transaction()
             .assert(alice_with_birthday)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1232,6 +1243,7 @@ mod tests {
             .transaction()
             .assert(alice.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1239,6 +1251,7 @@ mod tests {
             .transaction()
             .retract(alice)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1355,6 +1368,7 @@ mod tests {
             .assert(org::Badge::of(mallory.clone()).is("M-3"))
             .assert(org::Manager::of(mallory.clone()).is(carol.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1441,6 +1455,7 @@ mod tests {
                     .is("555-0199".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1508,6 +1523,7 @@ mod tests {
                 job: shortcut_employee::Job("Designer".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1559,6 +1575,7 @@ mod tests {
                 job: shortcut_employee::Job("Engineer".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1637,6 +1654,7 @@ mod tests {
             .assert(helper_person::Name::of(alice).is("Alice"))
             .assert(helper_person::Name::of(bob).is("Bob"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1677,6 +1695,7 @@ mod tests {
             .assert(helper_employee::Name::of(bob.clone()).is("Bob"))
             .assert(helper_employee::Department::of(bob).is("Sales"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1712,6 +1731,7 @@ mod tests {
             .assert(helper_employee::Name::of(bob.clone()).is("Bob"))
             .assert(helper_employee::Department::of(bob.clone()).is("Sales"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 

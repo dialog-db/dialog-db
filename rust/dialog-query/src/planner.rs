@@ -276,6 +276,7 @@ mod tests {
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .assert(the!("person/age").of(bob.clone()).is(30u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
