@@ -269,18 +269,21 @@ impl Branch {
     /// [`dialog_artifacts::history::causality`]).
     ///
     /// History records live in the same tree as the data, so this reads the
-    /// history region of the current revision's tree. Reads that miss
-    /// locally are not fetched from a remote — traversal over unreplicated
-    /// history surfaces as `IncompleteHistory`.
-    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    /// history region of the current revision's tree. A read that misses
+    /// locally hydrates from the branch's tracked remote exactly as a fact
+    /// read does, so a replica that materialized only the operational
+    /// regions fetches the history it turns out to need. A branch tracking
+    /// no remote reads purely locally.
+    pub async fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
+            + Provider<memory::Resolve>
             + Provider<Fork<RemoteSite, ArchiveGet>>
             + ConditionalSync
             + 'static,
     {
-        SourceRef::from(self).history(env)
+        SourceRef::from(self).history(env).await
     }
 
     /// The branch's committed history, newest first — at most `limit`
@@ -297,6 +300,7 @@ impl Branch {
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
+            + Provider<memory::Resolve>
             + Provider<Fork<RemoteSite, ArchiveGet>>
             + ConditionalSync
             + 'static,

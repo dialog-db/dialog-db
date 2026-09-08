@@ -281,7 +281,7 @@ impl<'a> Pull<'a> {
                         context.clone()
                     }
                     None => {
-                        let history = branch.history(env);
+                        let history = branch.history(env).await;
                         contexts.context_of(&revision.version(), &history).await?
                     }
                 },
@@ -1884,7 +1884,7 @@ mod history_tests {
             .await?
             .expect("pull merges");
 
-        let history = feature.history(&operator);
+        let history = feature.history(&operator).await;
 
         // Main's concurrent claim was adopted into feature's history.
         assert_eq!(
@@ -1976,7 +1976,7 @@ mod history_tests {
             .perform(&operator)
             .await?;
         feature.refresh(&operator).await?;
-        let history = feature.history(&operator);
+        let history = feature.history(&operator).await;
         for version in [after_merge.version(), next.version()] {
             let skips = history
                 .revision_record(&version)
@@ -2274,7 +2274,7 @@ mod history_tests {
         );
 
         // ... and the recorded lineage proves they are concurrent.
-        let history = feature.history(&operator);
+        let history = feature.history(&operator).await;
         let ours_claims = history
             .claims_at(&ours.version(), &"post:1".parse()?, &"post/title".parse()?)
             .await?;
@@ -2761,7 +2761,7 @@ mod history_tests {
                     .cached(&head.version())
                     .await
                     .expect("the memo is primed");
-                let history = branch.history(operator);
+                let history = branch.history(operator).await;
                 let walked = context_of(&head.version(), &history).await?;
                 anyhow::Ok((memo, walked))
             }
@@ -2825,7 +2825,7 @@ mod history_tests {
             .context
             .clone()
             .expect("a freshly minted head publishes its context");
-        let history = main.history(&operator);
+        let history = main.history(&operator).await;
         let walked = context_of(&head.version(), &history).await?;
         assert_eq!(
             published, walked,

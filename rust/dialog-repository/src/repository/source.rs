@@ -272,18 +272,25 @@ impl<'a> SourceRef<'a> {
 
     /// The recorded claim lineage at this line's revision. History
     /// records live in the same tree as the data, so this reads the
-    /// history region of the revision's tree. Reads that miss locally
-    /// are not fetched from a remote — traversal over unreplicated
-    /// history surfaces as `IncompleteHistory`.
-    pub(crate) fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
+    /// history region of the revision's tree.
+    ///
+    /// A read that misses locally falls back to the line's tracked
+    /// remote exactly as a fact read does (see [`fallback`](Self::fallback)),
+    /// so a replica that materialized only the operational regions
+    /// hydrates the history it turns out to need instead of failing with
+    /// `IncompleteHistory`. A line tracking no remote reads purely
+    /// locally, so an offline replica behaves as it always did.
+    pub(crate) async fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
+            + Provider<Resolve>
             + Provider<Fork<RemoteSite, ArchiveGet>>
             + ConditionalSync
             + 'static,
     {
-        let store = NetworkedIndex::new(env, self.archive().index(), None);
+        let remote = self.fallback(env).await;
+        let store = NetworkedIndex::new(env, self.archive().index(), remote);
         TreeHistory::from_root_with_cache(&self.root(), store, self.node_cache())
             .with_record_cache(self.records())
     }
@@ -298,6 +305,7 @@ impl<'a> SourceRef<'a> {
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
+            + Provider<Resolve>
             + Provider<Fork<RemoteSite, ArchiveGet>>
             + ConditionalSync
             + 'static,
@@ -305,7 +313,7 @@ impl<'a> SourceRef<'a> {
         let Some(head) = self.revision() else {
             return Ok(Vec::new());
         };
-        log(&head.version(), &self.history(env), limit).await
+        log(&head.version(), &self.history(env).await, limit).await
     }
 }
 

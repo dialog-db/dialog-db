@@ -14,6 +14,9 @@
 //! does not hold, caching each as it lands. [`Pull::download`] chains
 //! the two acts — adopt the upstream head, then materialize it.
 
+use core::ops::RangeInclusive;
+
+use dialog_artifacts::merge::data_scope;
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
@@ -28,12 +31,24 @@ use crate::{
     Upstream,
 };
 
+/// [`data_scope`] as the byte ranges the traversal takes: the operational
+/// indexes and the blob index, with history and coverage left out.
+fn operational_scope() -> Vec<RangeInclusive<Vec<u8>>> {
+    data_scope()
+        .map(|range| {
+            let (start, end) = range.into_inner();
+            Vec::from(start)..=Vec::from(end)
+        })
+        .to_vec()
+}
+
 /// Command struct for materializing a branch's content locally. Created
 /// by [`Branch::download`].
 pub struct Download<'a> {
     branch: &'a Branch,
     from: Option<Upstream>,
     revision: Option<Revision>,
+    scope: Option<Vec<RangeInclusive<Vec<u8>>>>,
 }
 
 impl Branch {
@@ -48,6 +63,7 @@ impl Branch {
             branch: self,
             from: None,
             revision: None,
+            scope: None,
         }
     }
 }
@@ -59,6 +75,31 @@ impl Download<'_> {
     pub fn of(mut self, revision: Revision) -> Self {
         self.revision = Some(revision);
         self
+    }
+
+    /// Materialize only the key regions in `scope`, leaving the rest of
+    /// the tree by reference. See [`SnapshotExport::within`].
+    pub fn within(mut self, scope: impl Into<Vec<RangeInclusive<Vec<u8>>>>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
+
+    /// Materialize only what reads and authorization touch: the
+    /// entity/attribute/value indexes and the blob index, with their
+    /// spilled values and referenced blobs.
+    ///
+    /// This is the download a profile wants. The regions it skips are
+    /// history and coverage, which no read path can reach — a selector
+    /// only ever ranges over the three data orderings — while they are
+    /// also the only regions that grow with every edit ever made rather
+    /// than with the live fact count.
+    ///
+    /// The revision DAG is *not* in what it skips: revision records are
+    /// ordinary facts in the data indexes, so ancestry, `log`, and skip
+    /// tables keep working. And a history record that turns out to be
+    /// needed hydrates from the upstream on demand rather than failing.
+    pub fn operational(self) -> Self {
+        self.within(operational_scope())
     }
 
     /// Materialize the branch's current revision locally.
@@ -96,10 +137,14 @@ impl Download<'_> {
         // The items themselves carry nothing the local store does not
         // already hold by the time they are yielded, so draining the
         // stream is the whole job.
-        let items = Snapshot::new(branch.subject(), revision)
+        let export = Snapshot::new(branch.subject(), revision)
             .export()
-            .download(remote)
-            .perform(env);
+            .download(remote);
+        let export = match self.scope {
+            Some(scope) => export.within(scope),
+            None => export,
+        };
+        let items = export.perform(env);
         futures_util::pin_mut!(items);
         while let Some(item) = items.next().await {
             item.map_err(DownloadError::Snapshot)?;
@@ -110,7 +155,7 @@ impl Download<'_> {
 
 /// Command struct for a pull followed by a download of the adopted head.
 /// Created by [`Pull::download`].
-pub struct PullDownload<'a>(Pull<'a>);
+pub struct PullDownload<'a>(Pull<'a>, Option<Vec<RangeInclusive<Vec<u8>>>>);
 
 impl<'a> Pull<'a> {
     /// After the pull, fetch every block and blob the adopted head
@@ -121,11 +166,24 @@ impl<'a> Pull<'a> {
     /// flow is the motivating case: pull the account's access branch,
     /// download it, and proofs read entirely locally.
     pub fn download(self) -> PullDownload<'a> {
-        PullDownload(self)
+        PullDownload(self, None)
     }
 }
 
-impl PullDownload<'_> {
+impl<'a> PullDownload<'a> {
+    /// Materialize only the key regions in `scope`. See
+    /// [`Download::within`].
+    pub fn within(mut self, scope: impl Into<Vec<RangeInclusive<Vec<u8>>>>) -> Self {
+        self.1 = Some(scope.into());
+        self
+    }
+
+    /// Materialize only the operational regions. See
+    /// [`Download::operational`].
+    pub fn operational(self) -> Self {
+        self.within(operational_scope())
+    }
+
     /// Pull with the materialization ORDERED BEFORE the head advance:
     /// prepare the merge, download every block and blob the prepared
     /// revision references, and only then commit the cell advance. A
@@ -160,6 +218,7 @@ impl PullDownload<'_> {
                 branch,
                 from,
                 revision: Some(revision),
+                scope: self.1,
             }
             .perform(env)
             .await?;
