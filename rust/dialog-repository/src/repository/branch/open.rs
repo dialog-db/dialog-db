@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::rules::RuleCache;
-use crate::{Branch, BranchReference, Ephemeral, ResolveError};
+use crate::{Bindings, Branch, BranchReference, Ephemeral, ResolveError};
 use dialog_artifacts::history::{CausalityCache, ContextCache};
 use dialog_artifacts::tree::spill_cache;
 use dialog_capability::Provider;
@@ -51,6 +51,7 @@ impl OpenBranch {
             spine: dialog_artifacts::SpineSlot::new(),
             identity_cache: Arc::new(Mutex::new(None)),
             overlay: Ephemeral::default(),
+            bindings: Bindings::default(),
         })
     }
 }

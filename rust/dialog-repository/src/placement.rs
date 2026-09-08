@@ -1,53 +1,55 @@
 //! Attribute placement: which layer an attribute's facts live in.
 //!
-//! A branch is read as one composite, but its facts live in layers
-//! that differ in two properties — whether they survive a restart and
-//! whether they replicate. Rather than having every writer pick a
-//! layer per call (a durable `assert`, a `dispatch`, an
-//! `overlay().assert(..)`), the *attribute* declares its layer once,
-//! as a fact on the branch, and every write routes by it: a
-//! transaction's `assert` / `retract` lands each instruction in the
-//! layer its attribute declares, a rule's head does the same, and a
-//! concept whose attributes span layers fans out on write and joins
-//! back on read.
+//! A line is read as one composite, but its facts live in layers that
+//! differ in whether they survive a restart and whether they
+//! replicate. Rather than having every writer pick a layer per call,
+//! the *attribute* declares its layer once, as a fact on the line, and
+//! every write routes by it: a transaction's `assert` / `retract`
+//! lands each instruction in the layer its attribute declares, a
+//! rule's head does the same, and a concept whose attributes span
+//! layers fans out on write and joins back on read.
 //!
-//! # Layers
+//! # Layers are names
 //!
-//! The set is fixed and every layer always exists, so a declaration
-//! can never name a layer some replica lacks:
+//! A layer is an entity, conventionally under a `memory:` scheme
+//! (`memory:shared`, `memory:session`), and nothing about the name is
+//! fixed. What is *shared* — which attribute goes to which name — is
+//! declared in the replicated tree. What is *local* — which store
+//! stands under a name on this replica — is a [binding](Bindings)
+//! made on the line by API. Today a line can bind a name to its tree
+//! or to its [`Ephemeral`](crate::Ephemeral) store; a stack of lines
+//! will bind names to other lines.
 //!
-//! | layer | durable | replicated | backing today |
-//! |---|---|---|---|
-//! | [`Semantic`](Layer::Semantic) | yes | yes | the branch tree (the default) |
-//! | [`Episodic`](Layer::Episodic) | yes | no | none yet |
-//! | [`Procedural`](Layer::Procedural) | no | no | the line's [`Ephemeral`](crate::Ephemeral) store |
-//! | [`Sensory`](Layer::Sensory) | no | yes | none yet |
+//! # Declarations, as facts on the line
 //!
-//! A write to an attribute declared on a layer with no backing fails
-//! the commit ([`CommitError::UnbackedLayer`]) rather than silently
-//! landing somewhere else.
+//! ```text
+//! <repository did>       dialog.attribute/default  memory:shared   # the implicit layer
+//! attribute:ui/selected  dialog.attribute/layer    memory:session  # an override
+//! ```
 //!
-//! # Declaration
+//! The default names the layer an attribute with no placement belongs
+//! to, and it is the tree's name: the tree is where the declarations
+//! themselves live, so it is always bound. With no default declared,
+//! undeclared attributes go to the tree as before. A placement is a
+//! branch-level fact, deliberately outside any concept's content
+//! address, so the same descriptor may be session-scoped on one line
+//! and durable on another; it takes effect in the commit that declares
+//! it, so a transaction can declare and use a placement together.
 //!
-//! `dialog.attribute/layer` `of` the attribute's entity (see
-//! [`attribute_entity`]) `is` the layer's name. It is a branch-level
-//! fact, deliberately outside any concept's content address — the
-//! same descriptor may be procedural on one branch and semantic on
-//! another — and it takes effect in the commit that declares it, so a
-//! transaction can declare and use a placement together. Undeclared
-//! attributes are semantic.
+//! A write naming a layer the line does not bind fails the commit
+//! ([`CommitError::UnboundLayer`]) rather than routing elsewhere. The
+//! fix is in the binding, which is local, not in the schema.
 //!
 //! # Observability
 //!
-//! The procedural layer is the session overlay, which every read of
-//! the branch folds in and every standing subscription re-evaluates
-//! on. So a rule concluding a procedural head writes something a
-//! subscriber sees — the observable ephemeral conclusion a transient
-//! (one induction round, never written anywhere) cannot be.
+//! A layer bound to the ephemeral store is folded into every read of
+//! the line and every standing subscription maintains from its
+//! instants. So a rule concluding a session-scoped head writes
+//! something a subscriber sees — the observable ephemeral conclusion
+//! a transient (one induction round, never written anywhere) cannot
+//! be.
 
 use std::collections::HashMap;
-use std::fmt;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
@@ -60,79 +62,19 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
 use dialog_query::the;
 use futures_util::{StreamExt as _, TryStreamExt as _};
+use parking_lot::RwLock;
 
 use crate::repository::source::SourceRef;
 use crate::{CommitError, RemoteSite};
 
-/// The layer an attribute's facts live in. See the [module
-/// docs](self) for the table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Layer {
-    /// Durable and replicated: the branch tree. The default.
-    Semantic,
-    /// Durable on this replica, never replicated. Not backed yet.
-    Episodic,
-    /// This process only, lost on restart: the session overlay.
-    Procedural,
-    /// Replicated but never stored. Not backed yet.
-    Sensory,
-}
-
-impl Layer {
-    /// Every layer, in declaration order.
-    pub const ALL: [Layer; 4] = [
-        Layer::Semantic,
-        Layer::Episodic,
-        Layer::Procedural,
-        Layer::Sensory,
-    ];
-
-    /// The layer's name, as written in a declaration.
-    pub fn name(self) -> &'static str {
-        match self {
-            Layer::Semantic => "semantic",
-            Layer::Episodic => "episodic",
-            Layer::Procedural => "procedural",
-            Layer::Sensory => "sensory",
-        }
-    }
-
-    /// Whether facts on this layer survive a restart.
-    pub fn is_durable(self) -> bool {
-        matches!(self, Layer::Semantic | Layer::Episodic)
-    }
-
-    /// Whether facts on this layer replicate to peers.
-    pub fn is_replicated(self) -> bool {
-        matches!(self, Layer::Semantic | Layer::Sensory)
-    }
-
-    /// Whether this layer has a store behind it today.
-    pub fn is_backed(self) -> bool {
-        matches!(self, Layer::Semantic | Layer::Procedural)
-    }
-}
-
-impl fmt::Display for Layer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-impl FromStr for Layer {
-    type Err = String;
-
-    fn from_str(name: &str) -> Result<Self, Self::Err> {
-        Layer::ALL
-            .into_iter()
-            .find(|layer| layer.name() == name)
-            .ok_or_else(|| format!("unknown layer {name:?}"))
-    }
-}
-
 /// The `dialog.attribute/layer` declaration attribute.
 pub(crate) fn layer_attr() -> Attribute {
     the!("dialog.attribute/layer").into()
+}
+
+/// The `dialog.attribute/default` declaration attribute.
+pub(crate) fn default_attr() -> Attribute {
+    the!("dialog.attribute/default").into()
 }
 
 /// The URI scheme attribute entities are minted under.
@@ -158,15 +100,16 @@ fn entity_attribute(entity: &Entity) -> Option<Attribute> {
 
 /// [`Statement`] declaring the layer an attribute's facts live in.
 /// Asserting it places the attribute; retracting it returns the
-/// attribute to the default ([`Layer::Semantic`]).
+/// attribute to the line's default layer.
 ///
 /// ```no_run
-/// # use dialog_repository::{Branch, Layer, Placement};
-/// # async fn example(branch: &Branch, env: &impl std::any::Any) -> anyhow::Result<()> {
-/// let selected = "ui/selected".parse()?;
+/// # use dialog_repository::{Branch, Placement, Target};
+/// # async fn example(branch: &Branch) -> anyhow::Result<()> {
+/// let session: dialog_artifacts::Entity = "memory:session".parse()?;
+/// branch.bind(session.clone(), Target::Session);
 /// let tx = branch
 ///     .transaction()
-///     .assert(Placement::new(selected, Layer::Procedural));
+///     .assert(Placement::new("ui/selected".parse()?, session));
 /// # let _ = tx;
 /// # Ok(())
 /// # }
@@ -176,12 +119,12 @@ pub struct Placement {
     /// The attribute being placed.
     pub attribute: Attribute,
     /// The layer its facts live in.
-    pub layer: Layer,
+    pub layer: Entity,
 }
 
 impl Placement {
     /// Declare that `attribute`'s facts live in `layer`.
-    pub fn new(attribute: Attribute, layer: Layer) -> Self {
+    pub fn new(attribute: Attribute, layer: Entity) -> Self {
         Self { attribute, layer }
     }
 }
@@ -191,7 +134,7 @@ impl Statement for Placement {
         update.associate_unique(
             layer_attr(),
             attribute_entity(&self.attribute),
-            Value::String(self.layer.name().to_string()),
+            Value::Entity(self.layer),
         );
     }
 
@@ -199,15 +142,103 @@ impl Statement for Placement {
         update.dissociate(
             layer_attr(),
             attribute_entity(&self.attribute),
-            Value::String(self.layer.name().to_string()),
+            Value::Entity(self.layer),
         );
     }
 }
 
-/// The committed placements at a branch head: attribute → layer for
-/// every declared attribute. Cached per head on the line's
-/// [`RuleCache`](crate::RuleCache), like the trigger footprint.
-pub(crate) type CommittedPlacements = Arc<HashMap<Attribute, Layer>>;
+/// [`Statement`] declaring the layer an attribute with no placement
+/// belongs to, for one repository: the name of the tree.
+///
+/// ```no_run
+/// # use dialog_repository::{Branch, DefaultLayer};
+/// # async fn example(branch: &Branch) -> anyhow::Result<()> {
+/// let tx = branch
+///     .transaction()
+///     .assert(DefaultLayer::new(branch.of(), "memory:shared".parse()?));
+/// # let _ = tx;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultLayer {
+    /// The repository the default is for.
+    pub repository: Entity,
+    /// The layer undeclared attributes belong to.
+    pub layer: Entity,
+}
+
+impl DefaultLayer {
+    /// Declare `layer` as the default for `repository`'s attributes.
+    pub fn new(repository: &dialog_capability::Did, layer: Entity) -> Self {
+        use crate::schema::DidExt as _;
+        Self {
+            repository: repository.this(),
+            layer,
+        }
+    }
+}
+
+impl Statement for DefaultLayer {
+    fn assert(self, update: &mut impl Update) {
+        update.associate_unique(default_attr(), self.repository, Value::Entity(self.layer));
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        update.dissociate(default_attr(), self.repository, Value::Entity(self.layer));
+    }
+}
+
+/// Where a layer name is bound on a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// The line's tree: durable, replicated with the line.
+    Tree,
+    /// The line's [`Ephemeral`](crate::Ephemeral) store: this process
+    /// only, never committed.
+    Session,
+}
+
+/// A line's local bindings from layer names to its stores. Shared
+/// across clones of the line, like its caches. The tree needs no
+/// binding: the repository default names it, and with no default
+/// declared undeclared attributes reach it anyway. Every other name a
+/// placement can target must be bound here before a write names it.
+#[derive(Debug, Clone, Default)]
+pub struct Bindings {
+    targets: Arc<RwLock<HashMap<Entity, Target>>>,
+}
+
+impl Bindings {
+    /// Bind `layer` to `target` on this line, replacing any prior
+    /// binding of the name.
+    pub fn bind(&self, layer: Entity, target: Target) {
+        self.targets.write().insert(layer, target);
+    }
+
+    /// Drop the binding of `layer`, if any.
+    pub fn unbind(&self, layer: &Entity) -> bool {
+        self.targets.write().remove(layer).is_some()
+    }
+
+    /// Where `layer` is bound, if it is.
+    pub fn target(&self, layer: &Entity) -> Option<Target> {
+        self.targets.read().get(layer).copied()
+    }
+}
+
+/// The committed placements at a line head: the layer each declared
+/// attribute belongs to, and the repository default. Cached per head
+/// on the line's [`RuleCache`](crate::RuleCache), like the trigger
+/// footprint.
+#[derive(Debug, Default)]
+pub(crate) struct Declared {
+    attributes: HashMap<Attribute, Entity>,
+    default: Option<Entity>,
+}
+
+/// A shared handle to the committed declarations at a head.
+pub(crate) type CommittedPlacements = Arc<Declared>;
 
 /// The resolved placements a commit routes by: the committed slice at
 /// the head, with the transaction's own declarations (and
@@ -215,8 +246,21 @@ pub(crate) type CommittedPlacements = Arc<HashMap<Attribute, Layer>>;
 #[derive(Debug, Default)]
 pub(crate) struct Placements {
     committed: CommittedPlacements,
-    declared: HashMap<Attribute, Layer>,
-    retracted: HashMap<Attribute, Layer>,
+    declared: HashMap<Attribute, Entity>,
+    retracted: HashMap<Attribute, Entity>,
+    default: Option<Entity>,
+    default_retracted: Option<Entity>,
+}
+
+/// Read a declaration value as a layer entity, or fail the commit.
+fn layer_value(attribute: &str, value: &Value) -> Result<Entity, CommitError> {
+    match value {
+        Value::Entity(layer) => Ok(layer.clone()),
+        other => Err(CommitError::InvalidPlacement {
+            attribute: attribute.to_string(),
+            value: format!("{other:?}"),
+        }),
+    }
 }
 
 impl Placements {
@@ -241,53 +285,68 @@ impl Placements {
             committed,
             ..Placements::default()
         };
-        let attribute = layer_attr();
+        let layer = layer_attr();
+        let default = default_attr();
         for (entity, the, change) in changes.iter() {
-            if *the != attribute {
-                continue;
+            if *the == layer {
+                let Some(placed) = entity_attribute(entity) else {
+                    continue;
+                };
+                let (Change::Assert(value) | Change::Replace(value) | Change::Retract(value)) =
+                    change;
+                let target = layer_value(placed.as_str(), value)?;
+                match change {
+                    Change::Retract(_) => placements.retracted.insert(placed, target),
+                    _ => placements.declared.insert(placed, target),
+                };
+            } else if *the == default {
+                let (Change::Assert(value) | Change::Replace(value) | Change::Retract(value)) =
+                    change;
+                let target = layer_value("dialog.attribute/default", value)?;
+                match change {
+                    Change::Retract(_) => placements.default_retracted = Some(target),
+                    _ => placements.default = Some(target),
+                }
             }
-            let Some(placed) = entity_attribute(entity) else {
-                continue;
-            };
-            let (Change::Assert(Value::String(name))
-            | Change::Replace(Value::String(name))
-            | Change::Retract(Value::String(name))) = change
-            else {
-                continue;
-            };
-            let Ok(layer) = name.parse::<Layer>() else {
-                return Err(CommitError::UnknownLayer {
-                    attribute: placed.to_string(),
-                    layer: name.clone(),
-                });
-            };
-            match change {
-                Change::Retract(_) => placements.retracted.insert(placed, layer),
-                _ => placements.declared.insert(placed, layer),
-            };
         }
         Ok(placements)
     }
 
-    /// The layer `attribute`'s facts live in.
-    pub(crate) fn layer_of(&self, attribute: &Attribute) -> Layer {
-        if let Some(layer) = self.declared.get(attribute) {
-            return *layer;
+    /// The layer undeclared attributes belong to, if one is declared.
+    fn default_layer(&self) -> Option<&Entity> {
+        if let Some(layer) = &self.default {
+            return Some(layer);
         }
-        match self.committed.get(attribute) {
-            Some(layer) if self.retracted.get(attribute) != Some(layer) => *layer,
-            _ => Layer::Semantic,
+        match &self.committed.default {
+            Some(layer) if self.default_retracted.as_ref() != Some(layer) => Some(layer),
+            _ => None,
         }
     }
 
-    /// Split a settled batch by layer: the semantic instructions (for
-    /// the tree) and the procedural ones (for the session overlay).
-    /// Declarations themselves are semantic facts and stay in the
-    /// tree. An instruction bound for a layer with no backing fails
-    /// the whole batch.
-    pub(crate) fn partition(&self, changes: Changes) -> Result<Partitioned, CommitError> {
-        let mut semantic = Changes::new();
-        let mut procedural = Changes::new();
+    /// The layer `attribute`'s facts live in, or `None` for the tree
+    /// when nothing names it.
+    pub(crate) fn layer_of(&self, attribute: &Attribute) -> Option<&Entity> {
+        if let Some(layer) = self.declared.get(attribute) {
+            return Some(layer);
+        }
+        match self.committed.attributes.get(attribute) {
+            Some(layer) if self.retracted.get(attribute) != Some(layer) => Some(layer),
+            _ => self.default_layer(),
+        }
+    }
+
+    /// Split a settled batch by destination store: the instructions
+    /// for the tree and the ones for the session store. Declarations
+    /// themselves are tree facts. An instruction bound for a layer the
+    /// line does not bind fails the whole batch.
+    pub(crate) fn partition(
+        &self,
+        changes: Changes,
+        bindings: &Bindings,
+    ) -> Result<Partitioned, CommitError> {
+        let mut tree = Changes::new();
+        let mut session = Changes::new();
+        let default = self.default_layer();
         for instruction in changes.into_instructions() {
             let attribute = match &instruction {
                 Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
@@ -295,34 +354,38 @@ impl Placements {
                 }
             };
             let target = match self.layer_of(&attribute) {
-                Layer::Semantic => &mut semantic,
-                Layer::Procedural => &mut procedural,
-                unbacked => {
-                    return Err(CommitError::UnbackedLayer {
-                        attribute: attribute.to_string(),
-                        layer: unbacked,
-                    });
-                }
+                None => Target::Tree,
+                Some(layer) if Some(layer) == default => Target::Tree,
+                Some(layer) => match bindings.target(layer) {
+                    Some(target) => target,
+                    None => {
+                        return Err(CommitError::UnboundLayer {
+                            attribute: attribute.to_string(),
+                            layer: layer.to_string(),
+                        });
+                    }
+                },
+            };
+            let into = match target {
+                Target::Tree => &mut tree,
+                Target::Session => &mut session,
             };
             match instruction {
-                Instruction::Assert(a) => target.associate(a.the, a.of, a.is),
-                Instruction::Replace(a) => target.associate_unique(a.the, a.of, a.is),
-                Instruction::Retract(a) => target.dissociate(a.the, a.of, a.is),
+                Instruction::Assert(a) => into.associate(a.the, a.of, a.is),
+                Instruction::Replace(a) => into.associate_unique(a.the, a.of, a.is),
+                Instruction::Retract(a) => into.dissociate(a.the, a.of, a.is),
             }
         }
-        Ok(Partitioned {
-            semantic,
-            procedural,
-        })
+        Ok(Partitioned { tree, session })
     }
 }
 
-/// A settled batch split by destination layer.
+/// A settled batch split by destination store.
 pub(crate) struct Partitioned {
-    /// Bound for the branch tree.
-    pub(crate) semantic: Changes,
-    /// Bound for the session overlay.
-    pub(crate) procedural: Changes,
+    /// Bound for the line's tree.
+    pub(crate) tree: Changes,
+    /// Bound for the line's ephemeral store.
+    pub(crate) session: Changes,
 }
 
 /// Selector for every committed `dialog.attribute/layer` declaration.
@@ -330,8 +393,13 @@ fn declarations_selector() -> ArtifactSelector<Constrained> {
     ArtifactSelector::new().the(layer_attr())
 }
 
-/// The committed placements at `source`'s head — one range scan over
-/// `dialog.attribute/layer`, cached per head.
+/// Selector for every committed `dialog.attribute/default` declaration.
+fn defaults_selector() -> ArtifactSelector<Constrained> {
+    ArtifactSelector::new().the(default_attr())
+}
+
+/// The committed declarations at `source`'s head — two range scans,
+/// cached per head.
 async fn committed_placements<Env>(
     source: SourceRef<'_>,
     env: &Env,
@@ -353,35 +421,54 @@ where
     if let Some(placements) = cache.placements(&head) {
         return Ok(placements);
     }
-    let stream = crate::Select::from_source(source, declarations_selector())
-        .perform(env)
-        .await
-        .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))?;
-    let claims: Vec<_> = stream
-        .map(|item| item.and_then(|view| view.to_owned()))
-        .try_collect()
-        .await
-        .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))?;
 
-    let mut placements = HashMap::with_capacity(claims.len());
-    for claim in claims {
+    let mut declared = Declared::default();
+    for claim in committed(source, declarations_selector(), env).await? {
         let Some(attribute) = entity_attribute(&claim.of) else {
             continue;
         };
-        let Value::String(name) = &claim.is else {
-            continue;
-        };
-        let Ok(layer) = name.parse::<Layer>() else {
-            return Err(CommitError::UnknownLayer {
-                attribute: attribute.to_string(),
-                layer: name.clone(),
-            });
-        };
-        placements.insert(attribute, layer);
+        let layer = layer_value(attribute.as_str(), &claim.is)?;
+        declared.attributes.insert(attribute, layer);
     }
-    let placements = Arc::new(placements);
+    // One default per repository; a line reads the one for its own
+    // repository. Any other subject is ignored.
+    use crate::schema::DidExt as _;
+    let repository = source.subject().did().this();
+    for claim in committed(source, defaults_selector(), env).await? {
+        if claim.of == repository {
+            declared.default = Some(layer_value("dialog.attribute/default", &claim.is)?);
+        }
+    }
+    let placements = Arc::new(declared);
     cache.record_placements(head, placements.clone());
     Ok(placements)
+}
+
+/// Collect the artifacts a selector matches on the line's committed
+/// tree.
+async fn committed<Env>(
+    source: SourceRef<'_>,
+    selector: ArtifactSelector<Constrained>,
+    env: &Env,
+) -> Result<Vec<dialog_artifacts::Artifact>, CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    let stream = crate::Select::from_source(source, selector)
+        .perform(env)
+        .await
+        .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))?;
+    stream
+        .map(|item| item.and_then(|view| view.to_owned()))
+        .try_collect()
+        .await
+        .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))
 }
 
 #[cfg(test)]
@@ -406,8 +493,12 @@ mod tests {
     use dialog_query::{AttributeQuery, InductiveRule, Term};
     use serde_json::json;
 
-    /// The values a `(the, of)` pair holds in the branch's composite
-    /// read (tree plus session layer), typed by the caller.
+    fn session() -> Entity {
+        "memory:session".parse().expect("layer entity")
+    }
+
+    /// The values a `(the, of)` pair holds in the line's composite
+    /// read (tree plus session store), typed by the caller.
     async fn values<V, Env>(
         branch: &Branch,
         env: &Env,
@@ -460,19 +551,6 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_names_every_layer_round_trip() {
-        for layer in Layer::ALL {
-            assert_eq!(layer.name().parse::<Layer>(), Ok(layer));
-            assert_eq!(layer.to_string(), layer.name());
-        }
-        assert!("working".parse::<Layer>().is_err());
-        assert!(Layer::Semantic.is_durable() && Layer::Semantic.is_replicated());
-        assert!(Layer::Episodic.is_durable() && !Layer::Episodic.is_replicated());
-        assert!(!Layer::Procedural.is_durable() && !Layer::Procedural.is_replicated());
-        assert!(!Layer::Sensory.is_durable() && Layer::Sensory.is_replicated());
-    }
-
-    #[dialog_common::test]
     fn it_mints_an_entity_per_attribute() -> Result<()> {
         let attribute: Attribute = "ui/selected".parse()?;
         let entity = attribute_entity(&attribute);
@@ -482,19 +560,20 @@ mod tests {
         Ok(())
     }
 
-    /// A declared attribute's facts route to the session layer: the
-    /// composite read sees them beside tree facts of the same entity,
-    /// the tree never holds them, and clearing the session drops
-    /// exactly them.
+    /// A declared attribute's facts route to the store its layer is
+    /// bound to: the composite read sees them beside tree facts of the
+    /// same entity, the tree never holds them, and clearing the session
+    /// drops exactly them.
     #[dialog_common::test]
-    async fn it_routes_a_declared_attribute_to_the_procedural_layer() -> Result<()> {
+    async fn it_routes_a_placed_attribute_to_its_bound_store() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
 
         branch
             .transaction()
-            .assert(Placement::new("ui/selected".parse()?, Layer::Procedural))
+            .assert(Placement::new("ui/selected".parse()?, session()))
             .commit()
             .perform(&operator)
             .await?;
@@ -521,13 +600,13 @@ mod tests {
         assert_eq!(
             values::<bool, _>(&branch, &operator, "ui/selected", &doc).await?,
             vec![Value::Boolean(true)],
-            "the composite read joins the session layer"
+            "the composite read joins the session store"
         );
         assert!(
             committed(&branch, &operator, "ui/selected", &doc)
                 .await?
                 .is_empty(),
-            "a procedural fact never reaches the tree"
+            "a session-placed fact never reaches the tree"
         );
 
         branch.overlay().clear();
@@ -539,7 +618,7 @@ mod tests {
         assert_eq!(
             values::<String, _>(&branch, &operator, "doc/title", &doc).await?,
             vec![Value::String("Notes".into())],
-            "the semantic half is untouched"
+            "the tree half is untouched"
         );
         Ok(())
     }
@@ -550,11 +629,12 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
 
         let doc: Entity = "doc:1".parse()?;
         branch
             .transaction()
-            .assert(Placement::new("ui/selected".parse()?, Layer::Procedural))
+            .assert(Placement::new("ui/selected".parse()?, session()))
             .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
             .commit()
             .perform(&operator)
@@ -573,17 +653,18 @@ mod tests {
         Ok(())
     }
 
-    /// A transaction touching only procedural attributes moves no
-    /// head: the session layer changes, the tree does not.
+    /// A transaction touching only session-placed attributes moves no
+    /// head: the store changes, the tree does not.
     #[dialog_common::test]
-    async fn it_keeps_a_procedural_only_transaction_off_the_tree() -> Result<()> {
+    async fn it_keeps_a_session_only_transaction_off_the_tree() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
 
         let before = branch
             .transaction()
-            .assert(Placement::new("ui/cursor".parse()?, Layer::Procedural))
+            .assert(Placement::new("ui/cursor".parse()?, session()))
             .commit()
             .perform(&operator)
             .await?;
@@ -596,14 +677,13 @@ mod tests {
             .commit()
             .perform(&operator)
             .await?;
-        assert_eq!(after, before, "no semantic change, no new revision");
+        assert_eq!(after, before, "no tree change, no new revision");
         assert_eq!(
             values::<u64, _>(&branch, &operator, "ui/cursor", &doc).await?,
             vec![Value::UnsignedInt(7)]
         );
 
-        // A retract removes the fact from the session layer outright
-        // (it is the store, so there is nothing to tombstone), and a
+        // A retract removes the fact from the store outright, and a
         // retract-and-assert in one transaction nets to the new value.
         branch
             .transaction()
@@ -630,13 +710,14 @@ mod tests {
         Ok(())
     }
 
-    /// A rule watching a procedural attribute fires when a transaction
-    /// writes it, and its semantic head lands in the tree.
+    /// A rule watching a session-placed attribute fires when a
+    /// transaction writes it, and its tree head lands in the tree.
     #[dialog_common::test]
-    async fn it_induces_over_a_procedural_write() -> Result<()> {
+    async fn it_induces_over_a_session_write() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
 
         let audit: InductiveRule = serde_json::from_value(json!({
             "assert!": {
@@ -655,20 +736,20 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Placement::new("ui/select".parse()?, Layer::Procedural))
+            .assert(Placement::new("ui/select".parse()?, session()))
             .assert(audit)
             .commit()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
 
-        let session: Entity = "session:1".parse()?;
+        let who: Entity = "session:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
         branch
             .transaction()
             .assert(
                 dialog_query::the!("ui/select")
-                    .of(session.clone())
+                    .of(who.clone())
                     .is(doc.clone()),
             )
             .commit()
@@ -677,27 +758,28 @@ mod tests {
         branch.refresh(&operator).await?;
 
         assert_eq!(
-            committed(&branch, &operator, "audit/selected", &session).await?,
+            committed(&branch, &operator, "audit/selected", &who).await?,
             vec![Value::Entity(doc)],
-            "the semantic head lands in the tree"
+            "the tree head lands in the tree"
         );
         assert!(
-            committed(&branch, &operator, "ui/select", &session)
+            committed(&branch, &operator, "ui/select", &who)
                 .await?
                 .is_empty(),
-            "the procedural trigger stays out of the tree"
+            "the session trigger stays out of the tree"
         );
         Ok(())
     }
 
     /// The observable ephemeral conclusion: a rule whose head is
-    /// procedural writes into the session layer, where a standing
+    /// session-placed writes into the store, where a standing
     /// subscription sees it and the tree never does.
     #[dialog_common::test]
-    async fn it_concludes_into_the_procedural_layer_observably() -> Result<()> {
+    async fn it_concludes_into_the_session_store_observably() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
 
         let navigate: InductiveRule = serde_json::from_value(json!({
             "assert!": {
@@ -716,7 +798,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Placement::new("site/navigate".parse()?, Layer::Procedural))
+            .assert(Placement::new("site/navigate".parse()?, session()))
             .assert(navigate)
             .commit()
             .perform(&operator)
@@ -761,59 +843,78 @@ mod tests {
         Ok(())
     }
 
-    /// A write to an attribute placed on a layer with no backing fails
-    /// the commit instead of landing somewhere else.
+    /// A write to an attribute placed on a layer the line does not
+    /// bind fails the commit instead of landing somewhere else, and
+    /// binding it afterwards makes the same write succeed.
     #[dialog_common::test]
-    async fn it_refuses_an_unbacked_layer() -> Result<()> {
+    async fn it_refuses_an_unbound_layer() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let doc: Entity = "doc:1".parse()?;
-        let result = branch
-            .transaction()
-            .assert(Placement::new("local/note".parse()?, Layer::Episodic))
-            .assert(
-                dialog_query::the!("local/note")
-                    .of(doc)
-                    .is("draft".to_string()),
-            )
-            .commit()
-            .perform(&operator)
-            .await;
+        let local: Entity = "memory:local".parse()?;
+        fn write<'a>(
+            branch: &'a Branch,
+            doc: &Entity,
+            local: &Entity,
+        ) -> Result<crate::TransactionCommit<'a>> {
+            Ok(branch
+                .transaction()
+                .assert(Placement::new("local/note".parse()?, local.clone()))
+                .assert(
+                    dialog_query::the!("local/note")
+                        .of(doc.clone())
+                        .is("draft".to_string()),
+                )
+                .commit())
+        }
+        let result = write(&branch, &doc, &local)?.perform(&operator).await;
         assert!(
-            matches!(
-                result,
-                Err(CommitError::UnbackedLayer {
-                    layer: Layer::Episodic,
-                    ..
-                })
-            ),
-            "expected an unbacked-layer refusal, got {result:?}"
+            matches!(result, Err(CommitError::UnboundLayer { ref layer, .. }) if layer == "memory:local"),
+            "expected an unbound-layer refusal, got {result:?}"
+        );
+
+        branch.bind(local.clone(), Target::Session);
+        write(&branch, &doc, &local)?.perform(&operator).await?;
+        assert_eq!(
+            values::<String, _>(&branch, &operator, "local/note", &doc).await?,
+            vec![Value::String("draft".into())]
         );
         Ok(())
     }
 
-    /// Retracting a placement returns the attribute to the tree.
+    /// The repository default names the tree: an attribute placed on
+    /// the default layer explicitly, or on a second name bound to the
+    /// tree, commits to the tree; retracting a placement returns the
+    /// attribute to the default.
     #[dialog_common::test]
-    async fn it_returns_an_attribute_to_the_tree_when_unplaced() -> Result<()> {
+    async fn it_routes_the_default_and_tree_bound_names_to_the_tree() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let placement = Placement::new("ui/selected".parse()?, Layer::Procedural);
-        branch
-            .transaction()
-            .assert(placement.clone())
-            .commit()
-            .perform(&operator)
-            .await?;
-        branch.refresh(&operator).await?;
+        let shared: Entity = "memory:shared".parse()?;
+        let durable: Entity = "memory:durable".parse()?;
+        branch.bind(durable.clone(), Target::Tree);
+        branch.bind(session(), Target::Session);
 
         let doc: Entity = "doc:1".parse()?;
         branch
             .transaction()
-            .retract(placement)
+            .assert(DefaultLayer::new(branch.of(), shared.clone()))
+            .assert(Placement::new("doc/title".parse()?, shared.clone()))
+            .assert(Placement::new("doc/body".parse()?, durable.clone()))
+            .assert(Placement::new("ui/selected".parse()?, session()))
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .assert(
+                dialog_query::the!("doc/body")
+                    .of(doc.clone())
+                    .is("Body".to_string()),
+            )
             .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
             .commit()
             .perform(&operator)
@@ -821,9 +922,59 @@ mod tests {
         branch.refresh(&operator).await?;
 
         assert_eq!(
+            committed(&branch, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "the default layer is the tree"
+        );
+        assert_eq!(
+            committed(&branch, &operator, "doc/body", &doc).await?,
+            vec![Value::String("Body".into())],
+            "a second name bound to the tree is the tree"
+        );
+        assert!(
+            committed(&branch, &operator, "ui/selected", &doc)
+                .await?
+                .is_empty()
+        );
+
+        // Unplacing returns the attribute to the default.
+        branch
+            .transaction()
+            .retract(Placement::new("ui/selected".parse()?, session()))
+            .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(false))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
             committed(&branch, &operator, "ui/selected", &doc).await?,
-            vec![Value::Boolean(true)],
-            "an unplaced attribute is semantic again"
+            vec![Value::Boolean(false)],
+            "an unplaced attribute belongs to the default again"
+        );
+        Ok(())
+    }
+
+    /// A placement whose value is not an entity is refused, so a
+    /// malformed declaration cannot silently route to the tree.
+    #[dialog_common::test]
+    async fn it_refuses_a_malformed_placement() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let result = branch
+            .transaction()
+            .assert(
+                dialog_query::the!("dialog.attribute/layer")
+                    .of(attribute_entity(&"ui/selected".parse()?))
+                    .is("session".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(result, Err(CommitError::InvalidPlacement { .. })),
+            "expected a malformed-placement refusal, got {result:?}"
         );
         Ok(())
     }

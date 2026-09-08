@@ -52,7 +52,7 @@ pub use rules::{RuleCache, Transient};
 
 /// Attribute placement: which layer an attribute's facts live in.
 pub mod placement;
-pub use placement::{Layer, Placement, attribute_entity};
+pub use placement::{Bindings, DefaultLayer, Placement, Target, attribute_entity};
 
 pub use dialog_artifacts::{Exporter, Importer};
 

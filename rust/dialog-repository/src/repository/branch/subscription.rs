@@ -4112,12 +4112,11 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let doc = Entity::new()?;
+        let session: Entity = "memory:session".parse()?;
+        branch.bind(session.clone(), crate::Target::Session);
         let placed = branch
             .transaction()
-            .assert(crate::Placement::new(
-                "ui/selected".parse()?,
-                crate::Layer::Procedural,
-            ))
+            .assert(crate::Placement::new("ui/selected".parse()?, session))
             .assert(SessionDocument {
                 this: doc.clone(),
                 title: DocTitle("Notes".into()),

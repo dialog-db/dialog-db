@@ -232,24 +232,24 @@ pub enum CommitError {
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
 
-    /// A write targeted an attribute placed on a layer that has no
-    /// store behind it yet (see [`Layer`](crate::Layer)).
-    #[error("Attribute {attribute} is placed on the {layer} layer, which has no backing store")]
-    UnbackedLayer {
+    /// A write targeted an attribute placed on a layer the line does
+    /// not bind (see [`Bindings`](crate::Bindings)).
+    #[error("Attribute {attribute} is placed on layer {layer}, which this line does not bind")]
+    UnboundLayer {
         /// The attribute the write targeted.
         attribute: String,
         /// The layer it is placed on.
-        layer: crate::Layer,
+        layer: String,
     },
 
-    /// A `dialog.attribute/layer` declaration names a layer this
-    /// build does not know.
-    #[error("Attribute {attribute} is placed on unknown layer {layer:?}")]
-    UnknownLayer {
+    /// A `dialog.attribute/*` declaration carries a value that is not
+    /// a layer entity.
+    #[error("Placement of {attribute} is not a layer entity: {value}")]
+    InvalidPlacement {
         /// The attribute the declaration is about.
         attribute: String,
-        /// The unrecognized layer name.
-        layer: String,
+        /// The value found.
+        value: String,
     },
 
     /// A write was attempted through a reference to a snapshot.

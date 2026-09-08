@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback, RemoteSite,
+    Bindings, Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Snapshot, Upstream,
 };
 
@@ -237,6 +237,14 @@ impl<'a> SourceRef<'a> {
         match self {
             SourceRef::Branch(branch) => branch.overlay(),
             SourceRef::Snapshot(snapshot) => snapshot.overlay(),
+        }
+    }
+
+    /// The layer bindings a commit on this line routes by.
+    pub(crate) fn bindings(self) -> &'a Bindings {
+        match self {
+            SourceRef::Branch(branch) => branch.bindings(),
+            SourceRef::Snapshot(snapshot) => snapshot.bindings(),
         }
     }
 

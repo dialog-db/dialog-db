@@ -22,10 +22,9 @@ use dialog_effects::memory::{Publish, Resolve};
 /// atomically via `.commit().perform(&env)`.
 ///
 /// Where an asserted or retracted fact lands is the attribute's
-/// decision, not the caller's: each instruction routes to the layer
-/// its attribute is [placed](crate::placement) on — the tree by
-/// default, the session overlay for a
-/// [`Procedural`](crate::Layer::Procedural) attribute. A concept whose
+/// decision, not the caller's: each instruction routes to the store
+/// the layer its attribute is [placed](crate::placement) on is
+/// [bound](crate::Bindings) to — the tree by default. A concept whose
 /// attributes span layers fans out accordingly.
 ///
 /// Transients are visible to every read through [`query`](Self::query)
@@ -204,15 +203,15 @@ impl<'a> TransactionCommit<'a> {
         let mut changes = self.changes;
         induce::induce(self.source, &mut changes, self.transients, env).await?;
 
-        // Route the settled batch by attribute placement: semantic
-        // instructions commit to the tree, procedural ones land in
-        // the session overlay once the tree commit has succeeded, so
-        // a failed commit leaves the session untouched too.
+        // Route the settled batch by attribute placement: tree-bound
+        // instructions commit to the tree, session-bound ones land in
+        // the ephemeral store once the tree commit has succeeded, so a
+        // failed commit leaves the session untouched too.
         let placements = Placements::resolve(self.source, &changes, env).await?;
         let Partitioned {
-            semantic: changes,
-            procedural,
-        } = placements.partition(changes)?;
+            tree: changes,
+            session,
+        } = placements.partition(changes, self.source.bindings())?;
 
         let previous = self.source.revision();
         let touches_rules = touches_rules(&changes);
@@ -225,7 +224,7 @@ impl<'a> TransactionCommit<'a> {
             commit = commit.canonicalize();
         }
         let revision = Box::pin(commit.perform(env)).await?;
-        self.source.overlay().apply(procedural);
+        self.source.overlay().apply(session);
 
         // Advance the induction watermark: rules have now evaluated
         // through this revision (induction ran over the commit's delta
