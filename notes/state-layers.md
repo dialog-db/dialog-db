@@ -1,202 +1,270 @@
-# State layers: an attribute declares where its facts live
+# Stacks: lines, layers, and where an attribute's facts live
 
-Status: first increment implemented (`placement.rs`, composite
-subscriptions). Motivated by #483 (rule-concluded transients are
-unobservable after the commit-time rollup) and by the pattern of
-workarounds it produced in tonk: the `navigate` postMessage side
-channel, the `CreateNotebookHandler` write-then-read-back dance, scoped
-overlay clears, and the `Provider<C>` command registry that re-derives
-what induction already computed.
+Status: proposal, superseding the fixed-layer model of the first
+increment. What the increment built and what carries over is listed at
+the end. Motivated by #483 and by tonk's overlay, transient, and
+command workarounds.
 
-## The problem, restated
+## Vocabulary
 
-Dialog had three places a fact could live and three verbs for putting
-it there, and the verb was chosen at every call site:
+- A **line** is anything with a head and a readable store: a `Branch`
+  (durable, head in a cell, replicates to its upstreams), a `Snapshot`
+  (durable, head by value), and, new, an **ephemeral line** (memory
+  backed, head by value, no history, dies with the process). Lines are
+  entities. Branch entities already exist; an ephemeral line mints one.
+- A **layer** is a *role* in a stack: a named slot with declared
+  properties. Layers are entities declared as facts on the top line,
+  so every replica agrees on which layers exist and what each one is.
+- A **stack** is an ordered binding of layers to lines. Top is the most
+  stable line, bottom the most volatile. Each line captures the heads
+  of the lines above it when it commits. A stack is built by API, per
+  replica or per connection, and may be registered under a name so
+  others can find it.
+- A **placement** maps an attribute to a layer. It is a fact on the top
+  line, replicated with the schema. Undeclared attributes belong to the
+  top layer.
 
-| place | verb | observable by subscribers | survives restart | replicates |
-|---|---|---|---|---|
-| branch tree | `tx.assert` | yes, as settled state | yes | yes |
-| transient bucket | `tx.dispatch` | no | no | no |
-| session overlay | `branch.overlay().assert` | yes, as settled state | no | no |
+The split that makes this coherent: what is *shared* (which layers
+exist, their properties, which attribute goes where) lives in the
+replicated tree; what is *local* (which concrete line plays a role on
+this replica, for this tab) is a binding made at stack construction.
+A replica that meets a placement for a layer it has not bound
+materializes the layer from its declared properties, so a name can
+never dangle.
 
-Readers never chose: `QueryLayer::from(SourceRef)` folds the overlay
-into every read, and the induction round view layers transients on top.
-Writers chose every time. That asymmetry was the incoherence: the
-schema knew what a fact *is*, but not where it *goes*, so every writer
-had to know.
+## Declarations, as facts on the top line
 
-Two further gaps followed from the same root:
+```
+dialog.layer/name       of <layer>   is "session"
+dialog.layer/durable    of <layer>   is false
+dialog.layer/replicated of <layer>   is false
+dialog.layer/above      of <layer>   is <layer>       # the next layer up; absent on the top
+dialog.attribute/layer  of attribute:ui/selected is <layer>
+```
 
-- A rule head could conclude into the tree or into the next round's
-  transient bucket, never into the overlay. Anything a rule derived was
-  durable-or-invisible (#483).
-- An overlay write bypassed induction. Session facts could be read by
-  rule bodies but could never trigger a rule.
+The top layer is implicit: it is the line whose tree holds these facts,
+and it needs no declaration. `above` gives a chain; loading checks it
+is acyclic and total. A DAG (`captures`, cardinality many) is the
+general form and can replace `above` later without changing anything
+else. `replicated` is a boolean today and becomes an audience (a peer
+set) when a layer needs to replicate to a subset; nothing in the
+routing depends on which.
 
-And composition was read-only: a `QueryLayer` joining several lines
-could be queried but not subscribed to. `subscribe` lived on `Branch`
-alone.
+Notation, as concept-level sugar the analyzer lowers to the facts
+above:
 
-## The model
+```yaml
+layer!: &session
+  durable: false
 
-A fact's **place** is a property of its attribute, declared once in
-the schema and stored in the branch. Writers assert; the schema routes.
+layer!: &local
+  durable: true
+  replicated: false
+  above: *session      # local sits above session; shared is the implicit top
 
-### Four layers, fixed and always present
+concept!: &site
+  layer: *session
+  with:
+    path: { the: xyz.tonk.site/path, as: text }
+```
 
-The set is fixed so a declaration can never name a layer some replica
-lacks. The names follow the memory taxonomy:
+## Building a stack
 
-| layer | durable | replicated | backing |
-|---|---|---|---|
-| `semantic` | yes | yes | the branch tree (the default) |
-| `episodic` | yes | no | not yet |
-| `procedural` | no | no | the session overlay |
-| `sensory` | no | yes | not yet |
+```rust
+// Everything from declarations: every layer bound by default policy.
+let stack = repo.branch("main").stack().open().perform(&env).await?;
 
-Two are backed today, which is what tonk actively needs: `semantic` is
-the tree and `procedural` is the overlay. A write to an attribute
-placed on an unbacked layer fails the commit rather than landing
-somewhere else, so adopting `episodic` or `sensory` later is a change
-in what commits accept, not in what a declaration means.
+// Explicit bindings override the defaults, e.g. one session line per
+// tab. Unbound layers still materialize by policy.
+let stack = repo
+    .branch("main")
+    .stack()
+    .bind("session", repo.ephemeral(format!("tab:{id}")))
+    .bind("local", repo.branch("main.local"))
+    .open()
+    .perform(&env)
+    .await?;
+```
 
-The earlier draft of this note proposed user-named layers with
-properties. The fixed set was chosen instead because layer wiring must
-live in the database (a name that exists on one replica and not
-another is exactly the bug the model is meant to remove), and a fixed
-vocabulary makes that trivially true. User-defined layers remain
-possible on top: they would be named bundles of the same two
-properties, and the routing below would not change.
+Default policy per declared properties: `durable && replicated` is the
+top line itself; `durable && !replicated` opens the branch
+`<top>.<layer>` with no upstream; `!durable` creates a fresh ephemeral
+line. `!durable && replicated` is unbacked until the log below exists
+and fails `open` with a clear error rather than binding to something
+else.
 
-### Declaration
+`open` verifies each bound line against its layer's properties, so a
+durable branch cannot be bound to an ephemeral layer by mistake.
 
-`dialog.attribute/layer` `of` `attribute:<namespace>/<name>` `is` the
-layer name. It is a branch-level fact, deliberately outside any
-concept's content address, so the same descriptor may be procedural on
-one branch and semantic on another. It takes effect in the commit that
-declares it, so a transaction can declare and use a placement
-together. Undeclared attributes are semantic. `Placement::new(attr,
-Layer::Procedural)` is the `Statement`; retracting it returns the
-attribute to the tree.
+### Naming
 
-### Routing
+```rust
+let stack = stack.named("tab:123");   // registers; still a handle
+```
 
-A transaction accumulates instructions as before. At commit, after
-induction has settled the batch, the batch is partitioned by each
-instruction's attribute: semantic instructions go to the tree commit,
-procedural ones to the overlay, applied only once the tree commit has
-succeeded so a failed commit leaves the session untouched. A batch
-with no semantic instructions mints no revision.
+Naming is optional. A named stack is registered in a process-local
+registry on the `Repository`, and the registry is exposed at query
+time as metadata facts, exactly the way `dialog.session/branch` lists
+the lines in scope today:
 
-Because the partition happens after induction, both directions work
-with no change to the induction loop:
+```
+dialog.stack/name   of <stack>   is "tab:123"
+dialog.stack/layer  of <stack>   is <line entity>    # cardinality many, ordered
+dialog.stack/top    of <stack>   is <line entity>
+```
 
-- A procedural write is part of the stimulus, so rules watching that
-  attribute fire, and their semantic heads land in the tree.
-- A rule whose head attribute is procedural folds its conclusion into
-  the settled batch like any durable novelty, and the partition
-  carries it to the overlay, where every subscription on the branch
-  sees it. This closes #483 for state-shaped conclusions without a
-  side channel and without the write amplification or crash re-fire
-  that persisting intermediates on the tree would carry.
+So an inspector enumerates stacks and their lines with an ordinary
+query and joins their session lines with the composite subscription
+that already exists. Dropping the handle unregisters it; an anonymous
+stack is just never listed. Nothing durable is written by naming.
 
-A retract of a procedural fact removes it from the overlay rather than
-tombstoning it: the overlay is the store for that attribute, so there
-is no tree fact to shadow.
+## Using a stack
 
-### Concepts across layers
+```rust
+stack.select(query).perform(&env)          // composite read, all lines
+stack.subscribe(query)                     // composite subscription, pins every line
+stack.transaction().assert(doc).commit().perform(&env)   // routes by placement
+stack.layer("session")                     // the bound line, for direct access
+stack.revision()                           // the stack revision: see below
+```
 
-A concept whose attributes span layers fans out on write and joins on
-read. This is deliberate: tonk already has concepts with a durable half
-and a session half, and forcing them apart would push the join into
-every consumer. The cost to keep in view is that a required
-session-scoped attribute makes the concept absent on another device and
-after a restart. That is a schema decision per concept, not a rule
-the engine enforces.
+`Stack` is what `QueryLayer` already is with two additions: ordered
+lines with roles, and a transaction. The composite subscription built
+in the first increment carries over unchanged; its vector of pins *is*
+the stack revision.
 
-### Composite subscriptions
+### Transactions and capture
 
-`QueryLayer::subscribe` registers a standing query over every line the
-layer joins, plus the layer's own `.with(..)` facts. Each line is
-pinned separately, revision and session-overlay epoch, so a poll
-re-evaluates exactly when some line moved, and the incremental path
-diffs only the lines that did: each moved line's cover-scoped tree
-diff yields its touched set, the sets union, and one DRed maintenance
-step runs over the composite. A rule-range hit on any line forces a
-recompute, as before. `Branch::subscribe` is now the single-line case
-of this.
+A stack transaction accumulates instructions as today. At commit,
+after induction has settled the batch against the composite view, the
+batch is partitioned by each attribute's layer, and the lines commit
+**top to bottom**. Each lower line's revision records the heads of the
+lines above it as they stand after their own commits:
 
-A joined line's session overlay is read live at every evaluation, not
-captured when the subscription is made. The layer's constructor folds
-each line's overlay into the layer's changes; the subscription lifts
-those back out so a stale snapshot never shadows the moving session.
+```
+Revision { tree, edition, context, captures: Vec<(line entity, Revision)> }
+```
 
-## What this removes, once tonk adopts it
+Only lines below the top pay this, and a capture is one hash per line
+above, so a session line that commits on every click records the
+shared and local heads it saw and nothing more. Consequences:
 
-- `dispatch` for state-shaped commands and every `overlay().assert`
-  become plain `assert` with a declared attribute.
-- The navigate side channel: a rule concludes a procedural
-  `site/navigate` fact, the page's subscription sees it, the host
-  performs the effect. The client id on `CommandOrigin` goes with it.
-- The `CreateNotebookHandler` workaround.
-- The transact route's pre-commit transient snapshot, for any command
-  that is procedural state rather than a one-round transient.
-- The blanket-versus-scoped overlay clear hazard, for facts that are
-  session-scoped by schema: they are retracted through transactions
-  like any fact.
+- **Consistency without atomicity.** A reader of the session line
+  knows which shared revision that state was computed against, and a
+  handler acting on a session instant reads shared state *at that
+  revision* rather than at "now".
+- **One identity.** The bottom line's revision transitively names the
+  whole composite. `stack.revision()` is that.
+- **Stale derivation is detectable.** A local durable layer that
+  captured shared head `h` and now sees the shared head at `h'` knows
+  it is behind, which is the induction watermark generalized to a pair
+  of lines.
 
-Reconciler pairs follow the same shape: a desired value on one
-attribute and one owner, an observed value on another attribute and
-another owner, and a controller subscribed to both. Tonk's pause-sync
-fight is one attribute doing both jobs.
+The ordering rule follows from lifetimes: a reference may point only
+from a shorter-lived line to a longer-lived one. The top never
+references anything below it.
 
-## What this increment does not do
+A revision on an ephemeral line is an identity, not a persistence
+claim: a hash of its state plus its captures, with no parent chain
+retained. That is enough for subscription pins, diffs, and captures.
 
-- **No instant log.** Transients still live for one induction round
-  and are still swept; a transient concluded by a rule is still
-  unobservable. This increment makes the *state* case observable by
-  giving it a layer; the *event* case wants a per-instant log on the
-  procedural store with observer offsets, which is the next step. Once
-  that exists, `transient:` becomes sugar for a sweep rule
-  (`retract! C when C`) plus placement on the procedural layer, and
-  the transient bucket becomes an optimization, as the inductive-rules
-  note already argues.
-- **No episodic or sensory backing.** Episodic wants a second,
-  unpushed tree per branch; the composite subscription already takes
-  a vector of pins, so that is additive. Sensory wants an event record
-  polarity in history so a fact can replicate without entering the
-  state fold.
-- **No per-connection partition of the procedural layer.** Tonk keys
-  per-tab facts by entity and reaps them; an owner tag on session
-  facts with partition GC would make that structural.
-- **No branch-union retraction semantics.** Joining two branches that
-  hold the same attribute still unions their facts, and a retraction
-  on one does not hide the fact on the other. Composite subscriptions
-  over disjoint entity sets, which the seed-branch case has, are
-  correct today.
-- **Placement changes are not migrations.** Moving an attribute
-  between layers does not move its existing facts. It is the same
-  class of problem as the frozen-descriptor trap, and the honest
-  answer for now is that placements are declared before facts are
-  written.
+### Retracts on a non-top layer
 
-## Two identities
+A retract of a fact on layer L removes it from L's line. If L's line
+never held it, the retract is a tombstone over the lines above, which
+is the only way a fact can appear under an attribute placed on L: a
+peer without the placement wrote it to the top. That situation is a
+placement divergence and should surface as a warning on pull, not be
+silently masked. This is the one shadowing case the model admits and
+it is diagnosable because placement is in the tree.
 
-The hash with teeth is the semantic head: the only thing two replicas
-must agree on. It cannot cover procedural or episodic state, which
-differ between replicas by design. The identity a subscription pins is
-a vector of per-line revisions and epochs. Both are deterministic over
-their inputs; they answer different questions, and keeping them apart
-is what lets root hashes keep their teeth.
+## Instants, queues, and the log
 
-## Path from here
+An **instant** is one induction round. A commit is a sequence of
+instants; durable lines fold them into one revision because storing
+intermediates costs storage. The two things folding loses are the
+intermediate rounds and any fact asserted and retracted within one
+commit, which is exactly what a rule-concluded transient is.
 
-1. Tonk migration: declare `xyz.tonk.site/*`, sync status, email
-   status, and the other overlay concepts procedural; replace overlay
-   writes with transactions; turn `navigate` into a procedural
-   conclusion with a page-side subscriber; delete the notebook
-   workaround; split pause-sync into a desired/observed pair.
-2. The procedural instant log and observer offsets, then `transient:`
-   as sugar over it.
-3. Episodic backing as a second tree per branch.
-4. Sensory backing as a history record polarity.
+An **observer** is anything that wants to see instants rather than
+folds: a state subscription (which needs the touched facts since its
+last poll to maintain incrementally) or an event handler (which needs
+every instant, including the ones that folded away). Observers
+register with a line when they are created and unregister when they
+are dropped.
+
+For a **local ephemeral line**, do not keep a shared log. Fan each
+instant out at write time into per-observer queues, filtered by each
+observer's demand. An instant nobody demanded costs nothing; memory is
+the sum of unconsumed matched instants across observers, which is what
+any event system pays. A queue has a ring bound; an observer that
+falls off the ring gets a gap marker and recomputes from the fold.
+"All have seen it" is not a question here: each observer owns its
+queue and drains it.
+
+For a **replicated ephemeral line**, which is where you found the log
+compelling, the log is the right shape and the peers are the
+observers. Each peer holds an offset into the line's log; sync is
+"send me instants past my offset"; retention is the minimum peer
+offset with a ring bound, and a peer that falls off resyncs from the
+fold. That is how presence and awareness protocols already work, with
+a per-peer clock standing in for the offset. It is also what makes
+that layer's `replicated` property meaningful without a tree: there is
+nothing to push except the log.
+
+With either mechanism in place, `transient:` becomes sugar: an
+attribute placed on the session layer plus a sweep rule `retract! C
+when C`, and the engine's transient bucket becomes an optimization it
+may apply when no observer demands the attribute.
+
+## What the first increment built and what carries over
+
+Built on the branch: a fixed `Layer` enum, `Placement` as a fact on the
+branch, partition-after-induction routing with the tree as the top and
+the overlay as the only other backed layer, and composite
+subscriptions over `QueryLayer` with a pin per line.
+
+Carries over unchanged: composite subscriptions (they are
+`stack.subscribe`), `Changes::cancel` and `Changes::subtract`, the
+`dialog.attribute/` carve-out in the write gate, partition after
+induction, the tests for routing and for rule heads concluding into a
+non-top layer.
+
+Replaced: the `Layer` enum becomes a layer entity with declared
+properties; `Placement` targets a layer entity; the `Overlay` becomes
+an ephemeral line, a real store with a head, cardinality, and a diff,
+so subscriptions maintain incrementally from it instead of recomputing
+on an epoch; `Transaction` gains the stack fan-out and capture.
+
+## Order of work
+
+1. Ephemeral line: a memory-backed `Source` with a head by value, a
+   cover-scoped diff, and no history. Replace `Overlay` with it.
+   Subscriptions become incremental over session changes for free.
+2. Layer entities and placement by entity, with the default
+   materialization policy and the `open`-time property check.
+3. `Stack` over `QueryLayer`: ordered roles, `bind`, `named`, the
+   registry metadata, `transaction` with top-to-bottom commit and
+   captures on lower revisions.
+4. Tonk migration: session layer declared in the library, one stack
+   per connection bound to a per-tab ephemeral line, inspector over
+   the registry, `navigate` as a session-layer conclusion.
+5. Per-observer instant queues on the ephemeral line, then
+   `transient:` as sugar.
+6. Replicated ephemeral lines with a peer-offset log.
+
+## Open questions
+
+- **Per-tab stacks and rules that read across tabs.** A rule premised
+  on "any tab's state" must read the join of every session line, which
+  means induction on one stack's commit reads other stacks' lines.
+  Either such rules are disallowed on session layers, or the registry
+  is what induction joins. Decide when a rule needs it.
+- **Capture on the top line's pull.** A pull moves the top head without
+  any lower line committing, so lower captures are briefly behind.
+  That is the stale-derivation signal working as intended, but the
+  first read after a pull should probably re-capture eagerly.
+- **Snapshots in stacks.** A snapshot can be bound as the top of a
+  read-only stack. Whether a transaction over such a stack should
+  advance the snapshot the way `Snapshot::transaction` does today is
+  unresolved.
