@@ -7,7 +7,7 @@ use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
 use crate::repository::source::{Caches, SourceRef};
-use crate::{NetworkedIndex, RemoteSite};
+use crate::{Ephemeral, NetworkedIndex, RemoteSite};
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::Entity;
 use dialog_artifacts::history::Origin;
@@ -57,9 +57,6 @@ mod metadata;
 
 mod open;
 pub use open::*;
-
-mod overlay;
-pub use overlay::*;
 
 mod pull;
 pub use pull::*;
@@ -144,11 +141,12 @@ pub struct Branch {
     /// every query's durable rule resolution, so the `dialog.rule/*` scan is
     /// paid once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
-    /// Transient session overlay: ephemeral facts folded into every
-    /// read of this branch, never committed. Shared across clones
-    /// like the caches; mutations bump an epoch subscriptions gate
-    /// on. See [`Overlay`].
-    overlay: Overlay,
+    /// The branch's ephemeral line: session facts folded into every
+    /// read of this branch, never committed, and the store behind
+    /// the procedural layer. Shared across clones like the caches;
+    /// every change mints an instant subscriptions maintain from.
+    /// See [`Ephemeral`].
+    overlay: Ephemeral,
     /// Shared plan cache for the deductive rules resolved on this branch,
     /// keyed by content-addressed `(rule, adornment)`. Handed to each
     /// per-query `ConceptRules` assembly so a re-assembled rule set reuses
@@ -207,6 +205,14 @@ impl Branch {
     /// Returns the branch name.
     pub fn name(&self) -> &str {
         self.reference.name()
+    }
+
+    /// The branch's ephemeral line: assert or retract session facts
+    /// that every read of this branch observes but no commit
+    /// persists, and the store a transaction routes procedural
+    /// attributes to. See [`Ephemeral`].
+    pub fn overlay(&self) -> &Ephemeral {
+        &self.overlay
     }
 
     /// Returns the current revision of this branch, or `None` if the branch

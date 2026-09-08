@@ -200,16 +200,16 @@ impl<'a> QueryLayer<'a> {
     }
 }
 
-// Folds the line's transient session overlay ([`Branch::overlay`],
-// [`Snapshot::overlay`]): every read path — `select`, `query`,
-// transaction queries, subscription evaluations — constructs through
-// here, so session facts participate in all of them with no per-path
-// wiring.
+// A line's ephemeral store ([`Branch::overlay`], [`Snapshot::overlay`])
+// is not folded here: [`QueryEnv`] reads it live at every evaluation,
+// so every read path — `select`, `query`, transaction queries,
+// subscription evaluations — sees session facts with no per-path
+// wiring and no snapshot to go stale.
 impl<'a> From<SourceRef<'a>> for QueryLayer<'a> {
     fn from(source: SourceRef<'a>) -> Self {
         Self {
             sources: vec![source],
-            changes: source.overlay().changes(),
+            changes: Changes::new(),
         }
     }
 }
@@ -277,10 +277,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
 
             let overlay = layer.overlay(&operator);
-            let tombstones = Arc::new(tombstones_from(&overlay));
-
             let sources = layer.sources.iter().map(|source| source.to_source()).collect();
-            let query_env = QueryEnv::new(sources, overlay, tombstones, env);
+            let query_env = QueryEnv::new(sources, overlay, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -306,9 +304,14 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// All overlay facts — caller-asserted + auto-injected metadata —
     /// merged into one batch. Queried via `Provider<Select> for Changes`.
     changes: Changes,
-    /// `sort_key`s of every retracted fact in `changes`. Each branch
+    /// `sort_key`s of every retracted fact in `changes`. Each line's
+    /// ephemeral stream is filtered against these before the merge so
+    /// a staged retract suppresses a session fact.
+    staged: Arc<HashSet<SortKey>>,
+    /// `staged` plus every line's own tombstones. Each line's tree
     /// stream is filtered against these before the merge so retracts
-    /// in the overlay suppress matching facts in the source.
+    /// in the overlay and session tombstones suppress matching facts
+    /// in the tree.
     tombstones: Arc<HashSet<SortKey>>,
     /// When present, every selector this environment executes —
     /// fact scans and rule-discovery reads alike — records its
@@ -326,23 +329,35 @@ pub(crate) struct QueryEnv<'a, Env> {
 impl<'a, Env> QueryEnv<'a, Env> {
     /// Build a runtime env from already-resolved parts: the lines to
     /// read, the per-query overlay (caller changes + injected metadata),
-    /// the tombstones lifted from it, and the underlying capability env.
+    /// and the underlying capability env. The tombstones are lifted
+    /// here: the overlay's retracts, plus each line's own session
+    /// tombstones for the tree streams.
     ///
     /// `Branch::query`, `Snapshot::query`, and the transaction-query
     /// paths all construct through here so there is exactly one query
     /// env — a transaction query is just a single-line `QueryEnv`.
-    /// Deductive-rule resolution is built in (a durable layer per line +
-    /// the overlay as a transient layer), so the paths can never
-    /// diverge on it.
-    pub(crate) fn new(
-        sources: Vec<Source>,
-        changes: Changes,
-        tombstones: Arc<HashSet<SortKey>>,
-        env: &'a Env,
-    ) -> Self {
+    /// Deductive-rule resolution is built in (a durable layer per line,
+    /// its ephemeral store, and the overlay as a transient layer), so
+    /// the paths can never diverge on it.
+    pub(crate) fn new(sources: Vec<Source>, changes: Changes, env: &'a Env) -> Self {
+        let staged = tombstones_from(&changes);
+        // The common case, one line and nothing staged, shares the
+        // store's own set rather than copying it per query.
+        let tombstones = match sources.as_slice() {
+            [only] if staged.is_empty() => only.as_ref().overlay().tombstones(),
+            _ => {
+                let mut tombstones = staged.clone();
+                for source in &sources {
+                    let session = source.as_ref().overlay().tombstones();
+                    tombstones.extend(session.iter().cloned());
+                }
+                Arc::new(tombstones)
+            }
+        };
         Self {
             sources,
             changes,
+            staged: Arc::new(staged),
             tombstones,
             demand: None,
             fixpoint: None,
@@ -379,6 +394,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
         Self {
             sources: self.sources.clone(),
             changes: self.changes.clone(),
+            staged: self.staged.clone(),
             tombstones: self.tombstones.clone(),
             demand: self.demand.clone(),
             fixpoint: self.fixpoint.clone(),
@@ -454,11 +470,25 @@ where
 
         // Line streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
-        // retract in `with(..)`) suppresses matching source facts. Each
-        // owns its line clone and borrows only `self.env`.
+        // retract in `with(..)`) suppresses matching source facts, and
+        // by the line's own session tombstones. Each owns its line
+        // clone and borrows only `self.env`.
         for source in &self.sources {
             let raw = select_from_source(source.clone(), self.env, input.clone());
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
+        }
+
+        // Each line's ephemeral store, read live. Filtered by the
+        // overlay's staged retracts only: the store's own tombstones
+        // hide facts *beneath* it, never its own. Pushed only when it
+        // has rows, for the same reason the overlay stream is below.
+        for source in &self.sources {
+            let mut session =
+                Provider::<Select<'a>>::execute(source.as_ref().overlay(), input.clone()).await?;
+            if let Some(first) = futures_util::StreamExt::next(&mut session).await {
+                let rows: ArtifactStream<'a> = Box::pin(stream::iter(vec![first]).chain(session));
+                streams.push(filter_tombstones(rows, self.staged.clone()));
+            }
         }
 
         // Overlay stream — Changes itself is a Provider<Select>. The
@@ -563,6 +593,26 @@ where
             .await
     }
 
+    /// The rules concluding `concept` held in `source`'s ephemeral
+    /// store: session-asserted `dialog.rule/*` facts, read fresh (the
+    /// store is in memory and never head-cached).
+    fn ephemeral_rules(
+        &self,
+        source: &Source,
+        concept: &Entity,
+    ) -> Result<Vec<DeductiveRule>, EvaluationError> {
+        let line = source.as_ref().overlay();
+        let entities = rule_entities(line.scan(&conclusion_selector(concept)));
+        let mut rules = Vec::with_capacity(entities.len());
+        for rule_entity in entities {
+            let Some(bytes) = source_bytes(line.scan(&source_selector(&rule_entity))) else {
+                continue;
+            };
+            rules.push(hydrate(&bytes)?);
+        }
+        Ok(rules)
+    }
+
     /// The durable rules concluding `concept` on `source`: the committed
     /// `dialog.rule/*` rules, read from the tree and cached by head
     /// (re-scanned only when the head moves), with hydrated bodies
@@ -654,9 +704,11 @@ where
         // `dialog.revision/*`.
         rules.extend(builtin(&concept));
 
-        // Durable layers — one per line.
+        // Durable layers — one per line — and each line's ephemeral
+        // store, read fresh.
         for source in &self.sources {
             rules.extend(self.durable_rules(source, &concept).await?);
+            rules.extend(self.ephemeral_rules(source, &concept)?);
         }
         // Transient layer — the per-query overlay, read fresh.
         rules.extend(overlay_rules(&self.changes, &concept));
@@ -741,6 +793,7 @@ where
             let mut rules: Vec<DeductiveRule> = builtin(&entity);
             for source in &self.sources {
                 rules.extend(self.durable_rules(source, &entity).await?);
+                rules.extend(self.ephemeral_rules(source, &entity)?);
             }
             rules.extend(overlay_rules(&self.changes, &entity));
             let bundle = assemble(&descriptor, rules, PlanCache::default());
@@ -1255,6 +1308,71 @@ mod rule_tests {
             "committed rule contributes Alice"
         );
         assert!(entities.contains(&bob), "overlay rule contributes Bob");
+        Ok(())
+    }
+
+    /// A rule asserted into the branch's ephemeral store resolves like
+    /// a committed one: session-held rules are a layer of their own,
+    /// read fresh every query and never head-cached.
+    #[dialog_common::test]
+    async fn it_resolves_a_rule_held_in_the_ephemeral_store() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let employees = || {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("name".into(), Term::var("name"));
+            ConceptQuery {
+                predicate: employee_descriptor(),
+                terms,
+            }
+        };
+        let before: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(before.is_empty(), "no rule, no employees");
+
+        branch
+            .overlay()
+            .assert(rule_with_person_attr("org/contractor-name"));
+        let after: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            after.iter().map(|c| c.entity().clone()).collect::<Vec<_>>(),
+            vec![bob],
+            "the session rule concludes Bob"
+        );
+
+        branch.overlay().clear();
+        let cleared: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(
+            cleared.is_empty(),
+            "dropping the session rule drops its conclusions"
+        );
         Ok(())
     }
 

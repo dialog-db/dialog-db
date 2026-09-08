@@ -69,7 +69,9 @@ use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled, selector_range};
-use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Key, State};
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, AttributeKey, Changes, Entity, EntityKey, Key, State, ValueKey,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -87,7 +89,6 @@ use dialog_storage::Blake3Hash;
 use futures_util::TryStreamExt as _;
 
 use super::session::{QueryEnv, QueryLayer};
-use crate::layer::tombstones_from;
 use crate::repository::source::Source;
 use crate::{
     Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Revision,
@@ -305,13 +306,11 @@ struct Pinned {
     /// The revision the retained results were evaluated at. `None`
     /// until the first poll, or for a branch with no commits.
     revision: Option<Revision>,
-    /// The [`Overlay`](crate::Overlay) epoch the retained results
-    /// were evaluated at. The line's session overlay is off-tree, so
-    /// a change to it is invisible to the poll's tree-diff gate; the
-    /// epoch is the signal that re-triggers evaluation (the overlay
-    /// delta is not derivable from the tree, so an epoch move
-    /// recomputes, reporting the change as a delta against the
-    /// retained results).
+    /// The sequence of the line's [`Ephemeral`](crate::Ephemeral)
+    /// store the retained results were evaluated at. The store is
+    /// off-tree, so its changes are invisible to the tree diff; the
+    /// instants it minted since this sequence are the delta instead
+    /// ([`Ephemeral::since`](crate::Ephemeral::since)).
     epoch: u64,
 }
 
@@ -321,7 +320,7 @@ impl Pinned {
         let source = source.as_ref();
         Self {
             revision: source.revision(),
-            epoch: source.overlay().epoch(),
+            epoch: source.overlay().revision().sequence,
         }
     }
 }
@@ -386,23 +385,15 @@ impl QueryLayer<'_> {
     /// joined line propagates as a result delta.
     ///
     /// The layer's `.with(..)` facts are captured now and never
-    /// change; a query that needs a moving overlay reads it through
-    /// a line's [`Branch::overlay`] instead.
+    /// change; each line's ephemeral store is read live and its
+    /// changes are maintained incrementally like tree changes.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
         let sources: Vec<Source> = self
             .sources()
             .iter()
             .map(|source| source.to_source())
             .collect();
-        // The layer's own changes, minus every joined line's session
-        // overlay: `QueryLayer::from(SourceRef)` folds those in at
-        // construction, but the subscription reads them live at each
-        // evaluation, and holding a snapshot here would pin stale
-        // session facts under the moving ones.
-        let mut changes = self.changes().clone();
-        for source in &sources {
-            changes.subtract(&source.as_ref().overlay().changes());
-        }
+        let changes = self.changes().clone();
         Subscription {
             pins: vec![
                 Pinned {
@@ -590,16 +581,7 @@ where
             + 'static,
     {
         let current: Vec<Pinned> = self.sources.iter().map(Pinned::current).collect();
-        // A session overlay is off-tree: an epoch move is invisible
-        // to the tree-diff gate below and its delta is not derivable
-        // from the tree, so it routes straight to a re-evaluation
-        // (reported against the retained results). The incremental
-        // path only serves polls where trees alone moved.
-        let epochs_held = current
-            .iter()
-            .zip(&self.pins)
-            .all(|(now, pinned)| now.epoch == pinned.epoch);
-        if self.initialized && epochs_held {
+        if self.initialized {
             if current == self.pins {
                 return Ok(None);
             }
@@ -607,22 +589,30 @@ where
             // `dialog.branch/tree` & co — changes on every commit by
             // construction (the binding itself moves), and those
             // metadata facts are overlay-injected, invisible to the
-            // tree diff below. Skip the gate and re-evaluate.
-            if !self.demand.depends_on_head() {
+            // tree diff below. Skip the gate and re-evaluate when a
+            // head moved; an ephemeral-only move leaves them alone.
+            let heads_moved = current
+                .iter()
+                .zip(&self.pins)
+                .any(|(now, pinned)| now.revision != pinned.revision);
+            if !(heads_moved && self.demand.depends_on_head()) {
                 let mut touched = Touched::Nothing;
                 for (index, source) in self.sources.iter().enumerate() {
-                    if current[index].revision == self.pins[index].revision {
-                        continue;
+                    if current[index].revision != self.pins[index].revision {
+                        let verdict = self
+                            .touched(
+                                env,
+                                source,
+                                &self.pins[index].revision,
+                                &current[index].revision,
+                            )
+                            .await?;
+                        touched = touched.merge(verdict);
                     }
-                    let verdict = self
-                        .touched(
-                            env,
-                            source,
-                            &self.pins[index].revision,
-                            &current[index].revision,
-                        )
-                        .await?;
-                    touched = touched.merge(verdict);
+                    if current[index].epoch != self.pins[index].epoch {
+                        let verdict = self.touched_ephemeral(source, self.pins[index].epoch);
+                        touched = touched.merge(verdict);
+                    }
                     if matches!(touched, Touched::Rules) {
                         break;
                     }
@@ -807,6 +797,65 @@ where
         }
     }
 
+    /// Classify what one line's ephemeral store changed since the
+    /// pinned `sequence`, within the demand cover: the exact facts its
+    /// instants asserted and retracted, filtered by their index keys
+    /// against the cover, with no diff to compute. A change inside a
+    /// rule-discovery range, or a pin the store's ring no longer
+    /// reaches, is [`Touched::Rules`], which recomputes.
+    fn touched_ephemeral(&self, source: &Source, sequence: u64) -> Touched {
+        let Some(instants) = source.as_ref().overlay().since(sequence) else {
+            return Touched::Rules;
+        };
+        let manifest = dialog_search_tree::Manifest::default();
+        let mut subjects = BTreeSet::new();
+        let mut asserted = Vec::new();
+        let mut retracted = Vec::new();
+        let mut seen = BTreeSet::new();
+        for instant in instants {
+            for (arriving, facts) in [(true, instant.asserted), (false, instant.retracted)] {
+                for fact in facts {
+                    let keys = [
+                        EntityKey::from_artifact(&fact, &manifest).into_key(),
+                        AttributeKey::from_artifact(&fact, &manifest).into_key(),
+                        ValueKey::from_artifact(&fact, &manifest).into_key(),
+                    ];
+                    if keys.iter().any(|key| self.demand.covers_rules(key)) {
+                        return Touched::Rules;
+                    }
+                    if !keys.iter().any(|key| self.demand.covers_facts(key)) {
+                        continue;
+                    }
+                    if !seen.insert((
+                        arriving,
+                        fact.of.to_string(),
+                        fact.the.to_string(),
+                        fact.is.to_bytes(),
+                    )) {
+                        continue;
+                    }
+                    subjects.insert(fact.of.clone());
+                    if arriving {
+                        asserted.push(fact);
+                    } else {
+                        retracted.push(fact);
+                    }
+                }
+            }
+        }
+        if subjects.is_empty() {
+            Touched::Nothing
+        } else {
+            let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
+            Touched::Facts {
+                subjects,
+                facts,
+                asserted,
+                retracted,
+            }
+        }
+    }
+
     /// Maintain the retained result incrementally: for each touched
     /// entity, over-delete its retained rows and re-derive them with
     /// the query restricted to that entity (DRed's delete /
@@ -857,14 +906,13 @@ where
                     .await
                     .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
                 let overlay = self.layer().overlay(&operator);
-                let tombstones = tombstones_from(&overlay);
                 self.anchor(&self.demand, &operator);
                 // Typed with the *named* env lifetime (owned line
                 // clones, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
                 let query_env: QueryEnv<'a, Env> =
-                    QueryEnv::new(self.sources.clone(), overlay, Arc::new(tombstones), env)
+                    QueryEnv::new(self.sources.clone(), overlay, env)
                         .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
@@ -968,13 +1016,11 @@ where
                 .await
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
             let overlay = self.layer().overlay(&operator);
-            let tombstones = tombstones_from(&overlay);
             self.anchor(demand, &operator);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let mut query_env: QueryEnv<'a, Env> =
-                QueryEnv::new(self.sources.clone(), overlay, Arc::new(tombstones), env)
-                    .with_demand(demand.clone());
+                QueryEnv::new(self.sources.clone(), overlay, env).with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -1016,17 +1062,15 @@ where
                 .await
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
             let overlay = self.layer().overlay(&operator);
-            let tombstones = tombstones_from(&overlay);
             self.anchor(&self.demand, &operator);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a, Env> =
-                QueryEnv::new(self.sources.clone(), overlay, Arc::new(tombstones), env)
-                    .with_demand(self.demand.clone())
-                    .with_fixpoint(
-                        concept.this(),
-                        Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
-                    );
+            let query_env: QueryEnv<'a, Env> = QueryEnv::new(self.sources.clone(), overlay, env)
+                .with_demand(self.demand.clone())
+                .with_fixpoint(
+                    concept.this(),
+                    Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
+                );
             self.query.clone().perform(&query_env).try_vec().await
         })
     }
@@ -4137,6 +4181,110 @@ mod tests {
             stored.is_empty(),
             "the procedural half stays out of the tree"
         );
+        Ok(())
+    }
+
+    /// A session write inside the cover is maintained from the store's
+    /// instants, per touched entity, with no recompute and no tree
+    /// diff; one outside the cover advances the pin for free.
+    #[dialog_common::test]
+    async fn it_maintains_session_changes_incrementally() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(subscription.recomputes(), 1);
+
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a covered session write propagates");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+        assert_eq!(subscription.recomputes(), 1, "maintained, not recomputed");
+        assert_eq!(subscription.maintenances(), 1);
+
+        // Outside the cover: the pin advances silently.
+        branch.overlay().assert(
+            the!("misc/tag")
+                .of(Entity::new()?)
+                .is("unrelated".to_string()),
+        );
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "an uncovered session write is free"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+
+        // A session retract of a session fact: maintained the same way.
+        branch
+            .overlay()
+            .retract(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("retract propagates");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(names(&delta.retracted), vec![(bob, "Bob".to_string())]);
+        assert_eq!(subscription.maintenances(), 2);
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(
+            names(subscription.results()),
+            vec![(alice, "Alice".to_string())]
+        );
+        Ok(())
+    }
+
+    /// A pin the store's ring no longer reaches falls back to a full
+    /// recompute and still lands on the right result.
+    #[dialog_common::test]
+    async fn it_recomputes_when_the_session_ring_is_exhausted() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+        // Push the ring past its capacity with unrelated instants.
+        for index in 0..2048u32 {
+            branch.overlay().assert(
+                the!("misc/tag")
+                    .of(Entity::new()?)
+                    .is(format!("tag-{index}")),
+            );
+        }
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the change is reported even though the ring lost it");
+        assert_eq!(names(&delta.asserted), vec![(bob, "Bob".to_string())]);
+        assert_eq!(subscription.recomputes(), 2, "fell back to a recompute");
+        assert!(subscription.poll(&operator).await?.is_none());
         Ok(())
     }
 }
