@@ -102,6 +102,62 @@ impl Changes {
         self.0.len() != before
     }
 
+    /// Drop every recorded `Assert` / `Replace` of exactly `is` at
+    /// `(of, the)`, returning whether anything was dropped. The
+    /// inverse of [`associate`](Update::associate) for a batch that
+    /// *is* the store (a session layer): where
+    /// [`dissociate`](Update::dissociate) records a tombstone beside
+    /// the prior change — the right thing when the batch overlays a
+    /// tree that still holds the fact — this removes the fact from
+    /// the batch itself, so a later read of the batch no longer
+    /// yields it. An emptied cell and an emptied entity are pruned,
+    /// so the batch does not accumulate empty slots.
+    pub fn cancel(&mut self, the: &Attribute, of: &Entity, is: &Value) -> bool {
+        let Some(attributes) = self.0.get_mut(of) else {
+            return false;
+        };
+        let Some(changes) = attributes.get_mut(the) else {
+            return false;
+        };
+        let before = changes.len();
+        changes.retain(|change| match change {
+            Change::Assert(value) | Change::Replace(value) => value != is,
+            Change::Retract(_) => true,
+        });
+        let removed = changes.len() != before;
+        if changes.is_empty() {
+            attributes.remove(the);
+        }
+        if attributes.is_empty() {
+            self.0.remove(of);
+        }
+        removed
+    }
+
+    /// Remove every change in `other` from this batch, one
+    /// occurrence per occurrence, leaving what this batch recorded
+    /// beyond `other`. A change `other` holds that this batch does
+    /// not is ignored. Emptied cells and entities are pruned.
+    pub fn subtract(&mut self, other: &Changes) {
+        for (entity, attribute, change) in other.iter() {
+            let Some(attributes) = self.0.get_mut(entity) else {
+                continue;
+            };
+            let Some(changes) = attributes.get_mut(attribute) else {
+                continue;
+            };
+            if let Some(index) = changes.iter().position(|recorded| recorded == change) {
+                changes.remove(index);
+            }
+            if changes.is_empty() {
+                attributes.remove(attribute);
+            }
+            if attributes.is_empty() {
+                self.0.remove(entity);
+            }
+        }
+    }
+
     /// Borrowing iterator over every recorded `(entity, attribute,
     /// change)` triple. Use this when you need to inspect the batch
     /// without consuming it — e.g. to extract tombstones from
@@ -611,5 +667,95 @@ mod tests {
         let mut sorted_keys = keys.clone();
         sorted_keys.sort();
         assert_eq!(keys, sorted_keys);
+    }
+
+    /// `cancel` drops the recorded asserts of one value at a cell and
+    /// prunes what it empties; a retract at the cell is left alone,
+    /// and a value never recorded cancels nothing.
+    #[dialog_common::test]
+    fn it_cancels_a_recorded_assert() {
+        let mut changes = Changes::new();
+        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(role_attr(), alice(), Value::String("Admin".into()));
+        changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
+
+        assert!(!changes.cancel(&name_attr(), &alice(), &Value::String("Alicia".into())));
+        assert!(changes.cancel(&name_attr(), &alice(), &Value::String("Alice".into())));
+        assert!(
+            !changes.cancel(&name_attr(), &alice(), &Value::String("Alice".into())),
+            "cancelled once, gone"
+        );
+        assert!(
+            !changes.cancel(&name_attr(), &bob(), &Value::String("Bob".into())),
+            "a retract is not an assert to cancel"
+        );
+
+        let remaining: Vec<_> = changes
+            .iter()
+            .map(|(entity, attribute, change)| (entity.clone(), attribute.clone(), change.clone()))
+            .collect();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&(
+            alice(),
+            role_attr(),
+            Change::Assert(Value::String("Admin".into()))
+        )));
+        assert!(remaining.contains(&(
+            bob(),
+            name_attr(),
+            Change::Retract(Value::String("Bob".into()))
+        )));
+
+        changes.cancel(&role_attr(), &alice(), &Value::String("Admin".into()));
+        assert!(
+            !changes.iter().any(|(entity, _, _)| *entity == alice()),
+            "an emptied entity is pruned"
+        );
+    }
+
+    /// `subtract` removes exactly the changes the other batch holds,
+    /// retracts included, one occurrence each, and nothing else.
+    #[dialog_common::test]
+    fn it_subtracts_another_batch_exactly() {
+        let mut changes = Changes::new();
+        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
+        changes.associate(role_attr(), bob(), Value::String("Guest".into()));
+
+        let mut other = Changes::new();
+        other.associate(name_attr(), alice(), Value::String("Alice".into()));
+        other.dissociate(name_attr(), bob(), Value::String("Bob".into()));
+        other.associate(role_attr(), alice(), Value::String("Absent".into()));
+
+        changes.subtract(&other);
+
+        let remaining: Vec<_> = changes
+            .iter()
+            .map(|(entity, attribute, change)| (entity.clone(), attribute.clone(), change.clone()))
+            .collect();
+        assert_eq!(remaining.len(), 2, "{remaining:?}");
+        assert!(
+            remaining.contains(&(
+                alice(),
+                name_attr(),
+                Change::Assert(Value::String("Alice".into()))
+            )),
+            "one of two identical asserts survives"
+        );
+        assert!(
+            remaining.contains(&(
+                bob(),
+                role_attr(),
+                Change::Assert(Value::String("Guest".into()))
+            )),
+            "a change the other batch lacks is untouched"
+        );
+        assert!(
+            !remaining
+                .iter()
+                .any(|(_, _, change)| matches!(change, Change::Retract(_))),
+            "the retract was subtracted, not inverted"
+        );
     }
 }

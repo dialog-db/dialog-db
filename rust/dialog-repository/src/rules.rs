@@ -53,6 +53,7 @@ use dialog_query::{
 };
 use parking_lot::RwLock;
 
+use crate::placement::CommittedPlacements;
 use crate::{Revision, schema};
 
 // The `dialog.rule/*` vocabulary and the Statement lowerings that
@@ -306,6 +307,9 @@ struct RuleCacheInner {
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
+    /// The committed attribute placements (`dialog.attribute/layer`),
+    /// as of a branch head. One range scan on a miss.
+    placements: Option<(Revision, CommittedPlacements)>,
 }
 
 impl RuleCache {
@@ -412,6 +416,19 @@ impl RuleCache {
             .write()
             .transient
             .insert(concept, (head, verdict));
+    }
+
+    /// The committed attribute placements if scanned at `head`.
+    pub(crate) fn placements(&self, head: &Revision) -> Option<CommittedPlacements> {
+        match &self.inner.read().placements {
+            Some((scanned_at, placements)) if scanned_at == head => Some(placements.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the committed attribute placements at `head`.
+    pub(crate) fn record_placements(&self, head: Revision, placements: CommittedPlacements) {
+        self.inner.write().placements = Some((head, placements));
     }
 }
 
