@@ -359,30 +359,54 @@ attribute placed on an ephemeral layer plus a sweep rule `retract! C
 when C`, and the engine's transient bucket becomes an optimization it
 may apply when no observer demands the attribute.
 
-## What the first increment built and what carries over
+## What is built
 
-Built on the branch: a fixed `Layer` enum, `Placement` as a fact on the
-branch, partition-after-induction routing with the tree as the top and
-the overlay as the only other backed layer, and composite
-subscriptions over `QueryLayer` with a pin per line.
+**Increment 1** (fixed layers, composite subscriptions): a `Layer`
+enum, `Placement` as a fact on the branch, partition-after-induction
+routing with the tree as the top and the session store as the only
+other backed layer, and composite subscriptions over `QueryLayer`
+with a pin per line.
 
-Carries over unchanged: composite subscriptions (they are
-`stack.subscribe`), `Changes::cancel` and `Changes::subtract`, the
-`dialog.attribute/` carve-out in the write gate, partition after
-induction, the tests for routing and for rule heads concluding into a
-non-top layer.
+**Increment 2** (the ephemeral line, `repository/ephemeral.rs`): the
+session overlay is replaced by a real memory-backed store,
+`Ephemeral`, which every branch and snapshot carries:
 
-Replaced: the `Layer` enum becomes a layer name (an entity) bound in
-a stack; `Placement` targets that entity; the `Overlay` becomes an
-ephemeral line, a real store with a head, cardinality, and a diff, so
-subscriptions maintain incrementally from it instead of recomputing
-on an epoch; `Transaction` gains the stack fan-out and capture.
+- Facts are held under the tree's own three index keys (entity,
+  attribute, and value orders) in one ordered map, so a selector's
+  `selector_range` applies unchanged and rows stream in exactly the
+  order a tree scan produces them. The query layer's k-way merge
+  interleaves the store with tree scans with no special case.
+- Writes have the tree's semantics: idempotent assert, cardinality-one
+  replace that supersedes the cell, exact retract. A retract of a fact
+  the store does not hold is a tombstone that hides it in the lines
+  beneath, so session shadowing of committed facts still works and
+  the store's own facts are never shadowed by it.
+- Every visible change mints an `Instant` (asserted facts, retracted
+  facts, sequence, chained hash) into a bounded ring. A subscription
+  pins the sequence and reads the exact delta since its pin, filtered
+  by its demand cover, so a session write inside the cover is
+  maintained per touched entity and one outside the cover advances
+  the pin for free. Only a pin older than the ring recomputes. The
+  chained hash costs the delta, never the store, which is the identity
+  an ephemeral line needs and the trade the design accepted.
+- The store is read live by every read path: `QueryEnv` unions each
+  line's store stream and lifts its tombstones itself, so `QueryLayer`
+  no longer snapshots session facts at construction and the
+  subscription's subtract workaround is gone. Rules asserted into the
+  store resolve as their own layer, read fresh.
+
+Carries over unchanged from increment 1: composite subscriptions,
+`Changes::cancel` and `Changes::subtract`, the `dialog.attribute/`
+carve-out in the write gate, partition after induction, and the
+routing tests.
+
+Still to replace: the `Layer` enum becomes a layer name bound in a
+stack; `Placement` targets that entity; `Transaction` gains the stack
+fan-out and lazy link refresh.
 
 ## Order of work
 
-1. Ephemeral line: a memory-backed `Source` with a head by value, a
-   cover-scoped diff, and no history. Replace `Overlay` with it.
-   Subscriptions become incremental over session changes for free.
+1. ~~Ephemeral line.~~ Done: increment 2.
 2. Placement by layer entity plus the repository default fact, with
    the unbound-layer error.
 3. `Stack` over `QueryLayer`: descriptor blobs in the archive with

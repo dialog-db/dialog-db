@@ -20,7 +20,7 @@
 //! |---|---|---|---|
 //! | [`Semantic`](Layer::Semantic) | yes | yes | the branch tree (the default) |
 //! | [`Episodic`](Layer::Episodic) | yes | no | none yet |
-//! | [`Procedural`](Layer::Procedural) | no | no | the session [`Overlay`](crate::Overlay) |
+//! | [`Procedural`](Layer::Procedural) | no | no | the line's [`Ephemeral`](crate::Ephemeral) store |
 //! | [`Sensory`](Layer::Sensory) | no | yes | none yet |
 //!
 //! A write to an attribute declared on a layer with no backing fails

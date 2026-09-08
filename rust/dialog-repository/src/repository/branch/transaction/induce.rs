@@ -47,9 +47,7 @@ use dialog_query::rule::inductive::Polarity;
 use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
-use std::sync::Arc;
 
-use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
 use crate::repository::source::SourceRef;
@@ -203,8 +201,7 @@ where
         let layered = QueryLayer::from(source)
             .with(view_changes)
             .overlay(&operator);
-        let tombstones = Arc::new(tombstones_from(&layered));
-        let view = QueryEnv::new(vec![source.to_source()], layered, tombstones, env);
+        let view = QueryEnv::new(vec![source.to_source()], layered, env);
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it

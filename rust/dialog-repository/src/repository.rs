@@ -25,6 +25,9 @@ pub use branch::*;
 mod create;
 pub use create::*;
 
+mod ephemeral;
+pub use ephemeral::*;
+
 mod error;
 pub use error::*;
 

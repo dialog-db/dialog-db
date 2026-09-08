@@ -78,7 +78,7 @@ use dialog_varsig::Principal;
 
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
-    BlobArchive, Branch, Index, NetworkedIndex, Overlay, PublishError, RemoteRepository,
+    BlobArchive, Branch, Ephemeral, Index, NetworkedIndex, PublishError, RemoteRepository,
     RemoteSite, Repository, RepositoryArchiveExt as _, Revision, Select, SelectQuery,
     SnapshotError,
 };
@@ -185,7 +185,7 @@ pub struct Snapshot {
     subject: Subject,
     head: RwLock<Head>,
     caches: Caches,
-    overlay: Overlay,
+    overlay: Ephemeral,
 }
 
 /// What a snapshot's commits move: the revision, and the line they are
@@ -231,7 +231,7 @@ impl Branch {
                 lineage: None,
             }),
             caches: self.caches(),
-            overlay: Overlay::default(),
+            overlay: Ephemeral::default(),
         })
     }
 }
@@ -246,7 +246,7 @@ impl Snapshot {
                 lineage: None,
             }),
             caches: Caches::new(),
-            overlay: Overlay::default(),
+            overlay: Ephemeral::default(),
         }
     }
 
@@ -346,8 +346,8 @@ impl Snapshot {
     /// The snapshot's transient session overlay: assert or retract
     /// ephemeral facts that every read of this snapshot observes but no
     /// commit persists. A [`Clone`] shares it, like branch clones do.
-    /// See [`Overlay`].
-    pub fn overlay(&self) -> &Overlay {
+    /// See [`Ephemeral`].
+    pub fn overlay(&self) -> &Ephemeral {
         &self.overlay
     }
 

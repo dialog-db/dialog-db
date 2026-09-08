@@ -56,10 +56,8 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
-use std::sync::Arc;
 
 use crate::RemoteSite;
-use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
 use crate::repository::source::SourceRef;
@@ -148,14 +146,13 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             let overlay = QueryLayer::from(source)
                 .with(changes)
                 .overlay(&operator);
-            let tombstones = tombstones_from(&overlay);
 
             // A transaction query is just a single-line `QueryEnv`.
             // Constructing the *same* env type the branch-session path
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let query_env = QueryEnv::new(vec![source.to_source()], overlay, Arc::new(tombstones), env);
+            let query_env = QueryEnv::new(vec![source.to_source()], overlay, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
