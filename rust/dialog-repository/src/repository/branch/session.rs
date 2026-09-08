@@ -32,7 +32,7 @@ use crate::rules::{
     source_selector,
 };
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
-use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snapshot};
+use crate::{Branch, Ephemeral, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snapshot};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -77,7 +77,30 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snaps
 #[derive(Default, Clone)]
 pub struct QueryLayer<'a> {
     sources: Vec<SourceRef<'a>>,
+    /// Ephemeral lines joined on their own, not as some tree line's
+    /// session store: the memory lines of a [`Stack`](crate::Stack).
+    ephemerals: Vec<&'a Ephemeral>,
     changes: Changes,
+}
+
+/// The lines a query env reads, owned: every tree line with its
+/// session store, plus every standalone ephemeral line. What a
+/// [`QueryLayer`] resolves to at perform time, and what a
+/// [`Stack`](crate::Stack) hands its induction.
+#[derive(Default, Clone)]
+pub(crate) struct Composite {
+    pub(crate) sources: Vec<Source>,
+    pub(crate) ephemerals: Vec<Ephemeral>,
+}
+
+impl Composite {
+    /// A composite of one tree line.
+    pub(crate) fn of(source: Source) -> Self {
+        Self {
+            sources: vec![source],
+            ephemerals: Vec::new(),
+        }
+    }
 }
 
 impl<'a> QueryLayer<'a> {
@@ -107,13 +130,21 @@ impl<'a> QueryLayer<'a> {
     pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
         let other = other.into();
         self.sources.extend(other.sources);
+        self.ephemerals.extend(other.ephemerals);
         other.changes.assert(&mut self.changes);
         self
     }
 
-    /// Every line this layer reads from, in join order.
-    pub(crate) fn sources(&self) -> &[SourceRef<'a>] {
-        &self.sources
+    /// The owned lines this layer reads.
+    pub(crate) fn composite(&self) -> Composite {
+        Composite {
+            sources: self
+                .sources
+                .iter()
+                .map(|source| source.to_source())
+                .collect(),
+            ephemerals: self.ephemerals.iter().map(|line| (*line).clone()).collect(),
+        }
     }
 
     /// The branches this layer reads from, in join order.
@@ -209,6 +240,17 @@ impl<'a> From<SourceRef<'a>> for QueryLayer<'a> {
     fn from(source: SourceRef<'a>) -> Self {
         Self {
             sources: vec![source],
+            ephemerals: Vec::new(),
+            changes: Changes::new(),
+        }
+    }
+}
+
+impl<'a> From<&'a Ephemeral> for QueryLayer<'a> {
+    fn from(ephemeral: &'a Ephemeral) -> Self {
+        Self {
+            sources: Vec::new(),
+            ephemerals: vec![ephemeral],
             changes: Changes::new(),
         }
     }
@@ -230,6 +272,7 @@ impl From<Changes> for QueryLayer<'_> {
     fn from(changes: Changes) -> Self {
         Self {
             sources: Vec::new(),
+            ephemerals: Vec::new(),
             changes,
         }
     }
@@ -277,8 +320,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
 
             let overlay = layer.overlay(&operator);
-            let sources = layer.sources.iter().map(|source| source.to_source()).collect();
-            let query_env = QueryEnv::new(sources, overlay, env);
+            let query_env = QueryEnv::new(layer.composite(), overlay, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -301,6 +343,9 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
+    /// Standalone ephemeral lines, read live like each tree line's
+    /// session store.
+    ephemerals: Vec<Ephemeral>,
     /// All overlay facts — caller-asserted + auto-injected metadata —
     /// merged into one batch. Queried via `Provider<Select> for Changes`.
     changes: Changes,
@@ -308,10 +353,10 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// ephemeral stream is filtered against these before the merge so
     /// a staged retract suppresses a session fact.
     staged: Arc<HashSet<SortKey>>,
-    /// `staged` plus every line's own tombstones. Each line's tree
-    /// stream is filtered against these before the merge so retracts
-    /// in the overlay and session tombstones suppress matching facts
-    /// in the tree.
+    /// `staged` plus every ephemeral store's own tombstones, session
+    /// and standalone alike. Each line's tree stream is filtered
+    /// against these before the merge so retracts in the overlay and
+    /// ephemeral tombstones suppress matching facts in the tree.
     tombstones: Arc<HashSet<SortKey>>,
     /// When present, every selector this environment executes —
     /// fact scans and rule-discovery reads alike — records its
@@ -339,23 +384,31 @@ impl<'a, Env> QueryEnv<'a, Env> {
     /// Deductive-rule resolution is built in (a durable layer per line,
     /// its ephemeral store, and the overlay as a transient layer), so
     /// the paths can never diverge on it.
-    pub(crate) fn new(sources: Vec<Source>, changes: Changes, env: &'a Env) -> Self {
+    pub(crate) fn new(composite: Composite, changes: Changes, env: &'a Env) -> Self {
+        let Composite {
+            sources,
+            ephemerals,
+        } = composite;
         let staged = tombstones_from(&changes);
         // The common case, one line and nothing staged, shares the
         // store's own set rather than copying it per query.
-        let tombstones = match sources.as_slice() {
-            [only] if staged.is_empty() => only.as_ref().overlay().tombstones(),
+        let tombstones = match (sources.as_slice(), ephemerals.as_slice()) {
+            ([only], []) if staged.is_empty() => only.as_ref().overlay().tombstones(),
             _ => {
                 let mut tombstones = staged.clone();
                 for source in &sources {
                     let session = source.as_ref().overlay().tombstones();
                     tombstones.extend(session.iter().cloned());
                 }
+                for line in &ephemerals {
+                    tombstones.extend(line.tombstones().iter().cloned());
+                }
                 Arc::new(tombstones)
             }
         };
         Self {
             sources,
+            ephemerals,
             changes,
             staged: Arc::new(staged),
             tombstones,
@@ -393,6 +446,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             sources: self.sources.clone(),
+            ephemerals: self.ephemerals.clone(),
             changes: self.changes.clone(),
             staged: self.staged.clone(),
             tombstones: self.tombstones.clone(),
@@ -478,13 +532,18 @@ where
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
-        // Each line's ephemeral store, read live. Filtered by the
-        // overlay's staged retracts only: the store's own tombstones
-        // hide facts *beneath* it, never its own. Pushed only when it
-        // has rows, for the same reason the overlay stream is below.
-        for source in &self.sources {
-            let mut session =
-                Provider::<Select<'a>>::execute(source.as_ref().overlay(), input.clone()).await?;
+        // Each line's ephemeral store, then each standalone ephemeral
+        // line, read live. Filtered by the overlay's staged retracts
+        // only: a store's own tombstones hide facts *beneath* it,
+        // never its own. Pushed only when it has rows, for the same
+        // reason the overlay stream is below.
+        let stores = self
+            .sources
+            .iter()
+            .map(|source| source.as_ref().overlay())
+            .chain(self.ephemerals.iter());
+        for store in stores {
+            let mut session = Provider::<Select<'a>>::execute(store, input.clone()).await?;
             if let Some(first) = futures_util::StreamExt::next(&mut session).await {
                 let rows: ArtifactStream<'a> = Box::pin(stream::iter(vec![first]).chain(session));
                 streams.push(filter_tombstones(rows, self.staged.clone()));
@@ -593,15 +652,15 @@ where
             .await
     }
 
-    /// The rules concluding `concept` held in `source`'s ephemeral
-    /// store: session-asserted `dialog.rule/*` facts, read fresh (the
-    /// store is in memory and never head-cached).
+    /// The rules concluding `concept` held in an ephemeral store, a
+    /// line's session store or a standalone line: `dialog.rule/*`
+    /// facts read fresh (the store is in memory and never
+    /// head-cached).
     fn ephemeral_rules(
         &self,
-        source: &Source,
+        line: &Ephemeral,
         concept: &Entity,
     ) -> Result<Vec<DeductiveRule>, EvaluationError> {
-        let line = source.as_ref().overlay();
         let entities = rule_entities(line.scan(&conclusion_selector(concept)));
         let mut rules = Vec::with_capacity(entities.len());
         for rule_entity in entities {
@@ -705,10 +764,13 @@ where
         rules.extend(builtin(&concept));
 
         // Durable layers — one per line — and each line's ephemeral
-        // store, read fresh.
+        // store, then every standalone ephemeral line, read fresh.
         for source in &self.sources {
             rules.extend(self.durable_rules(source, &concept).await?);
-            rules.extend(self.ephemeral_rules(source, &concept)?);
+            rules.extend(self.ephemeral_rules(source.as_ref().overlay(), &concept)?);
+        }
+        for line in &self.ephemerals {
+            rules.extend(self.ephemeral_rules(line, &concept)?);
         }
         // Transient layer — the per-query overlay, read fresh.
         rules.extend(overlay_rules(&self.changes, &concept));
@@ -793,7 +855,10 @@ where
             let mut rules: Vec<DeductiveRule> = builtin(&entity);
             for source in &self.sources {
                 rules.extend(self.durable_rules(source, &entity).await?);
-                rules.extend(self.ephemeral_rules(source, &entity)?);
+                rules.extend(self.ephemeral_rules(source.as_ref().overlay(), &entity)?);
+            }
+            for line in &self.ephemerals {
+                rules.extend(self.ephemeral_rules(line, &entity)?);
             }
             rules.extend(overlay_rules(&self.changes, &entity));
             let bundle = assemble(&descriptor, rules, PlanCache::default());

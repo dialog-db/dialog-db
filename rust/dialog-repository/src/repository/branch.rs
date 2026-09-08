@@ -74,7 +74,7 @@ pub use reset::*;
 mod select;
 pub use select::*;
 
-mod session;
+pub(crate) mod session;
 pub use session::*;
 
 mod subscription;
@@ -83,7 +83,7 @@ pub use subscription::*;
 mod set_upstream;
 pub use set_upstream::*;
 
-mod transaction;
+pub(crate) mod transaction;
 pub use transaction::*;
 
 mod upstream;

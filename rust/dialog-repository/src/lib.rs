@@ -54,6 +54,12 @@ pub use rules::{RuleCache, Transient};
 pub mod placement;
 pub use placement::{Bindings, DefaultLayer, Placement, Target, attribute_entity};
 
+pub mod stack;
+pub use stack::{
+    AsLine, Audience, Build, Head, Line, Stack, StackBuilder, StackCommit, StackError,
+    StackTransaction,
+};
+
 pub use dialog_artifacts::{Exporter, Importer};
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.

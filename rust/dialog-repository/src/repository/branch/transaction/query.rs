@@ -59,7 +59,7 @@ use dialog_query::query::{Application, Output};
 
 use crate::RemoteSite;
 use crate::repository::branch::QueryLayer;
-use crate::repository::branch::session::QueryEnv;
+use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::source::SourceRef;
 
 /// A non-composable query handle returned by
@@ -152,7 +152,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let query_env = QueryEnv::new(vec![source.to_source()], overlay, env);
+            let query_env = QueryEnv::new(Composite::of(source.to_source()), overlay, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;

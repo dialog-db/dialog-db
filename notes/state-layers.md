@@ -181,7 +181,7 @@ let gossip = Ephemeral::channel(&shared);
 let state = Ephemeral::new();
 let tab = Ephemeral::new();
 
-let stack = Stack::new()
+let stack = Stack::builder()
     .line(shared)                                    // memory:shared by the repository default
     .line(local).link(&shared, "memory:shared")
     .line(gossip).link(&shared, "memory:shared")
@@ -419,17 +419,78 @@ fixed `Layer` enum is gone.
   declarations and the bindings, into the tree commit and the
   ephemeral store.
 
-Carries over unchanged from increment 1:## Order of work
+**Increment 4** (the stack, `stack.rs`): lines linked under layer
+names, read as one composite and written by placement.
+
+- A `Line` is a branch, a snapshot, or an `Ephemeral` store; a stack
+  is built bottom first with `Stack::builder().line(a).line(b).link(&a,
+  name)`. `link` binds a name to the line it points at, so
+  `local.link(&shared, "memory:shared")` routes `memory:shared` to
+  `shared`. A name may be bound by several links; a write to it lands
+  in every line so bound and the composite read dedups the fact.
+- `build().perform(env)` checks the shape: a link must name a line
+  already beneath the linking one, a snapshot cannot hold links, and
+  the audience rule holds (a line may link a line beneath it only if
+  the lower line's audience contains its own, with `Process < Device
+  < Peers`; a branch with an upstream is `Peers`, one without is
+  `Device`, an ephemeral store is `Process`). Every check is a
+  `StackError`.
+- Identity is a pure function of shape. A line's stack identity is
+  `stack:<base58(blake3(dagcbor{address, links}))>` where `links` is
+  the sorted `(name, id(to))` list and `address` is the line's
+  location (repository and branch name, repository and tree hash, or
+  the ephemeral store's nonce entity). The bottom's identity is the
+  same in every stack that holds it; renaming or re-linking changes
+  only the lines above.
+- Links are facts held by the enclosing line: `dialog.link/{from, to,
+  name, revision}` on `link:<base58(blake3(from ‖ id(to)))>`, plus the
+  target's address (`dialog.link/repository` and `dialog.link/branch`,
+  `dialog.link/tree`, or `dialog.link/ephemeral`). `revision` is the
+  target's head as the encloser last saw it: written at build and
+  refreshed only when the encloser commits for its own reasons, so a
+  commit reaching only the bottom leaves an upper line's link behind
+  and the next commit reaching the upper line catches it up. The
+  `dialog.link/` prefix is carved out of the reserved-attribute gate
+  like `dialog.attribute/`.
+- Reads: `Stack::query()` joins every line into one `QueryLayer`;
+  `select` and `subscribe` work unchanged over it. Standalone
+  ephemeral lines are first-class in the query layer now (`join` a
+  `&Ephemeral`), the query env unions their streams and tombstones
+  and resolves their rules, and a subscription pins each one's
+  sequence beside the tree pins, maintaining from the instant ring
+  exactly as it does for a line's session store.
+- Writes: `Stack::transaction()` induces once over the whole
+  composite (`induce` now takes the view separately from the
+  dispatching line, which stays the bottom branch: only the bottom's
+  committed rules fire in a stack transaction, and an upper branch's
+  own rules are a gap this increment leaves open), resolves
+  placements from the bottom, routes each instruction to the lines
+  its layer is linked under (an undeclared or default-layer attribute
+  goes to the bottom; a name no link binds falls back to the bottom's
+  own bindings, so a one-line stack routes exactly as the branch
+  would; anything else is `UnboundLayer`), then commits bottom to
+  top through `commit_settled`, the settled half of a transaction
+  commit, refreshing each committing line's links. A stack whose
+  bottom is not a branch is read-only (`Detached`).
+
+Carries over unchanged from increment 1: composite subscriptions,
+`Changes::cancel` and `Changes::subtract`, partition after induction,
+and the routing tests.
+
+Not yet built from the stack section: descriptor blobs in the
+archive, `Stack::open` by hash, `named` and the registry metadata.
+
+## Order of work
 
 1. ~~Ephemeral line.~~ Done: increment 2.
 2. ~~Placement by layer entity plus the repository default fact, with
    the unbound-layer error.~~ Done: increment 3.
-3. `Stack` over `QueryLayer`: descriptor blobs in the archive with
-   `dialog.link/revision` facts beside them, the builder with
-   explicit `link`, the `build`-time checks (every targetable name
-   bound, descriptors resolve, the audience rule), `Stack::open` by
-   hash, `named`, the registry metadata, `transaction` with
-   bottom-to-top commit and lazy link refresh.
+3. ~~`Stack` over `QueryLayer`: the builder with explicit `link`, the
+   `build`-time checks, descriptor identities, `dialog.link/*` facts
+   with lazy refresh, `transaction` with bottom-to-top commit.~~
+   Done: increment 4. Still open from this item: descriptor blobs in
+   the archive, `Stack::open` by hash, `named`, the registry
+   metadata.
 4. Tonk migration: `layer:state` and `layer:tab` declared in the
    library, one stack per connection with its own tab line,
    inspector over the registry, `navigate` as a tab-layer
