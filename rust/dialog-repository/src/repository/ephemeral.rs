@@ -87,9 +87,22 @@ pub struct Instant {
 /// A memory-backed line. Cheap to clone: clones share the store, so a
 /// fact asserted through any handle is visible to readers of all of
 /// them. See the [module docs](self).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Ephemeral {
+    /// A nonce minted when the store is created: the address a stack
+    /// records for this line. Two stores never share one, and every
+    /// clone of a store carries the same.
+    entity: Entity,
     state: Arc<RwLock<State>>,
+}
+
+impl Default for Ephemeral {
+    fn default() -> Self {
+        Self {
+            entity: Entity::new().expect("the platform can mint a random entity"),
+            state: Arc::default(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -350,6 +363,18 @@ impl Ephemeral {
         }
         state.mint(delta);
         self
+    }
+
+    /// The address of this store: a nonce entity minted when it was
+    /// created, shared by every clone of it. A stack records it in
+    /// the link facts pointing at this line.
+    pub fn entity(&self) -> &Entity {
+        &self.entity
+    }
+
+    /// Whether `other` is a handle to this same store.
+    pub fn is(&self, other: &Ephemeral) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
     }
 
     /// The line's identity now.

@@ -88,10 +88,11 @@ use dialog_search_tree::{Change, ContentAddressedStorage};
 use dialog_storage::Blake3Hash;
 use futures_util::TryStreamExt as _;
 
-use super::session::{QueryEnv, QueryLayer};
+use super::session::{Composite, QueryEnv, QueryLayer};
 use crate::repository::source::Source;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Revision,
+    Branch, EMPTY_TREE_HASH, Ephemeral, Index, NetworkedIndex, RemoteSite,
+    RepositoryArchiveExt as _, Revision,
 };
 
 /// The demand cover of one evaluation: every index key range the
@@ -323,6 +324,22 @@ impl Pinned {
             epoch: source.overlay().revision().sequence,
         }
     }
+
+    /// Where a standalone ephemeral line stands right now.
+    fn ephemeral(line: &Ephemeral) -> Self {
+        Self {
+            revision: None,
+            epoch: line.revision().sequence,
+        }
+    }
+
+    /// A pin no evaluation has set.
+    fn unset() -> Self {
+        Self {
+            revision: None,
+            epoch: 0,
+        }
+    }
 }
 
 /// A standing query over a composite of lines — a branch, or every
@@ -336,15 +353,20 @@ impl Pinned {
 /// the touched sets of every moved line union into one maintenance
 /// step over the composite.
 pub struct Subscription<Q: Application> {
-    /// The lines read, in join order.
+    /// The tree lines read, in join order.
     sources: Vec<Source>,
+    /// The standalone ephemeral lines read, in join order.
+    ephemerals: Vec<Ephemeral>,
     /// The layer's own overlay facts (`.with(..)`), fixed for the
     /// subscription's lifetime. Each line's session overlay is read
     /// live at every evaluation instead, so it is not held here.
     changes: Changes,
     query: Q,
-    /// One pin per line, parallel to `sources`.
+    /// One pin per tree line, parallel to `sources`.
     pins: Vec<Pinned>,
+    /// One pin per standalone ephemeral line, parallel to
+    /// `ephemerals`.
+    epochs: Vec<Pinned>,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -388,21 +410,16 @@ impl QueryLayer<'_> {
     /// change; each line's ephemeral store is read live and its
     /// changes are maintained incrementally like tree changes.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
-        let sources: Vec<Source> = self
-            .sources()
-            .iter()
-            .map(|source| source.to_source())
-            .collect();
+        let Composite {
+            sources,
+            ephemerals,
+        } = self.composite();
         let changes = self.changes().clone();
         Subscription {
-            pins: vec![
-                Pinned {
-                    revision: None,
-                    epoch: 0,
-                };
-                sources.len()
-            ],
+            pins: vec![Pinned::unset(); sources.len()],
+            epochs: vec![Pinned::unset(); ephemerals.len()],
             sources,
+            ephemerals,
             changes,
             query,
             demand: Demand::new(),
@@ -536,7 +553,18 @@ where
         for source in &self.sources {
             layer = layer.join(QueryLayer::from(source.as_ref()));
         }
+        for line in &self.ephemerals {
+            layer = layer.join(line);
+        }
         layer.with(self.changes.clone())
+    }
+
+    /// The owned lines this subscription reads.
+    fn composite(&self) -> Composite {
+        Composite {
+            sources: self.sources.clone(),
+            ephemerals: self.ephemerals.clone(),
+        }
     }
 
     /// Anchor every branch line's metadata entity on `demand` (see
@@ -581,8 +609,9 @@ where
             + 'static,
     {
         let current: Vec<Pinned> = self.sources.iter().map(Pinned::current).collect();
+        let epochs: Vec<Pinned> = self.ephemerals.iter().map(Pinned::ephemeral).collect();
         if self.initialized {
-            if current == self.pins {
+            if current == self.pins && epochs == self.epochs {
                 return Ok(None);
             }
             // A head-dependent result — one that read
@@ -610,16 +639,27 @@ where
                         touched = touched.merge(verdict);
                     }
                     if current[index].epoch != self.pins[index].epoch {
-                        let verdict = self.touched_ephemeral(source, self.pins[index].epoch);
+                        let verdict = self
+                            .touched_ephemeral(source.as_ref().overlay(), self.pins[index].epoch);
                         touched = touched.merge(verdict);
                     }
                     if matches!(touched, Touched::Rules) {
                         break;
                     }
                 }
+                for (index, line) in self.ephemerals.iter().enumerate() {
+                    if matches!(touched, Touched::Rules) {
+                        break;
+                    }
+                    if epochs[index].epoch != self.epochs[index].epoch {
+                        let verdict = self.touched_ephemeral(line, self.epochs[index].epoch);
+                        touched = touched.merge(verdict);
+                    }
+                }
                 match touched {
                     Touched::Nothing => {
                         self.pins = current;
+                        self.epochs = epochs;
                         return Ok(None);
                     }
                     Touched::Facts {
@@ -634,6 +674,7 @@ where
                         {
                             self.maintenances += 1;
                             self.pins = current;
+                            self.epochs = epochs;
                             return Ok(Some(delta));
                         }
                         // Not maintainable for this query/rule shape:
@@ -667,6 +708,7 @@ where
         self.results = results;
         self.demand = demand;
         self.pins = current;
+        self.epochs = epochs;
         self.initialized = true;
         Ok(Some(delta))
     }
@@ -803,8 +845,8 @@ where
     /// against the cover, with no diff to compute. A change inside a
     /// rule-discovery range, or a pin the store's ring no longer
     /// reaches, is [`Touched::Rules`], which recomputes.
-    fn touched_ephemeral(&self, source: &Source, sequence: u64) -> Touched {
-        let Some(instants) = source.as_ref().overlay().since(sequence) else {
+    fn touched_ephemeral(&self, line: &Ephemeral, sequence: u64) -> Touched {
+        let Some(instants) = line.since(sequence) else {
             return Touched::Rules;
         };
         let manifest = dialog_search_tree::Manifest::default();
@@ -912,8 +954,7 @@ where
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
                 let query_env: QueryEnv<'a, Env> =
-                    QueryEnv::new(self.sources.clone(), overlay, env)
-                        .with_demand(self.demand.clone());
+                    QueryEnv::new(self.composite(), overlay, env).with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
                     // Fixpoint continuation: deletions retract via DRed,
@@ -1020,7 +1061,7 @@ where
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let mut query_env: QueryEnv<'a, Env> =
-                QueryEnv::new(self.sources.clone(), overlay, env).with_demand(demand.clone());
+                QueryEnv::new(self.composite(), overlay, env).with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -1065,7 +1106,7 @@ where
             self.anchor(&self.demand, &operator);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a, Env> = QueryEnv::new(self.sources.clone(), overlay, env)
+            let query_env: QueryEnv<'a, Env> = QueryEnv::new(self.composite(), overlay, env)
                 .with_demand(self.demand.clone())
                 .with_fixpoint(
                     concept.this(),

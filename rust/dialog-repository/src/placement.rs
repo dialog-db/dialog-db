@@ -313,7 +313,7 @@ impl Placements {
     }
 
     /// The layer undeclared attributes belong to, if one is declared.
-    fn default_layer(&self) -> Option<&Entity> {
+    pub(crate) fn default_layer(&self) -> Option<&Entity> {
         if let Some(layer) = &self.default {
             return Some(layer);
         }

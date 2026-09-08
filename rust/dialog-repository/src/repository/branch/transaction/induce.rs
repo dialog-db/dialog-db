@@ -49,7 +49,7 @@ use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match,
 use futures_util::{StreamExt as _, TryStreamExt};
 
 use crate::repository::branch::QueryLayer;
-use crate::repository::branch::session::QueryEnv;
+use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::source::SourceRef;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
@@ -65,8 +65,14 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// Run commit-time induction over `changes` + `transients`, folding
 /// durable novelty into `changes`. Transients never enter `changes`;
 /// they are visible to rule bodies for exactly one round.
+///
+/// `source` is the line whose committed rules dispatch and whose
+/// watermark the lag is measured against; `view` is every line a rule
+/// body reads, which is `source` alone for a transaction on one
+/// branch and the whole composite for a [`Stack`](crate::Stack).
 pub(crate) async fn induce<Env>(
     source: SourceRef<'_>,
+    view: &Composite,
     changes: &mut Changes,
     transients: Changes,
     env: &Env,
@@ -192,16 +198,21 @@ where
             }
         }
 
-        // The frozen round view: branch ⊕ durable changes ⊕ this
+        // The frozen round view: every line ⊕ durable changes ⊕ this
         // round's transients, through the same layered QueryEnv a
         // transaction query uses, so rule bodies read exactly what a
         // mid-transaction query would.
         let mut view_changes = changes.clone();
         transient_overlay.clone().assert(&mut view_changes);
-        let layered = QueryLayer::from(source)
-            .with(view_changes)
-            .overlay(&operator);
-        let view = QueryEnv::new(vec![source.to_source()], layered, env);
+        let mut layer = QueryLayer::new();
+        for line in &view.sources {
+            layer = layer.join(QueryLayer::from(SourceRef::from(line)));
+        }
+        for line in &view.ephemerals {
+            layer = layer.join(line);
+        }
+        let layered = layer.with(view_changes).overlay(&operator);
+        let view = QueryEnv::new(view.clone(), layered, env);
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it
