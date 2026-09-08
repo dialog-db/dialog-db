@@ -34,7 +34,7 @@ replica, for this tab) is a binding made at stack construction.
 ## Declarations, as facts on the bottom line
 
 ```
-dialog.attribute/layer  of attribute:ui/selected  is layer:tab
+dialog.attribute/layer  of attribute:ui/selected  is memory:tab
 ```
 
 That is the only replicated declaration. Layer names are entities;
@@ -49,43 +49,91 @@ above:
 
 ```yaml
 concept!: &site
-  layer: layer:tab
+  layer: memory:tab
   with:
     path: { the: xyz.tonk.site/path, as: text }
 ```
+
+## Topology as facts
+
+A stack's shape is data, not builder state. Each enclosing line holds
+one **edge** per line it encloses, in its own tree, written as
+machinery in the same commit that moves its head:
+
+```
+<edge> dialog.layer/from      did:key:zLocal        # the enclosing line
+<edge> dialog.layer/to        did:key:zShared       # the enclosed line
+<edge> dialog.layer/name      memory:shared         # the stable name placements use
+<edge> dialog.layer/revision  <revision of zShared> # replaced on every commit of zLocal
+```
+
+plus the enclosed line's address (its repository and branch name, or
+its ephemeral kind), in the `dialog.branch/*` vocabulary the session
+metadata already uses at query time. The address is necessary: a
+branch entity is a blake3 derivation, not something `open` can
+decode. The edge is its own entity rather than a fact on the enclosed
+line because a composite read unions every tree: local and gossip
+both capture shared, at different revisions, and only an edge entity
+keeps the two apart.
+
+Why facts rather than a field on the revision: a rule can premise on
+them. "Local captured shared at `r` and shared's head is now `h`" is
+an ordinary body, so stale derivation is a rule's concern, not engine
+code. And the audience rule (below) guarantees an edge is resolvable
+wherever it is readable, because a line only ever references lines
+beneath it.
+
+### Recovery
+
+`Stack::open(&line)` walks edges downward from any line. The durable
+part of a tab stack recovers from `main.local`; the ephemeral layers
+above it are rebuilt by the process, as they would be anyway. If that
+rebuild should be data-driven too, a durable line may hold template
+facts pointing up, name plus kind and no revision, which reference no
+head and so do not violate the audience rule. Templates stay builder
+code for now.
 
 ## Building a stack
 
 ```rust
 let shared = repo.branch("main").open().perform(&env).await?;
 let local = repo.branch("main.local").open().perform(&env).await?;
+let gossip = Ephemeral::channel(&shared);
+let state = Ephemeral::new();
+let tab = Ephemeral::new();
 
 let stack = Stack::new()
-    .layer(None, shared)                                    // durable, peers
-    .layer(Some("layer:local".parse()?), local)             // durable, this device
-    .layer(Some("layer:gossip".parse()?), Ephemeral::channel(&shared)) // ephemeral, peers
-    .layer(Some("layer:state".parse()?), Ephemeral::new())  // ephemeral, this process
-    .layer(Some("layer:tab".parse()?), Ephemeral::new())    // ephemeral, this tab
+    .layer(shared)                                                // unnamed: the default
+    .layer(local).named("memory:local").over(&shared)
+    .layer(gossip).named("memory:gossip").over(&shared)
+    .layer(state).named("memory:state").over(&local).over(&gossip)
+    .layer(tab).named("memory:tab").over(&state)
     .build()
     .perform(&env)
     .await?;
 ```
 
-`build` checks three things:
+`over` declares an edge; `build` validates and asserts the edges, and
+every later commit of an enclosing line refreshes its edges'
+revisions. Enclosure is explicit rather than derived from list order:
+the derivation would produce the same graph here, but a rule that
+needs explaining must not be the only way to say it.
 
-- **Exactly one unnamed layer.** None means undeclared attributes have
-  nowhere to go; more than one means they fan out silently, which is
-  the one place fan-out must never be implicit.
-- **Order is a dependency order.** Every layer is listed after every
-  layer it may capture.
-- **The audience rule.** A layer captures a lower layer only if that
-  layer's audience contains its own. A capture is a revision hash; if
-  gossip captured local, every gossip instant a peer received would
-  reference a head the peer cannot resolve. So gossip (audience: the
-  peers) captures shared and not local (audience: this device); state
-  (audience: this process) captures shared, local, and gossip; tab
-  captures state. The list above therefore builds this shape, with
-  local and gossip as siblings, without anyone drawing it:
+`build` checks:
+
+- **Exactly one unnamed layer**, the default for undeclared
+  attributes. A write naming a layer the stack does not bind fails
+  with a clear error. A catch-all layer is a possible flag; it is
+  deliberately not the default, since it turns a schema and stack
+  mismatch into silent misplacement.
+- **Edges form a DAG.**
+- **The audience rule.** A layer may enclose a lower layer only if
+  that layer's audience contains its own. A capture is a revision
+  hash; if gossip captured local, every gossip instant a peer received
+  would reference a head the peer cannot resolve. So gossip (audience:
+  the peers) encloses shared and not local (audience: this device);
+  state (audience: this process) encloses local and gossip; tab
+  encloses state:
 
 ```
 |-------------------------|
@@ -101,9 +149,7 @@ let stack = Stack::new()
 
 Audience is a property of the line: a branch's is its peers, an
 `Ephemeral::new()` is this process, a channel is the peers of the
-branch it is built from. Two layers with the same audience may
-capture in list order, which is how state and tab, both process-local
-in kind, are still ordered.
+branch it is built from.
 
 ### Several layers under one name
 
@@ -144,7 +190,7 @@ stack is just never listed. Nothing durable is written by naming.
 stack.select(query).perform(&env)          // composite read, all lines
 stack.subscribe(query)                     // composite subscription, pins every line
 stack.transaction().assert(doc).commit().perform(&env)   // routes by placement
-stack.layer(&"layer:tab".parse()?)         // the bound line(s), for direct access
+stack.layer(&"memory:tab".parse()?)        // the bound line(s), for direct access
 stack.revision()                           // the stack revision: see below
 ```
 
@@ -158,16 +204,11 @@ the stack revision.
 A stack transaction accumulates instructions as today. At commit,
 after induction has settled the batch against the composite view, the
 batch is partitioned by each attribute's layer, and the lines commit
-**bottom to top**. Each upper line's revision records the heads of
-the lines it captures, as they stand after their own commits:
-
-```
-Revision { tree, edition, context, captures: Vec<(line entity, Revision)> }
-```
-
-Only lines above the bottom pay this, and a capture is one hash per
-captured line, so a tab line that commits on every click records the
-state head it saw and nothing more. Consequences:
+**bottom to top**. Each enclosing line's commit folds in a replace of
+`dialog.layer/revision` on each of its edges, naming the enclosed
+heads as they stand after their own commits. Only enclosing lines pay
+this: one small replace per edge per commit, recorded in that line's
+history. Consequences:
 
 - **Consistency without atomicity.** A reader of the tab line knows,
   transitively, which shared revision that state was computed
@@ -175,15 +216,14 @@ state head it saw and nothing more. Consequences:
   *at that revision* rather than at "now".
 - **One identity.** The top line's revision transitively names the
   whole composite. `stack.revision()` is that. With siblings, the
-  first line that names both local and gossip is state; the top
-  always names everything.
-- **Stale derivation is detectable.** A local layer that captured
-  shared head `h` and now sees the shared head at `h'` knows it is
-  behind, which is the induction watermark generalized to a pair of
-  lines.
+  first line whose edges name both local and gossip is state; the
+  top always names everything.
+- **Stale derivation is a rule.** A layer whose edge revision differs
+  from the enclosed line's current head is behind, and a rule can say
+  so, which is the induction watermark generalized to a pair of lines.
 
 A revision on an ephemeral line is an identity, not a persistence
-claim: a hash of its state plus its captures, with no parent chain
+claim: a hash of its state plus its edges, with no parent chain
 retained. That is enough for subscription pins, diffs, and captures.
 
 ### Retracts on a named layer
@@ -259,10 +299,11 @@ on an epoch; `Transaction` gains the stack fan-out and capture.
    cover-scoped diff, and no history. Replace `Overlay` with it.
    Subscriptions become incremental over session changes for free.
 2. Placement by layer entity, with the unbound-layer error.
-3. `Stack` over `QueryLayer`: the bottom-first builder, the
-   `build`-time checks (one unnamed layer, dependency order, the
-   audience rule), `named`, the registry metadata, `transaction`
-   with bottom-to-top commit and captures on upper revisions.
+3. `Stack` over `QueryLayer`: edges as `dialog.layer/*` facts with
+   addresses, the builder with explicit `over`, the `build`-time
+   checks (one unnamed layer, a DAG, the audience rule), `Stack::open`
+   by walking edges, `named`, the registry metadata, `transaction`
+   with bottom-to-top commit and edge refresh.
 4. Tonk migration: `layer:state` and `layer:tab` declared in the
    library, one stack per connection with its own tab line,
    inspector over the registry, `navigate` as a tab-layer
@@ -282,9 +323,10 @@ on an epoch; `Transaction` gains the stack fan-out and capture.
   without any upper line committing, so upper captures are briefly
   behind. That is the stale-derivation signal working as intended,
   but the first read after a pull should probably re-capture eagerly.
-- **Layer entity syntax.** `layer:local` is used above because a
-  bare-scheme URI such as `local:` may not pass the canonical parse;
-  check before settling the convention.
+- **Layer name convention.** `memory:local`, `memory:state`,
+  `memory:tab` are used above. Whether they are a fixed convention or
+  declared per repository matters because tonk's library will name
+  them in placements.
 - **Snapshots in stacks.** A snapshot can be bound as the bottom of a
   read-only stack. Whether a transaction over such a stack should
   advance the snapshot the way `Snapshot::transaction` does today is
