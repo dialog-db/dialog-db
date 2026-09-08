@@ -395,20 +395,35 @@ session overlay is replaced by a real memory-backed store,
   subscription's subtract workaround is gone. Rules asserted into the
   store resolve as their own layer, read fresh.
 
-Carries over unchanged from increment 1: composite subscriptions,
-`Changes::cancel` and `Changes::subtract`, the `dialog.attribute/`
-carve-out in the write gate, partition after induction, and the
-routing tests.
+**Increment 3** (placement by layer entity, `placement.rs`): the
+fixed `Layer` enum is gone.
 
-Still to replace: the `Layer` enum becomes a layer name bound in a
-stack; `Placement` targets that entity; `Transaction` gains the stack
-fan-out and lazy link refresh.
+- A layer is an entity, conventionally `memory:<name>`, and nothing
+  about the name is fixed. `dialog.attribute/layer` of an attribute
+  entity is a layer entity; `dialog.attribute/default` of the
+  repository DID names the layer an attribute with no placement
+  belongs to, which is the tree's name. With no default declared,
+  undeclared attributes reach the tree as before. A declaration
+  whose value is not an entity fails the commit
+  (`InvalidPlacement`).
+- A line carries local **bindings** from layer entities to its stores
+  (`Branch::bind(layer, Target::Tree | Target::Session)`, shared
+  across clones like the caches; a snapshot minted from a branch
+  shares the branch's). The tree needs no binding: the default names
+  it. A write naming a layer the line does not bind fails the commit
+  (`UnboundLayer`), and binding it afterwards makes the same write
+  succeed. This is the seam the stack builder drives next: a stack's
+  links become bindings to other lines.
+- Routing is unchanged in shape: after induction the settled batch
+  is partitioned by each attribute's layer, resolved through the
+  declarations and the bindings, into the tree commit and the
+  ephemeral store.
 
-## Order of work
+Carries over unchanged from increment 1:## Order of work
 
 1. ~~Ephemeral line.~~ Done: increment 2.
-2. Placement by layer entity plus the repository default fact, with
-   the unbound-layer error.
+2. ~~Placement by layer entity plus the repository default fact, with
+   the unbound-layer error.~~ Done: increment 3.
 3. `Stack` over `QueryLayer`: descriptor blobs in the archive with
    `dialog.link/revision` facts beside them, the builder with
    explicit `link`, the `build`-time checks (every targetable name

@@ -6,6 +6,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
+use crate::placement::{Bindings, Target};
 use crate::repository::source::{Caches, SourceRef};
 use crate::{Ephemeral, NetworkedIndex, RemoteSite};
 use dialog_artifacts::DialogArtifactsError;
@@ -147,6 +148,10 @@ pub struct Branch {
     /// every change mints an instant subscriptions maintain from.
     /// See [`Ephemeral`].
     overlay: Ephemeral,
+    /// Which store each layer name a placement can target is bound to
+    /// on this replica. Shared across clones like the caches. See
+    /// [`Bindings`].
+    bindings: Bindings,
     /// Shared plan cache for the deductive rules resolved on this branch,
     /// keyed by content-addressed `(rule, adornment)`. Handed to each
     /// per-query `ConceptRules` assembly so a re-assembled rule set reuses
@@ -213,6 +218,19 @@ impl Branch {
     /// attributes to. See [`Ephemeral`].
     pub fn overlay(&self) -> &Ephemeral {
         &self.overlay
+    }
+
+    /// Bind a layer name to one of this branch's stores, so a write to
+    /// an attribute placed on that layer routes there. Local to this
+    /// replica; see [`Bindings`].
+    pub fn bind(&self, layer: Entity, target: Target) -> &Self {
+        self.bindings.bind(layer, target);
+        self
+    }
+
+    /// This branch's layer bindings.
+    pub fn bindings(&self) -> &Bindings {
+        &self.bindings
     }
 
     /// Returns the current revision of this branch, or `None` if the branch
