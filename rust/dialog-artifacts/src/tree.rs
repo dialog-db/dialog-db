@@ -1318,11 +1318,14 @@ where
         // records), written through [`ArtifactTreeExt::record`] or a
         // [`WriteScope::Machinery`] stream. At the library level such
         // facts therefore cannot be corrupted through the ordinary
-        // write path. Two prefixes are carved out of the application
-        // gate: `dialog.rule/*` (rule storage) and `dialog.concept/*`
-        // (concept markers), whose integrity is semantic rather than
-        // positional — rules are content-addressed, so a forged rule
-        // fact fails the hydration check upstream and is inert.
+        // write path. Three prefixes are carved out of the application
+        // gate: `dialog.rule/*` (rule storage), `dialog.concept/*`
+        // (concept markers), and `dialog.attribute/*` (attribute
+        // placement declarations), whose integrity is semantic rather
+        // than positional — rules are content-addressed, so a forged
+        // rule fact fails the hydration check upstream and is inert,
+        // and a marker only ever selects a behaviour for facts the
+        // writer could have written anyway.
         if scope == WriteScope::Application {
             let (Instruction::Assert(artifact)
             | Instruction::Replace(artifact)
@@ -1331,6 +1334,7 @@ where
             if the.starts_with("dialog.")
                 && !the.starts_with("dialog.rule/")
                 && !the.starts_with("dialog.concept/")
+                && !the.starts_with("dialog.attribute/")
             {
                 return Err(DialogArtifactsError::ReservedAttribute(
                     artifact.the.to_string(),

@@ -3,6 +3,7 @@ mod query;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 
 use crate::Commit;
+use crate::placement::{Partitioned, Placements};
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot};
@@ -16,9 +17,16 @@ use dialog_effects::memory::{Publish, Resolve};
 /// A transaction on a branch or a snapshot.
 ///
 /// Created by [`Branch::transaction`] or [`Snapshot::transaction`].
-/// Accumulates durable changes via `.assert()` / `.retract()` and
+/// Accumulates changes via `.assert()` / `.retract()` and
 /// *transient* facts (commands) via `.dispatch()`, then commits
 /// atomically via `.commit().perform(&env)`.
+///
+/// Where an asserted or retracted fact lands is the attribute's
+/// decision, not the caller's: each instruction routes to the layer
+/// its attribute is [placed](crate::placement) on — the tree by
+/// default, the session overlay for a
+/// [`Procedural`](crate::Layer::Procedural) attribute. A concept whose
+/// attributes span layers fans out accordingly.
 ///
 /// Transients are visible to every read through [`query`](Self::query)
 /// and to inductive-rule bodies during commit-time induction, but they
@@ -196,6 +204,16 @@ impl<'a> TransactionCommit<'a> {
         let mut changes = self.changes;
         induce::induce(self.source, &mut changes, self.transients, env).await?;
 
+        // Route the settled batch by attribute placement: semantic
+        // instructions commit to the tree, procedural ones land in
+        // the session overlay once the tree commit has succeeded, so
+        // a failed commit leaves the session untouched too.
+        let placements = Placements::resolve(self.source, &changes, env).await?;
+        let Partitioned {
+            semantic: changes,
+            procedural,
+        } = placements.partition(changes)?;
+
         let previous = self.source.revision();
         let touches_rules = touches_rules(&changes);
 
@@ -207,6 +225,7 @@ impl<'a> TransactionCommit<'a> {
             commit = commit.canonicalize();
         }
         let revision = Box::pin(commit.perform(env)).await?;
+        self.source.overlay().apply(procedural);
 
         // Advance the induction watermark: rules have now evaluated
         // through this revision (induction ran over the commit's delta

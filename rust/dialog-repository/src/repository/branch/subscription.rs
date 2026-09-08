@@ -69,13 +69,12 @@ use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled, selector_range};
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Key, State};
+use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Key, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get, Put};
-use dialog_effects::authority::Identify;
+use dialog_effects::authority::{Identify, Operator};
 use dialog_effects::memory::Resolve;
 use dialog_query::Conclusion;
 use dialog_query::concept::query::affected::affected_entities;
@@ -91,8 +90,7 @@ use super::session::{QueryEnv, QueryLayer};
 use crate::layer::tombstones_from;
 use crate::repository::source::Source;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Upstream,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Revision,
 };
 
 /// The demand cover of one evaluation: every index key range the
@@ -300,22 +298,54 @@ impl<T> Delta<T> {
     }
 }
 
-/// A standing query over a branch. Created by
-/// [`Branch::subscribe`]; driven by [`poll`](Subscription::poll).
-pub struct Subscription<Q: Application> {
-    branch: Branch,
-    query: Q,
+/// What one line of a subscription's composite was last evaluated
+/// at: its revision and its session-overlay epoch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Pinned {
     /// The revision the retained results were evaluated at. `None`
-    /// until the first poll.
+    /// until the first poll, or for a branch with no commits.
     revision: Option<Revision>,
     /// The [`Overlay`](crate::Overlay) epoch the retained results
-    /// were evaluated at. The branch's session overlay is off-tree,
-    /// so a change to it is invisible to the poll's tree-diff gate;
-    /// the epoch is the signal that re-triggers evaluation (the
-    /// overlay delta is not derivable from the tree, so an epoch
-    /// move recomputes, reporting the change as a delta against the
+    /// were evaluated at. The line's session overlay is off-tree, so
+    /// a change to it is invisible to the poll's tree-diff gate; the
+    /// epoch is the signal that re-triggers evaluation (the overlay
+    /// delta is not derivable from the tree, so an epoch move
+    /// recomputes, reporting the change as a delta against the
     /// retained results).
-    overlay_epoch: u64,
+    epoch: u64,
+}
+
+impl Pinned {
+    /// Where `source` stands right now.
+    fn current(source: &Source) -> Self {
+        let source = source.as_ref();
+        Self {
+            revision: source.revision(),
+            epoch: source.overlay().epoch(),
+        }
+    }
+}
+
+/// A standing query over a composite of lines — a branch, or every
+/// line a [`QueryLayer`] joins, plus its overlay. Created by
+/// [`Branch::subscribe`] or [`QueryLayer::subscribe`]; driven by
+/// [`poll`](Subscription::poll).
+///
+/// Each line is pinned separately (its revision and its session
+/// overlay's epoch), so a poll re-evaluates exactly when some line
+/// moved, and the incremental path diffs only the lines that did:
+/// the touched sets of every moved line union into one maintenance
+/// step over the composite.
+pub struct Subscription<Q: Application> {
+    /// The lines read, in join order.
+    sources: Vec<Source>,
+    /// The layer's own overlay facts (`.with(..)`), fixed for the
+    /// subscription's lifetime. Each line's session overlay is read
+    /// live at every evaluation instead, so it is not held here.
+    changes: Changes,
+    query: Q,
+    /// One pin per line, parallel to `sources`.
+    pins: Vec<Pinned>,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -343,11 +373,47 @@ impl Branch {
     /// the overlay propagates to the branch's subscriptions as a
     /// result delta on their next poll.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
+        self.query().subscribe(query)
+    }
+}
+
+impl QueryLayer<'_> {
+    /// Register a standing query over this composite: every line the
+    /// layer joins, read as one union, plus the layer's
+    /// [`with`](QueryLayer::with) facts. The subscription evaluates
+    /// on its first [`poll`](Subscription::poll) and is incrementally
+    /// gated afterwards; a commit or a session-overlay change on any
+    /// joined line propagates as a result delta.
+    ///
+    /// The layer's `.with(..)` facts are captured now and never
+    /// change; a query that needs a moving overlay reads it through
+    /// a line's [`Branch::overlay`] instead.
+    pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
+        let sources: Vec<Source> = self
+            .sources()
+            .iter()
+            .map(|source| source.to_source())
+            .collect();
+        // The layer's own changes, minus every joined line's session
+        // overlay: `QueryLayer::from(SourceRef)` folds those in at
+        // construction, but the subscription reads them live at each
+        // evaluation, and holding a snapshot here would pin stale
+        // session facts under the moving ones.
+        let mut changes = self.changes().clone();
+        for source in &sources {
+            changes.subtract(&source.as_ref().overlay().changes());
+        }
         Subscription {
-            branch: self.clone(),
+            pins: vec![
+                Pinned {
+                    revision: None,
+                    epoch: 0,
+                };
+                sources.len()
+            ],
+            sources,
+            changes,
             query,
-            revision: None,
-            overlay_epoch: 0,
             demand: Demand::new(),
             results: Vec::new(),
             fixpoint: Arc::new(Mutex::new(None)),
@@ -379,6 +445,42 @@ enum Touched {
         /// Facts that stopped being readable.
         retracted: Vec<Artifact>,
     },
+}
+
+impl Touched {
+    /// Fold another line's verdict into this one: a rule hit on any
+    /// line dominates; fact changes union; nothing is the identity.
+    fn merge(self, other: Touched) -> Touched {
+        match (self, other) {
+            (Touched::Rules, _) | (_, Touched::Rules) => Touched::Rules,
+            (Touched::Nothing, other) | (other, Touched::Nothing) => other,
+            (
+                Touched::Facts {
+                    mut subjects,
+                    mut facts,
+                    mut asserted,
+                    mut retracted,
+                },
+                Touched::Facts {
+                    subjects: more_subjects,
+                    facts: more_facts,
+                    asserted: more_asserted,
+                    retracted: more_retracted,
+                },
+            ) => {
+                subjects.extend(more_subjects);
+                facts.extend(more_facts);
+                asserted.extend(more_asserted);
+                retracted.extend(more_retracted);
+                Touched::Facts {
+                    subjects,
+                    facts,
+                    asserted,
+                    retracted,
+                }
+            }
+        }
+    }
 }
 
 /// A boxed evaluation future. The poll chain's inner evaluations are
@@ -436,20 +538,39 @@ where
         self.maintenances
     }
 
-    /// Poll the subscription against the branch's current state.
+    /// The composite this subscription reads: every line with its
+    /// live session overlay, plus the layer's captured facts.
+    fn layer(&self) -> QueryLayer<'_> {
+        let mut layer = QueryLayer::new();
+        for source in &self.sources {
+            layer = layer.join(QueryLayer::from(source.as_ref()));
+        }
+        layer.with(self.changes.clone())
+    }
+
+    /// Anchor every branch line's metadata entity on `demand` (see
+    /// [`Demand::anchor_metadata`]).
+    fn anchor(&self, demand: &Demand, operator: &dialog_capability::Capability<Operator>) {
+        for source in &self.sources {
+            if let Source::Branch(branch) = source {
+                demand.anchor_metadata(branch.metadata(operator).branch.this);
+            }
+        }
+    }
+
+    /// Poll the subscription against the composite's current state.
     ///
-    /// Returns `Ok(None)` when the result is known unchanged: the
-    /// branch is at the pinned revision with the session overlay at
-    /// the pinned epoch, or the tree moved but no change intersects
-    /// the demand cover (the pin advances silently). Returns
+    /// Returns `Ok(None)` when the result is known unchanged: every
+    /// line is at its pinned revision with its session overlay at
+    /// the pinned epoch, or some tree moved but no change intersects
+    /// the demand cover (the pins advance silently). Returns
     /// `Ok(Some(delta))` after a (re-)evaluation — the first poll
     /// always evaluates, reporting the initial result as `asserted`
     /// rows.
     ///
-    /// The revision and overlay epoch are snapshotted before
-    /// evaluating; a commit or overlay mutation that lands
-    /// mid-evaluation re-triggers on the next poll, so changes are
-    /// never missed, at worst re-checked.
+    /// The pins are snapshotted before evaluating; a commit or
+    /// overlay mutation that lands mid-evaluation re-triggers on the
+    /// next poll, so changes are never missed, at worst re-checked.
     // The `self` and `env` lifetimes are deliberately unified into
     // one named `'a`: the poll future must stay `Send` on native (an
     // axum handler drains subscription polls), and its inner
@@ -468,15 +589,18 @@ where
             + ConditionalSync
             + 'static,
     {
-        let current = self.branch.revision();
-        let epoch = self.branch.overlay().epoch();
-        // The session overlay is off-tree: an epoch move is invisible
+        let current: Vec<Pinned> = self.sources.iter().map(Pinned::current).collect();
+        // A session overlay is off-tree: an epoch move is invisible
         // to the tree-diff gate below and its delta is not derivable
         // from the tree, so it routes straight to a re-evaluation
         // (reported against the retained results). The incremental
-        // path only serves polls where the tree alone moved.
-        if self.initialized && epoch == self.overlay_epoch {
-            if current == self.revision {
+        // path only serves polls where trees alone moved.
+        let epochs_held = current
+            .iter()
+            .zip(&self.pins)
+            .all(|(now, pinned)| now.epoch == pinned.epoch);
+        if self.initialized && epochs_held {
+            if current == self.pins {
                 return Ok(None);
             }
             // A head-dependent result — one that read
@@ -485,9 +609,27 @@ where
             // metadata facts are overlay-injected, invisible to the
             // tree diff below. Skip the gate and re-evaluate.
             if !self.demand.depends_on_head() {
-                match self.touched(env, &current).await? {
+                let mut touched = Touched::Nothing;
+                for (index, source) in self.sources.iter().enumerate() {
+                    if current[index].revision == self.pins[index].revision {
+                        continue;
+                    }
+                    let verdict = self
+                        .touched(
+                            env,
+                            source,
+                            &self.pins[index].revision,
+                            &current[index].revision,
+                        )
+                        .await?;
+                    touched = touched.merge(verdict);
+                    if matches!(touched, Touched::Rules) {
+                        break;
+                    }
+                }
+                match touched {
                     Touched::Nothing => {
-                        self.revision = current;
+                        self.pins = current;
                         return Ok(None);
                     }
                     Touched::Facts {
@@ -501,7 +643,7 @@ where
                             .await?
                         {
                             self.maintenances += 1;
-                            self.revision = current;
+                            self.pins = current;
                             return Ok(Some(delta));
                         }
                         // Not maintainable for this query/rule shape:
@@ -534,14 +676,13 @@ where
 
         self.results = results;
         self.demand = demand;
-        self.revision = current;
-        self.overlay_epoch = epoch;
+        self.pins = current;
         self.initialized = true;
         Ok(Some(delta))
     }
 
-    /// Classify what the changes between the pinned root and
-    /// `current` touched within the demand cover.
+    /// Classify what the changes between one line's pinned root and
+    /// its `current` one touched within the demand cover.
     ///
     /// The diff is *scoped to the cover*
     /// ([`differentiate_within`]): subtrees whose key span misses
@@ -562,6 +703,8 @@ where
     async fn touched<'a, Env>(
         &'a self,
         env: &'a Env,
+        source: &'a Source,
+        pinned: &'a Option<Revision>,
         current: &'a Option<Revision>,
     ) -> Result<Touched, EvaluationError>
     where
@@ -573,7 +716,7 @@ where
             + ConditionalSync
             + 'static,
     {
-        let pinned = tree_hash(&self.revision);
+        let pinned = tree_hash(pinned);
         let target = tree_hash(current);
         if pinned == target {
             return Ok(Touched::Nothing);
@@ -583,7 +726,7 @@ where
             return Ok(Touched::Nothing);
         }
 
-        // Load the remote if the branch tracks one, exactly as a select does:
+        // Load the remote if the line tracks one, exactly as a select does:
         // a pull replicates tree nodes along changed paths but never spilled
         // value blocks, so the first poll after a pull that lands a spilled
         // fact inside the cover must be able to read the block through the
@@ -591,26 +734,14 @@ where
         // fallback rather than swallowed: the local archive alone may
         // still satisfy the poll, and a read that misses fails with the
         // load failure as its cause instead of a bare not-found.
-        let remote = match self.branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => {
-                let loaded = self
-                    .branch
-                    .subject()
-                    .remote(name.clone())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            _ => RemoteFallback::None,
-        };
-        let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), remote);
+        let line = source.as_ref();
+        let remote = line.fallback(env).await;
+        let store = NetworkedIndex::new(env, line.archive().index(), remote);
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
-        let previous =
-            Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
-        let next = Index::from_hash_with_cache(NodeHash::from(target), self.branch.node_cache());
+        let previous = Index::from_hash_with_cache(NodeHash::from(pinned), line.node_cache());
+        let next = Index::from_hash_with_cache(NodeHash::from(target), line.node_cache());
 
         let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
         let mut changes = Box::pin(changes);
@@ -725,22 +856,16 @@ where
                     .perform(env)
                     .await
                     .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-                let layer = QueryLayer::from(&self.branch);
-                let overlay = layer.overlay(&operator);
+                let overlay = self.layer().overlay(&operator);
                 let tombstones = tombstones_from(&overlay);
-                self.demand
-                    .anchor_metadata(self.branch.metadata(&operator).branch.this);
-                // Typed with the *named* env lifetime (owned branch
-                // clone, no generator-local borrows) so the poll
+                self.anchor(&self.demand, &operator);
+                // Typed with the *named* env lifetime (owned line
+                // clones, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
-                let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                    vec![Source::Branch(self.branch.clone())],
-                    overlay,
-                    Arc::new(tombstones),
-                    env,
-                )
-                .with_demand(self.demand.clone());
+                let query_env: QueryEnv<'a, Env> =
+                    QueryEnv::new(self.sources.clone(), overlay, Arc::new(tombstones), env)
+                        .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
                     // Fixpoint continuation: deletions retract via DRed,
@@ -817,9 +942,9 @@ where
         })
     }
 
-    /// Evaluate the query against the branch, recording every
+    /// Evaluate the query against the composite, recording every
     /// demanded range into `demand`. Mirrors the ordinary
-    /// `branch.select(query).perform(env)` path with a
+    /// `layer.select(query).perform(env)` path with a
     /// demand-recording environment.
     fn evaluate<'a, Env>(
         &'a self,
@@ -842,19 +967,14 @@ where
                 .perform(env)
                 .await
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-            let layer = QueryLayer::from(&self.branch);
-            let overlay = layer.overlay(&operator);
+            let overlay = self.layer().overlay(&operator);
             let tombstones = tombstones_from(&overlay);
-            demand.anchor_metadata(self.branch.metadata(&operator).branch.this);
+            self.anchor(demand, &operator);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let mut query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![Source::Branch(self.branch.clone())],
-                overlay,
-                Arc::new(tombstones),
-                env,
-            )
-            .with_demand(demand.clone());
+            let mut query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(self.sources.clone(), overlay, Arc::new(tombstones), env)
+                    .with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -895,24 +1015,18 @@ where
                 .perform(env)
                 .await
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-            let layer = QueryLayer::from(&self.branch);
-            let overlay = layer.overlay(&operator);
+            let overlay = self.layer().overlay(&operator);
             let tombstones = tombstones_from(&overlay);
-            self.demand
-                .anchor_metadata(self.branch.metadata(&operator).branch.this);
+            self.anchor(&self.demand, &operator);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![Source::Branch(self.branch.clone())],
-                overlay,
-                Arc::new(tombstones),
-                env,
-            )
-            .with_demand(self.demand.clone())
-            .with_fixpoint(
-                concept.this(),
-                Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
-            );
+            let query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(self.sources.clone(), overlay, Arc::new(tombstones), env)
+                    .with_demand(self.demand.clone())
+                    .with_fixpoint(
+                        concept.this(),
+                        Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
+                    );
             self.query.clone().perform(&query_env).try_vec().await
         })
     }
@@ -2348,6 +2462,31 @@ mod tests {
         #[domain("credential")]
         pub struct Badge(pub String);
 
+        /// A document's title (`doc/title`), a semantic fact.
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("doc")]
+        pub struct DocTitle(pub String);
+
+        /// Whether a document is selected in this session
+        /// (`ui/selected`), placed on the procedural layer by the
+        /// tests that use it.
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("ui")]
+        pub struct Selected(pub bool);
+
+        /// A document as this session sees it: a durable title and
+        /// a session-scoped selection flag, one concept over two
+        /// layers.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct SessionDocument {
+            /// The document entity.
+            pub this: Entity,
+            /// Its title, from the tree.
+            pub title: DocTitle,
+            /// Its selection flag, from the session layer.
+            pub selected: Selected,
+        }
+
         /// A report's display name (`report/name`).
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("report")]
@@ -3660,6 +3799,343 @@ mod tests {
                 total: Total(50),
             }),
             "the retained table carries the recursively derived row"
+        );
+        Ok(())
+    }
+
+    /// A subscription over a joined composite: the union of two
+    /// branches is evaluated once, and a covered commit on either
+    /// line propagates as a delta — maintained per touched entity,
+    /// never recomputed — while an uncovered commit on either line
+    /// advances that line's pin silently.
+    #[dialog_common::test]
+    async fn it_subscribes_across_joined_branches() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let scratch = repo.branch("scratch").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        main.transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let bob = Entity::new()?;
+        scratch
+            .transaction()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let synthetic = Entity::new()?;
+        let mut subscription = main
+            .query()
+            .join(&scratch)
+            .with(
+                the!("person/name")
+                    .of(synthetic.clone())
+                    .is("Synthetic".to_string()),
+            )
+            .subscribe(names_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        let mut asserted = names(&initial.asserted);
+        asserted.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+            (synthetic.clone(), "Synthetic".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(
+            asserted, expected,
+            "the union of both lines plus the layer facts"
+        );
+        assert!(subscription.poll(&operator).await?.is_none());
+
+        // A covered write on the second line.
+        let carol = Entity::new()?;
+        scratch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(carol.clone())
+                    .is("Carol".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a covered commit on a joined line propagates");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(carol.clone(), "Carol".to_string())]
+        );
+        assert!(delta.retracted.is_empty());
+        assert_eq!(subscription.recomputes(), 1, "maintained, not recomputed");
+        assert_eq!(subscription.maintenances(), 1);
+
+        // An uncovered write on the first line: the pin advances,
+        // nothing is reported.
+        main.transaction()
+            .assert(
+                the!("misc/tag")
+                    .of(Entity::new()?)
+                    .is("unrelated".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "an uncovered commit on a joined line is free"
+        );
+
+        // A covered retract on the first line.
+        main.transaction()
+            .retract(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a covered retract on a joined line propagates");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            names(&delta.retracted),
+            vec![(alice.clone(), "Alice".to_string())]
+        );
+        assert_eq!(subscription.maintenances(), 2);
+
+        let mut retained = names(subscription.results());
+        retained.sort();
+        let mut expected = vec![
+            (bob, "Bob".to_string()),
+            (carol, "Carol".to_string()),
+            (synthetic, "Synthetic".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(retained, expected);
+        Ok(())
+    }
+
+    /// Every joined line's session overlay is read live: a session
+    /// fact on either line propagates, a session fact present when
+    /// the subscription was made is not pinned as a stale snapshot,
+    /// and clearing a line's session retracts exactly its rows.
+    #[dialog_common::test]
+    async fn it_observes_every_joined_session_overlay() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let scratch = repo.branch("scratch").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        main.transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // A session fact already on the first line when the
+        // subscription is made.
+        let bob = Entity::new()?;
+        main.overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+
+        let mut subscription = main.query().join(&scratch).subscribe(names_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        let mut asserted = names(&initial.asserted);
+        asserted.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(
+            asserted, expected,
+            "a pre-existing session fact appears once"
+        );
+
+        // A session fact on the second line propagates with no tree
+        // movement anywhere.
+        let carol = Entity::new()?;
+        scratch.overlay().assert(
+            the!("person/name")
+                .of(carol.clone())
+                .is("Carol".to_string()),
+        );
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a joined line's session change propagates");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(carol.clone(), "Carol".to_string())]
+        );
+
+        // Clearing the first line's session drops exactly Bob: the
+        // subscription reads that session live rather than from a
+        // snapshot taken at creation.
+        main.overlay().clear();
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("clearing a joined line's session propagates");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(names(&delta.retracted), vec![(bob, "Bob".to_string())]);
+
+        let mut retained = names(subscription.results());
+        retained.sort();
+        let mut expected = vec![(alice, "Alice".to_string()), (carol, "Carol".to_string())];
+        expected.sort();
+        assert_eq!(retained, expected);
+        assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// A session tombstone on a joined line at subscribe time stays a
+    /// tombstone: lifting the line's overlay out of the layer's
+    /// captured facts must not invert it into a standing assert.
+    #[dialog_common::test]
+    async fn it_keeps_a_session_tombstone_out_of_the_layer_facts() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let scratch = repo.branch("scratch").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        main.transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        main.overlay().retract(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
+
+        let mut subscription = main.query().join(&scratch).subscribe(names_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(
+            initial.asserted.is_empty(),
+            "the session tombstone hides the tree fact"
+        );
+
+        main.overlay().clear();
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("dropping the tombstone restores the row");
+        assert_eq!(names(&delta.asserted), vec![(alice, "Alice".to_string())]);
+        Ok(())
+    }
+
+    /// One concept over two layers: the title is a tree fact, the
+    /// selection flag is placed on the procedural layer. A single
+    /// transaction asserts the concept and it fans out; the
+    /// subscription joins it back; flipping the session half
+    /// propagates without moving the head, and the tree never holds
+    /// the flag.
+    #[dialog_common::test]
+    async fn it_subscribes_to_a_concept_spanning_layers() -> anyhow::Result<()> {
+        use concepts::{DocTitle, Selected, SessionDocument};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let doc = Entity::new()?;
+        let placed = branch
+            .transaction()
+            .assert(crate::Placement::new(
+                "ui/selected".parse()?,
+                crate::Layer::Procedural,
+            ))
+            .assert(SessionDocument {
+                this: doc.clone(),
+                title: DocTitle("Notes".into()),
+                selected: Selected(false),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<SessionDocument>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted,
+            vec![SessionDocument {
+                this: doc.clone(),
+                title: DocTitle("Notes".into()),
+                selected: Selected(false),
+            }],
+            "the concept joins across the tree and the session layer"
+        );
+
+        // Flip the session half: no head movement, one delta.
+        let flipped = branch
+            .transaction()
+            .retract(Selected::of(doc.clone()).is(false))
+            .assert(Selected::of(doc.clone()).is(true))
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert_eq!(flipped, placed, "a session-only write mints no revision");
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the session half propagates");
+        assert_eq!(
+            delta.asserted,
+            vec![SessionDocument {
+                this: doc.clone(),
+                title: DocTitle("Notes".into()),
+                selected: Selected(true),
+            }]
+        );
+        assert_eq!(
+            delta.retracted,
+            vec![SessionDocument {
+                this: doc.clone(),
+                title: DocTitle("Notes".into()),
+                selected: Selected(false),
+            }]
+        );
+
+        // The flag never reached the tree.
+        let selector = dialog_artifacts::ArtifactSelector::new()
+            .the("ui/selected".parse()?)
+            .of(doc.clone());
+        let stored: Vec<_> = futures_util::TryStreamExt::try_collect(
+            branch.claims().select(selector).perform(&operator).await?,
+        )
+        .await?;
+        assert!(
+            stored.is_empty(),
+            "the procedural half stays out of the tree"
         );
         Ok(())
     }

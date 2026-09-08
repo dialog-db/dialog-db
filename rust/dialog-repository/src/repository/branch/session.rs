@@ -111,6 +111,11 @@ impl<'a> QueryLayer<'a> {
         self
     }
 
+    /// Every line this layer reads from, in join order.
+    pub(crate) fn sources(&self) -> &[SourceRef<'a>] {
+        &self.sources
+    }
+
     /// The branches this layer reads from, in join order.
     pub fn branches(&self) -> Vec<&'a Branch> {
         self.sources
