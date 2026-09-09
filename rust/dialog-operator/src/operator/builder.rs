@@ -16,7 +16,7 @@ use dialog_repository::{ACCESS_BRANCH, RemoteSite};
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, UcanCertificate};
-use dialog_ucan_core::DelegationBuilder;
+use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use dialog_varsig::Signer;
 
@@ -42,7 +42,7 @@ impl DeriveOperator for Profile {
 pub struct OperatorBuilder {
     credential: SignerCredential,
     context: Vec<u8>,
-    allowed: Vec<Scope>,
+    allowed: Vec<(Scope, Option<Timestamp>)>,
     directory: Directory,
     network: Network,
 }
@@ -74,7 +74,19 @@ impl OperatorBuilder {
         Capability<T>: Ability,
     {
         let cap = capability.into();
-        self.allowed.push(Scope::from(&cap));
+        self.allowed.push((Scope::from(&cap), None));
+        self
+    }
+
+    /// Allow a capability until `expiration`, held only in memory.
+    pub fn allow_until<T, C>(mut self, capability: C, expiration: Timestamp) -> Self
+    where
+        T: Constraint,
+        C: Into<Capability<T>>,
+        Capability<T>: Ability,
+    {
+        let cap = capability.into();
+        self.allowed.push((Scope::from(&cap), Some(expiration)));
         self
     }
 
@@ -111,13 +123,17 @@ impl OperatorBuilder {
 
         // Mint the session: one in-memory grant per allowed scope.
         let mut session = Vec::with_capacity(self.allowed.len());
-        for scope in &self.allowed {
-            let delegation = DelegationBuilder::new()
+        for (scope, expiration) in &self.allowed {
+            let mut builder = DelegationBuilder::new()
                 .issuer(dialog_credentials::Signer::from(profile_signer.clone()))
                 .audience(&operator_signer)
                 .subject(scope.subject.clone())
                 .command(scope.command.segments().clone())
-                .policy(scope.policy())
+                .policy(scope.policy());
+            if let Some(expiration) = expiration {
+                builder = builder.expiration(*expiration);
+            }
+            let delegation = builder
                 .try_build()
                 .await
                 .map_err(|e| OperatorError::Delegation(format!("{e:?}")))?;

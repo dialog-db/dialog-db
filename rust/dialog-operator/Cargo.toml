@@ -45,6 +45,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 tracing = { workspace = true }
 [dev-dependencies]
+futures-util = { workspace = true }
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
 dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
