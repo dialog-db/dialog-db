@@ -146,6 +146,7 @@ async fn it_reads_what_the_branch_reads() -> Result<()> {
         .assert(person("id:alice", "Alice"))
         .assert(person("id:bob", "Bob"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
 
@@ -180,6 +181,7 @@ async fn it_stays_pinned_while_the_branch_advances() -> Result<()> {
         .transaction()
         .assert(person("id:alice", "Alice"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let snapshot = branch.snapshot().expect("snapshot");
@@ -189,6 +191,7 @@ async fn it_stays_pinned_while_the_branch_advances() -> Result<()> {
         .transaction()
         .assert(person("id:bob", "Bob"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
 
@@ -231,6 +234,7 @@ async fn it_reads_through_a_cold_handle() -> Result<()> {
         .transaction()
         .assert(person("id:alice", "Alice"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
 
@@ -254,6 +258,7 @@ async fn it_fails_when_the_root_is_absent() -> Result<()> {
         .transaction()
         .assert(person("id:alice", "Alice"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
     revision.tree = TreeReference::from([7u8; 32]);
@@ -282,6 +287,7 @@ async fn it_joins_a_snapshot_into_a_branch_query() -> Result<()> {
     main.transaction()
         .assert(person("id:alice", "Alice"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let snapshot = main.snapshot().expect("snapshot");
@@ -291,6 +297,7 @@ async fn it_joins_a_snapshot_into_a_branch_query() -> Result<()> {
         .transaction()
         .assert(person("id:bob", "Bob"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
 
@@ -322,6 +329,7 @@ async fn it_injects_session_metadata() -> Result<()> {
         .transaction()
         .assert(person("id:alice", "Alice"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let snapshot = branch.snapshot().expect("snapshot");
@@ -376,6 +384,7 @@ async fn it_folds_the_overlay_into_reads() -> Result<()> {
         .transaction()
         .assert(person("id:alice", "Alice"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let snapshot = branch.snapshot().expect("snapshot");
@@ -453,6 +462,7 @@ async fn it_resolves_committed_rules() -> Result<()> {
                 .is("Alice".to_string()),
         )
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
 
@@ -490,6 +500,7 @@ async fn it_resolves_derived_revision_concepts() -> Result<()> {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?,
         );
@@ -542,6 +553,7 @@ async fn it_logs_history() -> Result<()> {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?,
         );
@@ -648,6 +660,7 @@ async fn it_reports_an_unreferenced_blob_as_absent() -> Result<()> {
         .transaction()
         .assert(person("id:alice", "Alice"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let snapshot = branch.snapshot().expect("snapshot");

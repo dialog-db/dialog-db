@@ -144,6 +144,7 @@ async fn staged() -> Result<(
         .transaction()
         .assert(name("user:alice", "Alice"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let snapshot = branch.snapshot().expect("a committed branch snapshots");
@@ -244,6 +245,7 @@ async fn it_mints_on_its_own_line() -> Result<()> {
         .transaction()
         .assert(name("user:carol", "Carol"))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
 
@@ -636,6 +638,7 @@ async fn it_induces_on_commit() -> Result<()> {
         .assert(increment)
         .assert(the!("counter/count").of(counter.clone()).is(1u64))
         .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let snapshot = branch.snapshot().expect("snapshot");

@@ -310,6 +310,7 @@ mod tests {
                     .is("Ali".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -363,6 +364,7 @@ mod tests {
                     .is("Ali".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -399,6 +401,7 @@ mod tests {
                     .is("Ali".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -442,6 +445,7 @@ mod tests {
                     .is("Allie".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -485,6 +489,7 @@ mod tests {
             .transaction()
             .assert(the!("club/banned").of(club.clone()).is("Ali".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());

@@ -362,6 +362,7 @@ mod tests {
                 .transaction()
                 .assert($the.clone().of($of.clone()).is($is))
                 .commit()
+                .publish()
                 .perform($operator)
                 .await
                 .unwrap();
@@ -507,6 +508,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await
             .unwrap();
@@ -518,6 +520,7 @@ mod tests {
                     .is("Alicia".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await
             .unwrap();
@@ -591,6 +594,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await
             .unwrap();
@@ -602,6 +606,7 @@ mod tests {
                     .is("Alicia".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await
             .unwrap();
@@ -677,6 +682,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await
             .unwrap();
@@ -688,6 +694,7 @@ mod tests {
                     .is("Alicia".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await
             .unwrap();

@@ -1250,6 +1250,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1325,6 +1326,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1373,6 +1375,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1460,6 +1463,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1517,6 +1521,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1590,6 +1595,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(alice.clone()).is(spilled.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1662,6 +1668,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1704,6 +1711,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1719,6 +1727,7 @@ mod tests {
                     .is("unrelated".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1760,6 +1769,7 @@ mod tests {
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1780,6 +1790,7 @@ mod tests {
                     .is("Groceries".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1811,6 +1822,7 @@ mod tests {
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1823,6 +1835,7 @@ mod tests {
             .transaction()
             .assert(second.of(list.clone()).is("Bread".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1856,6 +1869,7 @@ mod tests {
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1874,6 +1888,7 @@ mod tests {
                     .is("unrelated".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1962,6 +1977,7 @@ mod tests {
             .assert(first.of(list.clone()).is("Milk".to_string()))
             .assert(second.of(list.clone()).is("Bread".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2000,6 +2016,7 @@ mod tests {
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2014,6 +2031,7 @@ mod tests {
             .transaction()
             .assert(second.of(list.clone()).is("Bread".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2032,6 +2050,7 @@ mod tests {
                     .is("Groceries".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2065,6 +2084,7 @@ mod tests {
             .assert(first.of(list.clone()).is("Milk".to_string()))
             .assert(second.clone().of(list.clone()).is("Bread".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2083,6 +2103,7 @@ mod tests {
             .transaction()
             .retract(second.of(list.clone()).is("Bread".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2108,6 +2129,7 @@ mod tests {
             .assert(first.of(list.clone()).is("Milk".to_string()))
             .assert(second.of(list.clone()).is("Bread".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2156,6 +2178,7 @@ mod tests {
             )
             .assert(member.of(list.clone()).is("Milk".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2225,6 +2248,7 @@ mod tests {
             )
             .assert(member.of(list.clone()).is("Milk".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2283,6 +2307,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2294,6 +2319,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2315,6 +2341,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2348,6 +2375,7 @@ mod tests {
             .transaction()
             .assert(the!("misc/tag").of(Entity::new()?).is("seed".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2368,6 +2396,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2400,6 +2429,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2413,6 +2443,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2436,6 +2467,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2476,6 +2508,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2487,6 +2520,7 @@ mod tests {
             .transaction()
             .retract(the!("person/name").of(alice.clone()).is("Ali".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2528,6 +2562,7 @@ mod tests {
             )
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2538,6 +2573,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(bob.clone()).is("Bobby".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2822,9 +2858,9 @@ mod tests {
     /// durably — a rule is a [`Statement`](dialog_artifacts::Statement),
     /// so installing it is asserting it.
     fn with_rule<'t>(
-        transaction: crate::Transaction<'t>,
+        transaction: crate::Transaction<&'t crate::Branch>,
         rule: &dialog_query::DeductiveRule,
-    ) -> crate::Transaction<'t> {
+    ) -> crate::Transaction<&'t crate::Branch> {
         transaction.assert(rule)
     }
 
@@ -2907,6 +2943,7 @@ mod tests {
             .transaction()
             .assert(Badge::of(alice.clone()).is("A-1"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2926,6 +2963,7 @@ mod tests {
             .transaction()
             .assert(Badge::of(bob.clone()).is("B-2"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2971,6 +3009,7 @@ mod tests {
             .assert(Name::of(mallory.clone()).is("Mallory"))
             .assert(Manager::of(mallory.clone()).is(carol.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2992,6 +3031,7 @@ mod tests {
             .transaction()
             .assert(Badge::of(carol.clone()).is("C-3"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3020,6 +3060,7 @@ mod tests {
             .transaction()
             .retract(Badge::of(carol.clone()).is("C-3"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3075,6 +3116,7 @@ mod tests {
             .assert(Phone::of(bob.clone()).is("555-0100"));
         with_rule(transaction, &email_rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3089,6 +3131,7 @@ mod tests {
         // range: recompute.
         with_rule(branch.transaction(), &phone_rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3109,6 +3152,7 @@ mod tests {
             .transaction()
             .assert(Email::of(bob.clone()).is("bob@mail"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3174,6 +3218,7 @@ mod tests {
             .assert(Parent::of(b.clone()).is(a.clone()));
         with_rule(with_rule(transaction, &base), &step)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3192,6 +3237,7 @@ mod tests {
             .transaction()
             .assert(Parent::of(c.clone()).is(b.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert_eq!(subscription.recomputes(), 1);
@@ -3224,6 +3270,7 @@ mod tests {
             .transaction()
             .assert(Parent::of(d.clone()).is(c.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -3243,6 +3290,7 @@ mod tests {
             .transaction()
             .retract(Parent::of(c.clone()).is(b.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("cone shrinks");
@@ -3266,6 +3314,7 @@ mod tests {
             .transaction()
             .assert(Parent::of(e.clone()).is(d.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("extends again");
@@ -3319,6 +3368,7 @@ mod tests {
             .assert(Title::of(frank.clone()).is("Frank"))
             .assert(Deputy::of(frank.clone()).is(mallory.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3335,6 +3385,7 @@ mod tests {
             .transaction()
             .assert(Badge::of(carol.clone()).is("C-3"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3362,6 +3413,7 @@ mod tests {
             .transaction()
             .retract(Badge::of(carol.clone()).is("C-3"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("retraction");
@@ -3425,6 +3477,7 @@ mod tests {
                 salary: Salary(100),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3444,6 +3497,7 @@ mod tests {
                 salary: Salary(50),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("covered write");
@@ -3464,6 +3518,7 @@ mod tests {
                 salary: Salary(70),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("new group");
@@ -3518,6 +3573,7 @@ mod tests {
             .assert(bob_row.clone())
             .assert(carol_row.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3533,6 +3589,7 @@ mod tests {
             .transaction()
             .retract(bob_row)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -3548,6 +3605,7 @@ mod tests {
             .transaction()
             .retract(carol_row)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("group emptied");
@@ -3583,6 +3641,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3612,6 +3671,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(Entity::new()?).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3662,6 +3722,7 @@ mod tests {
                 bonus: None,
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3682,6 +3743,7 @@ mod tests {
             .transaction()
             .assert(Bonus::of(alice.clone()).is(25u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("bonus arrived");
@@ -3707,6 +3769,7 @@ mod tests {
             .transaction()
             .retract(Bonus::of(alice.clone()).is(25u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -3758,6 +3821,7 @@ mod tests {
                 salary: Salary(100),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3781,6 +3845,7 @@ mod tests {
                 salary: Salary(50),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("base change");
@@ -3850,6 +3915,7 @@ mod tests {
             .assert(Parent::of(dept_b.clone()).is(dept_a.clone()));
         with_rule(with_rule(transaction, &dept_total_rule()), &step)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3872,6 +3938,7 @@ mod tests {
                 salary: Salary(50),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("growth");
@@ -3894,6 +3961,7 @@ mod tests {
                 salary: Salary(100),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("shrinkage");
@@ -3936,6 +4004,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let bob = Entity::new()?;
@@ -3943,6 +4012,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3981,6 +4051,7 @@ mod tests {
                     .is("Carol".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -4004,6 +4075,7 @@ mod tests {
                     .is("unrelated".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert!(
@@ -4019,6 +4091,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -4063,6 +4136,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -4141,6 +4215,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         main.overlay().retract(
@@ -4192,6 +4267,7 @@ mod tests {
                 selected: Selected(false),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -4213,6 +4289,7 @@ mod tests {
             .retract(Selected::of(doc.clone()).is(false))
             .assert(Selected::of(doc.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert_eq!(flipped, placed, "a session-only write mints no revision");
@@ -4270,6 +4347,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 

@@ -673,7 +673,11 @@ where
                 role: stuff::Role(format!("role-{}", index % 8)),
             });
         }
-        transaction.commit().perform(&self.operator).await?;
+        transaction
+            .commit()
+            .publish()
+            .perform(&self.operator)
+            .await?;
         Ok(entities)
     }
 
@@ -891,6 +895,7 @@ where
         transaction
             .commit()
             .canonicalize()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(index)
@@ -1195,6 +1200,7 @@ where
                     .is(new.detail.to_string()),
             )
             .commit()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(entity)
@@ -1251,6 +1257,7 @@ where
                     ordering: bug::Ordering(count as f64 * 1000.0),
                 })
                 .commit()
+                .publish()
                 .perform(&self.operator)
                 .await?;
         }
@@ -1305,7 +1312,11 @@ where
                 ordering: bug::Ordering(index as f64 * 1000.0),
             });
         }
-        transaction.commit().perform(&self.operator).await?;
+        transaction
+            .commit()
+            .publish()
+            .perform(&self.operator)
+            .await?;
         Ok(entities)
     }
 
@@ -1370,6 +1381,7 @@ where
                     .is(status.to_string()),
             )
             .commit()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(())
@@ -1397,6 +1409,7 @@ where
                     .is(status.to_string()),
             )
             .commit()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(())
@@ -1442,6 +1455,7 @@ where
                     ordering: bug::Ordering(index as f64 * 1000.0),
                 })
                 .commit()
+                .publish()
                 .perform(&self.operator)
                 .await?;
         }
@@ -1498,6 +1512,7 @@ where
                     ordering: bug::Ordering(index as f64),
                 })
                 .commit()
+                .publish()
                 .perform(&self.operator)
                 .await?;
 
@@ -1832,6 +1847,7 @@ mod test {
                     ordering: bug::Ordering(count as f64 * 1000.0),
                 })
                 .commit()
+                .publish()
                 .perform(&env.operator)
                 .await?;
         }

@@ -111,6 +111,7 @@ mod tests {
             )
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -201,6 +202,7 @@ mod tests {
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .assert(the!("club/banned").of(club.clone()).is("Ali".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -280,6 +282,7 @@ mod tests {
             )
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -365,6 +368,7 @@ mod tests {
             // scheme to one type.
             .assert(the!("game/bonus").of(bob.clone()).is(0.5f64))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -428,6 +432,7 @@ mod tests {
             .transaction()
             .assert(the!("game/score").of(alice.clone()).is(-5i64))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -484,6 +489,7 @@ mod tests {
             .assert(the!("misc/tag").of(alice.clone()).is("blue".to_string()))
             .assert(the!("misc/tag").of(alice.clone()).is(7u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -538,6 +544,7 @@ mod tests {
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());

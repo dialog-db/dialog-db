@@ -496,6 +496,7 @@ mod tests {
             .transaction()
             .assert(person::Name::of(alice.clone()).is("Alice"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 

@@ -220,6 +220,7 @@ mod tests {
                 name: people::Name("Alice".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -326,6 +327,7 @@ mod tests {
                 name: people::Name("Bob".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -363,6 +365,7 @@ mod tests {
                 name: people::Name("Alice".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -454,7 +457,7 @@ mod tests {
             .try_vec()
             .await?;
         assert_eq!(seen.len(), 1, "txn-query must see Session");
-        tx.commit().perform(&operator).await?;
+        tx.commit().publish().perform(&operator).await?;
 
         // After commit, the branch tree must not contain any
         // `dialog.session/*` facts — those are auto-materialized at
@@ -537,6 +540,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             revisions.push(branch.revision().expect("branch has a revision"));

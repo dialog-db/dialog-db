@@ -309,6 +309,7 @@ mod tests {
                 .transaction()
                 .assert($the.clone().of($of.clone()).is($is))
                 .commit()
+                .publish()
                 .perform($operator)
                 .await
                 .unwrap();
@@ -328,6 +329,7 @@ mod tests {
             .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -374,6 +376,7 @@ mod tests {
             .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -381,6 +384,7 @@ mod tests {
             .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alicia".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -642,6 +646,7 @@ mod tests {
             .transaction()
             .assert(name_attr.of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -678,6 +683,7 @@ mod tests {
             .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -718,6 +724,7 @@ mod tests {
             .transaction()
             .assert(alice_name.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -740,6 +747,7 @@ mod tests {
             .transaction()
             .retract(alice_name)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -771,6 +779,7 @@ mod tests {
             .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -808,6 +817,7 @@ mod tests {
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -847,6 +857,7 @@ mod tests {
             .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -881,6 +892,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -923,6 +935,7 @@ mod tests {
             .transaction()
             .assert(person::Name::of(alice.clone()).is("Alice"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1024,6 +1037,7 @@ mod tests {
             .assert(the!("misc/tag").of(alice.clone()).is("blue".to_string()))
             .assert(the!("misc/tag").of(alice.clone()).is(7u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
