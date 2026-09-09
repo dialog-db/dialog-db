@@ -340,6 +340,31 @@ where
         let columns: Vec<_> = self.columns.iter().map(archived_column_slices).collect();
         StreamingLeaf::new(&schema, &columns, count)
     }
+
+    /// Whether any key in THIS buffer satisfies `predicate`, streaming the
+    /// keys without decoding any value.
+    ///
+    /// The per-link counterpart of
+    /// [`ArchivedIndex::any_novelty_key`](super::ArchivedIndex::any_novelty_key),
+    /// which asks the same question of every buffer at once. A caller
+    /// deciding about one child wants this one: ops route to exactly one
+    /// link and live in that link's buffer, so this answers for that child
+    /// exactly, with no need to re-derive the routing from separators.
+    pub fn any_key<Key>(
+        &self,
+        mut predicate: impl FnMut(&[u8]) -> bool,
+    ) -> Result<bool, DialogSearchTreeError>
+    where
+        Key: self::Key,
+    {
+        let mut keys = self.keys::<Key>()?;
+        while let Some((_, key)) = keys.next_key()? {
+            if predicate(key) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl<Value> ArchivedNoveltyBuffer<Value>
