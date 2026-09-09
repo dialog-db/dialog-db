@@ -39,15 +39,28 @@
 //!
 //! plus the enclosed line's address (`dialog.link/repository` and
 //! `dialog.link/branch` for a branch, `dialog.link/ephemeral` for an
-//! ephemeral line). A stack commit refreshes `revision` on every line
-//! above a line that moved, bottom to top, so after the commit the
-//! top line's head transitively names the head of every line beneath
-//! it: one hash for the whole composite. A link whose target did not
-//! move is a no-op refresh and mints nothing. Linking is capturing:
-//! a line that should not record another's head does not link it,
-//! and sits beside it under a common encloser instead. Movement that
-//! bypasses the stack, a pull on the bottom or a direct commit to a
-//! line, is not seen until the next stack commit.
+//! ephemeral line). Wiring lifts: an encloser also holds a copy of
+//! every link fact its enclosed lines hold, verbatim, so the top line
+//! carries the whole stack's wiring and every edge is queryable from
+//! it alone.
+//!
+//! A stack commit refreshes the wiring on every line above a line
+//! that moved, bottom to top, so after the commit the top line's head
+//! transitively names the head of every line beneath it: one hash for
+//! the whole composite. A link whose target did not move is a no-op
+//! refresh and mints nothing. Linking is capturing: a line that should
+//! not record another's head does not link it, and sits beside it
+//! under a common encloser instead.
+//!
+//! # Reads are pinned
+//!
+//! A stack is read at its top's head. Every line beneath the top is
+//! read at the revision the wiring captured, not at its live head, so
+//! what a read sees is exactly what the top's hash names. Movement
+//! that bypasses the stack, a pull on the bottom or a direct commit
+//! to one line, is invisible until the stack [`advance`](Stack::advance)s,
+//! which every stack commit and every subscription poll does: an
+//! external change lands as the stack's own instant.
 //!
 //! # Identity
 //!
@@ -67,24 +80,33 @@
 //! branch.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use base58::ToBase58 as _;
-use dialog_artifacts::{Artifact, Changes, Entity, Instruction, Statement, Update as _, Value};
+use dialog_artifacts::{
+    Artifact, Changes, DialogArtifactsError, Entity, Instruction, Statement, Update as _, Value,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_query::error::EvaluationError;
+use dialog_query::query::{Application, Output};
+use parking_lot::RwLock;
 use serde::Serialize;
 use thiserror::Error;
 
 use crate::placement::{Placements, Target};
-use crate::repository::branch::session::{Composite, QueryLayer};
+use crate::repository::branch::session::{Composite, QueryEnv, session_metadata};
 use crate::repository::branch::transaction::commit_settled;
 use crate::repository::branch::transaction::induce::induce;
 use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
-use crate::{Branch, CommitError, Ephemeral, EphemeralRevision, RemoteSite, Revision, Snapshot};
+use crate::{
+    Branch, CommitError, Delta, Ephemeral, EphemeralRevision, RemoteSite, Revision, Snapshot,
+    Subscription,
+};
 
 /// Who can read a line: the set of principals its facts reach.
 /// Ordered by inclusion, narrowest first.
@@ -488,11 +510,11 @@ impl Build {
             ids,
             links,
             bound,
+            captured: Arc::new(RwLock::new(Vec::new())),
         };
-        // Every encloser records its links now, at the heads it sees.
-        for index in 0..stack.lines.len() {
-            stack.refresh_links(index, Changes::new(), env).await?;
-        }
+        // Every encloser records its wiring now, at the heads it sees,
+        // and the stack reads at those heads from here on.
+        stack.advance(env).await?;
         Ok(stack)
     }
 }
@@ -540,6 +562,9 @@ pub struct Stack {
     links: Vec<Vec<Link>>,
     /// Layer name → the lines linked under it.
     bound: HashMap<Entity, Vec<usize>>,
+    /// What the stack reads each line at: the heads the last stack
+    /// commit or advance captured, bottom first. Shared by clones.
+    captured: Arc<RwLock<Vec<Head>>>,
 }
 
 impl Stack {
@@ -574,9 +599,37 @@ impl Stack {
             .unwrap_or_default()
     }
 
-    /// Every line's head now, bottom first.
+    /// Every line's live head now, bottom first. What the stack reads
+    /// at is [`captured`](Self::captured); the two differ exactly when
+    /// a line moved outside the stack since the last advance.
     pub fn heads(&self) -> Vec<Head> {
         self.lines.iter().map(Line::head).collect()
+    }
+
+    /// The heads the stack reads each line at, bottom first: what the
+    /// last stack commit or [`advance`](Self::advance) captured.
+    pub fn captured(&self) -> Vec<Head> {
+        self.captured.read().clone()
+    }
+
+    /// Capture every line's live head: refresh the wiring on every
+    /// line above a line that moved, bottom to top, and read at the
+    /// result from now on. A stack commit with nothing to write.
+    pub async fn advance<Env>(&self, env: &Env) -> Result<Vec<Head>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        self.transaction().commit().perform(env).await
     }
 
     /// The bottom line as a branch: where placements live and where
@@ -589,12 +642,32 @@ impl Stack {
         }
     }
 
-    /// The composite every read and every induction sees.
+    /// The composite a read sees: every line beneath the top pinned at
+    /// its captured head, the top live.
     pub(crate) fn composite(&self) -> Composite {
+        self.composite_at(&self.captured())
+    }
+
+    /// The composite with every branch beneath the top read at the
+    /// given heads. Ephemeral lines are always live: they are
+    /// process-local and cannot be read at an older sequence.
+    fn composite_at(&self, heads: &[Head]) -> Composite {
+        let top = self.lines.len().saturating_sub(1);
         let mut composite = Composite::default();
-        for line in &self.lines {
+        for (index, line) in self.lines.iter().enumerate() {
             match line {
-                Line::Branch(branch) => composite.sources.push(Source::Branch(branch.clone())),
+                Line::Branch(branch) if index == top => {
+                    composite.sources.push(Source::Branch(branch.clone()))
+                }
+                Line::Branch(branch) => {
+                    let revision = match heads.get(index) {
+                        Some(Head::Tree(revision)) => revision.clone(),
+                        _ => branch.revision(),
+                    };
+                    composite
+                        .sources
+                        .push(Source::Pinned(branch.clone(), revision))
+                }
                 Line::Snapshot(snapshot) => {
                     composite.sources.push(Source::Snapshot(snapshot.clone()))
                 }
@@ -604,19 +677,15 @@ impl Stack {
         composite
     }
 
-    /// Open a query over the whole stack. Use
-    /// [`select`](QueryLayer::select) or
-    /// [`subscribe`](QueryLayer::subscribe) on it.
-    pub fn query(&self) -> QueryLayer<'_> {
-        let mut layer = QueryLayer::new();
-        for line in &self.lines {
-            layer = match line {
-                Line::Branch(branch) => layer.join(branch),
-                Line::Snapshot(snapshot) => layer.join(snapshot),
-                Line::Ephemeral(ephemeral) => layer.join(ephemeral),
-            };
+    /// Open a query over the whole stack at its captured heads. Use
+    /// [`select`](StackQuery::select) or
+    /// [`subscribe`](StackQuery::subscribe) on it.
+    pub fn query(&self) -> StackQuery {
+        StackQuery {
+            stack: self.clone(),
+            composite: self.composite(),
+            changes: Changes::new(),
         }
-        layer
     }
 
     /// Start a transaction on this stack.
@@ -628,12 +697,16 @@ impl Stack {
         }
     }
 
-    /// The link facts line `index` holds, at the heads its targets
-    /// have now, folded into `changes`.
+    /// The wiring line `index` holds, at the heads its targets have
+    /// now, folded into `changes`: its own link facts, plus a verbatim
+    /// copy of every link fact each linked line holds. Bottom to top
+    /// commits refresh the linked lines first, so the copy is what
+    /// they hold after the same stack commit.
     fn link_facts(&self, index: usize, changes: &mut Changes) {
         let from = self.lines[index].address_entity();
         for link in &self.links[index] {
             let target = &self.lines[link.to];
+            self.link_facts(link.to, changes);
             changes.associate_unique(
                 link_attr("from"),
                 link.entity.clone(),
@@ -764,11 +837,18 @@ impl StackCommit<'_> {
             + 'static,
     {
         let stack = self.stack;
+        let mut batches: BTreeMap<usize, Changes> = BTreeMap::new();
+        if self.changes.is_empty() && self.transients.is_empty() {
+            return stack.capture(batches, env).await;
+        }
         let Some(primary) = stack.primary() else {
             return Err(CommitError::Detached);
         };
         let source = SourceRef::from(primary);
-        let composite = stack.composite();
+        // A write builds on the live heads, so its induction reads
+        // them: the commit advances the stack to now before it
+        // writes, then captures what it wrote.
+        let composite = stack.composite_at(&stack.heads());
 
         let mut changes = self.changes;
         induce(source, &composite, &mut changes, self.transients, env).await?;
@@ -779,7 +859,6 @@ impl StackCommit<'_> {
         // routes exactly as the branch would.
         let placements = Placements::resolve(source, &changes, env).await?;
         let default = placements.default_layer().cloned();
-        let mut batches: BTreeMap<usize, Changes> = BTreeMap::new();
         for instruction in changes.into_instructions() {
             let (op, artifact) = split(instruction);
             let targets: Vec<usize> = match placements.layer_of(&artifact.the) {
@@ -811,22 +890,175 @@ impl StackCommit<'_> {
             }
         }
 
-        // Bottom to top: every line commits after everything beneath
-        // it, writing its own share and its links at the heads it now
-        // sees. A line whose links all point at unmoved heads and
-        // that has nothing of its own to write is a no-op commit and
-        // keeps its head, so the refresh reaches exactly the lines
-        // above a line that moved.
-        let mut heads = Vec::with_capacity(stack.lines.len());
-        for index in 0..stack.lines.len() {
+        stack.capture(batches, env).await
+    }
+}
+
+impl Stack {
+    /// Commit each line's batch bottom to top, every line after
+    /// everything beneath it, writing its own share and its wiring at
+    /// the heads it now sees. A line whose wiring already names the
+    /// current heads and that has nothing of its own to write is a
+    /// no-op commit and keeps its head, so the refresh reaches
+    /// exactly the lines above a line that moved. The resulting heads
+    /// are what the stack reads at from now on.
+    async fn capture<Env>(
+        &self,
+        mut batches: BTreeMap<usize, Changes>,
+        env: &Env,
+    ) -> Result<Vec<Head>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let mut heads = Vec::with_capacity(self.lines.len());
+        for index in 0..self.lines.len() {
             let batch = batches.remove(&index).unwrap_or_default();
-            let head = stack
+            let head = self
                 .refresh_links(index, batch, env)
                 .await?
-                .unwrap_or_else(|| stack.lines[index].head());
+                .unwrap_or_else(|| self.lines[index].head());
             heads.push(head);
         }
+        *self.captured.write() = heads.clone();
         Ok(heads)
+    }
+}
+
+/// A query over a [`Stack`] at its captured heads, with optional
+/// overlay facts. Created by [`Stack::query`].
+pub struct StackQuery {
+    stack: Stack,
+    composite: Composite,
+    changes: Changes,
+}
+
+impl StackQuery {
+    /// Fold a [`Statement`] into this query's overlay facts.
+    pub fn with<S: Statement>(mut self, statement: S) -> Self {
+        statement.assert(&mut self.changes);
+        self
+    }
+
+    /// Stage a query application. Call `.perform(&env)` to execute.
+    pub fn select<Q: Application>(&self, query: Q) -> StackSelect<Q> {
+        StackSelect {
+            composite: self.composite.clone(),
+            changes: self.changes.clone(),
+            query,
+        }
+    }
+
+    /// Register a standing query over the stack. Each
+    /// [`poll`](StackSubscription::poll) first advances the stack, so
+    /// movement outside the stack lands as a delta.
+    pub fn subscribe<Q: Application>(&self, query: Q) -> StackSubscription<Q> {
+        StackSubscription {
+            stack: self.stack.clone(),
+            inner: Subscription::over(self.composite.clone(), self.changes.clone(), query),
+        }
+    }
+}
+
+/// A query command over a stack's composite, ready to be performed.
+pub struct StackSelect<Q> {
+    composite: Composite,
+    changes: Changes,
+    query: Q,
+}
+
+impl<Q: Application> StackSelect<Q> {
+    /// Execute the query, returning a stream of results.
+    pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let StackSelect {
+            composite,
+            changes,
+            query,
+        } = self;
+        async_stream::try_stream! {
+            let operator = Identify
+                .perform(env)
+                .await
+                .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
+            let mut overlay = changes;
+            session_metadata(composite.sources.iter().map(Source::as_ref), &operator)
+                .assert(&mut overlay);
+            let query_env = QueryEnv::new(composite, overlay, env);
+            let results = Box::pin(query.perform(&query_env));
+            for await result in results {
+                yield result?;
+            }
+        }
+    }
+}
+
+/// A standing query over a [`Stack`]. Created by
+/// [`StackQuery::subscribe`]; driven by [`poll`](Self::poll).
+pub struct StackSubscription<Q: Application> {
+    stack: Stack,
+    inner: Subscription<Q>,
+}
+
+impl<Q> StackSubscription<Q>
+where
+    Q: Application + Clone + ConditionalSync,
+    Q::Conclusion: dialog_query::Conclusion + PartialEq + Clone + ConditionalSync,
+{
+    /// Advance the stack, then poll against what it now reads at. A
+    /// line that moved outside the stack since the last poll is
+    /// captured first, so its change arrives as this poll's delta.
+    pub async fn poll<'a, Env>(
+        &'a mut self,
+        env: &'a Env,
+    ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        self.stack
+            .advance(env)
+            .await
+            .map_err(|error| EvaluationError::Store(format!("stack advance: {error}")))?;
+        self.inner.retarget(self.stack.composite());
+        self.inner.poll(env).await
+    }
+
+    /// Full evaluations performed so far.
+    pub fn recomputes(&self) -> usize {
+        self.inner.recomputes()
+    }
+
+    /// Polls maintained incrementally so far.
+    pub fn maintenances(&self) -> usize {
+        self.inner.maintenances()
     }
 }
 
@@ -867,7 +1099,6 @@ mod tests {
     use dialog_artifacts::{ArtifactSelector, Value};
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::attribute::The;
-    use dialog_query::query::Output as _;
     use dialog_query::types::Scalar;
     use dialog_query::{AttributeQuery, Term};
     use futures_util::TryStreamExt as _;
@@ -1189,6 +1420,185 @@ mod tests {
             vec![Value::Bytes(Head::Tree(shared.revision()).bytes())],
             "the top's link names shared's new head"
         );
+        Ok(())
+    }
+
+    /// Wiring lifts: the top holds a verbatim copy of every link fact
+    /// beneath it, so the whole topology is readable from the top
+    /// alone, and a stack commit refreshes the copy with the
+    /// original.
+    #[dialog_common::test]
+    async fn it_copies_wiring_upward() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let local = repo.branch("main.local").open().perform(&operator).await?;
+        let state = Ephemeral::new();
+
+        let stack = Stack::builder()
+            .line(shared.clone())
+            .line(local.clone())
+            .link(&shared, name("shared"))
+            .line(state.clone())
+            .link(&local, name("local"))
+            .build()
+            .perform(&operator)
+            .await?;
+
+        // local's own link to shared, as local holds it.
+        let local_address = Line::Branch(local.clone()).address_entity();
+        let link = link_entity(&local_address, &stack.identities()[0]);
+        let revision_of = |link: &Entity| {
+            ArtifactSelector::new()
+                .the("dialog.link/revision".parse().expect("attribute"))
+                .of(link.clone())
+        };
+        let from_of = |link: &Entity| {
+            ArtifactSelector::new()
+                .the("dialog.link/from".parse().expect("attribute"))
+                .of(link.clone())
+        };
+        let values = |facts: Vec<Artifact>| facts.into_iter().map(|a| a.is).collect::<Vec<_>>();
+        assert_eq!(
+            values(state.scan(&from_of(&link))),
+            vec![Value::Entity(local_address.clone())],
+            "the top holds local's link with local as its from"
+        );
+        assert_eq!(
+            values(state.scan(&revision_of(&link))),
+            vec![Value::Bytes(Head::Tree(shared.revision()).bytes())],
+            "at the head local captured"
+        );
+
+        let doc: Entity = "doc:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        local.refresh(&operator).await?;
+        assert_eq!(
+            values(state.scan(&revision_of(&link))),
+            vec![Value::Bytes(Head::Tree(shared.revision()).bytes())],
+            "the copy follows the original in the same commit"
+        );
+        assert_eq!(
+            committed(&local, &operator, "dialog.link/revision", &link).await?,
+            values(state.scan(&revision_of(&link))),
+            "and the two agree"
+        );
+        Ok(())
+    }
+
+    /// A stack reads every line beneath its top at the captured head:
+    /// a commit that bypasses the stack is invisible until the stack
+    /// advances, and then the top's wiring names the new head.
+    #[dialog_common::test]
+    async fn it_reads_at_captured_heads_until_advanced() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::new();
+
+        let stack = Stack::builder()
+            .line(shared.clone())
+            .line(state.clone())
+            .link(&shared, name("shared"))
+            .build()
+            .perform(&operator)
+            .await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        assert!(
+            values::<String>(&stack, &operator, "doc/title", &doc)
+                .await?
+                .is_empty(),
+            "the stack still reads the captured head"
+        );
+        assert_ne!(stack.heads(), stack.captured(), "and knows it is behind");
+
+        let heads = stack.advance(&operator).await?;
+        assert_eq!(heads, stack.captured());
+        assert_eq!(stack.heads(), stack.captured(), "advance catches up");
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())]
+        );
+        let link = link_entity(&state.entity().clone(), &stack.identities()[0]);
+        let selector = ArtifactSelector::new()
+            .the("dialog.link/revision".parse()?)
+            .of(link);
+        let seen: Vec<Value> = state.scan(&selector).into_iter().map(|a| a.is).collect();
+        assert_eq!(
+            seen,
+            vec![Value::Bytes(Head::Tree(shared.revision()).bytes())]
+        );
+        Ok(())
+    }
+
+    /// A subscription over a stack advances on poll, so a commit that
+    /// bypassed the stack lands as that poll's delta.
+    #[dialog_common::test]
+    async fn it_lands_external_movement_on_poll() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+
+        let stack = Stack::builder()
+            .line(shared.clone())
+            .line(Ephemeral::new())
+            .link(&shared, name("shared"))
+            .build()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = stack.query().subscribe(AttributeQuery::from(
+            Term::<The>::from(dialog_query::the!("doc/title"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        ));
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty());
+        assert!(subscription.poll(&operator).await?.is_none());
+
+        let doc: Entity = "doc:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the external commit lands on this poll");
+        assert_eq!(delta.asserted.len(), 1);
+        assert_eq!(stack.heads(), stack.captured());
+        assert!(subscription.poll(&operator).await?.is_none());
         Ok(())
     }
 

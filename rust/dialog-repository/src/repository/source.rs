@@ -40,6 +40,12 @@ pub(crate) enum Source {
     Branch(Branch),
     /// A detached line whose head is held by value.
     Snapshot(Snapshot),
+    /// A branch read at a captured revision rather than its live head:
+    /// the branch's caches, remote fallback, session store and
+    /// bindings, with the tree root fixed. `None` is a branch captured
+    /// before its first commit. What a [`Stack`](crate::Stack) reads
+    /// every line beneath its top as.
+    Pinned(Branch, Option<Revision>),
 }
 
 impl Source {
@@ -48,6 +54,7 @@ impl Source {
         match self {
             Source::Branch(branch) => SourceRef::Branch(branch),
             Source::Snapshot(snapshot) => SourceRef::Snapshot(snapshot),
+            Source::Pinned(branch, revision) => SourceRef::Pinned(branch, revision.as_ref()),
         }
     }
 }
@@ -72,6 +79,8 @@ pub(crate) enum SourceRef<'a> {
     Branch(&'a Branch),
     /// A detached line whose head is held by value.
     Snapshot(&'a Snapshot),
+    /// A branch read at a captured revision; see [`Source::Pinned`].
+    Pinned(&'a Branch, Option<&'a Revision>),
 }
 
 impl<'a> From<&'a Branch> for SourceRef<'a> {
@@ -98,13 +107,25 @@ impl<'a> SourceRef<'a> {
         match self {
             SourceRef::Branch(branch) => Source::Branch(branch.clone()),
             SourceRef::Snapshot(snapshot) => Source::Snapshot(snapshot.clone()),
+            SourceRef::Pinned(branch, revision) => {
+                Source::Pinned(branch.clone(), revision.cloned())
+            }
+        }
+    }
+
+    /// The branch behind this line, when it is one: a branch read live
+    /// or at a captured revision. A snapshot has none.
+    pub(crate) fn branch(self) -> Option<&'a Branch> {
+        match self {
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => Some(branch),
+            SourceRef::Snapshot(_) => None,
         }
     }
 
     /// The repository this line lives in.
     pub(crate) fn subject(self) -> Subject {
         match self {
-            SourceRef::Branch(branch) => branch.subject(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.subject(),
             SourceRef::Snapshot(snapshot) => snapshot.subject(),
         }
     }
@@ -120,18 +141,15 @@ impl<'a> SourceRef<'a> {
         match self {
             SourceRef::Branch(branch) => branch.revision(),
             SourceRef::Snapshot(snapshot) => Some(snapshot.revision()),
+            SourceRef::Pinned(_, revision) => revision.cloned(),
         }
     }
 
     /// The tree root to read: the revision's, or the empty tree's.
     pub(crate) fn root(self) -> Blake3Hash {
-        match self {
-            SourceRef::Branch(branch) => branch
-                .revision()
-                .map(|revision| *revision.tree.hash())
-                .unwrap_or(EMPTY_TREE_HASH),
-            SourceRef::Snapshot(snapshot) => *snapshot.revision().tree.hash(),
-        }
+        self.revision()
+            .map(|revision| *revision.tree.hash())
+            .unwrap_or(EMPTY_TREE_HASH)
     }
 
     /// The default upstream: a branch's tracked one. A snapshot tracks
@@ -139,10 +157,7 @@ impl<'a> SourceRef<'a> {
     /// [`SnapshotExport::download`](crate::SnapshotExport::download)
     /// for hydrating one ahead of time).
     pub(crate) fn upstream(self) -> Option<Upstream> {
-        match self {
-            SourceRef::Branch(branch) => branch.upstream(),
-            SourceRef::Snapshot(_) => None,
-        }
+        self.branch().and_then(Branch::upstream)
     }
 
     /// The remote block reads fall back to on a local miss: the first
@@ -158,7 +173,7 @@ impl<'a> SourceRef<'a> {
     where
         Env: Provider<Resolve> + ConditionalSync + 'static,
     {
-        let SourceRef::Branch(branch) = self else {
+        let Some(branch) = self.branch() else {
             return RemoteFallback::None;
         };
         let upstreams = branch.upstreams();
@@ -179,7 +194,7 @@ impl<'a> SourceRef<'a> {
     /// The shared node cache tree reads go through.
     pub(crate) fn node_cache(self) -> Cache<NodeHash, Buffer> {
         match self {
-            SourceRef::Branch(branch) => branch.node_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.node_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().nodes.clone(),
         }
     }
@@ -187,7 +202,7 @@ impl<'a> SourceRef<'a> {
     /// The shared spilled-value block cache.
     pub(crate) fn spill_cache(self) -> SpillCache {
         match self {
-            SourceRef::Branch(branch) => branch.spill_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.spill_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().spills.clone(),
         }
     }
@@ -195,7 +210,7 @@ impl<'a> SourceRef<'a> {
     /// The shared deductive-rule cache.
     pub(crate) fn rule_cache(self) -> SharedRuleCache {
         match self {
-            SourceRef::Branch(branch) => branch.rule_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.rule_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().rules.clone(),
         }
     }
@@ -203,7 +218,7 @@ impl<'a> SourceRef<'a> {
     /// The shared query-plan cache.
     pub(crate) fn plan_cache(self) -> PlanCache {
         match self {
-            SourceRef::Branch(branch) => branch.plan_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.plan_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().plans.clone(),
         }
     }
@@ -211,7 +226,7 @@ impl<'a> SourceRef<'a> {
     /// The shared verified-record memo.
     pub(crate) fn records(self) -> Cache<Version, RevisionRecord> {
         match self {
-            SourceRef::Branch(branch) => branch.records(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.records(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().records.clone(),
         }
     }
@@ -219,7 +234,7 @@ impl<'a> SourceRef<'a> {
     /// The shared causal-context memo.
     pub(crate) fn contexts(self) -> ContextCache {
         match self {
-            SourceRef::Branch(branch) => branch.contexts(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.contexts(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().contexts.clone(),
         }
     }
@@ -227,7 +242,7 @@ impl<'a> SourceRef<'a> {
     /// The live-spine slot commits on this line reuse.
     pub(crate) fn spine(self) -> &'a SpineSlot {
         match self {
-            SourceRef::Branch(branch) => branch.spine(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.spine(),
             SourceRef::Snapshot(snapshot) => &snapshot.caches().spine,
         }
     }
@@ -235,7 +250,7 @@ impl<'a> SourceRef<'a> {
     /// The ephemeral line every read of this line folds in.
     pub(crate) fn overlay(self) -> &'a Ephemeral {
         match self {
-            SourceRef::Branch(branch) => branch.overlay(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.overlay(),
             SourceRef::Snapshot(snapshot) => snapshot.overlay(),
         }
     }
@@ -243,7 +258,7 @@ impl<'a> SourceRef<'a> {
     /// The layer bindings a commit on this line routes by.
     pub(crate) fn bindings(self) -> &'a Bindings {
         match self {
-            SourceRef::Branch(branch) => branch.bindings(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.bindings(),
             SourceRef::Snapshot(snapshot) => snapshot.bindings(),
         }
     }
@@ -267,6 +282,12 @@ impl<'a> SourceRef<'a> {
         match self {
             SourceRef::Branch(branch) => {
                 let metadata = branch.metadata(operator);
+                let entity = metadata.branch.this.clone();
+                metadata.assert(changes);
+                Some(entity)
+            }
+            SourceRef::Pinned(branch, revision) => {
+                let metadata = branch.metadata_at(operator, revision.cloned());
                 let entity = metadata.branch.this.clone();
                 metadata.assert(changes);
                 Some(entity)

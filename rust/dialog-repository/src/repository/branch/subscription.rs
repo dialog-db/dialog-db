@@ -410,11 +410,19 @@ impl QueryLayer<'_> {
     /// change; each line's ephemeral store is read live and its
     /// changes are maintained incrementally like tree changes.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
+        Subscription::over(self.composite(), self.changes().clone(), query)
+    }
+}
+
+impl<Q: Application> Subscription<Q> {
+    /// A standing query over an owned composite plus fixed overlay
+    /// facts. What [`QueryLayer::subscribe`] and a
+    /// [`Stack`](crate::Stack) subscription build on.
+    pub(crate) fn over(composite: Composite, changes: Changes, query: Q) -> Self {
         let Composite {
             sources,
             ephemerals,
-        } = self.composite();
-        let changes = self.changes().clone();
+        } = composite;
         Subscription {
             pins: vec![Pinned::unset(); sources.len()],
             epochs: vec![Pinned::unset(); ephemerals.len()],
@@ -429,6 +437,26 @@ impl QueryLayer<'_> {
             recomputes: 0,
             maintenances: 0,
         }
+    }
+
+    /// Point the subscription at a fresh composite of the same shape:
+    /// the same lines in the same order, possibly captured at other
+    /// revisions. The pins are kept, so the next poll diffs each line
+    /// from where it was last evaluated to where the new composite
+    /// reads it. A composite of a different shape resets the
+    /// subscription to evaluate afresh.
+    pub(crate) fn retarget(&mut self, composite: Composite) {
+        let Composite {
+            sources,
+            ephemerals,
+        } = composite;
+        if sources.len() != self.sources.len() || ephemerals.len() != self.ephemerals.len() {
+            self.pins = vec![Pinned::unset(); sources.len()];
+            self.epochs = vec![Pinned::unset(); ephemerals.len()];
+            self.initialized = false;
+        }
+        self.sources = sources;
+        self.ephemerals = ephemerals;
     }
 }
 
@@ -571,7 +599,7 @@ where
     /// [`Demand::anchor_metadata`]).
     fn anchor(&self, demand: &Demand, operator: &dialog_capability::Capability<Operator>) {
         for source in &self.sources {
-            if let Source::Branch(branch) = source {
+            if let Some(branch) = source.as_ref().branch() {
                 demand.anchor_metadata(branch.metadata(operator).branch.this);
             }
         }

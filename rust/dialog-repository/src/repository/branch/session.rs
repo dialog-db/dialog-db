@@ -151,10 +151,7 @@ impl<'a> QueryLayer<'a> {
     pub fn branches(&self) -> Vec<&'a Branch> {
         self.sources
             .iter()
-            .filter_map(|source| match source {
-                SourceRef::Branch(branch) => Some(*branch),
-                SourceRef::Snapshot(_) => None,
-            })
+            .filter_map(|source| source.branch())
             .collect()
     }
 
@@ -164,7 +161,7 @@ impl<'a> QueryLayer<'a> {
             .iter()
             .filter_map(|source| match source {
                 SourceRef::Snapshot(snapshot) => Some(*snapshot),
-                SourceRef::Branch(_) => None,
+                SourceRef::Branch(_) | SourceRef::Pinned(..) => None,
             })
             .collect()
     }
@@ -183,33 +180,7 @@ impl<'a> QueryLayer<'a> {
     /// `operator` (from [`Identify`]) supplies the profile + operator
     /// DIDs the schema entities are derived from.
     pub fn metadata(&self, operator: &Capability<Operator>) -> Changes {
-        let mut changes = Changes::new();
-
-        let mut branch_entities = Vec::with_capacity(self.sources.len());
-        for source in &self.sources {
-            if let Some(entity) = source.metadata(operator, &mut changes) {
-                branch_entities.push(entity);
-            }
-        }
-
-        let session_entity = Session::entity();
-        Session {
-            this: session_entity.clone(),
-            profile: session::Profile(operator.profile().this()),
-            operator: session::Operator(operator.did().this()),
-        }
-        .assert(&mut changes);
-        // One `SessionBranch` per branch — `dialog.session/branch` is
-        // cardinality-many, so the entries accumulate on `db:session`.
-        for branch_entity in branch_entities {
-            SessionBranch {
-                this: session_entity.clone(),
-                branch: session::Branch(branch_entity),
-            }
-            .assert(&mut changes);
-        }
-
-        changes
+        session_metadata(self.sources.iter().copied(), operator)
     }
 
     /// The full per-query overlay: this layer's own
@@ -276,6 +247,43 @@ impl From<Changes> for QueryLayer<'_> {
             changes,
         }
     }
+}
+
+/// The schema-metadata [`Changes`] for a set of lines: every line's
+/// own metadata plus a single [`Session`] with one
+/// `dialog.session/branch` per branch in scope. See
+/// [`QueryLayer::metadata`].
+pub(crate) fn session_metadata<'a>(
+    sources: impl IntoIterator<Item = SourceRef<'a>>,
+    operator: &Capability<Operator>,
+) -> Changes {
+    let mut changes = Changes::new();
+
+    let mut branch_entities = Vec::new();
+    for source in sources {
+        if let Some(entity) = source.metadata(operator, &mut changes) {
+            branch_entities.push(entity);
+        }
+    }
+
+    let session_entity = Session::entity();
+    Session {
+        this: session_entity.clone(),
+        profile: session::Profile(operator.profile().this()),
+        operator: session::Operator(operator.did().this()),
+    }
+    .assert(&mut changes);
+    // One `SessionBranch` per branch — `dialog.session/branch` is
+    // cardinality-many, so the entries accumulate on `db:session`.
+    for branch_entity in branch_entities {
+        SessionBranch {
+            this: session_entity.clone(),
+            branch: session::Branch(branch_entity),
+        }
+        .assert(&mut changes);
+    }
+
+    changes
 }
 
 /// A query command ready to be performed against an environment.
