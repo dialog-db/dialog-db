@@ -575,6 +575,7 @@ mod tests {
             .transaction()
             .assert(Placement::new("ui/selected".parse()?, session()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -589,6 +590,7 @@ mod tests {
             )
             .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -637,6 +639,7 @@ mod tests {
             .assert(Placement::new("ui/selected".parse()?, session()))
             .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -666,6 +669,7 @@ mod tests {
             .transaction()
             .assert(Placement::new("ui/cursor".parse()?, session()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -675,6 +679,7 @@ mod tests {
             .transaction()
             .assert(dialog_query::the!("ui/cursor").of(doc.clone()).is(7u64))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert_eq!(after, before, "no tree change, no new revision");
@@ -690,6 +695,7 @@ mod tests {
             .retract(dialog_query::the!("ui/cursor").of(doc.clone()).is(7u64))
             .assert(dialog_query::the!("ui/cursor").of(doc.clone()).is(9u64))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -700,6 +706,7 @@ mod tests {
             .transaction()
             .retract(dialog_query::the!("ui/cursor").of(doc.clone()).is(9u64))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert!(
@@ -739,6 +746,7 @@ mod tests {
             .assert(Placement::new("ui/select".parse()?, session()))
             .assert(audit)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -753,6 +761,7 @@ mod tests {
                     .is(doc.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -801,6 +810,7 @@ mod tests {
             .assert(Placement::new("site/navigate".parse()?, session()))
             .assert(navigate)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -823,6 +833,7 @@ mod tests {
                     .is("/docs/1".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -858,7 +869,7 @@ mod tests {
             branch: &'a Branch,
             doc: &Entity,
             local: &Entity,
-        ) -> Result<crate::TransactionCommit<'a>> {
+        ) -> Result<crate::TransactionPublish<&'a Branch>> {
             Ok(branch
                 .transaction()
                 .assert(Placement::new("local/note".parse()?, local.clone()))
@@ -867,7 +878,8 @@ mod tests {
                         .of(doc.clone())
                         .is("draft".to_string()),
                 )
-                .commit())
+                .commit()
+                .publish())
         }
         let result = write(&branch, &doc, &local)?.perform(&operator).await;
         assert!(
@@ -917,6 +929,7 @@ mod tests {
             )
             .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -943,6 +956,7 @@ mod tests {
             .retract(Placement::new("ui/selected".parse()?, session()))
             .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(false))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -970,6 +984,7 @@ mod tests {
                     .is("session".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await;
         assert!(

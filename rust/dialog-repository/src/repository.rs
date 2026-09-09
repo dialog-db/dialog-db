@@ -818,6 +818,7 @@ mod tests {
                     role: employee::Role("Designer".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -882,6 +883,7 @@ mod tests {
                     entity: NamedEntity(page_v1.clone()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -909,6 +911,7 @@ mod tests {
                     entity: NamedEntity(page_v2.clone()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -966,6 +969,7 @@ mod tests {
                     tag: Tag("blue".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1027,6 +1031,7 @@ mod tests {
                     entity: NamedEntity(page_v1.clone()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1037,6 +1042,7 @@ mod tests {
                     entity: NamedEntity(page_v1.clone()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1136,6 +1142,7 @@ mod tests {
                     role: employee::Role("Engineer".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1147,6 +1154,7 @@ mod tests {
                     role: employee::Role("Designer".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1190,6 +1198,7 @@ mod tests {
                     role: employee::Role("Engineer".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let main = repo.branch("main").load().perform(&operator).await?;
@@ -1235,6 +1244,7 @@ mod tests {
                         .is("Alice".to_string()),
                 )
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1335,6 +1345,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             // Reload so the revision cell reflects the commit.
@@ -1414,6 +1425,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1440,6 +1452,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Bob".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1484,6 +1497,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -1543,6 +1557,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -1552,6 +1567,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Bob".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -1601,6 +1617,7 @@ mod tests {
                     .transaction()
                     .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
                     .commit()
+                    .publish()
                     .perform(&operator)
                     .await?;
                 revisions.push(branch.revision().expect("branch has a revision"));
@@ -1816,6 +1833,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -1919,6 +1937,7 @@ mod tests {
                     nickname: cardinality_one_attr::Nickname("Bobby".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1933,6 +1952,7 @@ mod tests {
                     nickname: cardinality_one_attr::Nickname("Rob".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -2058,6 +2078,7 @@ mod tests {
                 .transaction()
                 .assert(changes.clone())
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -2147,6 +2168,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(alice).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -2168,6 +2190,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(alice).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -2220,6 +2243,7 @@ mod tests {
                 .transaction()
                 .assert(the!("item/tag").of(item).is("in-profile".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 

@@ -921,6 +921,7 @@ mod tests {
             .assert(the!("person/age").of(Entity::new()?).is(30u64))
             .assert(the!("person/age").of(Entity::new()?).is(50u64))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -968,6 +969,7 @@ mod tests {
             )
             .assert(the!("person/name").of(Entity::new()?).is("Zed".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1005,6 +1007,7 @@ mod tests {
             .assert(the!("score/value").of(Entity::new()?).is(2.5f64))
             .assert(the!("score/value").of(Entity::new()?).is(-3i64))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1059,6 +1062,7 @@ mod tests {
             )
             .assert(member.of(list.clone()).is("Milk".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1116,6 +1120,7 @@ mod tests {
             .assert(first.of(list.clone()).is("Milk".to_string()))
             .assert(second.of(list.clone()).is("Bread".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1176,6 +1181,7 @@ mod tests {
             .transaction()
             .assert(the!("tag/kind").of(e.clone()).is(symbol))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1221,6 +1227,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1265,6 +1272,7 @@ mod tests {
                     .is("Bobby".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1311,6 +1319,7 @@ mod tests {
             )
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1347,6 +1356,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1358,6 +1368,7 @@ mod tests {
                     .is("Alicia".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1401,6 +1412,7 @@ mod tests {
                     .is("Alicia".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 

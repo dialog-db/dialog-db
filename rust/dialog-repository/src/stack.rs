@@ -1284,6 +1284,7 @@ mod tests {
             .transaction()
             .assert(Placement::new("ui/selected".parse()?, name("state")))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -1386,6 +1387,7 @@ mod tests {
             .transaction()
             .assert(Placement::new("local/note".parse()?, name("local")))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -1634,6 +1636,7 @@ mod tests {
                     .is("Notes".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -1700,6 +1703,7 @@ mod tests {
                     .is("Notes".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -1748,6 +1752,7 @@ mod tests {
                     .is("Notes".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert!(
@@ -1787,6 +1792,7 @@ mod tests {
             .transaction()
             .assert(Placement::new("ui/selected".parse()?, name("state")))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -1810,6 +1816,7 @@ mod tests {
                     .is("Notes".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1874,6 +1881,7 @@ mod tests {
             .transaction()
             .assert(Placement::new("ui/selected".parse()?, name("state")))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -1901,6 +1909,7 @@ mod tests {
                     .is("Notes".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert!(stack.behind());
@@ -1979,6 +1988,7 @@ mod tests {
             .transaction()
             .assert(Placement::new("ui/selected".parse()?, name("state")))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -2005,6 +2015,7 @@ mod tests {
                     .is("draft".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let local_after = local.revision();
@@ -2136,6 +2147,7 @@ mod tests {
             .transaction()
             .assert(Placement::new("ui/cursor".parse()?, name("state")))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;

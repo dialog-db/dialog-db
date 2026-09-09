@@ -1312,6 +1312,7 @@ mod tests {
                     .is(1u64),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1325,6 +1326,7 @@ mod tests {
                     .is(counter.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1393,6 +1395,7 @@ mod tests {
             .transaction()
             .assert(rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1409,6 +1412,7 @@ mod tests {
             )
             .assert(dialog_query::the!("task/done").of(task.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1426,6 +1430,7 @@ mod tests {
             .transaction()
             .retract(dialog_query::the!("task/done").of(task.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1501,6 +1506,7 @@ mod tests {
             .assert(stage)
             .assert(finish)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1515,6 +1521,7 @@ mod tests {
                     .is(target.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1590,6 +1597,7 @@ mod tests {
             .assert(ping_to_pong)
             .assert(pong_to_ping)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1602,6 +1610,7 @@ mod tests {
                     .is(1u64),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await;
         assert!(
@@ -1643,6 +1652,7 @@ mod tests {
             .assert(stamp("cmd.x/target", "result.x/target"))
             .assert(stamp("cmd.y/target", "result.y/target"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1657,6 +1667,7 @@ mod tests {
                     .is(target.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1733,6 +1744,7 @@ mod tests {
                     .is("second".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1745,6 +1757,7 @@ mod tests {
                     .is(message.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1832,6 +1845,7 @@ mod tests {
             .assert(status)
             .assert(notify)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1853,6 +1867,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1874,6 +1889,7 @@ mod tests {
                     .is("on-duty".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1919,6 +1935,7 @@ mod tests {
             .transaction()
             .assert(stamp("result.first/target"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1931,6 +1948,7 @@ mod tests {
                     .is(target.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1941,6 +1959,7 @@ mod tests {
             .transaction()
             .assert(stamp("result.second/target"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1954,6 +1973,7 @@ mod tests {
                     .is(target.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1985,6 +2005,7 @@ mod tests {
             .transaction()
             .assert(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1998,6 +2019,7 @@ mod tests {
                     .is("before".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2011,6 +2033,7 @@ mod tests {
             .transaction()
             .retract(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2024,6 +2047,7 @@ mod tests {
                     .is("after".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2054,6 +2078,7 @@ mod tests {
             .transaction()
             .assert(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2068,6 +2093,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2105,6 +2131,7 @@ mod tests {
             )
             .assert(dialog_query::the!("dialog.rule/on").of(forged).is(on))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2118,6 +2145,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2149,6 +2177,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2158,6 +2187,7 @@ mod tests {
             .transaction()
             .assert(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2201,6 +2231,7 @@ mod tests {
                     .is("pending".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2209,6 +2240,7 @@ mod tests {
             .transaction()
             .assert(drain)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2259,6 +2291,7 @@ mod tests {
                     .is("on-duty".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2289,6 +2322,7 @@ mod tests {
             .transaction()
             .assert(status)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2338,6 +2372,7 @@ mod tests {
             .transaction()
             .assert(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2420,6 +2455,7 @@ mod tests {
             .transaction()
             .assert(pair)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2447,6 +2483,7 @@ mod tests {
                     .is("q".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2549,6 +2586,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2561,6 +2599,7 @@ mod tests {
                     .is("doc:1".parse::<Entity>()?),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -2588,6 +2627,7 @@ mod tests {
                     .is("n".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2605,6 +2645,7 @@ mod tests {
                     .is("n".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2633,6 +2674,7 @@ mod tests {
             .transaction()
             .assert(stamp)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2727,6 +2769,7 @@ mod tests {
             .transaction()
             .assert(rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2739,6 +2782,7 @@ mod tests {
                     .is(list.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2790,6 +2834,7 @@ mod tests {
             .transaction()
             .assert(rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2803,6 +2848,7 @@ mod tests {
                     .is(item.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2858,6 +2904,7 @@ mod tests {
             .transaction()
             .assert(rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2875,6 +2922,7 @@ mod tests {
                     .is("Milk".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await;
         assert!(
