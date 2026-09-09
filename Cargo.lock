@@ -1616,6 +1616,7 @@ dependencies = [
  "dialog-credentials",
  "dialog-effects",
  "dialog-operator",
+ "dialog-query",
  "dialog-remote-fs",
  "dialog-repository",
  "dialog-search-tree",

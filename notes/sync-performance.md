@@ -123,7 +123,27 @@ increasing order of work:
   payloads. This is the protocol fix and pairs naturally with the permit
   work in finding 1.
 
-### 4. What the soak gates now
+### 4. The query engine's join is slower than downloading everything
+
+The `concept` phase runs the landing page the way the query engine runs
+it: a five-attribute concept join on the shared entity, on a fresh cold
+client. On broadband at 4,000 entities it takes ~8.4 s of modeled time,
+954 requests, and ~49 MB transferred — against a vault that is 399
+blocks and ~19 MB in total. The `download` phase (eagerly materializing
+the *entire* space) takes ~2.4 s, 398 requests, ~19 MB. The lazy join is
+~3.4x slower than full replication and re-fetches more than double the
+space's bytes, because the evaluator awaits one Select per outer row and
+each premise's probes descend and fetch serially (and re-fetch blocks
+across probes). `filtered` (the same concept with status pinned, the
+selective shape) barely improves: ~8.3 s, 743 requests.
+
+The per-phase `rounds` column (modeled time over per-request serial
+cost) estimates the longest sequential fetch chain: ~105 for the concept
+join versus ~30 for the download of the whole space. This is the number
+issue #492's parallelized query-driven replication exists to drive down;
+these two phases are its yardstick.
+
+### 5. What the soak gates now
 
 - `pull` staying O(1) requests (adopt-by-root must never regress into a
   block walk).
@@ -148,8 +168,14 @@ counts loosely and run totals tightly (`scripts/soak-compare.py`).
   26-33 once delays are injected — the extra requests are concurrent
   misses re-fetching blocks already in flight, and the duplication
   grows with latency, i.e. exactly on the links that can least afford
-  it. With concurrent application selects (finding 3) this compounds;
-  worth revisiting with a wasm-compatible in-flight map.
+  it. With concurrent application selects (finding 3) this compounds.
+  **Update**: #491 since landed a single-flight map at the remote
+  (`dialog-remote-s3`'s `Flight`), which joins identical concurrent
+  GETs below the cache. Single-flight does not help sequential
+  re-misses: finding 4's concept join still issues 954 requests against
+  a 399-block vault, so blocks the join has already seen are fetched
+  again (across probes or across selects — the attribution is a
+  follow-up).
 - Hydrated blocks are written back one `put` at a time
   (`networked.rs`); an `Import` batch per fetch window would cut local
   write overhead on IndexedDB targets.

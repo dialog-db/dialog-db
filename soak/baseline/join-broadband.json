@@ -9,12 +9,13 @@
   "entities": 4000,
   "facts": 24011,
   "commits": 33,
-  "vault_files": 401,
-  "vault_bytes": 19304457,
+  "vault_files": 407,
+  "vault_bytes": 19307797,
   "phases": [
     {
       "name": "pull",
       "virtual_ms": 82,
+      "rounds": 1.025,
       "traffic": {
         "rows": [
           [
@@ -29,48 +30,45 @@
     },
     {
       "name": "probe",
-      "virtual_ms": 175,
+      "virtual_ms": 176,
+      "rounds": 2.2,
       "traffic": {
         "rows": [
           [
             "archive.get",
             2,
-            150368
+            163420
           ]
         ],
         "requests": 2,
-        "bytes": 150368
+        "bytes": 163420
       }
     },
     {
       "name": "roster",
-      "virtual_ms": 82,
+      "virtual_ms": 0,
+      "rounds": 0.0,
       "traffic": {
-        "rows": [
-          [
-            "archive.get",
-            1,
-            5056
-          ]
-        ],
-        "requests": 1,
-        "bytes": 5056
+        "rows": [],
+        "requests": 0,
+        "bytes": 0
       }
     },
     {
       "name": "claim",
       "virtual_ms": 341,
+      "rounds": 4.2625,
       "traffic": {
         "rows": [
           [
             "archive.get",
             1,
-            106560
+            88832
           ],
           [
             "archive.put",
             1,
-            69420
+            74888
           ],
           [
             "memory.resolve",
@@ -80,31 +78,33 @@
           [
             "memory.publish",
             1,
-            373
+            370
           ]
         ],
         "requests": 4,
-        "bytes": 176686
+        "bytes": 164423
       }
     },
     {
       "name": "render",
-      "virtual_ms": 226,
+      "virtual_ms": 221,
+      "rounds": 2.7625,
       "traffic": {
         "rows": [
           [
             "archive.get",
-            21,
-            800080
+            25,
+            820048
           ]
         ],
-        "requests": 21,
-        "bytes": 800080
+        "requests": 25,
+        "bytes": 820048
       }
     },
     {
       "name": "entity",
       "virtual_ms": 89,
+      "rounds": 1.1125,
       "traffic": {
         "rows": [
           [
@@ -120,6 +120,7 @@
     {
       "name": "requery",
       "virtual_ms": 0,
+      "rounds": 0.0,
       "traffic": {
         "rows": [],
         "requests": 0,
@@ -127,23 +128,56 @@
       }
     },
     {
-      "name": "download",
-      "virtual_ms": 2487,
+      "name": "concept",
+      "virtual_ms": 8415,
+      "rounds": 105.1875,
       "traffic": {
         "rows": [
           [
             "archive.get",
-            399,
-            19308172
+            945,
+            49264816
+          ]
+        ],
+        "requests": 945,
+        "bytes": 49264816
+      }
+    },
+    {
+      "name": "filtered",
+      "virtual_ms": 8331,
+      "rounds": 104.1375,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            737,
+            38572904
+          ]
+        ],
+        "requests": 737,
+        "bytes": 38572904
+      }
+    },
+    {
+      "name": "download",
+      "virtual_ms": 2494,
+      "rounds": 31.175,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            405,
+            19311488
           ],
           [
             "memory.resolve",
             1,
-            373
+            370
           ]
         ],
-        "requests": 400,
-        "bytes": 19308545
+        "requests": 406,
+        "bytes": 19311858
       }
     }
   ]

@@ -37,6 +37,15 @@ pub struct PhaseReport {
     /// network (virtual time when the harness runs under the paused
     /// clock).
     pub virtual_ms: u64,
+    /// Estimated depth of the phase's longest sequential fetch chain:
+    /// modeled elapsed time divided by the per-request serial cost
+    /// (round-trip latency plus auth latency). An upper bound, since
+    /// bandwidth serialization and compute also advance the clock; 0 when
+    /// the run is unshaped. This is the round-trip metric parallelized
+    /// replication drives down: `requests` may grow while `rounds` should
+    /// approach tree depth times the number of ranges visited.
+    #[serde(default)]
+    pub rounds: f64,
     /// What crossed the simulated wire during the phase.
     pub traffic: TallyRows,
 }
@@ -98,13 +107,13 @@ impl Report {
         );
         let _ = writeln!(
             out,
-            "| {:<10} | {:>10} | {:>8} | {:>10} | breakdown",
-            "phase", "virtual ms", "requests", "bytes"
+            "| {:<10} | {:>10} | {:>6} | {:>8} | {:>10} | breakdown",
+            "phase", "virtual ms", "rounds", "requests", "bytes"
         );
         let _ = writeln!(
             out,
-            "|{:-<12}|{:-<12}|{:-<10}|{:-<12}|----------",
-            "", "", "", ""
+            "|{:-<12}|{:-<12}|{:-<8}|{:-<10}|{:-<12}|----------",
+            "", "", "", "", ""
         );
         for phase in &self.phases {
             let breakdown = phase
@@ -116,9 +125,10 @@ impl Report {
                 .join(" ");
             let _ = writeln!(
                 out,
-                "| {:<10} | {:>10} | {:>8} | {:>10} | {}",
+                "| {:<10} | {:>10} | {:>6.0} | {:>8} | {:>10} | {}",
                 phase.name,
                 phase.virtual_ms,
+                phase.rounds,
                 phase.traffic.requests,
                 phase.traffic.bytes,
                 breakdown

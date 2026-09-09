@@ -13,9 +13,17 @@
 //! 5. **render** — the first content query a landing page runs.
 //! 6. **entity** — a point read of one entity's detail (opening an item).
 //! 7. **requery** — the render query again, warm (should be free).
-//! 8. **download** — a second fresh client materializes the entire space
-//!    (`pull().download()`): the eager-replication cost the lazy join
-//!    avoids up front but pays incrementally.
+//! 8. **concept** — a fresh cold client runs the landing page as the query
+//!    engine runs it: a five-attribute concept join on the shared entity.
+//!    This is the sequential probe chain issue #492 is about, and the
+//!    yardstick for parallelized query-driven replication.
+//! 9. **filtered** — another fresh client runs the same concept with the
+//!    status pinned: the selective shape where a value-bound scan turns the
+//!    other premises into entity probes (the block-count-versus-rounds
+//!    tradeoff recorded in `notes/set-at-a-time-joins.md`).
+//! 10. **download** — a second fresh client materializes the entire space
+//!     (`pull().download()`): the eager-replication cost the lazy join
+//!     avoids up front but pays incrementally.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +34,7 @@ use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::{Directory, Location};
 use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 use dialog_operator::{Operator, Profile};
+use dialog_query::{Concept, Entity, Output as _, Query, Term};
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::simulation::{self, NetworkShape};
 use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
@@ -56,6 +65,58 @@ pub struct JoinScenario {
 
 /// Facts asserted per seeded entity.
 pub const FACTS_PER_ENTITY: usize = 6;
+
+/// Attribute markers for the [`Card`] concept, matching the facts
+/// [`entity_facts`] seeds (`bug/title`, `bug/status`, ...). The long
+/// `bug/detail` body is deliberately not a concept field, the same way a
+/// board render reads the card fields and not the description.
+mod card {
+    use dialog_query::Attribute;
+
+    /// The `bug/title` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("bug")]
+    pub struct Title(pub String);
+
+    /// The `bug/status` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("bug")]
+    pub struct Status(pub String);
+
+    /// The `bug/rank` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("bug")]
+    pub struct Rank(pub String);
+
+    /// The `bug/reporter` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("bug")]
+    pub struct Reporter(pub String);
+
+    /// The `bug/created` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("bug")]
+    pub struct Created(pub String);
+}
+
+/// The landing-page record as the query engine sees it: a five-attribute
+/// concept join on the shared entity. Querying it with every field free is
+/// the balanced join shape; pinning `status` is the selective shape.
+#[derive(Clone, Debug, PartialEq, Concept)]
+pub struct Card {
+    /// The bug entity the card renders.
+    pub this: Entity,
+    /// Its title.
+    pub title: card::Title,
+    /// Its status.
+    pub status: card::Status,
+    /// Its ordering key.
+    pub rank: card::Rank,
+    /// Who reported it.
+    pub reporter: card::Reporter,
+    /// When it was filed.
+    pub created: card::Created,
+}
 
 /// Build one entity's facts: sizes chosen to look like an issue-tracker
 /// row (short fields plus one few-hundred-byte body), the shape tonk
@@ -253,6 +314,7 @@ where
     phases.push(PhaseReport {
         name: name.to_string(),
         virtual_ms: elapsed.as_millis() as u64,
+        rounds: 0.0,
         traffic: traffic.into(),
     });
     Ok(outcome)
@@ -433,6 +495,70 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     })
     .await?;
 
+    // A cold client's first landing-page render through the query engine's
+    // concept join, rather than the raw attribute selects above. Today the
+    // evaluator resolves one premise at a time and awaits one Select per
+    // outer row, so on a cold replica the join's fetches serialize; this
+    // phase is the yardstick issue #492 is judged by. The client is fresh
+    // so every block is cold; the pull that adopts the head runs outside
+    // the measured window.
+    let concept_client =
+        mount_client(&operator, &profile, &server, &address, "soak-concept").await?;
+    concept_client.pull().perform(&operator).await?;
+    measured("concept", &mut phases, async {
+        let cards: Vec<Card> = concept_client
+            .query()
+            .select(Query::<Card> {
+                this: Term::var("this"),
+                title: Term::var("title"),
+                status: Term::var("status"),
+                rank: Term::var("rank"),
+                reporter: Term::var("reporter"),
+                created: Term::var("created"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        anyhow::ensure!(
+            cards.len() == expected,
+            "concept join should see every card"
+        );
+        Ok(())
+    })
+    .await?;
+
+    // The selective variant: status pinned to one value, so the value-bound
+    // scan drives the join and the other premises become entity probes. The
+    // contrast between this phase and `concept` is the block-count versus
+    // round-trip tradeoff the merge-versus-fold decision weighs.
+    let filtered_client =
+        mount_client(&operator, &profile, &server, &address, "soak-filtered").await?;
+    filtered_client.pull().perform(&operator).await?;
+    let closed = (0..scenario.entities)
+        .filter(|index| index % 3 == 2)
+        .count();
+    measured("filtered", &mut phases, async {
+        let cards: Vec<Card> = filtered_client
+            .query()
+            .select(Query::<Card> {
+                this: Term::var("this"),
+                title: Term::var("title"),
+                status: Term::from("closed".to_string()),
+                rank: Term::var("rank"),
+                reporter: Term::var("reporter"),
+                created: Term::var("created"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        anyhow::ensure!(
+            cards.len() == closed,
+            "filtered join should see the closed cards"
+        );
+        Ok(())
+    })
+    .await?;
+
     let downloader = mount_client(&operator, &profile, &server, &address, "soak-download").await?;
     measured("download", &mut phases, async {
         downloader.pull().download().perform(&operator).await?;
@@ -453,6 +579,18 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         ),
         None => (0.0, 0.0, 0.0),
     };
+
+    // Derive each phase's sequential-fetch-chain estimate: under the paused
+    // clock a chain of dependent requests costs its length times the
+    // per-request serial cost (auth redeem, then the round trip), so the
+    // quotient bounds the chain depth from above. Bandwidth serialization
+    // also advances the clock, which is why this is a bound and not a count.
+    let per_request_ms = latency_ms + auth_ms;
+    if per_request_ms > 0.0 {
+        for phase in &mut phases {
+            phase.rounds = phase.virtual_ms as f64 / per_request_ms;
+        }
+    }
 
     Ok(Report {
         scenario: "join".into(),

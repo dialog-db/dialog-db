@@ -23,6 +23,7 @@ dialog-capability = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-query = { workspace = true }
 dialog-remote-fs = { workspace = true }
 dialog-repository = { workspace = true }
 dialog-search-tree = { workspace = true }
