@@ -482,9 +482,20 @@ where
                         // The scan will walk this node's remaining children in
                         // turn, so start reading them now and let them land in
                         // the cache while the walk descends into the first of
-                        // them. A sibling still queued from an earlier descent
-                        // is not queued twice.
-                        for sibling in (child_index + 1)..index.len() {
+                        // them. Only children the range can still visit are
+                        // warmed: a narrow scan (an entity probe) would
+                        // otherwise queue up to PREFETCH_CONCURRENCY siblings
+                        // past its end bound at every level, fetches the walk
+                        // then drops mid-flight when the stream ends — paid
+                        // for on a remote backend, delivered to no one. A
+                        // sibling still queued from an earlier descent is not
+                        // queued twice.
+                        let visitable = index.children_within(match range.end_bound() {
+                            Bound::Included(bound) => Bound::Included(bound.as_ref()),
+                            Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
+                            Bound::Unbounded => Bound::Unbounded,
+                        })?;
+                        for sibling in (child_index + 1)..visitable {
                             if warming.len() >= PREFETCH_CONCURRENCY {
                                 break;
                             }
@@ -1411,6 +1422,44 @@ mod prefetch_tests {
         assert!(
             backend.peak_reads_in_flight() > 1,
             "sibling reads overlap the read the scan is waiting on"
+        );
+
+        Ok(())
+    }
+
+    /// A range scan bounded within a single leaf's span (the shape of an
+    /// entity probe inside a join) must read exactly the blocks a point
+    /// lookup of the same leaf reads: the descent path, nothing beside
+    /// it. Unbounded sibling warming used to queue up to
+    /// `PREFETCH_CONCURRENCY` siblings past the range's end at every
+    /// level; the probe's stream then dropped them mid-flight — reads a
+    /// remote backend had already paid for, delivered to no one and
+    /// re-fetched by the next probe.
+    #[dialog_common::test]
+    async fn it_does_not_warm_siblings_past_the_range_bound() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+        let backend = storage.backend().clone();
+
+        backend.reset();
+        let found = tree.get(&100u32.to_be_bytes(), &storage).await?;
+        assert_eq!(found, Some(value_of(100)));
+        let point_path: HashSet<_> = backend.read_log().into_iter().collect();
+
+        // A fresh handle, so the scan's node cache is cold and every node
+        // it touches reaches the backend.
+        let scan_tree = Tree::from_hash(tree.root().clone());
+        backend.reset();
+        let entries: Vec<_> = scan_tree
+            .stream_range(100u32.to_be_bytes()..=103u32.to_be_bytes(), &storage)
+            .try_collect()
+            .await?;
+        assert_eq!(entries.len(), 4, "the scan yields exactly the range");
+
+        let scan_reads: HashSet<_> = backend.read_log().into_iter().collect();
+        assert_eq!(
+            scan_reads, point_path,
+            "a leaf-narrow range scan reads the descent path and nothing beside it"
         );
 
         Ok(())

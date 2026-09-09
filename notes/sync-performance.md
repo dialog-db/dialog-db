@@ -1,7 +1,8 @@
 # Sync performance: the cost of joining and reading over a real network
 
-Status: audit record, 2026-09-01. Measurements from the `dialog-soak`
-harness (`rust/dialog-soak`, `scripts/soak.sh`); baselines under
+Status: audit record, 2026-09-01; updated 2026-09-09 (finding 4 added and
+resolved). Measurements from the `dialog-soak` harness (`rust/dialog-soak`;
+`soak sweep` / `soak compare` subcommands); baselines under
 `soak/baseline`; the nightly `soak:sync` arm gates regressions.
 
 ## Why this audit exists
@@ -123,25 +124,46 @@ increasing order of work:
   payloads. This is the protocol fix and pairs naturally with the permit
   work in finding 1.
 
-### 4. The query engine's join is slower than downloading everything
+### 4. The query engine's cold join re-downloaded most of what it read
+(found and fixed)
 
 The `concept` phase runs the landing page the way the query engine runs
 it: a five-attribute concept join on the shared entity, on a fresh cold
-client. On broadband at 4,000 entities it takes ~8.4 s of modeled time,
-954 requests, and ~49 MB transferred — against a vault that is 399
-blocks and ~19 MB in total. The `download` phase (eagerly materializing
-the *entire* space) takes ~2.4 s, 398 requests, ~19 MB. The lazy join is
-~3.4x slower than full replication and re-fetches more than double the
-space's bytes, because the evaluator awaits one Select per outer row and
-each premise's probes descend and fetch serially (and re-fetch blocks
-across probes). `filtered` (the same concept with status pinned, the
-selective shape) barely improves: ~8.3 s, 743 requests.
+client. As first measured (broadband, 4,000 entities) it took ~8.4 s of
+modeled time, ~950 requests, and ~49 MB transferred — against a vault
+that is 399 blocks and ~19 MB in total, and 3.4x slower than the
+`download` phase eagerly materializing the *entire* space (~2.4 s, ~400
+requests, ~19 MB).
 
-The per-phase `rounds` column (modeled time over per-request serial
-cost) estimates the longest sequential fetch chain: ~105 for the concept
-join versus ~30 for the download of the whole space. This is the number
-issue #492's parallelized query-driven replication exists to drive down;
-these two phases are its yardstick.
+The per-key get ledger (`dialog_remote_fs::simulation::get_ledger`)
+decomposed those ~950 requests into ~117 unique blocks, ~450 requests
+re-downloading blocks already received, zero empty lookups — 80% of the
+transfer was waste, hot leaves fetched 11-15x. **Root cause:** the
+walker's sibling read-ahead ignored the scan's end bound, so an entity
+probe (a range narrower than one leaf) queued up to 16 siblings past its
+range at every level of the descent; the probe's stream then completed
+and dropped those fetches mid-flight — after the simulated transport had
+served them, before `NetworkedIndex` could cache them. Nobody received
+the bytes, and the next probe re-fetched the same leaves and overshot
+again. Unshaped runs showed no duplication because without latency each
+fetch completed and hydrated before it could be dropped, which is why
+localhost testing never surfaced it.
+
+**Fix:** the walker warms only children the range can still visit
+(`ArchivedIndex::children_within`, the `children_spanning` upper-edge
+rule per level), pinned by
+`walker::prefetch_tests::it_does_not_warm_siblings_past_the_range_bound`.
+After the fix the same concept join is 111 requests, 111 unique, zero
+duplicates, ~5.5 MB. `NetworkedIndex` hydration was verified sound
+throughout (every completed fetch cached exactly once); its swallowed
+write-back error now emits a `dialog::sync::hydrate` debug event. The
+`soak compare` gate holds duplicate fetches at zero per phase.
+
+What the fix does *not* change: modeled wall-clock (~8.4 s) and the
+`rounds` column (~105 versus the download's ~30), because the critical
+path is still one sequential probe chain — the evaluator awaits one
+Select per outer row. That is issue #492's target; these phases are its
+yardstick, now measuring chain depth rather than bandwidth waste.
 
 ### 5. What the soak gates now
 
@@ -154,7 +176,7 @@ these two phases are its yardstick.
 Run-to-run leaf-boundary wobble (randomized identities, commit
 timestamps) moves a block or two between phases, so the sweep keeps the
 median of 3 runs per configuration and the gate compares phase request
-counts loosely and run totals tightly (`scripts/soak-compare.py`).
+counts loosely and run totals tightly (`dialog_soak::compare`).
 
 ## Other hazards on the read/merge path (unmeasured here, real)
 
@@ -171,11 +193,12 @@ counts loosely and run totals tightly (`scripts/soak-compare.py`).
   it. With concurrent application selects (finding 3) this compounds.
   **Update**: #491 since landed a single-flight map at the remote
   (`dialog-remote-s3`'s `Flight`), which joins identical concurrent
-  GETs below the cache. Single-flight does not help sequential
-  re-misses: finding 4's concept join still issues 954 requests against
-  a 399-block vault, so blocks the join has already seen are fetched
-  again (across probes or across selects — the attribution is a
-  follow-up).
+  GETs below the cache — note the `Fs` transport this harness uses has
+  no such map, and `NetworkedIndex` itself none either: two concurrent
+  misses on one key each fetch remotely. The sequential evaluator never
+  triggers that (post-fix duplication measures zero); it becomes
+  load-bearing once the #492 work issues genuinely concurrent scans,
+  and belongs to the fetch-scheduler milestone.
 - Hydrated blocks are written back one `put` at a time
   (`networked.rs`); an `Import` batch per fetch window would cut local
   write overhead on IndexedDB targets.
