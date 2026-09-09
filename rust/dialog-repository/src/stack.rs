@@ -1,12 +1,12 @@
-//! Stacks: lines linked under layer names, read as one composite and
+//! Stacks: layers linked under scope names, read as one composite and
 //! written by placement.
 //!
-//! A **line** is a [`Branch`], a [`Snapshot`], or an [`Ephemeral`]
-//! store. A **stack** is a list of lines, bottom first, where an upper
-//! line may **link** a line beneath it under a layer name. Reads see
-//! every line as one composite; a transaction routes each fact to the
-//! line its attribute's layer is linked under, commits the lines
-//! bottom to top, and every enclosing line that commits refreshes its
+//! A **layer** is a [`Branch`], a [`Snapshot`], or an [`Ephemeral`]
+//! store. A **stack** is a list of layers, bottom first, where an upper
+//! layer may **link** a layer beneath it under a scope name. Reads see
+//! every layer as one composite; a transaction routes each fact to the
+//! layer its attribute's scope is linked under, commits the layers
+//! bottom to top, and every enclosing layer that commits refreshes its
 //! links with the heads it saw.
 //!
 //! ```no_run
@@ -14,10 +14,10 @@
 //! # fn example(shared: Branch, local: Branch) -> anyhow::Result<()> {
 //! let state = Ephemeral::new();
 //! let build = Stack::builder()
-//!     .line(shared.clone()) // the bottom: placements live here
-//!     .line(local.clone())
+//!     .layer(shared.clone()) // the bottom: placements live here
+//!     .layer(local.clone())
 //!     .link(&shared, "memory:shared".parse()?)
-//!     .line(state.clone())
+//!     .layer(state.clone())
 //!     .link(&local, "memory:local".parse()?)
 //!     .build(); // `.perform(&env).await?` checks the shape and writes the links
 //! # let _ = build;
@@ -27,58 +27,58 @@
 //!
 //! # Links, as facts
 //!
-//! A link is held by the enclosing line, in its own store, as facts on
+//! A link is held by the enclosing layer, in its own store, as facts on
 //! a content-addressed link entity:
 //!
 //! ```text
 //! <link> dialog.link/from      <address entity of the encloser>
-//! <link> dialog.link/to        <stack identity of the enclosed line>
-//! <link> dialog.link/name      <layer name>
-//! <link> dialog.link/revision  <head of the enclosed line, as last seen>
+//! <link> dialog.link/to        <stack identity of the enclosed layer>
+//! <link> dialog.link/name      <scope name>
+//! <link> dialog.link/revision  <head of the enclosed layer, as last seen>
 //! ```
 //!
-//! plus the enclosed line's address (`dialog.link/repository` and
+//! plus the enclosed layer's address (`dialog.link/repository` and
 //! `dialog.link/branch` for a branch, `dialog.link/ephemeral` for an
-//! ephemeral line). Wiring lifts: an encloser also holds a copy of
-//! every link fact its enclosed lines hold, verbatim, so the top line
+//! ephemeral layer). Wiring lifts: an encloser also holds a copy of
+//! every link fact its enclosed layers hold, verbatim, so the top layer
 //! carries the whole stack's wiring and every edge is queryable from
 //! it alone.
 //!
-//! A stack commit refreshes the wiring on every line above a line it
-//! moved, bottom to top, so after the commit the top line's head
-//! transitively names the head of every line beneath it: one hash for
+//! A stack commit refreshes the wiring on every layer above a layer it
+//! moved, bottom to top, so after the commit the top layer's head
+//! transitively names the head of every layer beneath it: one hash for
 //! the whole composite. A link whose target did not move is a no-op
-//! refresh and mints nothing. Linking is capturing: a line that should
+//! refresh and mints nothing. Linking is capturing: a layer that should
 //! not record another's head does not link it, and sits beside it
 //! under a common encloser instead.
 //!
 //! # Captured heads
 //!
-//! A stack holds a captured head per line, the way a branch handle
+//! A stack holds a captured head per layer, the way a branch handle
 //! holds its head, and everything it does builds on them. Reads see
-//! every line beneath the top at its captured revision, so what a
+//! every layer beneath the top at its captured revision, so what a
 //! read sees is exactly what the top's hash names. A commit induces
-//! against the captured heads and commits each line on top of its
-//! captured revision; a line that moved outside the stack refuses the
+//! against the captured heads and commits each layer on top of its
+//! captured revision; a layer that moved outside the stack refuses the
 //! write ([`CommitError::Behind`]) rather than building on a head the
 //! stack never saw. Movement enters a stack only on
-//! [`pull`](Stack::pull), which reconciles each line with its upstream
+//! [`pull`](Stack::pull), which reconciles each layer with its upstream
 //! bottom to top and then captures the live heads, and leaves it on
 //! [`push`](Stack::push), which fails when an upstream moved and needs
 //! a pull first. Reads and subscription polls never write.
 //!
 //! # Identity
 //!
-//! Every line has an **address** (where its head lives) and a **stack
+//! Every layer has an **address** (where its head lives) and a **stack
 //! identity**: the hash of its descriptor, `{address, links: sorted
-//! [(name, id(to))]}` in canonical dag-cbor. The bottom line's identity
+//! [(name, id(to))]}` in canonical dag-cbor. The bottom layer's identity
 //! is the same on every replica; an encloser's identity covers the
-//! shape beneath it, so a cycle is unconstructible and a re-shaped line
+//! shape beneath it, so a cycle is unconstructible and a re-shaped layer
 //! re-identifies everything above it.
 //!
 //! # The audience rule
 //!
-//! A line may link a line beneath it only if that line's
+//! A layer may link a layer beneath it only if that layer's
 //! [`Audience`] contains its own: a link is a revision hash, and a
 //! reader of the encloser must be able to resolve it. A replicated
 //! branch may not link a process-local store; the store may link the
@@ -114,7 +114,7 @@ use crate::{
     ResolveError, Revision, Snapshot, Subscription, TransactionBatch,
 };
 
-/// Who can read a line: the set of principals its facts reach.
+/// Who can read a layer: the set of principals its facts reach.
 /// Ordered by inclusion, narrowest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Audience {
@@ -122,13 +122,13 @@ pub enum Audience {
     Process,
     /// This device: durable here, never pushed.
     Device,
-    /// The line's peers: pushed to its upstreams.
+    /// The layer's peers: pushed to its upstreams.
     Peers,
 }
 
-/// A line in a stack.
+/// A layer in a stack.
 #[derive(Debug, Clone)]
-pub enum Line {
+pub enum Layer {
     /// A branch: durable, head in a cell.
     Branch(Branch),
     /// A snapshot: durable, head by value, read-only in a stack.
@@ -137,55 +137,55 @@ pub enum Line {
     Ephemeral(Ephemeral),
 }
 
-impl From<Branch> for Line {
+impl From<Branch> for Layer {
     fn from(branch: Branch) -> Self {
-        Line::Branch(branch)
+        Layer::Branch(branch)
     }
 }
 
-impl From<Snapshot> for Line {
+impl From<Snapshot> for Layer {
     fn from(snapshot: Snapshot) -> Self {
-        Line::Snapshot(snapshot)
+        Layer::Snapshot(snapshot)
     }
 }
 
-impl From<Ephemeral> for Line {
+impl From<Ephemeral> for Layer {
     fn from(ephemeral: Ephemeral) -> Self {
-        Line::Ephemeral(ephemeral)
+        Layer::Ephemeral(ephemeral)
     }
 }
 
-/// Something a link can target: a line, or a handle to one.
-pub trait AsLine {
-    /// This as a line.
-    fn as_line(&self) -> Line;
+/// Something a link can target: a layer, or a handle to one.
+pub trait AsLayer {
+    /// This as a layer.
+    fn as_layer(&self) -> Layer;
 }
 
-impl AsLine for Line {
-    fn as_line(&self) -> Line {
+impl AsLayer for Layer {
+    fn as_layer(&self) -> Layer {
         self.clone()
     }
 }
 
-impl AsLine for Branch {
-    fn as_line(&self) -> Line {
-        Line::Branch(self.clone())
+impl AsLayer for Branch {
+    fn as_layer(&self) -> Layer {
+        Layer::Branch(self.clone())
     }
 }
 
-impl AsLine for Snapshot {
-    fn as_line(&self) -> Line {
-        Line::Snapshot(self.clone())
+impl AsLayer for Snapshot {
+    fn as_layer(&self) -> Layer {
+        Layer::Snapshot(self.clone())
     }
 }
 
-impl AsLine for Ephemeral {
-    fn as_line(&self) -> Line {
-        Line::Ephemeral(self.clone())
+impl AsLayer for Ephemeral {
+    fn as_layer(&self) -> Layer {
+        Layer::Ephemeral(self.clone())
     }
 }
 
-/// Where a line's head lives, as the descriptor records it.
+/// Where a layer's head lives, as the descriptor records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum Address {
@@ -194,8 +194,8 @@ enum Address {
     Ephemeral { id: String },
 }
 
-/// The shape of a line: its address and what it links, in canonical
-/// order. Its hash is the line's stack identity.
+/// The shape of a layer: its address and what it links, in canonical
+/// order. Its hash is the layer's stack identity.
 #[derive(Debug, Clone, Serialize)]
 struct Descriptor {
     address: Address,
@@ -205,9 +205,9 @@ struct Descriptor {
 /// A head as a link records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Head {
-    /// A tree line's head, or `None` for a branch with no commits.
+    /// A tree layer's head, or `None` for a branch with no commits.
     Tree(Option<Revision>),
-    /// An ephemeral line's head.
+    /// An ephemeral layer's head.
     Ephemeral(EphemeralRevision),
 }
 
@@ -223,75 +223,75 @@ impl Head {
     }
 }
 
-impl Line {
-    /// Whether two handles name the same line.
-    fn same(&self, other: &Line) -> bool {
+impl Layer {
+    /// Whether two handles name the same layer.
+    fn same(&self, other: &Layer) -> bool {
         match (self, other) {
-            (Line::Branch(a), Line::Branch(b)) => a.of() == b.of() && a.name() == b.name(),
-            (Line::Snapshot(a), Line::Snapshot(b)) => {
+            (Layer::Branch(a), Layer::Branch(b)) => a.of() == b.of() && a.name() == b.name(),
+            (Layer::Snapshot(a), Layer::Snapshot(b)) => {
                 a.of() == b.of() && a.revision() == b.revision()
             }
-            (Line::Ephemeral(a), Line::Ephemeral(b)) => a.is(b),
+            (Layer::Ephemeral(a), Layer::Ephemeral(b)) => a.is(b),
             _ => false,
         }
     }
 
-    /// Who can read this line.
+    /// Who can read this layer.
     pub fn audience(&self) -> Audience {
         match self {
-            Line::Branch(branch) if branch.upstream().is_some() => Audience::Peers,
-            Line::Branch(_) | Line::Snapshot(_) => Audience::Device,
-            Line::Ephemeral(_) => Audience::Process,
+            Layer::Branch(branch) if branch.upstream().is_some() => Audience::Peers,
+            Layer::Branch(_) | Layer::Snapshot(_) => Audience::Device,
+            Layer::Ephemeral(_) => Audience::Process,
         }
     }
 
     fn address(&self) -> Address {
         match self {
-            Line::Branch(branch) => Address::Branch {
+            Layer::Branch(branch) => Address::Branch {
                 repository: branch.of().to_string(),
                 branch: branch.name().to_string(),
             },
-            Line::Snapshot(snapshot) => Address::Snapshot {
+            Layer::Snapshot(snapshot) => Address::Snapshot {
                 repository: snapshot.of().to_string(),
                 tree: snapshot.revision().tree.hash().to_base58(),
             },
-            Line::Ephemeral(ephemeral) => Address::Ephemeral {
+            Layer::Ephemeral(ephemeral) => Address::Ephemeral {
                 id: ephemeral.entity().to_string(),
             },
         }
     }
 
-    /// The entity standing for this line's address in link facts.
+    /// The entity standing for this layer's address in link facts.
     pub fn address_entity(&self) -> Entity {
         match self {
-            Line::Branch(branch) => format!("line:{}/{}", branch.of(), branch.name())
+            Layer::Branch(branch) => format!("layer:{}/{}", branch.of(), branch.name())
                 .parse()
                 .expect("a DID and a branch name form an opaque URI path"),
-            Line::Snapshot(snapshot) => format!(
-                "line:{}/{}",
+            Layer::Snapshot(snapshot) => format!(
+                "layer:{}/{}",
                 snapshot.of(),
                 snapshot.revision().tree.hash().to_base58()
             )
             .parse()
             .expect("a DID and a hash form an opaque URI path"),
-            Line::Ephemeral(ephemeral) => ephemeral.entity().clone(),
+            Layer::Ephemeral(ephemeral) => ephemeral.entity().clone(),
         }
     }
 
-    /// This line's head now.
+    /// This layer's head now.
     pub fn head(&self) -> Head {
         match self {
-            Line::Branch(branch) => Head::Tree(branch.revision()),
-            Line::Snapshot(snapshot) => Head::Tree(Some(snapshot.revision())),
-            Line::Ephemeral(ephemeral) => Head::Ephemeral(ephemeral.revision()),
+            Layer::Branch(branch) => Head::Tree(branch.revision()),
+            Layer::Snapshot(snapshot) => Head::Tree(Some(snapshot.revision())),
+            Layer::Ephemeral(ephemeral) => Head::Ephemeral(ephemeral.revision()),
         }
     }
 
-    /// The address facts a link to this line carries, so an opener can
+    /// The address facts a link to this layer carries, so an opener can
     /// resolve the target from the link alone.
     fn address_facts(&self, link: &Entity, changes: &mut Changes) {
         match self {
-            Line::Branch(branch) => {
+            Layer::Branch(branch) => {
                 changes.associate_unique(
                     link_attr("repository"),
                     link.clone(),
@@ -303,7 +303,7 @@ impl Line {
                     Value::String(branch.name().to_string()),
                 );
             }
-            Line::Snapshot(snapshot) => {
+            Layer::Snapshot(snapshot) => {
                 changes.associate_unique(
                     link_attr("repository"),
                     link.clone(),
@@ -315,7 +315,7 @@ impl Line {
                     Value::Bytes(snapshot.revision().tree.hash().to_vec()),
                 );
             }
-            Line::Ephemeral(ephemeral) => {
+            Layer::Ephemeral(ephemeral) => {
                 changes.associate_unique(
                     link_attr("ephemeral"),
                     link.clone(),
@@ -333,44 +333,44 @@ fn link_attr(name: &str) -> dialog_artifacts::Attribute {
         .expect("a fixed link attribute name is valid")
 }
 
-/// A link from an enclosing line to a line beneath it.
+/// A link from an enclosing layer to a layer beneath it.
 #[derive(Debug, Clone)]
 struct Link {
-    /// Index of the enclosed line in the stack.
+    /// Index of the enclosed layer in the stack.
     to: usize,
-    /// The layer name the link binds.
+    /// The scope name the link binds.
     name: Entity,
     /// The link entity: `link:<blake3(dagcbor{from, to})>` over the
-    /// encloser's address entity and the enclosed line's identity.
+    /// encloser's address entity and the enclosed layer's identity.
     entity: Entity,
 }
 
 /// Why a stack could not be built.
 #[derive(Debug, Error)]
 pub enum StackError {
-    /// A link names a line the stack does not hold beneath the
-    /// linking line.
-    #[error("Line {from} links a line that is not beneath it in the stack")]
-    UnknownLine {
-        /// The address entity of the linking line.
+    /// A link names a layer the stack does not hold beneath the
+    /// linking layer.
+    #[error("Layer {from} links a layer that is not beneath it in the stack")]
+    UnknownLayer {
+        /// The address entity of the linking layer.
         from: Entity,
     },
     /// A link would let a wider audience reference a head it cannot
     /// resolve.
-    #[error("Line {from} ({from_audience:?}) may not link {to} ({to_audience:?})")]
+    #[error("Layer {from} ({from_audience:?}) may not link {to} ({to_audience:?})")]
     Audience {
-        /// The address entity of the linking line.
+        /// The address entity of the linking layer.
         from: Entity,
         /// Its audience.
         from_audience: Audience,
-        /// The address entity of the linked line.
+        /// The address entity of the linked layer.
         to: Entity,
         /// Its audience.
         to_audience: Audience,
     },
     /// A snapshot cannot hold links: nothing reached through a
     /// snapshot handle can write.
-    #[error("Snapshot {from} cannot link other lines")]
+    #[error("Snapshot {from} cannot link other layers")]
     SnapshotEncloser {
         /// The address entity of the snapshot.
         from: Entity,
@@ -378,86 +378,88 @@ pub enum StackError {
     /// A descriptor could not be encoded.
     #[error("Failed to encode a stack descriptor: {0}")]
     Encode(String),
-    /// Writing a line's link facts failed.
+    /// Writing a layer's link facts failed.
     #[error("Failed to write link facts: {0}")]
     Commit(#[from] CommitError),
-    /// Re-resolving a line's head from storage failed.
-    #[error("Failed to resolve a line's head: {0}")]
+    /// Re-resolving a layer's head from storage failed.
+    #[error("Failed to resolve a layer's head: {0}")]
     Resolve(#[from] ResolveError),
-    /// Pulling a line from its upstream failed.
-    #[error("Failed to pull a line: {0}")]
+    /// Pulling a layer from its upstream failed.
+    #[error("Failed to pull a layer: {0}")]
     Pull(#[from] PullError),
-    /// Pushing a line to its upstream failed.
-    #[error("Failed to push a line: {0}")]
+    /// Pushing a layer to its upstream failed.
+    #[error("Failed to push a layer: {0}")]
     Push(#[from] PushError),
-    /// Publishing a line's staged chain failed, most often because its
+    /// Publishing a layer's staged chain failed, most often because its
     /// head moved outside the stack. The chain and every chain above
     /// it are dropped; pull, then re-run the transactions.
-    #[error("Failed to publish line {line}: {source}")]
+    #[error("Failed to publish layer {layer}: {source}")]
     Publish {
-        /// The address entity of the line whose publish failed.
-        line: Entity,
+        /// The address entity of the layer whose publish failed.
+        layer: Entity,
         /// Why.
         #[source]
         source: CommitError,
     },
 }
 
-/// A line as the builder holds it: with the links declared so far.
+/// A layer as the builder holds it: with the links declared so far.
 #[derive(Debug, Clone)]
 struct Pending {
-    line: Line,
+    layer: Layer,
     links: Vec<(usize, Entity)>,
 }
 
-/// Builder for a [`Stack`]: add lines bottom first, link each upper
-/// line to lines beneath it under layer names, then
+/// Builder for a [`Stack`]: add layers bottom first, link each upper
+/// layer to layers beneath it under scope names, then
 /// [`build`](StackBuilder::build).
 #[derive(Debug, Default)]
 pub struct StackBuilder {
-    lines: Vec<Pending>,
+    layers: Vec<Pending>,
 }
 
 impl StackBuilder {
-    /// Add a line above every line added so far.
-    pub fn line(mut self, line: impl Into<Line>) -> Self {
-        self.lines.push(Pending {
-            line: line.into(),
+    /// Add a layer above every layer added so far.
+    pub fn layer(mut self, layer: impl Into<Layer>) -> Self {
+        self.layers.push(Pending {
+            layer: layer.into(),
             links: Vec::new(),
         });
         self
     }
 
-    /// Link the most recently added line to `to`, which must already
+    /// Link the most recently added layer to `to`, which must already
     /// be in the stack beneath it, under `name`. A name may be bound
-    /// by several links from one line; a write to it then lands in
-    /// every line so bound.
-    pub fn link<L: AsLine>(mut self, to: &L, name: Entity) -> Self {
-        let to = to.as_line();
-        let Some(last) = self.lines.len().checked_sub(1) else {
+    /// by several links from one layer; a write to it then lands in
+    /// every layer so bound.
+    pub fn link<L: AsLayer>(mut self, to: &L, name: Entity) -> Self {
+        let to = to.as_layer();
+        let Some(last) = self.layers.len().checked_sub(1) else {
             return self;
         };
-        // An unknown target is recorded as a link to the linking line
+        // An unknown target is recorded as a link to the linking layer
         // itself, which `build` rejects with the right error.
-        let index = self.lines[..last]
+        let index = self.layers[..last]
             .iter()
-            .position(|pending| pending.line.same(&to))
+            .position(|pending| pending.layer.same(&to))
             .unwrap_or(last);
-        self.lines[last].links.push((index, name));
+        self.layers[last].links.push((index, name));
         self
     }
 
-    /// Validate and assemble the stack, writing every enclosing line's
+    /// Validate and assemble the stack, writing every enclosing layer's
     /// link facts.
     pub fn build(self) -> Build {
-        Build { lines: self.lines }
+        Build {
+            layers: self.layers,
+        }
     }
 }
 
 /// Command assembling a stack; see [`StackBuilder::build`].
 #[derive(Debug)]
 pub struct Build {
-    lines: Vec<Pending>,
+    layers: Vec<Pending>,
 }
 
 impl Build {
@@ -477,21 +479,21 @@ impl Build {
             + ConditionalSync
             + 'static,
     {
-        let mut ids: Vec<Entity> = Vec::with_capacity(self.lines.len());
-        let mut links: Vec<Vec<Link>> = Vec::with_capacity(self.lines.len());
-        for (index, pending) in self.lines.iter().enumerate() {
-            let from = pending.line.address_entity();
-            if !pending.links.is_empty() && matches!(pending.line, Line::Snapshot(_)) {
+        let mut ids: Vec<Entity> = Vec::with_capacity(self.layers.len());
+        let mut links: Vec<Vec<Link>> = Vec::with_capacity(self.layers.len());
+        for (index, pending) in self.layers.iter().enumerate() {
+            let from = pending.layer.address_entity();
+            if !pending.links.is_empty() && matches!(pending.layer, Layer::Snapshot(_)) {
                 return Err(StackError::SnapshotEncloser { from });
             }
             let mut own: Vec<Link> = Vec::with_capacity(pending.links.len());
             let mut descriptor_links: Vec<(String, String)> = Vec::new();
             for (to, name) in &pending.links {
                 if *to >= index {
-                    return Err(StackError::UnknownLine { from });
+                    return Err(StackError::UnknownLayer { from });
                 }
-                let target = &self.lines[*to].line;
-                let (from_audience, to_audience) = (pending.line.audience(), target.audience());
+                let target = &self.layers[*to].layer;
+                let (from_audience, to_audience) = (pending.layer.audience(), target.audience());
                 if to_audience < from_audience {
                     return Err(StackError::Audience {
                         from,
@@ -509,7 +511,7 @@ impl Build {
             }
             descriptor_links.sort();
             let descriptor = Descriptor {
-                address: pending.line.address(),
+                address: pending.layer.address(),
                 links: descriptor_links,
             };
             let bytes = serde_ipld_dagcbor::to_vec(&descriptor)
@@ -518,8 +520,8 @@ impl Build {
             links.push(own);
         }
 
-        // A name binds the lines *linked under it*, not the linking
-        // lines: `local.link(&shared, "memory:shared")` makes
+        // A name binds the layers *linked under it*, not the linking
+        // layers: `local.link(&shared, "memory:shared")` makes
         // `memory:shared` route to shared.
         let mut bound: HashMap<Entity, Vec<usize>> = HashMap::new();
         for own in &links {
@@ -531,15 +533,19 @@ impl Build {
             }
         }
 
-        let lines: Vec<Line> = self.lines.into_iter().map(|pending| pending.line).collect();
-        let published: Vec<Head> = lines.iter().map(Line::head).collect();
+        let layers: Vec<Layer> = self
+            .layers
+            .into_iter()
+            .map(|pending| pending.layer)
+            .collect();
+        let published: Vec<Head> = layers.iter().map(Layer::head).collect();
         let stack = Stack {
             state: Arc::new(RwLock::new(State {
                 published,
                 versions: Vec::new(),
-                staged: lines.iter().map(|_| None).collect(),
+                staged: layers.iter().map(|_| None).collect(),
             })),
-            lines,
+            layers,
             ids,
             links,
             bound,
@@ -547,7 +553,7 @@ impl Build {
         stack.state.write().versions = stack.versions();
         // Every encloser records its wiring now, at the heads it sees,
         // and publishes it, so the stack reads at those heads from
-        // here on. Nothing beneath has moved yet, so every line with
+        // here on. Nothing beneath has moved yet, so every layer with
         // links is treated as reaching a move.
         let heads = stack.heads();
         let never: Vec<Head> = Vec::new();
@@ -558,7 +564,7 @@ impl Build {
 }
 
 /// What a link entity hashes: the encloser's address entity and the
-/// enclosed line's stack identity, in canonical dag-cbor like the
+/// enclosed layer's stack identity, in canonical dag-cbor like the
 /// descriptor.
 #[derive(Debug, Clone, Serialize)]
 struct LinkKey<'a> {
@@ -588,38 +594,38 @@ fn identity(descriptor: &[u8]) -> Entity {
     .expect("a base58 hash is an opaque URI path")
 }
 
-/// Lines linked under layer names, read as one composite and written
+/// Layers linked under scope names, read as one composite and written
 /// by placement. Built by [`Stack::builder`]; cheap to clone.
 ///
-/// A stack holds, per line, the head it last **published** or pulled,
-/// and for branch lines a **staged** chain of commits not yet
+/// A stack holds, per layer, the head it last **published** or pulled,
+/// and for branch layers a **staged** chain of commits not yet
 /// published. Reads and commits build on the staged tip where there
 /// is one and on the published head otherwise; [`publish`](Self::publish)
-/// moves every branch line's head to its staged tip, bottom to top.
+/// moves every branch layer's head to its staged tip, bottom to top.
 #[derive(Debug, Clone)]
 pub struct Stack {
     /// Bottom first.
-    lines: Vec<Line>,
-    /// Each line's stack identity, parallel to `lines`.
+    layers: Vec<Layer>,
+    /// Each layer's stack identity, parallel to `layers`.
     ids: Vec<Entity>,
-    /// Each line's links, parallel to `lines`.
+    /// Each layer's links, parallel to `layers`.
     links: Vec<Vec<Link>>,
-    /// Layer name → the lines linked under it.
+    /// Scope name → the layers linked under it.
     bound: HashMap<Entity, Vec<usize>>,
     /// Heads and staged chains, shared by clones.
     state: Arc<RwLock<State>>,
 }
 
-/// What a stack knows about its lines' heads.
+/// What a stack knows about its layers' heads.
 struct State {
-    /// Per line, the head the stack last published or pulled: the
-    /// base every staged chain builds on. An ephemeral line's head
+    /// Per layer, the head the stack last published or pulled: the
+    /// base every staged chain builds on. An ephemeral layer's head
     /// moves here directly, since it has nothing to publish.
     published: Vec<Head>,
-    /// Per branch line, the head cell's version at `published`, which
-    /// a publish CAS's against. `None` for other lines.
+    /// Per branch layer, the head cell's version at `published`, which
+    /// a publish CAS's against. `None` for other layers.
     versions: Vec<Option<MemoryVersion>>,
-    /// Per branch line, the staged chain of commits since
+    /// Per branch layer, the staged chain of commits since
     /// `published`, or `None` when nothing is staged.
     staged: Vec<Option<TransactionBatch>>,
 }
@@ -640,7 +646,7 @@ impl fmt::Debug for State {
 }
 
 impl State {
-    /// The head the stack reads line `index` at: the staged tip, or
+    /// The head the stack reads layer `index` at: the staged tip, or
     /// the published head.
     fn captured(&self, index: usize) -> Head {
         match &self.staged[index] {
@@ -656,45 +662,45 @@ impl Stack {
         StackBuilder::default()
     }
 
-    /// The lines, bottom first.
-    pub fn lines(&self) -> &[Line] {
-        &self.lines
+    /// The layers, bottom first.
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
     }
 
-    /// The stack's identity: the top line's, which covers every line
+    /// The stack's identity: the top layer's, which covers every layer
     /// beneath it.
     pub fn identity(&self) -> &Entity {
         self.ids
             .last()
-            .expect("a built stack holds at least one line")
+            .expect("a built stack holds at least one layer")
     }
 
-    /// Every line's stack identity, bottom first.
+    /// Every layer's stack identity, bottom first.
     pub fn identities(&self) -> &[Entity] {
         &self.ids
     }
 
-    /// The lines linked under `name`.
-    pub fn layer(&self, name: &Entity) -> Vec<&Line> {
+    /// The layers linked under `name`.
+    pub fn scope(&self, name: &Entity) -> Vec<&Layer> {
         self.bound
             .get(name)
-            .map(|indices| indices.iter().map(|index| &self.lines[*index]).collect())
+            .map(|indices| indices.iter().map(|index| &self.layers[*index]).collect())
             .unwrap_or_default()
     }
 
-    /// Every line's live head now, bottom first: what each line's
+    /// Every layer's live head now, bottom first: what each layer's
     /// own handle reports, whatever the stack has published or
     /// staged.
     pub fn heads(&self) -> Vec<Head> {
-        self.lines.iter().map(Line::head).collect()
+        self.layers.iter().map(Layer::head).collect()
     }
 
-    /// The heads the stack reads each line at, bottom first: the
+    /// The heads the stack reads each layer at, bottom first: the
     /// staged tip where a chain is staged, the published head
     /// otherwise.
     pub fn captured(&self) -> Vec<Head> {
         let state = self.state.read();
-        (0..self.lines.len())
+        (0..self.layers.len())
             .map(|index| state.captured(index))
             .collect()
     }
@@ -705,28 +711,28 @@ impl Stack {
         self.state.read().published.clone()
     }
 
-    /// Whether some branch line holds commits not yet published.
+    /// Whether some branch layer holds commits not yet published.
     pub fn is_staged(&self) -> bool {
         self.state.read().staged.iter().any(Option::is_some)
     }
 
-    /// Whether some line's live head differs from the head the stack
+    /// Whether some layer's live head differs from the head the stack
     /// last published or pulled: it moved outside the stack, and a
-    /// publish of that line would fail until a [`pull`](Self::pull).
+    /// publish of that layer would fail until a [`pull`](Self::pull).
     pub fn behind(&self) -> bool {
         self.heads() != self.published()
     }
 
-    /// Bring movement in: re-resolve every branch line's head from
-    /// storage, pull every line that tracks an upstream, bottom to
+    /// Bring movement in: re-resolve every branch layer's head from
+    /// storage, pull every layer that tracks an upstream, bottom to
     /// top, then take the live heads as the published base and stage
-    /// and publish the wiring of every line above a line that moved.
+    /// and publish the wiring of every layer above a layer that moved.
     ///
     /// Anything staged and not yet published is dropped: its chain
     /// built on heads the pull supersedes, so it is stale wholesale,
     /// and the transaction that staged it is re-run on the fresh
     /// heads. A pull that fails part way leaves the published heads
-    /// where they were: lines beneath the failure may have reconciled
+    /// where they were: layers beneath the failure may have reconciled
     /// with their upstreams, and the next pull captures them.
     pub async fn pull<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
@@ -742,8 +748,8 @@ impl Stack {
             + ConditionalSync
             + 'static,
     {
-        for line in &self.lines {
-            let Line::Branch(branch) = line else {
+        for layer in &self.layers {
+            let Layer::Branch(branch) = layer else {
                 continue;
             };
             branch.refresh(env).await?;
@@ -757,14 +763,14 @@ impl Stack {
             let mut state = self.state.write();
             state.published = live.clone();
             state.versions = self.versions();
-            state.staged = self.lines.iter().map(|_| None).collect();
+            state.staged = self.layers.iter().map(|_| None).collect();
         }
         self.capture(BTreeMap::new(), live, &previous, env).await?;
         self.publish(env).await
     }
 
-    /// Send movement out: push every branch line that tracks an
-    /// upstream, bottom to top, so a pushed line's wiring never names
+    /// Send movement out: push every branch layer that tracks an
+    /// upstream, bottom to top, so a pushed layer's wiring never names
     /// a head its upstream lacks. Pushes the published heads; staged
     /// commits are not pushed until [`publish`](Self::publish)ed.
     pub async fn push<Env>(&self, env: &Env) -> Result<(), StackError>
@@ -783,8 +789,8 @@ impl Stack {
             + ConditionalSync
             + 'static,
     {
-        for line in &self.lines {
-            if let Line::Branch(branch) = line
+        for layer in &self.layers {
+            if let Layer::Branch(branch) = layer
                 && branch.upstream().is_some()
             {
                 Box::pin(branch.push().perform(env)).await?;
@@ -793,25 +799,25 @@ impl Stack {
         Ok(())
     }
 
-    /// Publish every staged chain, bottom to top: each branch line's
+    /// Publish every staged chain, bottom to top: each branch layer's
     /// head moves to its staged tip with one CAS against the version
-    /// the stack last published or pulled. A line whose head moved
+    /// the stack last published or pulled. A layer whose head moved
     /// outside the stack fails the CAS; its chain and every chain
-    /// above it are then stale wholesale and dropped (lines beneath
+    /// above it are then stale wholesale and dropped (layers beneath
     /// stay published), and the transactions that staged them are
     /// re-run after a [`pull`](Self::pull).
     pub async fn publish<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Publish> + Provider<Resolve> + ConditionalSync,
     {
-        for index in 0..self.lines.len() {
+        for index in 0..self.layers.len() {
             let Some(batch) = self.state.write().staged[index].take() else {
                 continue;
             };
             match batch.publish().perform(env).await {
                 Ok(revision) => {
-                    let version = match &self.lines[index] {
-                        Line::Branch(branch) => branch
+                    let version = match &self.layers[index] {
+                        Layer::Branch(branch) => branch
                             .revision_cell()
                             .edition()
                             .map(|edition| edition.version),
@@ -827,7 +833,7 @@ impl Stack {
                         *stale = None;
                     }
                     return Err(StackError::Publish {
-                        line: self.lines[index].address_entity(),
+                        layer: self.layers[index].address_entity(),
                         source,
                     });
                 }
@@ -836,12 +842,12 @@ impl Stack {
         Ok(self.captured())
     }
 
-    /// Every branch line's head cell version now.
+    /// Every branch layer's head cell version now.
     fn versions(&self) -> Vec<Option<MemoryVersion>> {
-        self.lines
+        self.layers
             .iter()
-            .map(|line| match line {
-                Line::Branch(branch) => branch
+            .map(|layer| match layer {
+                Layer::Branch(branch) => branch
                     .revision_cell()
                     .edition()
                     .map(|edition| edition.version),
@@ -850,37 +856,37 @@ impl Stack {
             .collect()
     }
 
-    /// The bottom line as a branch: where placements live and where
+    /// The bottom layer as a branch: where placements live and where
     /// undeclared attributes go. `None` when the bottom is not a
     /// branch, in which case the stack is read-only.
     fn primary(&self) -> Option<&Branch> {
-        match self.lines.first() {
-            Some(Line::Branch(branch)) => Some(branch),
+        match self.layers.first() {
+            Some(Layer::Branch(branch)) => Some(branch),
             _ => None,
         }
     }
 
-    /// The composite a read sees: every line beneath the top at the
+    /// The composite a read sees: every layer beneath the top at the
     /// head the stack reads it at, the top live.
     pub(crate) fn composite(&self) -> Composite {
         self.composite_at(&self.captured())
     }
 
     /// The composite with every branch beneath the top read at the
-    /// given heads. Ephemeral lines are always live: they are
+    /// given heads. Ephemeral layers are always live: they are
     /// process-local, written only through the stack, and cannot be
     /// read at an older sequence.
     fn composite_at(&self, heads: &[Head]) -> Composite {
-        let top = self.lines.len().saturating_sub(1);
+        let top = self.layers.len().saturating_sub(1);
         let mut composite = Composite::default();
-        for (index, line) in self.lines.iter().enumerate() {
-            match line {
-                Line::Branch(branch)
+        for (index, layer) in self.layers.iter().enumerate() {
+            match layer {
+                Layer::Branch(branch)
                     if index == top && self.state.read().staged[index].is_none() =>
                 {
                     composite.sources.push(Source::Branch(branch.clone()))
                 }
-                Line::Branch(branch) => {
+                Layer::Branch(branch) => {
                     let revision = match heads.get(index) {
                         Some(Head::Tree(revision)) => revision.clone(),
                         _ => branch.revision(),
@@ -889,10 +895,10 @@ impl Stack {
                         .sources
                         .push(Source::Pinned(branch.clone(), revision))
                 }
-                Line::Snapshot(snapshot) => {
+                Layer::Snapshot(snapshot) => {
                     composite.sources.push(Source::Snapshot(snapshot.clone()))
                 }
-                Line::Ephemeral(ephemeral) => composite.ephemerals.push(ephemeral.clone()),
+                Layer::Ephemeral(ephemeral) => composite.ephemerals.push(ephemeral.clone()),
             }
         }
         composite
@@ -918,13 +924,13 @@ impl Stack {
         }
     }
 
-    /// The link facts line `index` holds at `heads`, folded into
-    /// `changes`: one entity per line it links, naming the target's
-    /// identity, the layer name, the target's head, and its address.
+    /// The link facts layer `index` holds at `heads`, folded into
+    /// `changes`: one entity per layer it links, naming the target's
+    /// identity, the scope name, the target's head, and its address.
     fn link_facts(&self, index: usize, heads: &[Head], changes: &mut Changes) {
-        let from = self.lines[index].address_entity();
+        let from = self.layers[index].address_entity();
         for link in &self.links[index] {
-            let target = &self.lines[link.to];
+            let target = &self.layers[link.to];
             changes.associate_unique(
                 link_attr("from"),
                 link.entity.clone(),
@@ -949,10 +955,10 @@ impl Stack {
         }
     }
 
-    /// Stage `batch` on line `index` on top of `heads[index]`, with
-    /// its links at `heads`. A branch line extends its staged chain
-    /// (or opens one on its published head); an ephemeral line is
-    /// written directly. A line with nothing to write and no links
+    /// Stage `batch` on layer `index` on top of `heads[index]`, with
+    /// its links at `heads`. A branch layer extends its staged chain
+    /// (or opens one on its published head); an ephemeral layer is
+    /// written directly. A layer with nothing to write and no links
     /// is left alone; one whose link facts already hold stages a
     /// no-op and keeps its head.
     async fn refresh_links<Env>(
@@ -978,8 +984,8 @@ impl Stack {
             return Ok(None);
         }
         self.link_facts(index, heads, &mut batch);
-        match &self.lines[index] {
-            Line::Branch(branch) => {
+        match &self.layers[index] {
+            Layer::Branch(branch) => {
                 let staged = self.state.write().staged[index].take();
                 let (chain, tip) = match staged {
                     Some(mut chain) => {
@@ -1010,22 +1016,22 @@ impl Stack {
                 self.state.write().staged[index] = Some(chain);
                 Ok(Some(Head::Tree(Some(tip))))
             }
-            Line::Ephemeral(ephemeral) => {
+            Layer::Ephemeral(ephemeral) => {
                 ephemeral.apply(batch);
                 let head = Head::Ephemeral(ephemeral.revision());
                 self.state.write().published[index] = head.clone();
                 Ok(Some(head))
             }
-            Line::Snapshot(_) => Err(CommitError::Detached),
+            Layer::Snapshot(_) => Err(CommitError::Detached),
         }
     }
 
-    /// Stage each line's batch bottom to top on top of `heads`, every
-    /// line after everything beneath it, writing its own share and its
-    /// wiring at the heads as they stand once the lines beneath it
-    /// staged. A line is touched only when it has something of its
-    /// own to write or a line its wiring reaches moved, either in this
-    /// pass or since `previous`; a line the pass never reaches is
+    /// Stage each layer's batch bottom to top on top of `heads`, every
+    /// layer after everything beneath it, writing its own share and its
+    /// wiring at the heads as they stand once the layers beneath it
+    /// staged. A layer is touched only when it has something of its
+    /// own to write or a layer its wiring reaches moved, either in this
+    /// pass or since `previous`; a layer the pass never reaches is
     /// never asked to write, whatever happened to it outside the
     /// stack. Returns the heads the stack reads at afterwards.
     async fn capture<Env>(
@@ -1052,7 +1058,7 @@ impl Stack {
             .enumerate()
             .map(|(index, head)| previous.get(index) != Some(head))
             .collect();
-        for index in 0..self.lines.len() {
+        for index in 0..self.layers.len() {
             let batch = batches.remove(&index).unwrap_or_default();
             if batch.is_empty() && !self.reaches_moved(index, &moved) {
                 continue;
@@ -1067,7 +1073,7 @@ impl Stack {
         Ok(heads)
     }
 
-    /// Whether any line reachable through `index`'s links moved.
+    /// Whether any layer reachable through `index`'s links moved.
     fn reaches_moved(&self, index: usize, moved: &[bool]) -> bool {
         self.links[index]
             .iter()
@@ -1076,8 +1082,8 @@ impl Stack {
 }
 
 /// A transaction on a [`Stack`]: accumulates facts, then routes each
-/// to the lines its attribute's layer is linked under and stages the
-/// lines bottom to top.
+/// to the layers its attribute's scope is linked under and stages the
+/// layers bottom to top.
 pub struct StackTransaction<'a> {
     stack: &'a Stack,
     changes: Changes,
@@ -1130,7 +1136,7 @@ impl<'a> StackCommit<'a> {
     }
 
     /// Induce against the composite at the heads the stack reads at,
-    /// route by placement, and stage the lines bottom to top. Never
+    /// route by placement, and stage the layers bottom to top. Never
     /// moves a branch head: the staged chains wait for
     /// [`Stack::publish`]. Returns the heads the stack reads at
     /// afterwards, bottom first.
@@ -1160,7 +1166,7 @@ impl<'a> StackCommit<'a> {
         };
         // A write builds on the heads the stack reads at, like a
         // branch commit builds on its handle's head: induction reads
-        // them, and each line stages on top of its own.
+        // them, and each layer stages on top of its own.
         let composite = stack.composite_at(&captured);
         let source = match composite.sources.first() {
             Some(source) => source.as_ref(),
@@ -1172,24 +1178,24 @@ impl<'a> StackCommit<'a> {
 
         // Route by placement: the primary holds the declarations, the
         // stack's links bind the names. A name no link binds falls
-        // back to a tree binding on the primary, so a single-line
+        // back to a tree binding on the primary, so a single-layer
         // stack routes exactly as the branch would; the primary's own
-        // session store is not a line and gets nothing.
+        // session store is not a layer and gets nothing.
         let placements = Placements::resolve(source, &changes, env).await?;
-        let default = placements.default_layer().cloned();
+        let default = placements.default_scope().cloned();
         for instruction in changes.into_instructions() {
             let (op, artifact) = split(instruction);
-            let targets: Vec<usize> = match placements.layer_of(&artifact.the) {
+            let targets: Vec<usize> = match placements.scope_of(&artifact.the) {
                 None => vec![0],
-                Some(layer) if Some(layer) == default.as_ref() => vec![0],
-                Some(layer) => match stack.bound.get(layer) {
+                Some(scope) if Some(scope) == default.as_ref() => vec![0],
+                Some(scope) => match stack.bound.get(scope) {
                     Some(indices) => indices.clone(),
-                    None => match primary.bindings().target(layer) {
+                    None => match primary.bindings().target(scope) {
                         Some(Target::Tree) => vec![0],
                         Some(Target::Session) | None => {
-                            return Err(CommitError::UnboundLayer {
+                            return Err(CommitError::UnboundScope {
                                 attribute: artifact.the.to_string(),
-                                layer: layer.to_string(),
+                                scope: scope.to_string(),
                             });
                         }
                     },
@@ -1325,7 +1331,7 @@ where
     Q::Conclusion: dialog_query::Conclusion + PartialEq + Clone + ConditionalSync,
 {
     /// Poll against what the stack reads at now. A read: nothing is
-    /// written, so a line that moved outside the stack is not seen
+    /// written, so a layer that moved outside the stack is not seen
     /// until [`Stack::pull`] captures it, and then this poll reports
     /// the change as its delta.
     pub async fn poll<'a, Env>(
@@ -1346,7 +1352,7 @@ where
         self.inner.poll(env).await
     }
 
-    /// Whether the stack is behind its lines' live heads; see
+    /// Whether the stack is behind its layers' live heads; see
     /// [`Stack::behind`].
     pub fn behind(&self) -> bool {
         self.stack.behind()
@@ -1459,8 +1465,8 @@ mod tests {
         Ok(artifacts.into_iter().map(|artifact| artifact.is).collect())
     }
 
-    /// A branch bottom, an ephemeral state line linked over it: a
-    /// transaction routes the placed attribute to the state line and
+    /// A branch bottom, an ephemeral state layer linked over it: a
+    /// transaction routes the placed attribute to the state layer and
     /// the rest to the tree, the composite read joins them, and a
     /// subscription over the stack maintains the state half.
     #[dialog_common::test]
@@ -1480,18 +1486,18 @@ mod tests {
         shared.refresh(&operator).await?;
 
         // A name binds where its link points: `memory:shared` is the
-        // bottom, and `memory:state` needs a line above state to link
+        // bottom, and `memory:state` needs a layer above state to link
         // it under that name.
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(state.clone())
+            .layer(shared.clone())
+            .layer(state.clone())
             .link(&shared, name("shared"))
-            .line(Ephemeral::new())
+            .layer(Ephemeral::new())
             .link(&state, name("state"))
             .build()
             .perform(&operator)
             .await?;
-        assert_eq!(stack.lines().len(), 3);
+        assert_eq!(stack.layers().len(), 3);
 
         let doc: Entity = "doc:1".parse()?;
         let heads = stack
@@ -1524,13 +1530,13 @@ mod tests {
         assert_eq!(
             state.scan(&selected).len(),
             1,
-            "the placed attribute lands in the state line"
+            "the placed attribute lands in the state layer"
         );
         assert!(
             !state
                 .scan(&ArtifactSelector::new().the("dialog.link/to".parse()?))
                 .is_empty(),
-            "beside the state line's own link facts"
+            "beside the state layer's own link facts"
         );
         assert!(
             shared.overlay().is_empty(),
@@ -1539,7 +1545,7 @@ mod tests {
         assert_eq!(
             values::<bool>(&stack, &operator, "ui/selected", &doc).await?,
             vec![Value::Boolean(true)],
-            "the composite read joins the state line"
+            "the composite read joins the state layer"
         );
 
         let mut subscription = stack.query().subscribe(AttributeQuery::from(
@@ -1559,7 +1565,7 @@ mod tests {
         let delta = subscription
             .poll(&operator)
             .await?
-            .expect("the state line's change propagates");
+            .expect("the state layer's change propagates");
         assert_eq!(delta.retracted.len(), 1);
         assert_eq!(subscription.maintenances(), 1, "maintained from the ring");
         Ok(())
@@ -1585,10 +1591,10 @@ mod tests {
         shared.refresh(&operator).await?;
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(local.clone())
+            .layer(shared.clone())
+            .layer(local.clone())
             .link(&shared, name("shared"))
-            .line(Ephemeral::new())
+            .layer(Ephemeral::new())
             .link(&local, name("local"))
             .build()
             .perform(&operator)
@@ -1596,7 +1602,7 @@ mod tests {
         local.refresh(&operator).await?;
 
         let link = link_entity(
-            &Line::Branch(local.clone()).address_entity(),
+            &Layer::Branch(local.clone()).address_entity(),
             &stack.identities()[0],
         );
         let shared_head = |branch: &Branch| Head::Tree(branch.revision()).bytes();
@@ -1689,9 +1695,9 @@ mod tests {
         let state = Ephemeral::new();
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(local.clone())
-            .line(state.clone())
+            .layer(shared.clone())
+            .layer(local.clone())
+            .layer(state.clone())
             .link(&shared, name("shared"))
             .link(&local, name("local"))
             .build()
@@ -1743,17 +1749,17 @@ mod tests {
         let state = Ephemeral::new();
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(local.clone())
+            .layer(shared.clone())
+            .layer(local.clone())
             .link(&shared, name("shared"))
-            .line(state.clone())
+            .layer(state.clone())
             .link(&local, name("local"))
             .build()
             .perform(&operator)
             .await?;
         local.refresh(&operator).await?;
 
-        let local_address = Line::Branch(local.clone()).address_entity();
+        let local_address = Layer::Branch(local.clone()).address_entity();
         let link = link_entity(&local_address, &stack.identities()[0]);
         let own = link_entity(state.entity(), &stack.identities()[1]);
         let selector = |the: &str, of: &Entity| {
@@ -1804,7 +1810,7 @@ mod tests {
         Ok(())
     }
 
-    /// A stack reads every line beneath its top at the captured head:
+    /// A stack reads every layer beneath its top at the captured head:
     /// a commit that bypasses the stack is invisible until the stack
     /// pulls, and then the top's wiring names the new head.
     #[dialog_common::test]
@@ -1815,8 +1821,8 @@ mod tests {
         let state = Ephemeral::new();
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(state.clone())
+            .layer(shared.clone())
+            .layer(state.clone())
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -1873,8 +1879,8 @@ mod tests {
         let shared = repo.branch("main").open().perform(&operator).await?;
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(Ephemeral::new())
+            .layer(shared.clone())
+            .layer(Ephemeral::new())
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -1931,8 +1937,8 @@ mod tests {
         let other = repo.branch("main").open().perform(&operator).await?;
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(Ephemeral::new())
+            .layer(shared.clone())
+            .layer(Ephemeral::new())
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -1995,10 +2001,10 @@ mod tests {
         other.refresh(&operator).await?;
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(state.clone())
+            .layer(shared.clone())
+            .layer(state.clone())
             .link(&shared, name("shared"))
-            .line(Ephemeral::new())
+            .layer(Ephemeral::new())
             .link(&state, name("state"))
             .build()
             .perform(&operator)
@@ -2072,8 +2078,8 @@ mod tests {
         let shared = repo.branch("main").open().perform(&operator).await?;
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(Ephemeral::new())
+            .layer(shared.clone())
+            .layer(Ephemeral::new())
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -2157,10 +2163,10 @@ mod tests {
         shared.refresh(&operator).await?;
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(local.clone())
+            .layer(shared.clone())
+            .layer(local.clone())
             .link(&shared, name("shared"))
-            .line(state.clone())
+            .layer(state.clone())
             .link(&local, name("state"))
             .build()
             .perform(&operator)
@@ -2263,7 +2269,7 @@ mod tests {
         Ok(())
     }
 
-    /// A line that moved outside the stack is left alone by a write
+    /// A layer that moved outside the stack is left alone by a write
     /// that never reaches it, even when it holds links: in the chain
     /// `shared < local < state < tab`, local moving outside the stack
     /// does not stop a write routed only to state.
@@ -2285,12 +2291,12 @@ mod tests {
         shared.refresh(&operator).await?;
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(local.clone())
+            .layer(shared.clone())
+            .layer(local.clone())
             .link(&shared, name("shared"))
-            .line(state.clone())
+            .layer(state.clone())
             .link(&local, name("local"))
-            .line(Ephemeral::new())
+            .layer(Ephemeral::new())
             .link(&state, name("state"))
             .build()
             .perform(&operator)
@@ -2339,8 +2345,8 @@ mod tests {
         let state = Ephemeral::new();
 
         let result = Stack::builder()
-            .line(state.clone())
-            .line(shared.clone())
+            .layer(state.clone())
+            .layer(shared.clone())
             .link(&state, name("state"))
             .build()
             .perform(&operator)
@@ -2359,7 +2365,7 @@ mod tests {
         Ok(())
     }
 
-    /// A link must name a line already beneath the linking one.
+    /// A link must name a layer already beneath the linking one.
     #[dialog_common::test]
     async fn it_rejects_a_link_to_an_unknown_line() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
@@ -2368,22 +2374,22 @@ mod tests {
         let elsewhere = Ephemeral::new();
 
         let result = Stack::builder()
-            .line(shared.clone())
-            .line(Ephemeral::new())
+            .layer(shared.clone())
+            .layer(Ephemeral::new())
             .link(&elsewhere, name("state"))
             .build()
             .perform(&operator)
             .await;
         assert!(
-            matches!(result, Err(StackError::UnknownLine { .. })),
-            "expected an unknown-line refusal, got {result:?}"
+            matches!(result, Err(StackError::UnknownLayer { .. })),
+            "expected an unknown-layer refusal, got {result:?}"
         );
         Ok(())
     }
 
     /// Identities are a pure function of shape: two stacks over the
     /// same branch agree on its identity, and linking changes the
-    /// encloser's identity but not the enclosed line's.
+    /// encloser's identity but not the enclosed layer's.
     #[dialog_common::test]
     async fn it_derives_identities_from_shape() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
@@ -2392,13 +2398,13 @@ mod tests {
         let state = Ephemeral::new();
 
         let alone = Stack::builder()
-            .line(shared.clone())
+            .layer(shared.clone())
             .build()
             .perform(&operator)
             .await?;
         let over = Stack::builder()
-            .line(shared.clone())
-            .line(state.clone())
+            .layer(shared.clone())
+            .layer(state.clone())
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -2412,8 +2418,8 @@ mod tests {
         assert!(over.identity().to_string().starts_with("stack:"));
 
         let renamed = Stack::builder()
-            .line(shared.clone())
-            .line(state.clone())
+            .layer(shared.clone())
+            .layer(state.clone())
             .link(&shared, name("base"))
             .build()
             .perform(&operator)
@@ -2426,8 +2432,8 @@ mod tests {
         Ok(())
     }
 
-    /// A name bound by two links from one line fans a write out to
-    /// both lines, and the composite read dedups the fact.
+    /// A name bound by two links from one layer fans a write out to
+    /// both layers, and the composite read dedups the fact.
     #[dialog_common::test]
     async fn it_fans_out_a_name_bound_twice() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
@@ -2445,10 +2451,10 @@ mod tests {
         shared.refresh(&operator).await?;
 
         let stack = Stack::builder()
-            .line(shared.clone())
-            .line(left.clone())
-            .line(right.clone())
-            .line(Ephemeral::new())
+            .layer(shared.clone())
+            .layer(left.clone())
+            .layer(right.clone())
+            .layer(Ephemeral::new())
             .link(&left, name("state"))
             .link(&right, name("state"))
             .build()
@@ -2468,7 +2474,7 @@ mod tests {
         assert_eq!(
             values::<u64>(&stack, &operator, "ui/cursor", &doc).await?,
             vec![Value::UnsignedInt(3)],
-            "one fact in two lines reads as one row"
+            "one fact in two layers reads as one row"
         );
         Ok(())
     }
@@ -2479,7 +2485,7 @@ mod tests {
     async fn it_refuses_to_transact_without_a_branch_bottom() -> Result<()> {
         let (operator, _profile) = test_operator_with_profile().await;
         let stack = Stack::builder()
-            .line(Ephemeral::new())
+            .layer(Ephemeral::new())
             .build()
             .perform(&operator)
             .await?;

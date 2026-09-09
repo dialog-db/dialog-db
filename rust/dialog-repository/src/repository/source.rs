@@ -1,5 +1,5 @@
-//! What a read or a commit needs from the line it works on, whether
-//! that line is a [`Branch`] or a [`Snapshot`].
+//! What a read or a commit needs from the layer it works on, whether
+//! that layer is a [`Branch`] or a [`Snapshot`].
 //!
 //! The two differ in one thing only: where the head lives. A branch keeps
 //! it in a memory cell that advances under CAS and that every handle to
@@ -31,25 +31,25 @@ use crate::{
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Snapshot, Upstream,
 };
 
-/// An owned line to read from: a branch or a snapshot, cheaply cloned
+/// An owned layer to read from: a branch or a snapshot, cheaply cloned
 /// (both share their caches by handle). Query environments hold these
 /// so the only lifetime they carry is the capability environment's.
 #[derive(Debug, Clone)]
 pub(crate) enum Source {
-    /// A named line whose head lives in a memory cell.
+    /// A named layer whose head lives in a memory cell.
     Branch(Branch),
-    /// A detached line whose head is held by value.
+    /// A detached layer whose head is held by value.
     Snapshot(Snapshot),
     /// A branch read at a captured revision rather than its live head:
     /// the branch's caches, remote fallback, session store and
     /// bindings, with the tree root fixed. `None` is a branch captured
     /// before its first commit. What a [`Stack`](crate::Stack) reads
-    /// every line beneath its top as.
+    /// every layer beneath its top as.
     Pinned(Branch, Option<Revision>),
 }
 
 impl Source {
-    /// Borrow this line.
+    /// Borrow this layer.
     pub(crate) fn as_ref(&self) -> SourceRef<'_> {
         match self {
             Source::Branch(branch) => SourceRef::Branch(branch),
@@ -71,13 +71,13 @@ impl From<Snapshot> for Source {
     }
 }
 
-/// A borrowed line to read from. `Copy`, so builders that hold one stay
+/// A borrowed layer to read from. `Copy`, so builders that hold one stay
 /// as cheap to pass around as the `&Branch` they used to hold.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SourceRef<'a> {
-    /// A named line whose head lives in a memory cell.
+    /// A named layer whose head lives in a memory cell.
     Branch(&'a Branch),
-    /// A detached line whose head is held by value.
+    /// A detached layer whose head is held by value.
     Snapshot(&'a Snapshot),
     /// A branch read at a captured revision; see [`Source::Pinned`].
     Pinned(&'a Branch, Option<&'a Revision>),
@@ -102,7 +102,7 @@ impl<'a> From<&'a Source> for SourceRef<'a> {
 }
 
 impl<'a> SourceRef<'a> {
-    /// An owned handle to the same line.
+    /// An owned handle to the same layer.
     pub(crate) fn to_source(self) -> Source {
         match self {
             SourceRef::Branch(branch) => Source::Branch(branch.clone()),
@@ -113,7 +113,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The branch behind this line, when it is one: a branch read live
+    /// The branch behind this layer, when it is one: a branch read live
     /// or at a captured revision. A snapshot has none.
     pub(crate) fn branch(self) -> Option<&'a Branch> {
         match self {
@@ -122,7 +122,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The repository this line lives in.
+    /// The repository this layer lives in.
     pub(crate) fn subject(self) -> Subject {
         match self {
             SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.subject(),
@@ -130,12 +130,12 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The archive capability for this line's repository.
+    /// The archive capability for this layer's repository.
     pub(crate) fn archive(self) -> Capability<Archive> {
         self.subject().archive()
     }
 
-    /// The revision this line currently names, or `None` for a branch
+    /// The revision this layer currently names, or `None` for a branch
     /// with no commits yet. A snapshot always has one.
     pub(crate) fn revision(self) -> Option<Revision> {
         match self {
@@ -239,7 +239,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The live-spine slot commits on this line reuse.
+    /// The live-spine slot commits on this layer reuse.
     pub(crate) fn spine(self) -> &'a SpineSlot {
         match self {
             SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.spine(),
@@ -247,7 +247,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The ephemeral line every read of this line folds in.
+    /// The ephemeral layer every read of this layer folds in.
     pub(crate) fn overlay(self) -> &'a Ephemeral {
         match self {
             SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.overlay(),
@@ -255,7 +255,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The layer bindings a commit on this line routes by.
+    /// The layer bindings a commit on this layer routes by.
     pub(crate) fn bindings(self) -> &'a Bindings {
         match self {
             SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.bindings(),
@@ -263,8 +263,8 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// Fold this line's schema metadata into `changes`, returning the
-    /// branch entity when the line is a branch (a
+    /// Fold this layer's schema metadata into `changes`, returning the
+    /// branch entity when the layer is a branch (a
     /// [`SessionBranch`](crate::schema::SessionBranch) row is minted
     /// per branch in scope; a snapshot is not a branch and gets none).
     ///
@@ -299,7 +299,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The recorded claim lineage at this line's revision. History
+    /// The recorded claim lineage at this layer's revision. History
     /// records live in the same tree as the data, so this reads the
     /// history region of the revision's tree. Reads that miss locally
     /// are not fetched from a remote — traversal over unreplicated
@@ -317,7 +317,7 @@ impl<'a> SourceRef<'a> {
             .with_record_cache(self.records())
     }
 
-    /// This line's committed history, newest first — at most `limit`
+    /// This layer's committed history, newest first — at most `limit`
     /// entries of `(version, record)`. See [`Branch::log`].
     pub(crate) async fn log<Env>(
         self,
@@ -338,7 +338,7 @@ impl<'a> SourceRef<'a> {
     }
 }
 
-/// The caches a line carries between its reads and commits. Every one
+/// The caches a layer carries between its reads and commits. Every one
 /// is content- or version-addressed, so a set may be shared between a
 /// branch and the snapshots minted from it, and between a snapshot and
 /// the snapshots its transactions produce, without ever serving a

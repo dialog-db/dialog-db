@@ -249,8 +249,8 @@ impl BatchPublish {
 /// publishing in one step — created by [`TransactionCommit::publish`],
 /// executed with `.perform(&env)`. The one-shot form: equivalent to
 /// staging the batch and immediately publishing it.
-pub struct TransactionPublish<Line> {
-    commit: TransactionCommit<Line>,
+pub struct TransactionPublish<Layer> {
+    commit: TransactionCommit<Layer>,
 }
 
 impl<'a> TransactionCommit<&'a Branch> {

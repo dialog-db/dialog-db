@@ -1,49 +1,49 @@
-//! Attribute placement: which layer an attribute's facts live in.
+//! Attribute placement: which scope an attribute's facts live in.
 //!
-//! A line is read as one composite, but its facts live in layers that
+//! A layer is read as one composite, but its facts live in scopes that
 //! differ in whether they survive a restart and whether they
-//! replicate. Rather than having every writer pick a layer per call,
-//! the *attribute* declares its layer once, as a fact on the line, and
+//! replicate. Rather than having every writer pick a scope per call,
+//! the *attribute* declares its scope once, as a fact on the layer, and
 //! every write routes by it: a transaction's `assert` / `retract`
-//! lands each instruction in the layer its attribute declares, a
+//! lands each instruction in the scope its attribute declares, a
 //! rule's head does the same, and a concept whose attributes span
-//! layers fans out on write and joins back on read.
+//! scopes fans out on write and joins back on read.
 //!
-//! # Layers are names
+//! # Scopes are names
 //!
-//! A layer is an entity, conventionally under a `memory:` scheme
+//! A scope is an entity, conventionally under a `memory:` scheme
 //! (`memory:shared`, `memory:session`), and nothing about the name is
 //! fixed. What is *shared* — which attribute goes to which name — is
 //! declared in the replicated tree. What is *local* — which store
 //! stands under a name on this replica — is a [binding](Bindings)
-//! made on the line by API. Today a line can bind a name to its tree
-//! or to its [`Ephemeral`](crate::Ephemeral) store; a stack of lines
-//! will bind names to other lines.
+//! made on the layer by API. Today a layer can bind a name to its tree
+//! or to its [`Ephemeral`](crate::Ephemeral) store; a stack of layers
+//! will bind names to other layers.
 //!
-//! # Declarations, as facts on the line
+//! # Declarations, as facts on the layer
 //!
 //! ```text
-//! <repository did>       dialog.attribute/default  memory:shared   # the implicit layer
-//! attribute:ui/selected  dialog.attribute/layer    memory:session  # an override
+//! <repository did>       dialog.attribute/default  memory:shared   # the implicit scope
+//! attribute:ui/selected  dialog.attribute/scope    memory:session  # an override
 //! ```
 //!
-//! The default names the layer an attribute with no placement belongs
+//! The default names the scope an attribute with no placement belongs
 //! to, and it is the tree's name: the tree is where the declarations
 //! themselves live, so it is always bound. With no default declared,
 //! undeclared attributes go to the tree as before. A placement is a
 //! branch-level fact, deliberately outside any concept's content
-//! address, so the same descriptor may be session-scoped on one line
+//! address, so the same descriptor may be session-scoped on one layer
 //! and durable on another; it takes effect in the commit that declares
 //! it, so a transaction can declare and use a placement together.
 //!
-//! A write naming a layer the line does not bind fails the commit
-//! ([`CommitError::UnboundLayer`]) rather than routing elsewhere. The
+//! A write naming a scope the layer does not bind fails the commit
+//! ([`CommitError::UnboundScope`]) rather than routing elsewhere. The
 //! fix is in the binding, which is local, not in the schema.
 //!
 //! # Observability
 //!
-//! A layer bound to the ephemeral store is folded into every read of
-//! the line and every standing subscription maintains from its
+//! A scope bound to the ephemeral store is folded into every read of
+//! the layer and every standing subscription maintains from its
 //! instants. So a rule concluding a session-scoped head writes
 //! something a subscriber sees — the observable ephemeral conclusion
 //! a transient (one induction round, never written anywhere) cannot
@@ -67,9 +67,9 @@ use parking_lot::RwLock;
 use crate::repository::source::SourceRef;
 use crate::{CommitError, RemoteSite};
 
-/// The `dialog.attribute/layer` declaration attribute.
-pub(crate) fn layer_attr() -> Attribute {
-    the!("dialog.attribute/layer").into()
+/// The `dialog.attribute/scope` declaration attribute.
+pub(crate) fn scope_attr() -> Attribute {
+    the!("dialog.attribute/scope").into()
 }
 
 /// The `dialog.attribute/default` declaration attribute.
@@ -98,9 +98,9 @@ fn entity_attribute(entity: &Entity) -> Option<Attribute> {
         .ok()
 }
 
-/// [`Statement`] declaring the layer an attribute's facts live in.
+/// [`Statement`] declaring the scope an attribute's facts live in.
 /// Asserting it places the attribute; retracting it returns the
-/// attribute to the line's default layer.
+/// attribute to the layer's default scope.
 ///
 /// ```no_run
 /// # use dialog_repository::{Branch, Placement, Target};
@@ -118,89 +118,89 @@ fn entity_attribute(entity: &Entity) -> Option<Attribute> {
 pub struct Placement {
     /// The attribute being placed.
     pub attribute: Attribute,
-    /// The layer its facts live in.
-    pub layer: Entity,
+    /// The scope its facts live in.
+    pub scope: Entity,
 }
 
 impl Placement {
-    /// Declare that `attribute`'s facts live in `layer`.
-    pub fn new(attribute: Attribute, layer: Entity) -> Self {
-        Self { attribute, layer }
+    /// Declare that `attribute`'s facts live in `scope`.
+    pub fn new(attribute: Attribute, scope: Entity) -> Self {
+        Self { attribute, scope }
     }
 }
 
 impl Statement for Placement {
     fn assert(self, update: &mut impl Update) {
         update.associate_unique(
-            layer_attr(),
+            scope_attr(),
             attribute_entity(&self.attribute),
-            Value::Entity(self.layer),
+            Value::Entity(self.scope),
         );
     }
 
     fn retract(self, update: &mut impl Update) {
         update.dissociate(
-            layer_attr(),
+            scope_attr(),
             attribute_entity(&self.attribute),
-            Value::Entity(self.layer),
+            Value::Entity(self.scope),
         );
     }
 }
 
-/// [`Statement`] declaring the layer an attribute with no placement
+/// [`Statement`] declaring the scope an attribute with no placement
 /// belongs to, for one repository: the name of the tree.
 ///
 /// ```no_run
-/// # use dialog_repository::{Branch, DefaultLayer};
+/// # use dialog_repository::{Branch, DefaultScope};
 /// # async fn example(branch: &Branch) -> anyhow::Result<()> {
 /// let tx = branch
 ///     .transaction()
-///     .assert(DefaultLayer::new(branch.of(), "memory:shared".parse()?));
+///     .assert(DefaultScope::new(branch.of(), "memory:shared".parse()?));
 /// # let _ = tx;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefaultLayer {
+pub struct DefaultScope {
     /// The repository the default is for.
     pub repository: Entity,
-    /// The layer undeclared attributes belong to.
-    pub layer: Entity,
+    /// The scope undeclared attributes belong to.
+    pub scope: Entity,
 }
 
-impl DefaultLayer {
-    /// Declare `layer` as the default for `repository`'s attributes.
-    pub fn new(repository: &dialog_capability::Did, layer: Entity) -> Self {
+impl DefaultScope {
+    /// Declare `scope` as the default for `repository`'s attributes.
+    pub fn new(repository: &dialog_capability::Did, scope: Entity) -> Self {
         use crate::schema::DidExt as _;
         Self {
             repository: repository.this(),
-            layer,
+            scope,
         }
     }
 }
 
-impl Statement for DefaultLayer {
+impl Statement for DefaultScope {
     fn assert(self, update: &mut impl Update) {
-        update.associate_unique(default_attr(), self.repository, Value::Entity(self.layer));
+        update.associate_unique(default_attr(), self.repository, Value::Entity(self.scope));
     }
 
     fn retract(self, update: &mut impl Update) {
-        update.dissociate(default_attr(), self.repository, Value::Entity(self.layer));
+        update.dissociate(default_attr(), self.repository, Value::Entity(self.scope));
     }
 }
 
-/// Where a layer name is bound on a line.
+/// Where a scope name is bound on a layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
-    /// The line's tree: durable, replicated with the line.
+    /// The layer's tree: durable, replicated with the layer.
     Tree,
-    /// The line's [`Ephemeral`](crate::Ephemeral) store: this process
+    /// The layer's [`Ephemeral`](crate::Ephemeral) store: this process
     /// only, never committed.
     Session,
 }
 
-/// A line's local bindings from layer names to its stores. Shared
-/// across clones of the line, like its caches. The tree needs no
+/// A layer's local bindings from scope names to its stores. Shared
+/// across clones of the layer, like its caches. The tree needs no
 /// binding: the repository default names it, and with no default
 /// declared undeclared attributes reach it anyway. Every other name a
 /// placement can target must be bound here before a write names it.
@@ -210,26 +210,26 @@ pub struct Bindings {
 }
 
 impl Bindings {
-    /// Bind `layer` to `target` on this line, replacing any prior
+    /// Bind `scope` to `target` on this layer, replacing any prior
     /// binding of the name.
-    pub fn bind(&self, layer: Entity, target: Target) {
-        self.targets.write().insert(layer, target);
+    pub fn bind(&self, scope: Entity, target: Target) {
+        self.targets.write().insert(scope, target);
     }
 
-    /// Drop the binding of `layer`, if any.
-    pub fn unbind(&self, layer: &Entity) -> bool {
-        self.targets.write().remove(layer).is_some()
+    /// Drop the binding of `scope`, if any.
+    pub fn unbind(&self, scope: &Entity) -> bool {
+        self.targets.write().remove(scope).is_some()
     }
 
-    /// Where `layer` is bound, if it is.
-    pub fn target(&self, layer: &Entity) -> Option<Target> {
-        self.targets.read().get(layer).copied()
+    /// Where `scope` is bound, if it is.
+    pub fn target(&self, scope: &Entity) -> Option<Target> {
+        self.targets.read().get(scope).copied()
     }
 }
 
-/// The committed placements at a line head: the layer each declared
+/// The committed placements at a layer head: the scope each declared
 /// attribute belongs to, and the repository default. Cached per head
-/// on the line's [`RuleCache`](crate::RuleCache), like the trigger
+/// on the layer's [`RuleCache`](crate::RuleCache), like the trigger
 /// footprint.
 #[derive(Debug, Default)]
 pub(crate) struct Declared {
@@ -252,10 +252,10 @@ pub(crate) struct Placements {
     default_retracted: Option<Entity>,
 }
 
-/// Read a declaration value as a layer entity, or fail the commit.
-fn layer_value(attribute: &str, value: &Value) -> Result<Entity, CommitError> {
+/// Read a declaration value as a scope entity, or fail the commit.
+fn scope_value(attribute: &str, value: &Value) -> Result<Entity, CommitError> {
     match value {
-        Value::Entity(layer) => Ok(layer.clone()),
+        Value::Entity(scope) => Ok(scope.clone()),
         other => Err(CommitError::InvalidPlacement {
             attribute: attribute.to_string(),
             value: format!("{other:?}"),
@@ -285,16 +285,16 @@ impl Placements {
             committed,
             ..Placements::default()
         };
-        let layer = layer_attr();
+        let scope = scope_attr();
         let default = default_attr();
         for (entity, the, change) in changes.iter() {
-            if *the == layer {
+            if *the == scope {
                 let Some(placed) = entity_attribute(entity) else {
                     continue;
                 };
                 let (Change::Assert(value) | Change::Replace(value) | Change::Retract(value)) =
                     change;
-                let target = layer_value(placed.as_str(), value)?;
+                let target = scope_value(placed.as_str(), value)?;
                 match change {
                     Change::Retract(_) => placements.retracted.insert(placed, target),
                     _ => placements.declared.insert(placed, target),
@@ -302,7 +302,7 @@ impl Placements {
             } else if *the == default {
                 let (Change::Assert(value) | Change::Replace(value) | Change::Retract(value)) =
                     change;
-                let target = layer_value("dialog.attribute/default", value)?;
+                let target = scope_value("dialog.attribute/default", value)?;
                 match change {
                     Change::Retract(_) => placements.default_retracted = Some(target),
                     _ => placements.default = Some(target),
@@ -312,33 +312,33 @@ impl Placements {
         Ok(placements)
     }
 
-    /// The layer undeclared attributes belong to, if one is declared.
-    pub(crate) fn default_layer(&self) -> Option<&Entity> {
-        if let Some(layer) = &self.default {
-            return Some(layer);
+    /// The scope undeclared attributes belong to, if one is declared.
+    pub(crate) fn default_scope(&self) -> Option<&Entity> {
+        if let Some(scope) = &self.default {
+            return Some(scope);
         }
         match &self.committed.default {
-            Some(layer) if self.default_retracted.as_ref() != Some(layer) => Some(layer),
+            Some(scope) if self.default_retracted.as_ref() != Some(scope) => Some(scope),
             _ => None,
         }
     }
 
-    /// The layer `attribute`'s facts live in, or `None` for the tree
+    /// The scope `attribute`'s facts live in, or `None` for the tree
     /// when nothing names it.
-    pub(crate) fn layer_of(&self, attribute: &Attribute) -> Option<&Entity> {
-        if let Some(layer) = self.declared.get(attribute) {
-            return Some(layer);
+    pub(crate) fn scope_of(&self, attribute: &Attribute) -> Option<&Entity> {
+        if let Some(scope) = self.declared.get(attribute) {
+            return Some(scope);
         }
         match self.committed.attributes.get(attribute) {
-            Some(layer) if self.retracted.get(attribute) != Some(layer) => Some(layer),
-            _ => self.default_layer(),
+            Some(scope) if self.retracted.get(attribute) != Some(scope) => Some(scope),
+            _ => self.default_scope(),
         }
     }
 
     /// Split a settled batch by destination store: the instructions
     /// for the tree and the ones for the session store. Declarations
-    /// themselves are tree facts. An instruction bound for a layer the
-    /// line does not bind fails the whole batch.
+    /// themselves are tree facts. An instruction bound for a scope the
+    /// layer does not bind fails the whole batch.
     pub(crate) fn partition(
         &self,
         changes: Changes,
@@ -346,22 +346,22 @@ impl Placements {
     ) -> Result<Partitioned, CommitError> {
         let mut tree = Changes::new();
         let mut session = Changes::new();
-        let default = self.default_layer();
+        let default = self.default_scope();
         for instruction in changes.into_instructions() {
             let attribute = match &instruction {
                 Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
                     a.the.clone()
                 }
             };
-            let target = match self.layer_of(&attribute) {
+            let target = match self.scope_of(&attribute) {
                 None => Target::Tree,
-                Some(layer) if Some(layer) == default => Target::Tree,
-                Some(layer) => match bindings.target(layer) {
+                Some(scope) if Some(scope) == default => Target::Tree,
+                Some(scope) => match bindings.target(scope) {
                     Some(target) => target,
                     None => {
-                        return Err(CommitError::UnboundLayer {
+                        return Err(CommitError::UnboundScope {
                             attribute: attribute.to_string(),
-                            layer: layer.to_string(),
+                            scope: scope.to_string(),
                         });
                     }
                 },
@@ -382,15 +382,15 @@ impl Placements {
 
 /// A settled batch split by destination store.
 pub(crate) struct Partitioned {
-    /// Bound for the line's tree.
+    /// Bound for the layer's tree.
     pub(crate) tree: Changes,
-    /// Bound for the line's ephemeral store.
+    /// Bound for the layer's ephemeral store.
     pub(crate) session: Changes,
 }
 
-/// Selector for every committed `dialog.attribute/layer` declaration.
+/// Selector for every committed `dialog.attribute/scope` declaration.
 fn declarations_selector() -> ArtifactSelector<Constrained> {
-    ArtifactSelector::new().the(layer_attr())
+    ArtifactSelector::new().the(scope_attr())
 }
 
 /// Selector for every committed `dialog.attribute/default` declaration.
@@ -414,7 +414,7 @@ where
         + 'static,
 {
     let Some(head) = source.revision() else {
-        // A line with no commits declares nothing.
+        // A layer with no commits declares nothing.
         return Ok(Arc::default());
     };
     let cache = source.rule_cache();
@@ -427,16 +427,16 @@ where
         let Some(attribute) = entity_attribute(&claim.of) else {
             continue;
         };
-        let layer = layer_value(attribute.as_str(), &claim.is)?;
-        declared.attributes.insert(attribute, layer);
+        let scope = scope_value(attribute.as_str(), &claim.is)?;
+        declared.attributes.insert(attribute, scope);
     }
-    // One default per repository; a line reads the one for its own
+    // One default per repository; a layer reads the one for its own
     // repository. Any other subject is ignored.
     use crate::schema::DidExt as _;
     let repository = source.subject().did().this();
     for claim in committed(source, defaults_selector(), env).await? {
         if claim.of == repository {
-            declared.default = Some(layer_value("dialog.attribute/default", &claim.is)?);
+            declared.default = Some(scope_value("dialog.attribute/default", &claim.is)?);
         }
     }
     let placements = Arc::new(declared);
@@ -444,7 +444,7 @@ where
     Ok(placements)
 }
 
-/// Collect the artifacts a selector matches on the line's committed
+/// Collect the artifacts a selector matches on the layer's committed
 /// tree.
 async fn committed<Env>(
     source: SourceRef<'_>,
@@ -494,10 +494,10 @@ mod tests {
     use serde_json::json;
 
     fn session() -> Entity {
-        "memory:session".parse().expect("layer entity")
+        "memory:session".parse().expect("scope entity")
     }
 
-    /// The values a `(the, of)` pair holds in the line's composite
+    /// The values a `(the, of)` pair holds in the layer's composite
     /// read (tree plus session store), typed by the caller.
     async fn values<V, Env>(
         branch: &Branch,
@@ -560,7 +560,7 @@ mod tests {
         Ok(())
     }
 
-    /// A declared attribute's facts route to the store its layer is
+    /// A declared attribute's facts route to the store its scope is
     /// bound to: the composite read sees them beside tree facts of the
     /// same entity, the tree never holds them, and clearing the session
     /// drops exactly them.
@@ -854,7 +854,7 @@ mod tests {
         Ok(())
     }
 
-    /// A write to an attribute placed on a layer the line does not
+    /// A write to an attribute placed on a scope the layer does not
     /// bind fails the commit instead of landing somewhere else, and
     /// binding it afterwards makes the same write succeed.
     #[dialog_common::test]
@@ -883,8 +883,8 @@ mod tests {
         }
         let result = write(&branch, &doc, &local)?.perform(&operator).await;
         assert!(
-            matches!(result, Err(CommitError::UnboundLayer { ref layer, .. }) if layer == "memory:local"),
-            "expected an unbound-layer refusal, got {result:?}"
+            matches!(result, Err(CommitError::UnboundScope { ref scope, .. }) if scope == "memory:local"),
+            "expected an unbound-scope refusal, got {result:?}"
         );
 
         branch.bind(local.clone(), Target::Session);
@@ -897,7 +897,7 @@ mod tests {
     }
 
     /// The repository default names the tree: an attribute placed on
-    /// the default layer explicitly, or on a second name bound to the
+    /// the default scope explicitly, or on a second name bound to the
     /// tree, commits to the tree; retracting a placement returns the
     /// attribute to the default.
     #[dialog_common::test]
@@ -913,7 +913,7 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
         branch
             .transaction()
-            .assert(DefaultLayer::new(branch.of(), shared.clone()))
+            .assert(DefaultScope::new(branch.of(), shared.clone()))
             .assert(Placement::new("doc/title".parse()?, shared.clone()))
             .assert(Placement::new("doc/body".parse()?, durable.clone()))
             .assert(Placement::new("ui/selected".parse()?, session()))
@@ -937,7 +937,7 @@ mod tests {
         assert_eq!(
             committed(&branch, &operator, "doc/title", &doc).await?,
             vec![Value::String("Notes".into())],
-            "the default layer is the tree"
+            "the default scope is the tree"
         );
         assert_eq!(
             committed(&branch, &operator, "doc/body", &doc).await?,
@@ -979,7 +979,7 @@ mod tests {
         let result = branch
             .transaction()
             .assert(
-                dialog_query::the!("dialog.attribute/layer")
+                dialog_query::the!("dialog.attribute/scope")
                     .of(attribute_entity(&"ui/selected".parse()?))
                     .is("session".to_string()),
             )

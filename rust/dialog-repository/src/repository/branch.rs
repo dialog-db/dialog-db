@@ -109,7 +109,7 @@ mod read_amplification;
 /// Type alias for the search tree index.
 pub type Index = dialog_artifacts::Index;
 
-/// A branch represents a named line of development within a repository.
+/// A branch represents a named layer of development within a repository.
 ///
 /// Holds a [`BranchReference`] (scoped to `branch/{name}`) plus cells
 /// for the branch's latest revision and optional upstream tracking.
@@ -142,7 +142,7 @@ pub struct Branch {
     /// every query's durable rule resolution, so the `dialog.rule/*` scan is
     /// paid once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
-    /// The branch's ephemeral line: session facts folded into every
+    /// The branch's ephemeral layer: session facts folded into every
     /// read of this branch, never committed, and the store behind
     /// the procedural layer. Shared across clones like the caches;
     /// every change mints an instant subscriptions maintain from.
@@ -212,7 +212,7 @@ impl Branch {
         self.reference.name()
     }
 
-    /// The branch's ephemeral line: assert or retract session facts
+    /// The branch's ephemeral layer: assert or retract session facts
     /// that every read of this branch observes but no commit
     /// persists, and the store a transaction routes procedural
     /// attributes to. See [`Ephemeral`].

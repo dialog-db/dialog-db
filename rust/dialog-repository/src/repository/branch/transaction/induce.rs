@@ -66,8 +66,8 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// durable novelty into `changes`. Transients never enter `changes`;
 /// they are visible to rule bodies for exactly one round.
 ///
-/// `source` is the line whose committed rules dispatch and whose
-/// watermark the lag is measured against; `view` is every line a rule
+/// `source` is the layer whose committed rules dispatch and whose
+/// watermark the lag is measured against; `view` is every layer a rule
 /// body reads, which is `source` alone for a transaction on one
 /// branch and the whole composite for a [`Stack`](crate::Stack).
 pub(crate) async fn induce<Env>(
@@ -198,7 +198,7 @@ where
             }
         }
 
-        // The frozen round view: every line ⊕ durable changes ⊕ this
+        // The frozen round view: every layer ⊕ durable changes ⊕ this
         // round's transients, through the same layered QueryEnv a
         // transaction query uses, so rule bodies read exactly what a
         // mid-transaction query would.
@@ -301,9 +301,9 @@ where
 }
 
 /// The committed side of trigger dispatch for one induction run: the
-/// line (branch or snapshot), the head every cache entry is keyed by,
+/// layer (branch or snapshot), the head every cache entry is keyed by,
 /// and the trigger footprint (the O(1) gate). All committed lookups
-/// flow through the line's shared [`RuleCache`](crate::RuleCache) under
+/// flow through the layer's shared [`RuleCache`](crate::RuleCache) under
 /// the established disciplines — discovery head-keyed, hydrated bodies
 /// content-addressed, the overlay never head-cached.
 struct Dispatch<'a> {
@@ -825,7 +825,7 @@ where
     Ok(lag)
 }
 
-/// Collect the artifacts a selector matches on the line's committed
+/// Collect the artifacts a selector matches on the layer's committed
 /// tree (no overlay — the cacheable slice).
 async fn committed<Env>(
     source: SourceRef<'_>,

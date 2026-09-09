@@ -29,7 +29,7 @@ impl<'a> Select<'a> {
         Self::from_source(SourceRef::from(branch), selector)
     }
 
-    /// Create a select command for the given line (branch or snapshot)
+    /// Create a select command for the given layer (branch or snapshot)
     /// and artifact selector.
     pub(crate) fn from_source(
         source: SourceRef<'a>,
@@ -42,7 +42,7 @@ impl<'a> Select<'a> {
         self.source.root()
     }
 
-    /// The catalog (archive index) scoped to this line's subject.
+    /// The catalog (archive index) scoped to this layer's subject.
     pub fn catalog(&self) -> Capability<Catalog> {
         self.source.subject().archive().index()
     }
@@ -65,7 +65,7 @@ impl<'a> Select<'a> {
 }
 
 impl Select<'_> {
-    /// Execute the select, using fallback to remote if the line is a
+    /// Execute the select, using fallback to remote if the layer is a
     /// branch with a remote upstream.
     ///
     /// Rows stream as borrowed-access [`ArtifactView`]s; chain
@@ -87,7 +87,7 @@ impl Select<'_> {
             + ConditionalSync
             + 'static,
     {
-        // Load a remote if the line tracks one so the networked index
+        // Load a remote if the layer tracks one so the networked index
         // can fall back to it for blocks missing locally. A failed load
         // (e.g. no credentials) is carried into the fallback rather
         // than swallowed: the local archive alone may still satisfy the
@@ -212,7 +212,7 @@ impl Select<'_> {
 pub struct SelectOwned<'a>(Select<'a>);
 
 impl SelectOwned<'_> {
-    /// The catalog (archive index) scoped to this line's subject.
+    /// The catalog (archive index) scoped to this layer's subject.
     pub fn catalog(&self) -> Capability<Catalog> {
         self.0.catalog()
     }

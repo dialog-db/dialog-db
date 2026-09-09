@@ -1,10 +1,10 @@
-//! The ephemeral line: a memory-backed store with a head and an
+//! The ephemeral layer: a memory-backed store with a head and an
 //! instant log, no history, gone with the process.
 //!
 //! Every branch and snapshot carries one ([`Branch::overlay`],
 //! [`Snapshot::overlay`](crate::Snapshot::overlay)): the store behind
 //! the procedural layer (see [`placement`](crate::placement)) and the
-//! home of session facts folded into every read of the line but never
+//! home of session facts folded into every read of the layer but never
 //! committed to its tree. It is built to sit under a reactive UI:
 //!
 //! - **Reads are range scans in the tree's own order.** Facts are held
@@ -17,7 +17,7 @@
 //!   assert is idempotent, a replace supersedes the other values at
 //!   its `(entity, attribute)` cell, a retract removes the exact
 //!   triple. A retract of a fact the store does not hold is a
-//!   *tombstone* that hides the same fact in the lines beneath, which
+//!   *tombstone* that hides the same fact in the layers beneath, which
 //!   is how a session shadows a committed fact without touching the
 //!   tree.
 //! - **Every change is an instant.** A write that changes what readers
@@ -58,7 +58,7 @@ use parking_lot::RwLock;
 /// back than this recomputes from the fold instead of maintaining.
 const LOG_CAPACITY: usize = 1024;
 
-/// The identity of an ephemeral line at some instant: how many
+/// The identity of an ephemeral layer at some instant: how many
 /// instants have been minted and the hash chained through all of
 /// them. The hash of the empty store is the all-zero hash.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -69,7 +69,7 @@ pub struct EphemeralRevision {
     pub hash: Blake3Hash,
 }
 
-/// One change to what readers of the line see.
+/// One change to what readers of the layer see.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instant {
     /// The sequence this instant minted; the store's revision after
@@ -84,13 +84,13 @@ pub struct Instant {
     pub retracted: Vec<Artifact>,
 }
 
-/// A memory-backed line. Cheap to clone: clones share the store, so a
+/// A memory-backed layer. Cheap to clone: clones share the store, so a
 /// fact asserted through any handle is visible to readers of all of
 /// them. See the [module docs](self).
 #[derive(Clone, Debug)]
 pub struct Ephemeral {
     /// A nonce minted when the store is created: the address a stack
-    /// records for this line. Two stores never share one, and every
+    /// records for this layer. Two stores never share one, and every
     /// clone of a store carries the same.
     entity: Entity,
     state: Arc<RwLock<State>>,
@@ -111,7 +111,7 @@ struct State {
     /// tag byte keeps the three orders apart, so one map serves every
     /// selector shape.
     facts: BTreeMap<Key, Artifact>,
-    /// Facts held beneath this line that the session hides, by sort
+    /// Facts held beneath this layer that the session hides, by sort
     /// key, with the fact kept so lifting the tombstone can report
     /// what became readable again. Shared with readers by `Arc` and
     /// rebuilt on change, so a read never copies the set.
@@ -278,7 +278,7 @@ impl State {
 }
 
 impl Ephemeral {
-    /// An empty line.
+    /// An empty layer.
     pub fn new() -> Self {
         Self::default()
     }
@@ -371,7 +371,7 @@ impl Ephemeral {
 
     /// The address of this store: a nonce entity minted when it was
     /// created, shared by every clone of it. A stack records it in
-    /// the link facts pointing at this line.
+    /// the link facts pointing at this layer.
     pub fn entity(&self) -> &Entity {
         &self.entity
     }
@@ -381,7 +381,7 @@ impl Ephemeral {
         Arc::ptr_eq(&self.state, &other.state)
     }
 
-    /// The line's identity now.
+    /// The layer's identity now.
     pub fn revision(&self) -> EphemeralRevision {
         let state = self.state.read();
         EphemeralRevision {
@@ -416,7 +416,7 @@ impl Ephemeral {
         }
     }
 
-    /// Sort keys of every fact this line hides beneath it. Shared, so
+    /// Sort keys of every fact this layer hides beneath it. Shared, so
     /// a read never copies the set.
     pub(crate) fn tombstones(&self) -> Arc<HashSet<SortKey>> {
         self.state.read().tombstones.clone()

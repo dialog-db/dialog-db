@@ -86,14 +86,14 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Delta;
 use futures_util::{Stream, StreamExt};
 
-/// A line's blob store: the target that blob reads and writes bind to.
+/// A layer's blob store: the target that blob reads and writes bind to.
 ///
 /// Holds a reference to the [`Branch`] or [`Snapshot`], so it carries the
 /// subject (for the capability chain), the blob index (for size lookups),
 /// and — for a branch — the upstream (for remote hydration). Obtain one
 /// with [`Branch::blobs`], [`Snapshot::blobs`], or `branch.into()`.
 ///
-/// Reads bind to either kind. Writes and retractions advance the line,
+/// Reads bind to either kind. Writes and retractions advance the layer,
 /// which a reference to a snapshot cannot do (its revision is held by
 /// value): they fail with [`CommitError::Detached`], and the snapshot is
 /// advanced by consuming it instead.
@@ -250,7 +250,7 @@ where
     NetworkedIndex::new(env, source.archive().index(), remote)
 }
 
-/// The size recorded for `hash` in the line's blob index, or `None` if the
+/// The size recorded for `hash` in the layer's blob index, or `None` if the
 /// current tree does not reference it.
 async fn index_size<Env>(
     source: SourceRef<'_>,

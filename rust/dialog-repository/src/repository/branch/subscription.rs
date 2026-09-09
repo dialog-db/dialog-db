@@ -300,14 +300,14 @@ impl<T> Delta<T> {
     }
 }
 
-/// What one line of a subscription's composite was last evaluated
+/// What one layer of a subscription's composite was last evaluated
 /// at: its revision and its session-overlay epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Pinned {
     /// The revision the retained results were evaluated at. `None`
     /// until the first poll, or for a branch with no commits.
     revision: Option<Revision>,
-    /// The sequence of the line's [`Ephemeral`](crate::Ephemeral)
+    /// The sequence of the layer's [`Ephemeral`](crate::Ephemeral)
     /// store the retained results were evaluated at. The store is
     /// off-tree, so its changes are invisible to the tree diff; the
     /// instants it minted since this sequence are the delta instead
@@ -325,7 +325,7 @@ impl Pinned {
         }
     }
 
-    /// Where a standalone ephemeral line stands right now.
+    /// Where a standalone ephemeral layer stands right now.
     fn ephemeral(line: &Ephemeral) -> Self {
         Self {
             revision: None,
@@ -342,29 +342,29 @@ impl Pinned {
     }
 }
 
-/// A standing query over a composite of lines — a branch, or every
-/// line a [`QueryLayer`] joins, plus its overlay. Created by
+/// A standing query over a composite of layers — a branch, or every
+/// layer a [`QueryLayer`] joins, plus its overlay. Created by
 /// [`Branch::subscribe`] or [`QueryLayer::subscribe`]; driven by
 /// [`poll`](Subscription::poll).
 ///
-/// Each line is pinned separately (its revision and its session
-/// overlay's epoch), so a poll re-evaluates exactly when some line
-/// moved, and the incremental path diffs only the lines that did:
-/// the touched sets of every moved line union into one maintenance
+/// Each layer is pinned separately (its revision and its session
+/// overlay's epoch), so a poll re-evaluates exactly when some layer
+/// moved, and the incremental path diffs only the layers that did:
+/// the touched sets of every moved layer union into one maintenance
 /// step over the composite.
 pub struct Subscription<Q: Application> {
-    /// The tree lines read, in join order.
+    /// The tree layers read, in join order.
     sources: Vec<Source>,
-    /// The standalone ephemeral lines read, in join order.
+    /// The standalone ephemeral layers read, in join order.
     ephemerals: Vec<Ephemeral>,
     /// The layer's own overlay facts (`.with(..)`), fixed for the
-    /// subscription's lifetime. Each line's session overlay is read
+    /// subscription's lifetime. Each layer's session overlay is read
     /// live at every evaluation instead, so it is not held here.
     changes: Changes,
     query: Q,
-    /// One pin per tree line, parallel to `sources`.
+    /// One pin per tree layer, parallel to `sources`.
     pins: Vec<Pinned>,
-    /// One pin per standalone ephemeral line, parallel to
+    /// One pin per standalone ephemeral layer, parallel to
     /// `ephemerals`.
     epochs: Vec<Pinned>,
     /// The demand cover recorded during the last evaluation.
@@ -399,15 +399,15 @@ impl Branch {
 }
 
 impl QueryLayer<'_> {
-    /// Register a standing query over this composite: every line the
+    /// Register a standing query over this composite: every layer the
     /// layer joins, read as one union, plus the layer's
     /// [`with`](QueryLayer::with) facts. The subscription evaluates
     /// on its first [`poll`](Subscription::poll) and is incrementally
     /// gated afterwards; a commit or a session-overlay change on any
-    /// joined line propagates as a result delta.
+    /// joined layer propagates as a result delta.
     ///
     /// The layer's `.with(..)` facts are captured now and never
-    /// change; each line's ephemeral store is read live and its
+    /// change; each layer's ephemeral store is read live and its
     /// changes are maintained incrementally like tree changes.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
         Subscription::over(self.composite(), self.changes().clone(), query)
@@ -440,8 +440,8 @@ impl<Q: Application> Subscription<Q> {
     }
 
     /// Point the subscription at a fresh composite of the same shape:
-    /// the same lines in the same order, possibly captured at other
-    /// revisions. The pins are kept, so the next poll diffs each line
+    /// the same layers in the same order, possibly captured at other
+    /// revisions. The pins are kept, so the next poll diffs each layer
     /// from where it was last evaluated to where the new composite
     /// reads it. A composite of a different shape resets the
     /// subscription to evaluate afresh.
@@ -484,8 +484,8 @@ enum Touched {
 }
 
 impl Touched {
-    /// Fold another line's verdict into this one: a rule hit on any
-    /// line dominates; fact changes union; nothing is the identity.
+    /// Fold another layer's verdict into this one: a rule hit on any
+    /// layer dominates; fact changes union; nothing is the identity.
     fn merge(self, other: Touched) -> Touched {
         match (self, other) {
             (Touched::Rules, _) | (_, Touched::Rules) => Touched::Rules,
@@ -574,7 +574,7 @@ where
         self.maintenances
     }
 
-    /// The composite this subscription reads: every line with its
+    /// The composite this subscription reads: every layer with its
     /// live session overlay, plus the layer's captured facts.
     fn layer(&self) -> QueryLayer<'_> {
         let mut layer = QueryLayer::new();
@@ -587,7 +587,7 @@ where
         layer.with(self.changes.clone())
     }
 
-    /// The owned lines this subscription reads.
+    /// The owned layers this subscription reads.
     fn composite(&self) -> Composite {
         Composite {
             sources: self.sources.clone(),
@@ -595,7 +595,7 @@ where
         }
     }
 
-    /// Anchor every branch line's metadata entity on `demand` (see
+    /// Anchor every branch layer's metadata entity on `demand` (see
     /// [`Demand::anchor_metadata`]).
     fn anchor(&self, demand: &Demand, operator: &dialog_capability::Capability<Operator>) {
         for source in &self.sources {
@@ -608,7 +608,7 @@ where
     /// Poll the subscription against the composite's current state.
     ///
     /// Returns `Ok(None)` when the result is known unchanged: every
-    /// line is at its pinned revision with its session overlay at
+    /// layer is at its pinned revision with its session overlay at
     /// the pinned epoch, or some tree moved but no change intersects
     /// the demand cover (the pins advance silently). Returns
     /// `Ok(Some(delta))` after a (re-)evaluation — the first poll
@@ -741,7 +741,7 @@ where
         Ok(Some(delta))
     }
 
-    /// Classify what the changes between one line's pinned root and
+    /// Classify what the changes between one layer's pinned root and
     /// its `current` one touched within the demand cover.
     ///
     /// The diff is *scoped to the cover*
@@ -786,7 +786,7 @@ where
             return Ok(Touched::Nothing);
         }
 
-        // Load the remote if the line tracks one, exactly as a select does:
+        // Load the remote if the layer tracks one, exactly as a select does:
         // a pull replicates tree nodes along changed paths but never spilled
         // value blocks, so the first poll after a pull that lands a spilled
         // fact inside the cover must be able to read the block through the
@@ -867,7 +867,7 @@ where
         }
     }
 
-    /// Classify what one line's ephemeral store changed since the
+    /// Classify what one layer's ephemeral store changed since the
     /// pinned `sequence`, within the demand cover: the exact facts its
     /// instants asserted and retracted, filtered by their index keys
     /// against the cover, with no diff to compute. A change inside a
@@ -977,7 +977,7 @@ where
                     .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
                 let overlay = self.layer().overlay(&operator);
                 self.anchor(&self.demand, &operator);
-                // Typed with the *named* env lifetime (owned line
+                // Typed with the *named* env lifetime (owned layer
                 // clones, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
@@ -3986,9 +3986,9 @@ mod tests {
 
     /// A subscription over a joined composite: the union of two
     /// branches is evaluated once, and a covered commit on either
-    /// line propagates as a delta — maintained per touched entity,
-    /// never recomputed — while an uncovered commit on either line
-    /// advances that line's pin silently.
+    /// layer propagates as a delta — maintained per touched entity,
+    /// never recomputed — while an uncovered commit on either layer
+    /// advances that layer's pin silently.
     #[dialog_common::test]
     async fn it_subscribes_across_joined_branches() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
@@ -4041,7 +4041,7 @@ mod tests {
         );
         assert!(subscription.poll(&operator).await?.is_none());
 
-        // A covered write on the second line.
+        // A covered write on the second layer.
         let carol = Entity::new()?;
         scratch
             .transaction()
@@ -4066,7 +4066,7 @@ mod tests {
         assert_eq!(subscription.recomputes(), 1, "maintained, not recomputed");
         assert_eq!(subscription.maintenances(), 1);
 
-        // An uncovered write on the first line: the pin advances,
+        // An uncovered write on the first layer: the pin advances,
         // nothing is reported.
         main.transaction()
             .assert(
@@ -4083,7 +4083,7 @@ mod tests {
             "an uncovered commit on a joined line is free"
         );
 
-        // A covered retract on the first line.
+        // A covered retract on the first layer.
         main.transaction()
             .retract(
                 the!("person/name")
@@ -4117,10 +4117,10 @@ mod tests {
         Ok(())
     }
 
-    /// Every joined line's session overlay is read live: a session
-    /// fact on either line propagates, a session fact present when
+    /// Every joined layer's session overlay is read live: a session
+    /// fact on either layer propagates, a session fact present when
     /// the subscription was made is not pinned as a stale snapshot,
-    /// and clearing a line's session retracts exactly its rows.
+    /// and clearing a layer's session retracts exactly its rows.
     #[dialog_common::test]
     async fn it_observes_every_joined_session_overlay() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
@@ -4140,7 +4140,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        // A session fact already on the first line when the
+        // A session fact already on the first layer when the
         // subscription is made.
         let bob = Entity::new()?;
         main.overlay()
@@ -4160,7 +4160,7 @@ mod tests {
             "a pre-existing session fact appears once"
         );
 
-        // A session fact on the second line propagates with no tree
+        // A session fact on the second layer propagates with no tree
         // movement anywhere.
         let carol = Entity::new()?;
         scratch.overlay().assert(
@@ -4177,7 +4177,7 @@ mod tests {
             vec![(carol.clone(), "Carol".to_string())]
         );
 
-        // Clearing the first line's session drops exactly Bob: the
+        // Clearing the first layer's session drops exactly Bob: the
         // subscription reads that session live rather than from a
         // snapshot taken at creation.
         main.overlay().clear();
@@ -4197,8 +4197,8 @@ mod tests {
         Ok(())
     }
 
-    /// A session tombstone on a joined line at subscribe time stays a
-    /// tombstone: lifting the line's overlay out of the layer's
+    /// A session tombstone on a joined layer at subscribe time stays a
+    /// tombstone: lifting the layer's overlay out of the layer's
     /// captured facts must not invert it into a standing assert.
     #[dialog_common::test]
     async fn it_keeps_a_session_tombstone_out_of_the_layer_facts() -> anyhow::Result<()> {

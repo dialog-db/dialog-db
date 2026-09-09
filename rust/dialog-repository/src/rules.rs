@@ -21,16 +21,16 @@
 //! These names are a dialog-repository convention (like
 //! `dialog.session/*`).
 //!
-//! # Two layers, two caches
+//! # Two rule sources, two caches
 //!
-//! - A **durable** layer reads a branch's committed tree. Its rule
+//! - A **durable** rule source reads a branch's committed tree. Its rule
 //!   discovery (the `conclusion` lookup) is cacheable by branch head —
 //!   the committed rule set for a concept only changes when the head
 //!   moves. Hydrated bodies are cached by content-addressed rule entity.
-//! - A **transient** layer reads the per-query overlay. Overlay rules
+//! - A **transient** rule source reads the per-query overlay. Overlay rules
 //!   (`tx.assert(rule)` / `.with(rule)`, uncommitted — the head has NOT
 //!   moved) are read fresh every query and never head-cached. Keeping
-//!   the overlay in its own layer is what makes the "overlay rule masked
+//!   the overlay in its own rule source is what makes the "overlay rule masked
 //!   by a head-keyed cache" bug structurally impossible.
 
 use std::collections::{BTreeSet, HashMap};
@@ -307,7 +307,7 @@ struct RuleCacheInner {
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
-    /// The committed attribute placements (`dialog.attribute/layer`),
+    /// The committed attribute placements (`dialog.attribute/scope`),
     /// as of a branch head. One range scan on a miss.
     placements: Option<(Revision, CommittedPlacements)>,
 }
@@ -433,7 +433,7 @@ impl RuleCache {
 }
 
 /// Assemble a [`ConceptRules`] for `concept` from the implicit rule plus
-/// the installed rules found across the layers' rule sets.
+/// the installed rules found across the rule sources' rule sets.
 ///
 /// `durable` are the rules read (and cached) from each branch's
 /// committed tree; `transient` are read fresh from the overlay. Both are
