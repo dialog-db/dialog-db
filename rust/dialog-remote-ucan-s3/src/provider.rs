@@ -50,15 +50,29 @@ where
 
         let cached = key.as_ref().and_then(|key| cache.lookup(key, now));
         let from_cache = cached.is_some();
-        let permit = match cached {
-            Some(permit) => permit,
-            None => {
-                let permit = invocation.authorization.redeem(&invocation.address).await?;
-                if let Some(key) = key.clone() {
-                    cache.store(key, &permit, now);
-                }
-                permit
+        let permit = match (cached, &key) {
+            (Some(permit), _) => permit,
+            // A cacheable miss joins the site's in-flight redeems:
+            // concurrent requests for one object share a single redeem
+            // round-trip, and whoever completes it stores the permit —
+            // exactly once — for the TTL window that follows. The shared
+            // future owns clones of everything it touches, so any joiner
+            // can drive it; a shared failure is returned to everyone in
+            // flight and cached for nobody.
+            (None, Some(key)) => {
+                let authorization = invocation.authorization.clone();
+                let address = invocation.address.clone();
+                let permits = self.permits_shared();
+                let key = key.clone();
+                self.redeems()
+                    .join(key.clone(), move || async move {
+                        let permit = authorization.redeem(&address).await?;
+                        permits.store(key, &permit, time::now());
+                        Ok(permit)
+                    })
+                    .await?
             }
+            (None, None) => invocation.authorization.redeem(&invocation.address).await?,
         };
 
         // A retry presents the capability a second time, so it is
@@ -213,6 +227,90 @@ mod tests {
         use dialog_effects::blob::BlobError;
         use dialog_effects::blob::prelude::{ArchiveBlobExt, BlobExt};
         use dialog_remote_s3::helpers::LocalS3;
+
+        /// A one-shot access service: answers every POST with the given
+        /// permit, counting how many redeems arrived.
+        async fn counting_redeemer(
+            permit: Permit,
+        ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let count = Arc::new(AtomicUsize::new(0));
+            let counted = count.clone();
+            let body = serde_ipld_dagcbor::to_vec(&permit).unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    let mut buffer = [0u8; 8192];
+                    let _ = stream.read(&mut buffer).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/cbor\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                }
+            });
+            (endpoint, count)
+        }
+
+        /// Concurrent requests for one cacheable object share a single
+        /// redeem round-trip: the second joins the first's in-flight
+        /// redeem instead of POSTing its own invocation.
+        #[dialog_common::test]
+        async fn it_shares_one_redeem_between_concurrent_requests() {
+            let (endpoint, redeems) = counting_redeemer(unreachable_permit()).await;
+
+            let signer = Ed25519Signer::import(&[11u8; 32]).await.unwrap();
+            let capability = || {
+                Subject::from(did!("key:zSharedRedeemTest"))
+                    .attenuate(Use)
+                    .attenuate(Archive)
+                    .attenuate(Catalog::new("blocks"))
+                    .invoke(Get::new([3u8; 32]))
+            };
+
+            let site = UcanSite::default();
+            let address = UcanAddress::new(endpoint);
+            let authorization = self_authorization(&signer).await;
+
+            type Read = Result<Option<Vec<u8>>, ArchiveError>;
+            let first = site.execute(ForkInvocation::new(
+                capability(),
+                address.clone(),
+                authorization.clone(),
+            ));
+            let second = site.execute(ForkInvocation::new(
+                capability(),
+                address.clone(),
+                authorization,
+            ));
+            let (first, second): (Read, Read) = tokio::join!(first, second);
+
+            // The permit points nowhere, so the S3 leg fails for both —
+            // past the redeem, which is the leg under test.
+            assert!(first.is_err() && second.is_err());
+            assert_eq!(
+                redeems.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "concurrent requests for one object must share one redeem"
+            );
+
+            let key = PermitKey::cacheable(&address, capability().to_request())
+                .expect("a GET request is cacheable");
+            assert!(
+                site.permits().lookup(&key, time::now()).is_some(),
+                "the shared redeem stores the permit once for the TTL window"
+            );
+        }
 
         /// The pin for the presence-probe finding: a GET that comes
         /// back 404 is a semantic outcome, not a permit failure. The
