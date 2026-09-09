@@ -24,12 +24,20 @@ impl Provider<ForkInvocation<Fs, Get>> for Fs {
         input: ForkInvocation<Fs, Get>,
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
         let flight = simulation::begin(Traffic::ArchiveGet).await;
+        let key = input.capability.constraint.digest.to_string();
         let result =
             Provider::<Get>::execute(input.authorization.filesystem(), input.capability).await;
         let bytes = match &result {
             Ok(Some(block)) => block.len(),
             _ => 0,
         };
+        simulation::record_get(
+            key,
+            match &result {
+                Ok(Some(_)) => Some(bytes),
+                _ => None,
+            },
+        );
         flight.complete(bytes).await;
         result
     }

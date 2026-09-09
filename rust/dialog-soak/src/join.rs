@@ -307,14 +307,33 @@ where
     F: Future<Output = Result<T>>,
 {
     let before_tally = simulation::tally();
+    let before_gets = simulation::get_ledger();
+    if std::env::var("DIALOG_SOAK_DUMP_GETS").is_ok() {
+        eprintln!("PHASE-START {name}");
+    }
     let before = tokio::time::Instant::now();
     let outcome = work.await.with_context(|| format!("phase {name} failed"))?;
     let elapsed = before.elapsed();
     let traffic = simulation::tally().since(&before_tally);
+    let gets = simulation::get_ledger().since(&before_gets);
+    // With DIALOG_SOAK_DUMP_GETS set, print the phase's most re-requested
+    // keys so a duplication investigation can see which blocks they are.
+    if std::env::var("DIALOG_SOAK_DUMP_GETS").is_ok() {
+        for (key, record) in gets.offenders().into_iter().take(24) {
+            eprintln!(
+                "DUP {name} {key} requests={} empty={} bytes={}",
+                record.requests, record.empty, record.bytes
+            );
+        }
+    }
     phases.push(PhaseReport {
         name: name.to_string(),
         virtual_ms: elapsed.as_millis() as u64,
         rounds: 0.0,
+        unique_blocks: gets.unique_blocks(),
+        duplicate_requests: gets.duplicate_requests(),
+        duplicate_bytes: gets.duplicate_bytes(),
+        empty_requests: gets.empty_requests(),
         traffic: traffic.into(),
     });
     Ok(outcome)

@@ -46,6 +46,20 @@ pub struct PhaseReport {
     /// approach tree depth times the number of ranges visited.
     #[serde(default)]
     pub rounds: f64,
+    /// Distinct blocks the phase's `archive.get` requests brought over.
+    #[serde(default)]
+    pub unique_blocks: u64,
+    /// Requests that re-downloaded a block already received in the phase:
+    /// pure replication waste, and the count the duplication work drives
+    /// to zero.
+    #[serde(default)]
+    pub duplicate_requests: u64,
+    /// Bytes those duplicate requests moved.
+    #[serde(default)]
+    pub duplicate_bytes: u64,
+    /// Requests that returned no block (the remote does not hold the key).
+    #[serde(default)]
+    pub empty_requests: u64,
     /// What crossed the simulated wire during the phase.
     pub traffic: TallyRows,
 }
@@ -107,13 +121,13 @@ impl Report {
         );
         let _ = writeln!(
             out,
-            "| {:<10} | {:>10} | {:>6} | {:>8} | {:>10} | breakdown",
-            "phase", "virtual ms", "rounds", "requests", "bytes"
+            "| {:<10} | {:>10} | {:>6} | {:>8} | {:>6} | {:>5} | {:>5} | {:>10} | breakdown",
+            "phase", "virtual ms", "rounds", "requests", "unique", "dup", "empty", "bytes"
         );
         let _ = writeln!(
             out,
-            "|{:-<12}|{:-<12}|{:-<8}|{:-<10}|{:-<12}|----------",
-            "", "", "", "", ""
+            "|{:-<12}|{:-<12}|{:-<8}|{:-<10}|{:-<8}|{:-<7}|{:-<7}|{:-<12}|----------",
+            "", "", "", "", "", "", "", ""
         );
         for phase in &self.phases {
             let breakdown = phase
@@ -125,11 +139,14 @@ impl Report {
                 .join(" ");
             let _ = writeln!(
                 out,
-                "| {:<10} | {:>10} | {:>6.0} | {:>8} | {:>10} | {}",
+                "| {:<10} | {:>10} | {:>6.0} | {:>8} | {:>6} | {:>5} | {:>5} | {:>10} | {}",
                 phase.name,
                 phase.virtual_ms,
                 phase.rounds,
                 phase.traffic.requests,
+                phase.unique_blocks,
+                phase.duplicate_requests,
+                phase.empty_requests,
                 phase.traffic.bytes,
                 breakdown
             );

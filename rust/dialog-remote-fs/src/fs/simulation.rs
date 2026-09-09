@@ -148,6 +148,132 @@ impl TransferTally {
     }
 }
 
+/// Per-key accounting for one content hash's `archive.get` requests.
+///
+/// Content addressing makes every non-empty response for a key identical,
+/// so `bytes / hits` is the block's size and any request beyond the first
+/// hit re-downloaded a block the client already received.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GetRecord {
+    /// Requests issued for this key.
+    pub requests: u64,
+    /// Requests that returned no block (the remote does not hold it).
+    pub empty: u64,
+    /// Payload bytes across all of this key's requests.
+    pub bytes: u64,
+}
+
+impl GetRecord {
+    /// Requests that returned the block.
+    pub fn hits(&self) -> u64 {
+        self.requests - self.empty
+    }
+
+    /// Bytes re-downloaded beyond the first successful fetch.
+    pub fn wasted_bytes(&self) -> u64 {
+        match self.hits() {
+            0 | 1 => 0,
+            hits => self.bytes / hits * (hits - 1),
+        }
+    }
+}
+
+/// The process-global get ledger, keyed by content hash (hex).
+static GET_LEDGER: std::sync::Mutex<Option<std::collections::HashMap<String, GetRecord>>> =
+    std::sync::Mutex::new(None);
+
+/// Record one `archive.get` outcome: `bytes` is `Some(len)` when the
+/// remote returned the block and `None` when it did not hold it.
+pub(crate) fn record_get(key: String, bytes: Option<usize>) {
+    let mut ledger = GET_LEDGER.lock().expect("get ledger lock poisoned");
+    let record = ledger.get_or_insert_default().entry(key).or_default();
+    record.requests += 1;
+    match bytes {
+        Some(bytes) => record.bytes += bytes as u64,
+        None => record.empty += 1,
+    }
+}
+
+/// A snapshot of the get ledger: per-key request accounting since the
+/// last [`reset_tally`], for measuring replication waste (duplicate
+/// fetches, empty lookups) rather than just volume.
+#[derive(Debug, Clone, Default)]
+pub struct GetLedger {
+    map: std::collections::HashMap<String, GetRecord>,
+}
+
+impl GetLedger {
+    /// Total requests across every key.
+    pub fn requests(&self) -> u64 {
+        self.map.values().map(|record| record.requests).sum()
+    }
+
+    /// Distinct keys that returned a block at least once.
+    pub fn unique_blocks(&self) -> u64 {
+        self.map.values().filter(|record| record.hits() > 0).count() as u64
+    }
+
+    /// Requests beyond the first successful fetch of their key: every one
+    /// re-downloaded a block the client had already received.
+    pub fn duplicate_requests(&self) -> u64 {
+        self.map
+            .values()
+            .map(|record| record.hits().saturating_sub(1))
+            .sum()
+    }
+
+    /// Bytes those duplicate requests moved.
+    pub fn duplicate_bytes(&self) -> u64 {
+        self.map.values().map(GetRecord::wasted_bytes).sum()
+    }
+
+    /// Requests that returned no block. Repeats of these are round trips
+    /// nothing can hydrate away, since there is no block to cache.
+    pub fn empty_requests(&self) -> u64 {
+        self.map.values().map(|record| record.empty).sum()
+    }
+
+    /// The difference `self - earlier`, for per-phase deltas over the
+    /// monotonically growing ledger. Keys whose counts did not move are
+    /// dropped.
+    pub fn since(&self, earlier: &GetLedger) -> GetLedger {
+        let mut delta = std::collections::HashMap::new();
+        for (key, record) in &self.map {
+            let before = earlier.map.get(key).copied().unwrap_or_default();
+            let moved = GetRecord {
+                requests: record.requests - before.requests,
+                empty: record.empty - before.empty,
+                bytes: record.bytes - before.bytes,
+            };
+            if moved.requests > 0 {
+                delta.insert(key.clone(), moved);
+            }
+        }
+        GetLedger { map: delta }
+    }
+
+    /// Keys requested more than once, most-requested first: the blocks a
+    /// duplicate-fetch investigation should look at.
+    pub fn offenders(&self) -> Vec<(String, GetRecord)> {
+        let mut rows: Vec<_> = self
+            .map
+            .iter()
+            .filter(|(_, record)| record.requests > 1)
+            .map(|(key, record)| (key.clone(), *record))
+            .collect();
+        rows.sort_by(|a, b| b.1.requests.cmp(&a.1.requests));
+        rows
+    }
+}
+
+/// The current get ledger.
+pub fn get_ledger() -> GetLedger {
+    let ledger = GET_LEDGER.lock().expect("get ledger lock poisoned");
+    GetLedger {
+        map: ledger.clone().unwrap_or_default(),
+    }
+}
+
 /// The current transfer tally.
 pub fn tally() -> TransferTally {
     let mut snapshot = TransferTally::default();
@@ -158,12 +284,13 @@ pub fn tally() -> TransferTally {
     snapshot
 }
 
-/// Reset the transfer tally to zero.
+/// Reset the transfer tally (and the get ledger) to zero.
 pub fn reset_tally() {
     for index in 0..BUCKETS {
         COUNTS[index].store(0, Ordering::Relaxed);
         BYTES[index].store(0, Ordering::Relaxed);
     }
+    *GET_LEDGER.lock().expect("get ledger lock poisoned") = None;
 }
 
 /// An in-flight simulated request: [`begin`] has charged the request's
