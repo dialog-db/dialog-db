@@ -1361,6 +1361,7 @@ dependencies = [
  "dialog-varsig",
  "dirs",
  "ed25519-dalek",
+ "futures-util",
  "getrandom 0.2.16",
  "ipld-core",
  "parking_lot",

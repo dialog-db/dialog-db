@@ -297,9 +297,11 @@ impl<S: Clone> Operator<S> {
 
     /// The session grant covering `claim`, if the operator holds one.
     fn session_grant(&self, claim: &Prove<Ucan>) -> Option<&UcanCertificate> {
-        self.session
-            .iter()
-            .find(|grant| grant.verify(&claim.access).is_ok())
+        self.session.iter().find(|grant| {
+            grant
+                .verify(&claim.access)
+                .is_ok_and(|range| range.covers(&claim.duration))
+        })
     }
 
     /// Re-resolve the access branch handle's head and upstream from
@@ -984,6 +986,124 @@ mod tests {
             .resolve(Prove::<Ucan>::new(operator.did(), storage_scope(&space)))
             .await?;
         assert_eq!(proof.proofs().len(), 2);
+        Ok(())
+    }
+    async fn retained_count(operator: &Operator<VolatileSpace>) -> Result<usize> {
+        use futures_util::TryStreamExt as _;
+        let rows: Vec<_> = operator
+            .delegations()?
+            .claims()
+            .select(dialog_artifacts::ArtifactSelector::new().the("dialog.ucan/audience".parse()?))
+            .perform(operator)
+            .await?
+            .try_collect()
+            .await?;
+        Ok(rows.len())
+    }
+
+    #[dialog_common::test]
+    async fn it_bounds_in_memory_sessions_without_retaining_them() -> Result<()> {
+        let storage = Storage::volatile();
+        let profile = Profile::open(unique("bounded-session"))
+            .perform(&storage)
+            .await?;
+        let setup = profile.derive(b"setup").build(storage.clone()).await?;
+        let space = Ed25519Signer::generate().await?;
+        let now = now_s();
+        let upstream_end = now + 7200;
+        let delegation = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&profile.did())
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".into()])
+            .expiration(Timestamp::try_from(upstream_end as i128)?)
+            .try_build()
+            .await?;
+        profile
+            .access()
+            .save(UcanDelegation::new(DelegationChain::new(delegation)))
+            .perform(&setup)
+            .await?;
+        let revision = setup.delegations()?.revision();
+        assert_eq!(retained_count(&setup).await?, 1);
+        let exported = Subject::from(profile.did())
+            .attenuate(Access)
+            .invoke(Export::<Ucan>::new())
+            .perform(&setup)
+            .await?;
+        for session_end in [now + 3600, now + 10800, now - 60] {
+            let operator = profile
+                .derive(session_end.to_le_bytes())
+                .allow_until(Subject::any(), Timestamp::try_from(session_end as i128)?)
+                .build(storage.clone())
+                .await?;
+            assert_eq!(operator.delegations()?.revision(), revision);
+            let end = session_end.min(upstream_end);
+            let mut claim = Prove::<Ucan>::new(operator.did(), storage_scope(&space));
+            claim.duration = TimeRange {
+                not_before: Some(end - 10),
+                expiration: Some(end - 1),
+            };
+            for _ in 0..2 {
+                let proof = operator.resolve(claim.clone()).await?;
+                assert_eq!(proof.duration().expiration, Some(end));
+                assert_eq!(proof.proofs().len(), 2);
+                assert_eq!(proof.proofs()[0].0.audience(), proof.proofs()[1].0.issuer());
+                assert_eq!(proof.proofs()[1].0.audience(), &operator.did());
+            }
+            let key = Operator::<VolatileSpace>::cache_key(&claim).unwrap();
+            assert_eq!(operator.cached(&key, &claim).is_some(), session_end > now);
+            claim.duration = TimeRange {
+                not_before: Some(now),
+                expiration: Some(now),
+            };
+            assert_eq!(
+                operator.resolve(claim.clone()).await.is_ok(),
+                session_end > now
+            );
+            claim.duration = TimeRange {
+                not_before: Some(end),
+                expiration: Some(end + 1),
+            };
+            assert!(operator.resolve(claim).await.is_err());
+            assert_eq!(operator.delegations()?.revision(), revision);
+            let after = Subject::from(profile.did())
+                .attenuate(Access)
+                .invoke(Export::<Ucan>::new())
+                .perform(&operator)
+                .await?;
+            assert_eq!(after.len(), exported.len());
+            assert_eq!(retained_count(&operator).await?, 1);
+        }
+        Ok(())
+    }
+    #[dialog_common::test]
+    async fn it_selects_a_session_grant_covering_the_requested_window() -> Result<()> {
+        let storage = Storage::volatile();
+        let profile = Profile::open(unique("session-windows"))
+            .perform(&storage)
+            .await?;
+        let now = now_s();
+        let operator = profile
+            .derive(b"test")
+            .allow_until(Subject::any(), Timestamp::try_from((now - 60) as i128)?)
+            .allow_until(Subject::any(), Timestamp::try_from((now + 3600) as i128)?)
+            .build(storage)
+            .await?;
+        let mut claim = Prove::<Ucan>::new(
+            operator.did(),
+            Scope {
+                subject: UcanSubject::Specific(profile.did()),
+                command: UcanCommand(vec!["storage".into()]),
+                parameters: Parameters::default(),
+            },
+        );
+        claim.duration = TimeRange {
+            not_before: Some(now),
+            expiration: Some(now),
+        };
+        let proof = operator.resolve(claim).await?;
+        assert_eq!(proof.duration.expiration, Some(now + 3600));
         Ok(())
     }
 }
