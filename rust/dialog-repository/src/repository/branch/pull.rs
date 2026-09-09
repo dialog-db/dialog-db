@@ -1445,9 +1445,11 @@ mod history_tests {
     use anyhow::Result;
     use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 
-    use dialog_artifacts::history::{Causality, History as _, causality, common_ancestor};
+    use dialog_artifacts::history::{
+        Causality, History as _, HistorySelector, causality, common_ancestor,
+    };
     use dialog_artifacts::{Artifact, Instruction, Value};
-    use futures_util::stream;
+    use futures_util::{TryStreamExt as _, stream};
 
     /// A scenario-2 pull ("upstream moved, but with things we already
     /// know") keeps the head and advances only the sync base — and it must
@@ -1901,7 +1903,8 @@ mod history_tests {
         // The supersession feature established over main's claim is
         // detectable from the merged history.
         let title_claims: Vec<_> = history
-            .records()
+            .select(HistorySelector::All)
+            .try_collect::<Vec<_>>()
             .await?
             .into_iter()
             .filter(|(_, record)| record.claim().the.to_string() == "post/title")

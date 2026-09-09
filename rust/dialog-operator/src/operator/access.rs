@@ -644,6 +644,7 @@ mod tests {
                 .transaction()
                 .integrate(moved)
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
         }

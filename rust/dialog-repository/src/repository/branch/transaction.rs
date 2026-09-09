@@ -1,5 +1,7 @@
+mod batch;
 mod induce;
 mod query;
+pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 
 use crate::Commit;
@@ -13,24 +15,49 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
 
-/// A transaction on a branch or a snapshot.
+/// A transaction on a line of the repository.
 ///
-/// Created by [`Branch::transaction`] or [`Snapshot::transaction`].
-/// Accumulates durable changes via `.assert()` / `.retract()` and
-/// *transient* facts (commands) via `.dispatch()`, then commits
-/// atomically via `.commit().perform(&env)`.
+/// `Line` is what the transaction runs on, and it decides what
+/// committing does:
+///
+/// - `&`[`Branch`]: `.commit().perform(&env)` STAGES the batch. It mints
+///   a revision on the branch's own origin — the successor edition of
+///   the head, exactly what a published commit would mint — but the
+///   branch head does not move and nothing becomes visible. The returned
+///   [`TransactionBatch`] chains further commits and finally
+///   [`publish`](TransactionBatch::publish)es the whole chain with one
+///   head CAS. A one-shot writer commits and publishes in one step with
+///   [`.commit().publish()`](TransactionCommit::publish).
+/// - [`TransactionBatch`]: the same, extending the staged chain by one
+///   more commit.
+/// - `&`[`Snapshot`]: commits advance the snapshot in place, minted on
+///   the snapshot's own lineage. Nothing publishes; a snapshot is a fork,
+///   not a stage.
+///
+/// Created by [`Branch::transaction`], [`Snapshot::transaction`], or
+/// [`TransactionBatch::transaction`]. Accumulates durable changes via
+/// `.assert()` / `.retract()` and *transient* facts (commands) via
+/// `.dispatch()`.
 ///
 /// Transients are visible to every read through [`query`](Self::query)
 /// and to inductive-rule bodies during commit-time induction, but they
 /// never enter the durable batch: they live for exactly one induction
 /// round and leave no trace in the committed tree.
-pub struct Transaction<'a> {
-    source: SourceRef<'a>,
+pub struct Transaction<Line> {
+    line: Line,
     changes: Changes,
     transients: Changes,
 }
 
-impl<'a> Transaction<'a> {
+impl<Line> Transaction<Line> {
+    pub(crate) fn on(line: Line) -> Self {
+        Transaction {
+            line,
+            changes: Changes::new(),
+            transients: Changes::new(),
+        }
+    }
+
     /// Assert a claim into this transaction.
     pub fn assert<C: Statement>(mut self, claim: C) -> Self {
         // Disambiguate from `Statement::assert` (which Changes now
@@ -79,32 +106,18 @@ impl<'a> Transaction<'a> {
         self
     }
 
-    /// Run queries against this transaction's "as-if committed" view of
-    /// the line it runs on.
-    ///
-    /// Pending asserts and retracts are surfaced through a
-    /// [`TransactionQuery`] handle — assertions show up alongside the
-    /// stored facts; retractions tombstone matching facts in the stored
-    /// stream before the merge. Dispatched transients are part of the
-    /// view too. The transaction itself stays open and committable.
-    pub fn query(&self) -> TransactionQuery<'_> {
-        let mut view = self.changes.clone();
-        self.transients.clone().assert(&mut view);
-        TransactionQuery::new(self.source, &view)
-    }
-
     /// Finalize the transaction into a commit command.
     ///
-    /// [`TransactionCommit::perform`] first runs commit-time induction:
-    /// the commit's delta (durable changes and dispatched transients
-    /// alike) probes the `dialog.rule/on` trigger index, matching inductive
-    /// rules fire against the transaction view, and their durable
-    /// novelty folds into the commit while transient heads seed further
-    /// rounds. Only then is the durable batch committed; transients are
-    /// dropped, never written.
-    pub fn commit(self) -> TransactionCommit<'a> {
+    /// `perform` first runs commit-time induction: the commit's delta
+    /// (durable changes and dispatched transients alike) probes the
+    /// `dialog.rule/on` trigger index, matching inductive rules fire
+    /// against the transaction view, and their durable novelty folds
+    /// into the commit while transient heads seed further rounds. Only
+    /// then is the durable batch committed; transients are dropped,
+    /// never written.
+    pub fn commit(self) -> TransactionCommit<Line> {
         TransactionCommit {
-            source: self.source,
+            line: self.line,
             changes: self.changes,
             transients: self.transients,
             allow_empty: false,
@@ -113,17 +126,52 @@ impl<'a> Transaction<'a> {
     }
 }
 
+/// The "as-if committed" view over `changes` + `transients` that
+/// [`Transaction::query`] serves on every line kind.
+fn transaction_view(changes: &Changes, transients: &Changes) -> Changes {
+    let mut view = changes.clone();
+    transients.clone().assert(&mut view);
+    view
+}
+
+impl<'a> Transaction<&'a Branch> {
+    /// Run queries against this transaction's "as-if committed" view of
+    /// the branch.
+    ///
+    /// Pending asserts and retracts are surfaced through a
+    /// [`TransactionQuery`] handle — assertions show up alongside the
+    /// stored facts; retractions tombstone matching facts in the stored
+    /// stream before the merge. Dispatched transients are part of the
+    /// view too. The transaction itself stays open and committable.
+    pub fn query(&self) -> TransactionQuery<'a> {
+        TransactionQuery::new(
+            SourceRef::Branch(self.line),
+            &transaction_view(&self.changes, &self.transients),
+        )
+    }
+}
+
+impl<'a> Transaction<&'a Snapshot> {
+    /// Run queries against this transaction's "as-if committed" view of
+    /// the snapshot. See [`Transaction::<&Branch>::query`].
+    pub fn query(&self) -> TransactionQuery<'a> {
+        TransactionQuery::new(
+            SourceRef::Snapshot(self.line),
+            &transaction_view(&self.changes, &self.transients),
+        )
+    }
+}
+
 impl Branch {
     /// Start a transaction on this branch.
     ///
-    /// Use `.assert()` and `.retract()` to accumulate changes,
-    /// then `.commit().perform(&env)` to apply them.
-    pub fn transaction(&self) -> Transaction<'_> {
-        Transaction {
-            source: SourceRef::from(self),
-            changes: Changes::new(),
-            transients: Changes::new(),
-        }
+    /// Use `.assert()` and `.retract()` to accumulate changes, then
+    /// either `.commit().publish().perform(&env)` to commit and publish
+    /// in one step, or `.commit().perform(&env)` to stage a
+    /// [`TransactionBatch`] that chains further commits before one
+    /// atomic publish.
+    pub fn transaction(&self) -> Transaction<&Branch> {
+        Transaction::on(self)
     }
 }
 
@@ -135,33 +183,30 @@ impl Snapshot {
     /// `.commit().perform(&env)` to apply them; the snapshot advances to
     /// the revision `perform` returns. Clone first to keep the view you
     /// have.
-    pub fn transaction(&self) -> Transaction<'_> {
-        Transaction {
-            source: SourceRef::from(self),
-            changes: Changes::new(),
-            transients: Changes::new(),
-        }
+    pub fn transaction(&self) -> Transaction<&Snapshot> {
+        Transaction::on(self)
     }
 }
 
 /// Command committing a [`Transaction`]: runs commit-time induction
-/// over the transaction's delta, then delegates the settled durable
-/// batch to [`Branch::commit`] / [`Snapshot::commit`].
+/// over the transaction's delta, then mints the settled durable batch
+/// on the line.
 ///
-/// Mirrors [`Commit`](crate::Commit)'s builder surface
+/// What `perform` returns follows the line — see [`Transaction`]. The
+/// builder mirrors [`Commit`](crate::Commit)'s surface
 /// ([`allow_empty`](Self::allow_empty) /
 /// [`canonicalize`](Self::canonicalize)); the difference is the
 /// induction step in front and that transients never reach the
 /// durable batch.
-pub struct TransactionCommit<'a> {
-    source: SourceRef<'a>,
-    changes: Changes,
-    transients: Changes,
-    allow_empty: bool,
-    canonicalize: bool,
+pub struct TransactionCommit<Line> {
+    pub(super) line: Line,
+    pub(super) changes: Changes,
+    pub(super) transients: Changes,
+    pub(super) allow_empty: bool,
+    pub(super) canonicalize: bool,
 }
 
-impl<'a> TransactionCommit<'a> {
+impl<Line> TransactionCommit<Line> {
     /// Mint a revision even when the settled change batch leaves the
     /// indexes untouched. See [`Commit::allow_empty`](crate::Commit::allow_empty).
     pub fn allow_empty(mut self) -> Self {
@@ -175,10 +220,12 @@ impl<'a> TransactionCommit<'a> {
         self.canonicalize = true;
         self
     }
+}
 
-    /// Run induction, then execute the commit, returning the
-    /// newly-published [`Revision`] (or the unchanged head when the
-    /// settled batch is a no-op).
+impl TransactionCommit<&Snapshot> {
+    /// Run induction, then execute the commit, advancing the snapshot to
+    /// the returned [`Revision`] (or returning the unchanged head when
+    /// the settled batch is a no-op).
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<Get>
@@ -193,13 +240,20 @@ impl<'a> TransactionCommit<'a> {
             + ConditionalSync
             + 'static,
     {
+        let snapshot = self.line;
         let mut changes = self.changes;
-        induce::induce(self.source, &mut changes, self.transients, env).await?;
+        induce::induce(
+            SourceRef::Snapshot(snapshot),
+            &mut changes,
+            self.transients,
+            env,
+        )
+        .await?;
 
-        let previous = self.source.revision();
+        let previous = snapshot.revision();
         let touches_rules = touches_rules(&changes);
 
-        let mut commit = Commit::new(self.source, changes.into_stream());
+        let mut commit = Commit::new(snapshot, changes.into_stream());
         if self.allow_empty {
             commit = commit.allow_empty();
         }
@@ -208,23 +262,12 @@ impl<'a> TransactionCommit<'a> {
         }
         let revision = Box::pin(commit.perform(env)).await?;
 
-        // Advance the induction watermark: rules have now evaluated
-        // through this revision (induction ran over the commit's delta
-        // plus any lag, and the settled batch is what `revision`
-        // holds). A raced publish here at worst regresses the
-        // watermark, which re-induces a covered span — idempotent
-        // under the novelty check. A snapshot keeps no watermark: its
-        // head moves only through commits like this one, every one of
-        // which induces, so it is always at the head.
-        if let SourceRef::Branch(branch) = self.source {
-            let cell = branch.induction_cell();
-            if cell.content().as_ref() != Some(&revision) {
-                cell.publish(revision.clone()).perform(env).await?;
-            }
-        }
-
         if !touches_rules {
-            carry_footprint(&self.source.rule_cache(), previous.as_ref(), &revision);
+            carry_footprint(
+                &SourceRef::Snapshot(snapshot).rule_cache(),
+                Some(&previous),
+                &revision,
+            );
         }
         Ok(revision)
     }
@@ -291,6 +334,6 @@ impl Branch {
             + ConditionalSync
             + 'static,
     {
-        self.transaction().commit().perform(env).await
+        Box::pin(self.transaction().commit().publish().perform(env)).await
     }
 }
