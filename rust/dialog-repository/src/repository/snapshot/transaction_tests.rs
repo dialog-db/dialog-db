@@ -185,6 +185,7 @@ async fn it_advances_the_snapshot_and_not_the_branch() -> Result<()> {
     // The minted record's parent is the base revision.
     let record = snapshot
         .history(&operator)
+        .await
         .revision_record(&minted.version())
         .await?
         .expect("the minted record is in the tree");
@@ -370,6 +371,7 @@ async fn it_gives_a_clone_its_own_line() -> Result<()> {
     for (side, minted) in [(&snapshot, &left), (&fork, &right)] {
         let record = side
             .history(&operator)
+            .await
             .revision_record(&minted.version())
             .await?
             .expect("record");
@@ -414,6 +416,7 @@ async fn it_keeps_the_revision_for_a_noop() -> Result<()> {
     assert_eq!(snapshot.revision(), empty);
     let record = snapshot
         .history(&operator)
+        .await
         .revision_record(&empty.version())
         .await?
         .expect("record");
@@ -523,6 +526,7 @@ async fn it_signs_the_minted_revision() -> Result<()> {
 
     let record = snapshot
         .history(&operator)
+        .await
         .revision_record(&revision.version())
         .await?
         .expect("record");

@@ -47,6 +47,7 @@
 //! [`SnapshotExport::download`] resolves both by hydrating read-misses from an
 //! upstream as the walk proceeds, which is what makes the result complete.
 
+use core::ops::RangeInclusive;
 use std::collections::HashSet;
 
 use async_stream::try_stream;
@@ -71,6 +72,7 @@ use dialog_search_tree::{
     ArchivedNodeBody, ContentAddressedStorage as TreeStorage, NoveltyOp, Traversable as _, Visit,
     into_owned,
 };
+use futures_util::future::Either;
 use futures_util::{Stream, StreamExt as _, stream};
 use parking_lot::RwLock;
 
@@ -384,15 +386,17 @@ impl Snapshot {
 
     /// The recorded claim lineage at this snapshot's revision. See
     /// [`Branch::history`].
-    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    /// A snapshot tracks no upstream, so this reads purely locally.
+    pub async fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
         Env: Provider<Get>
             + Provider<Put>
+            + Provider<memory::Resolve>
             + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {
-        SourceRef::from(self).history(env)
+        SourceRef::from(self).history(env).await
     }
 
     /// The snapshot's committed history, newest first — at most `limit`
@@ -405,6 +409,7 @@ impl Snapshot {
     where
         Env: Provider<Get>
             + Provider<Put>
+            + Provider<memory::Resolve>
             + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
@@ -530,6 +535,9 @@ pub enum Reach {
 pub struct SnapshotExport {
     snapshot: Snapshot,
     reach: Reach,
+    /// The key regions to walk, or `None` for the whole tree. See
+    /// [`SnapshotExport::within`].
+    scope: Option<Vec<RangeInclusive<Vec<u8>>>>,
 }
 
 impl Snapshot {
@@ -538,6 +546,7 @@ impl Snapshot {
         SnapshotExport {
             snapshot: self,
             reach: Reach::Complete,
+            scope: None,
         }
     }
 }
@@ -565,9 +574,37 @@ impl SnapshotExport {
         self
     }
 
+    /// Walk only the key regions in `scope`, leaving the rest of the tree
+    /// by reference.
+    ///
+    /// The artifact tree partitions by a leading tag byte, so this is how
+    /// a caller materializes some regions and not others — most usefully
+    /// [`data_scope`](dialog_artifacts::merge::data_scope), the
+    /// operational indexes and the blob index, which is everything reads
+    /// and authorization touch. The history and coverage regions it
+    /// leaves behind grow with every edit ever made, while the data
+    /// regions track only live facts.
+    ///
+    /// What is skipped stays *fetchable*, not lost: history reads hydrate
+    /// from the branch's tracked remote on a miss, so a merge that turns
+    /// out to need an old record pays a round trip rather than failing.
+    ///
+    /// Pruning is conservative — a node whose span or buffered ops might
+    /// touch the scope is kept — so an export may carry blocks just
+    /// outside it. It never omits one inside.
+    pub fn within(mut self, scope: impl Into<Vec<RangeInclusive<Vec<u8>>>>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
+
     /// How far this export will reach.
     pub fn reach(&self) -> &Reach {
         &self.reach
+    }
+
+    /// The key regions this export walks, or `None` for the whole tree.
+    pub fn scope(&self) -> Option<&[RangeInclusive<Vec<u8>>]> {
+        self.scope.as_deref()
     }
 
     /// Stream the snapshot's content.
@@ -599,6 +636,7 @@ impl SnapshotExport {
         let hydrate = upstream.clone();
         let sparse = matches!(self.reach, Reach::Sparse);
         let root = NodeHash::from(*self.snapshot.revision().tree.hash());
+        let scope = self.scope.clone();
 
         try_stream! {
             // With an upstream a read-miss falls through to the remote and
@@ -615,7 +653,18 @@ impl SnapshotExport {
             // content; ship each blob once.
             let mut blob_seen: HashSet<NodeHash> = HashSet::new();
 
-            let visits = tree.traverse_available(&storage);
+            // A scoped walk descends only subtrees whose key span (or
+            // buffered ops) can meet the scope, so the regions left out
+            // are never fetched -- that is the whole point on a
+            // downloading reach.
+            let visits = match &scope {
+                Some(scope) => Either::Left(
+                    tree.traverse_available_within(&storage, scope),
+                ),
+                None => Either::Right(
+                    tree.traverse_available(&storage),
+                ),
+            };
             futures_util::pin_mut!(visits);
             while let Some(visit) = visits.next().await {
                 let node = match visit? {
