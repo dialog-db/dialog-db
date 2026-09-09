@@ -3792,3 +3792,118 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
     );
     Ok(())
 }
+
+/// `download().operational()` materializes what reads need and skips the
+/// history region.
+///
+/// Device A commits enough revisions that history is a real share of the
+/// tree, then pushes. A second device pulls by reference and downloads
+/// only the operational regions. Three things must hold afterwards, and
+/// they are what the whole feature rests on:
+///
+/// 1. Facts read from the local store — the download genuinely put the
+///    data regions on disk, rather than leaving reads to hydrate lazily.
+/// 2. The scoped download reads strictly fewer blocks than a full one of
+///    the same revision.
+/// 3. The revision DAG survives: `log` walks ancestry, because revision
+///    records are ordinary facts in the data indexes rather than
+///    history-region entries.
+#[dialog_common::test]
+async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let (alice_repo, alice) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "operational-a").await?;
+
+    // Several commits, so the history region holds many records rather
+    // than one: history grows per edit, the data regions per live fact.
+    for round in 0..6 {
+        let facts: Vec<_> = (0..120)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    // Wide enough that the fixture fills real leaves: a
+                    // tree of a few 64KiB segments has no structure to
+                    // prune, and the whole point is the pruning.
+                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        alice.commit(stream::iter(facts)).perform(&operator).await?;
+    }
+    assert!(alice.push().perform(&operator).await?.is_some());
+
+    // A device that adopts Alice's head by reference, then materializes
+    // only the operational regions.
+    let open_replica = async |name: &str| -> Result<Branch> {
+        let repo = profile
+            .repository(unique_name(name))
+            .open()
+            .perform(&operator)
+            .await?;
+        let origin = repo
+            .remote("origin")
+            .create(s3_site_address(&s3))
+            .subject(alice_repo.did())
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let remote_branch = origin.branch("main").open().perform(&operator).await?;
+        branch
+            .set_upstream(remote_branch)
+            .perform(&operator)
+            .await?;
+        Ok(branch)
+    };
+
+    let scoped = open_replica("operational-b").await?;
+    let scoped_env = Counting::new(operator.clone());
+    assert!(scoped.pull().perform(&scoped_env).await?.is_some());
+    scoped_env.reset();
+    scoped.download().operational().perform(&scoped_env).await?;
+    let scoped_reads = scoped_env.block_reads();
+
+    // The same revision, materialized in full, for the comparison.
+    let full = open_replica("operational-c").await?;
+    let full_env = Counting::new(operator.clone());
+    assert!(full.pull().perform(&full_env).await?.is_some());
+    full_env.reset();
+    full.download().perform(&full_env).await?;
+    let full_reads = full_env.block_reads();
+
+    assert!(
+        scoped_reads < full_reads,
+        "an operational download must read fewer blocks than a full one \
+         (scoped {scoped_reads}, full {full_reads})"
+    );
+
+    // Every live fact is readable, and the revision DAG walks: revision
+    // records are data-region facts, so a scoped download keeps them.
+    let facts: Vec<_> = scoped
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        facts.len(),
+        720,
+        "every live fact survives an operational download"
+    );
+
+    let log = scoped.log(&operator, 100).await?;
+    assert!(
+        log.len() >= 6,
+        "the revision DAG survives an operational download (got {} entries)",
+        log.len()
+    );
+
+    Ok(())
+}

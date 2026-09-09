@@ -228,39 +228,56 @@ where
                                 // buffered op may sit outside the span its
                                 // own node advertises (see
                                 // `ArchivedIndex::upper_bound`). Span alone
-                                // therefore cannot decide relevance, and a
-                                // node whose buffer holds an in-scope key is
-                                // kept regardless of its span -- exactly the
-                                // rule `TreeDifference::retain_scope` applies.
+                                // therefore cannot decide relevance.
                                 //
-                                // The buffer that matters is the CHILD's, but
-                                // it is not in hand before the child is read.
-                                // This node's own buffer is, and the ops it
-                                // holds are routed down into the children
-                                // whose spans cover them on the way to their
-                                // leaves, so an in-scope key buffered here
-                                // means some child below is in scope. Keeping
-                                // the whole level in that case over-retains
-                                // (safe) rather than dropping a node the
-                                // scope needs.
-                                let buffered_in_scope = index
-                                    .any_novelty_key::<Key>(|key| {
-                                        scope
-                                            .iter()
-                                            .any(|range| {
-                                                key >= range.start().as_slice()
-                                                    && key <= range.end().as_slice()
-                                            })
+                                // So the buffer is consulted too -- but per
+                                // CHILD, not per node. A buffered op belongs
+                                // to the child whose span covers it (that is
+                                // where the descent would route it), so an
+                                // in-scope buffered key rescues that one
+                                // child. Rescuing every child instead would
+                                // retain the whole level, which on a
+                                // tag-partitioned tree means retaining every
+                                // region -- the root's buffer always holds
+                                // some in-scope op.
+                                //
+                                // A buffer that fails to decode cannot prove
+                                // itself out of scope, so its node's children
+                                // are all kept: over-retaining is safe,
+                                // over-dropping loses content.
+                                let in_scope = |key: &[u8]| {
+                                    scope.iter().any(|range| {
+                                        key >= range.start().as_slice()
+                                            && key <= range.end().as_slice()
                                     })
-                                    // A buffer that fails to decode cannot
-                                    // prove itself out of scope; keep the
-                                    // subtree and let the read path surface
-                                    // the error.
-                                    .unwrap_or(true);
+                                };
+                                let mut rescued = vec![false; links.len()];
+                                let mut undecodable = false;
+                                for (at, link) in links.iter().enumerate() {
+                                    let upper =
+                                        links.get(at + 1).map(|next| next.separator.as_slice());
+                                    let lower = link.separator.as_slice();
+                                    match index.any_novelty_key::<Key>(|key| {
+                                        // The child's own span, half-open
+                                        // above exactly as `span_intersects`
+                                        // treats it.
+                                        key >= lower
+                                            && upper.is_none_or(|upper| key < upper)
+                                            && in_scope(key)
+                                    }) {
+                                        Ok(hit) => rescued[at] = hit,
+                                        Err(_) => {
+                                            undecodable = true;
+                                            break;
+                                        }
+                                    }
+                                }
 
                                 for (at, link) in links.iter().enumerate() {
-                                    let upper = links.get(at + 1).map(|next| next.separator.as_slice());
-                                    if buffered_in_scope
+                                    let upper =
+                                        links.get(at + 1).map(|next| next.separator.as_slice());
+                                    if undecodable
+                                        || rescued[at]
                                         || span_intersects(&link.separator, upper, scope)
                                     {
                                         next.push(link.node.clone());
