@@ -57,10 +57,12 @@
 //! A stack is read at its top's head. Every line beneath the top is
 //! read at the revision the wiring captured, not at its live head, so
 //! what a read sees is exactly what the top's hash names. Movement
-//! that bypasses the stack, a pull on the bottom or a direct commit
-//! to one line, is invisible until the stack [`advance`](Stack::advance)s,
-//! which every stack commit and every subscription poll does: an
-//! external change lands as the stack's own instant.
+//! enters a stack the way it enters a branch: on [`pull`](Stack::pull),
+//! which pulls each line from its upstream and then captures every
+//! live head, and leaves it on [`push`](Stack::push). A stack commit
+//! captures too, since a write builds on the live heads. Reads and
+//! subscription polls never write: a line that moved outside the
+//! stack stays invisible until the next pull.
 //!
 //! # Identity
 //!
@@ -90,6 +92,7 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
@@ -104,8 +107,8 @@ use crate::repository::branch::transaction::induce::induce;
 use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
 use crate::{
-    Branch, CommitError, Delta, Ephemeral, EphemeralRevision, RemoteSite, Revision, Snapshot,
-    Subscription,
+    Branch, CommitError, Delta, Ephemeral, EphemeralRevision, PullError, PushError, RemoteSite,
+    Revision, Snapshot, Subscription,
 };
 
 /// Who can read a line: the set of principals its facts reach.
@@ -375,6 +378,12 @@ pub enum StackError {
     /// Writing a line's link facts failed.
     #[error("Failed to write link facts: {0}")]
     Commit(#[from] CommitError),
+    /// Pulling a line from its upstream failed.
+    #[error("Failed to pull a line: {0}")]
+    Pull(#[from] PullError),
+    /// Pushing a line to its upstream failed.
+    #[error("Failed to push a line: {0}")]
+    Push(#[from] PushError),
 }
 
 /// A line as the builder holds it: with the links declared so far.
@@ -514,7 +523,7 @@ impl Build {
         };
         // Every encloser records its wiring now, at the heads it sees,
         // and the stack reads at those heads from here on.
-        stack.advance(env).await?;
+        stack.capture(BTreeMap::new(), env).await?;
         Ok(stack)
     }
 }
@@ -563,7 +572,7 @@ pub struct Stack {
     /// Layer name → the lines linked under it.
     bound: HashMap<Entity, Vec<usize>>,
     /// What the stack reads each line at: the heads the last stack
-    /// commit or advance captured, bottom first. Shared by clones.
+    /// commit or pull captured, bottom first. Shared by clones.
     captured: Arc<RwLock<Vec<Head>>>,
 }
 
@@ -601,21 +610,31 @@ impl Stack {
 
     /// Every line's live head now, bottom first. What the stack reads
     /// at is [`captured`](Self::captured); the two differ exactly when
-    /// a line moved outside the stack since the last advance.
+    /// a line moved outside the stack since the last capture.
     pub fn heads(&self) -> Vec<Head> {
         self.lines.iter().map(Line::head).collect()
     }
 
     /// The heads the stack reads each line at, bottom first: what the
-    /// last stack commit or [`advance`](Self::advance) captured.
+    /// last stack commit or [`pull`](Self::pull) captured.
     pub fn captured(&self) -> Vec<Head> {
         self.captured.read().clone()
     }
 
-    /// Capture every line's live head: refresh the wiring on every
-    /// line above a line that moved, bottom to top, and read at the
-    /// result from now on. A stack commit with nothing to write.
-    pub async fn advance<Env>(&self, env: &Env) -> Result<Vec<Head>, CommitError>
+    /// Whether some line moved outside the stack since the last
+    /// capture: its live head differs from what the stack reads at.
+    /// [`pull`](Self::pull) catches up.
+    pub fn behind(&self) -> bool {
+        self.heads() != self.captured()
+    }
+
+    /// Bring movement in: pull every branch line that tracks an
+    /// upstream, bottom to top, then capture every line's live head,
+    /// refreshing the wiring on every line above a line that moved.
+    /// The stack reads at the result from now on. Lines with no
+    /// upstream are only captured, so on a stack of local lines this
+    /// is exactly "notice what moved outside the stack".
+    pub async fn pull<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -629,7 +648,44 @@ impl Stack {
             + ConditionalSync
             + 'static,
     {
-        self.transaction().commit().perform(env).await
+        for line in &self.lines {
+            if let Line::Branch(branch) = line
+                && branch.upstream().is_some()
+            {
+                Box::pin(branch.pull().perform(env)).await?;
+            }
+        }
+        Ok(self.capture(BTreeMap::new(), env).await?)
+    }
+
+    /// Send movement out: push every branch line that tracks an
+    /// upstream, bottom to top, so a pushed line's wiring never names
+    /// a head its upstream lacks. A stack commit never pushes, like a
+    /// branch commit; ephemeral lines never leave the process.
+    pub async fn push<Env>(&self, env: &Env) -> Result<(), StackError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<BlobRead>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Put>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, Publish>>
+            + Provider<Fork<RemoteSite, BlobImport>>
+            + Provider<Fork<RemoteSite, BlobRead>>
+            + ConditionalSync
+            + 'static,
+    {
+        for line in &self.lines {
+            if let Line::Branch(branch) = line
+                && branch.upstream().is_some()
+            {
+                Box::pin(branch.push().perform(env)).await?;
+            }
+        }
+        Ok(())
     }
 
     /// The bottom line as a branch: where placements live and where
@@ -846,7 +902,7 @@ impl StackCommit<'_> {
         };
         let source = SourceRef::from(primary);
         // A write builds on the live heads, so its induction reads
-        // them: the commit advances the stack to now before it
+        // them: the commit captures the stack as it is now before it
         // writes, then captures what it wrote.
         let composite = stack.composite_at(&stack.heads());
 
@@ -958,9 +1014,10 @@ impl StackQuery {
         }
     }
 
-    /// Register a standing query over the stack. Each
-    /// [`poll`](StackSubscription::poll) first advances the stack, so
-    /// movement outside the stack lands as a delta.
+    /// Register a standing query over the stack. A poll reads at the
+    /// stack's captured heads and never writes: movement outside the
+    /// stack lands as a delta on the first poll after a
+    /// [`pull`](Stack::pull).
     pub fn subscribe<Q: Application>(&self, query: Q) -> StackSubscription<Q> {
         StackSubscription {
             stack: self.stack.clone(),
@@ -1023,9 +1080,10 @@ where
     Q: Application + Clone + ConditionalSync,
     Q::Conclusion: dialog_query::Conclusion + PartialEq + Clone + ConditionalSync,
 {
-    /// Advance the stack, then poll against what it now reads at. A
-    /// line that moved outside the stack since the last poll is
-    /// captured first, so its change arrives as this poll's delta.
+    /// Poll against what the stack reads at now. A read: nothing is
+    /// written, so a line that moved outside the stack is not seen
+    /// until [`Stack::pull`] captures it, and then this poll reports
+    /// the change as its delta.
     pub async fn poll<'a, Env>(
         &'a mut self,
         env: &'a Env,
@@ -1033,22 +1091,21 @@ where
     where
         Env: Provider<Get>
             + Provider<Put>
-            + Provider<Import>
             + Provider<Resolve>
-            + Provider<Publish>
             + Provider<Identify>
-            + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        self.stack
-            .advance(env)
-            .await
-            .map_err(|error| EvaluationError::Store(format!("stack advance: {error}")))?;
         self.inner.retarget(self.stack.composite());
         self.inner.poll(env).await
+    }
+
+    /// Whether the stack is behind its lines' live heads; see
+    /// [`Stack::behind`].
+    pub fn behind(&self) -> bool {
+        self.stack.behind()
     }
 
     /// Full evaluations performed so far.
@@ -1498,9 +1555,9 @@ mod tests {
 
     /// A stack reads every line beneath its top at the captured head:
     /// a commit that bypasses the stack is invisible until the stack
-    /// advances, and then the top's wiring names the new head.
+    /// pulls, and then the top's wiring names the new head.
     #[dialog_common::test]
-    async fn it_reads_at_captured_heads_until_advanced() -> Result<()> {
+    async fn it_reads_at_captured_heads_until_pulled() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
@@ -1533,11 +1590,11 @@ mod tests {
                 .is_empty(),
             "the stack still reads the captured head"
         );
-        assert_ne!(stack.heads(), stack.captured(), "and knows it is behind");
+        assert!(stack.behind(), "and knows it is behind");
 
-        let heads = stack.advance(&operator).await?;
+        let heads = stack.pull(&operator).await?;
         assert_eq!(heads, stack.captured());
-        assert_eq!(stack.heads(), stack.captured(), "advance catches up");
+        assert!(!stack.behind(), "pull catches up");
         assert_eq!(
             values::<String>(&stack, &operator, "doc/title", &doc).await?,
             vec![Value::String("Notes".into())]
@@ -1554,10 +1611,11 @@ mod tests {
         Ok(())
     }
 
-    /// A subscription over a stack advances on poll, so a commit that
-    /// bypassed the stack lands as that poll's delta.
+    /// A subscription poll never writes: a commit that bypassed the
+    /// stack is not seen until the stack pulls, and then the next poll
+    /// reports it as a delta.
     #[dialog_common::test]
-    async fn it_lands_external_movement_on_poll() -> Result<()> {
+    async fn it_lands_external_movement_on_pull() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
@@ -1592,12 +1650,19 @@ mod tests {
             .await?;
         shared.refresh(&operator).await?;
 
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "a poll is a read: the stack has not captured the commit"
+        );
+        assert!(subscription.behind());
+
+        stack.pull(&operator).await?;
         let delta = subscription
             .poll(&operator)
             .await?
-            .expect("the external commit lands on this poll");
+            .expect("the pulled commit lands on this poll");
         assert_eq!(delta.asserted.len(), 1);
-        assert_eq!(stack.heads(), stack.captured());
+        assert!(!subscription.behind());
         assert!(subscription.poll(&operator).await?.is_none());
         Ok(())
     }
