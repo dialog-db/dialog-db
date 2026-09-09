@@ -44,25 +44,28 @@
 //! carries the whole stack's wiring and every edge is queryable from
 //! it alone.
 //!
-//! A stack commit refreshes the wiring on every line above a line
-//! that moved, bottom to top, so after the commit the top line's head
+//! A stack commit refreshes the wiring on every line above a line it
+//! moved, bottom to top, so after the commit the top line's head
 //! transitively names the head of every line beneath it: one hash for
 //! the whole composite. A link whose target did not move is a no-op
 //! refresh and mints nothing. Linking is capturing: a line that should
 //! not record another's head does not link it, and sits beside it
 //! under a common encloser instead.
 //!
-//! # Reads are pinned
+//! # Captured heads
 //!
-//! A stack is read at its top's head. Every line beneath the top is
-//! read at the revision the wiring captured, not at its live head, so
-//! what a read sees is exactly what the top's hash names. Movement
-//! enters a stack the way it enters a branch: on [`pull`](Stack::pull),
-//! which pulls each line from its upstream and then captures every
-//! live head, and leaves it on [`push`](Stack::push). A stack commit
-//! captures too, since a write builds on the live heads. Reads and
-//! subscription polls never write: a line that moved outside the
-//! stack stays invisible until the next pull.
+//! A stack holds a captured head per line, the way a branch handle
+//! holds its head, and everything it does builds on them. Reads see
+//! every line beneath the top at its captured revision, so what a
+//! read sees is exactly what the top's hash names. A commit induces
+//! against the captured heads and commits each line on top of its
+//! captured revision; a line that moved outside the stack refuses the
+//! write ([`CommitError::Behind`]) rather than building on a head the
+//! stack never saw. Movement enters a stack only on
+//! [`pull`](Stack::pull), which reconciles each line with its upstream
+//! bottom to top and then captures the live heads, and leaves it on
+//! [`push`](Stack::push), which fails when an upstream moved and needs
+//! a pull first. Reads and subscription polls never write.
 //!
 //! # Identity
 //!
@@ -526,7 +529,8 @@ impl Build {
         };
         // Every encloser records its wiring now, at the heads it sees,
         // and the stack reads at those heads from here on.
-        stack.capture(BTreeMap::new(), env).await?;
+        let live = stack.heads();
+        stack.capture(BTreeMap::new(), live, env).await?;
         Ok(stack)
     }
 }
@@ -636,8 +640,14 @@ impl Stack {
     /// invisible to this one), pull every line that tracks an
     /// upstream, bottom to top, then capture every live head,
     /// refreshing the wiring on every line above a line that moved.
-    /// The stack reads at the result from now on. On a stack of local
-    /// lines this is exactly "notice what moved outside the stack".
+    /// The stack reads at and builds on the result from now on. On a
+    /// stack of local lines this is exactly "notice what moved
+    /// outside the stack".
+    ///
+    /// A pull that fails part way leaves the captured heads where
+    /// they were: lines beneath the failure may have reconciled with
+    /// their upstreams, but the stack does not read at them until a
+    /// pull completes.
     pub async fn pull<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Get>
@@ -661,7 +671,8 @@ impl Stack {
                 Box::pin(branch.pull().perform(env)).await?;
             }
         }
-        Ok(self.capture(BTreeMap::new(), env).await?)
+        let live = self.heads();
+        Ok(self.capture(BTreeMap::new(), live, env).await?)
     }
 
     /// Send movement out: push every branch line that tracks an
@@ -759,16 +770,16 @@ impl Stack {
         }
     }
 
-    /// The wiring line `index` holds, at the heads its targets have
-    /// now, folded into `changes`: its own link facts, plus a verbatim
-    /// copy of every link fact each linked line holds. Bottom to top
-    /// commits refresh the linked lines first, so the copy is what
-    /// they hold after the same stack commit.
-    fn link_facts(&self, index: usize, changes: &mut Changes) {
+    /// The wiring line `index` holds at `heads`, folded into
+    /// `changes`: its own link facts, plus a verbatim copy of every
+    /// link fact each linked line holds. Bottom to top commits refresh
+    /// the linked lines first, so the copy is what they hold after
+    /// the same stack commit.
+    fn link_facts(&self, index: usize, heads: &[Head], changes: &mut Changes) {
         let from = self.lines[index].address_entity();
         for link in &self.links[index] {
             let target = &self.lines[link.to];
-            self.link_facts(link.to, changes);
+            self.link_facts(link.to, heads, changes);
             changes.associate_unique(
                 link_attr("from"),
                 link.entity.clone(),
@@ -787,19 +798,21 @@ impl Stack {
             changes.associate_unique(
                 link_attr("revision"),
                 link.entity.clone(),
-                Value::Bytes(target.head().bytes()),
+                Value::Bytes(heads[link.to].bytes()),
             );
             target.address_facts(&link.entity, changes);
         }
     }
 
-    /// Commit `batch` to line `index` with its links refreshed to the
-    /// heads its targets have now. A line with nothing to write and
-    /// no links is left alone; one whose link facts are already
-    /// current commits as a no-op and keeps its head.
+    /// Commit `batch` to line `index` on top of `heads[index]`, with
+    /// its wiring at `heads`. A line with nothing to write and no links
+    /// is left alone; one whose wiring already names `heads` commits
+    /// as a no-op and keeps its head. A branch that moved past
+    /// `heads[index]` refuses ([`CommitError::Behind`]).
     async fn refresh_links<Env>(
         &self,
         index: usize,
+        heads: &[Head],
         mut batch: Changes,
         env: &Env,
     ) -> Result<Option<Head>, CommitError>
@@ -819,11 +832,15 @@ impl Stack {
         if batch.is_empty() && self.links[index].is_empty() {
             return Ok(None);
         }
-        self.link_facts(index, &mut batch);
+        self.link_facts(index, heads, &mut batch);
         match &self.lines[index] {
             Line::Branch(branch) => {
-                let revision =
-                    commit_settled(SourceRef::from(branch), batch, false, false, env).await?;
+                let base = match &heads[index] {
+                    Head::Tree(revision) => revision.as_ref(),
+                    Head::Ephemeral(_) => None,
+                };
+                let source = SourceRef::Pinned(branch, base);
+                let revision = commit_settled(source, batch, false, false, env).await?;
                 Ok(Some(Head::Tree(Some(revision))))
             }
             Line::Ephemeral(ephemeral) => {
@@ -899,18 +916,24 @@ impl StackCommit<'_> {
             + 'static,
     {
         let stack = self.stack;
+        let captured = stack.captured();
         let mut batches: BTreeMap<usize, Changes> = BTreeMap::new();
         if self.changes.is_empty() && self.transients.is_empty() {
-            return stack.capture(batches, env).await;
+            return stack.capture(batches, captured, env).await;
         }
         let Some(primary) = stack.primary() else {
             return Err(CommitError::Detached);
         };
-        let source = SourceRef::from(primary);
-        // A write builds on the live heads, so its induction reads
-        // them: the commit captures the stack as it is now before it
-        // writes, then captures what it wrote.
-        let composite = stack.composite_at(&stack.heads());
+        // A write builds on the captured heads, like a branch commit
+        // builds on its handle's head: induction reads them, and each
+        // line commits on top of its captured revision. A line that
+        // moved outside the stack refuses (`CommitError::Behind`)
+        // rather than building on a head the stack never saw.
+        let composite = stack.composite_at(&captured);
+        let source = match composite.sources.first() {
+            Some(source) => source.as_ref(),
+            None => SourceRef::from(primary),
+        };
 
         let mut changes = self.changes;
         induce(source, &composite, &mut changes, self.transients, env).await?;
@@ -952,21 +975,24 @@ impl StackCommit<'_> {
             }
         }
 
-        stack.capture(batches, env).await
+        stack.capture(batches, captured, env).await
     }
 }
 
 impl Stack {
-    /// Commit each line's batch bottom to top, every line after
-    /// everything beneath it, writing its own share and its wiring at
-    /// the heads it now sees. A line whose wiring already names the
-    /// current heads and that has nothing of its own to write is a
-    /// no-op commit and keeps its head, so the refresh reaches
-    /// exactly the lines above a line that moved. The resulting heads
-    /// are what the stack reads at from now on.
+    /// Commit each line's batch bottom to top on top of `heads`, every
+    /// line after everything beneath it, writing its own share and its
+    /// wiring at the heads as they stand once the lines beneath it
+    /// committed. A line whose wiring already names those heads and
+    /// that has nothing of its own to write is a no-op commit and
+    /// keeps its head, so the refresh reaches exactly the lines above
+    /// a line this pass moved. The resulting heads are what the stack
+    /// reads at and builds on from now on; a pass that fails part way
+    /// leaves them untouched.
     async fn capture<Env>(
         &self,
         mut batches: BTreeMap<usize, Changes>,
+        mut heads: Vec<Head>,
         env: &Env,
     ) -> Result<Vec<Head>, CommitError>
     where
@@ -982,14 +1008,11 @@ impl Stack {
             + ConditionalSync
             + 'static,
     {
-        let mut heads = Vec::with_capacity(self.lines.len());
         for index in 0..self.lines.len() {
             let batch = batches.remove(&index).unwrap_or_default();
-            let head = self
-                .refresh_links(index, batch, env)
-                .await?
-                .unwrap_or_else(|| self.lines[index].head());
-            heads.push(head);
+            if let Some(head) = self.refresh_links(index, &heads, batch, env).await? {
+                heads[index] = head;
+            }
         }
         *self.captured.write() = heads.clone();
         Ok(heads)
@@ -1723,8 +1746,8 @@ mod tests {
         Ok(())
     }
 
-    /// A stack transaction builds on the head its handle knows. When
-    /// the branch moved through another handle, the bottom's publish
+    /// A stack transaction builds on the captured heads. When the
+    /// branch moved through another handle, the bottom's publish
     /// fails the version check before anything above it commits, and
     /// the same transaction succeeds after a pull.
     #[dialog_common::test]
@@ -1806,6 +1829,112 @@ mod tests {
             "and the retried write lands on top of it"
         );
         assert_ne!(state.revision(), state_before);
+        Ok(())
+    }
+
+    /// A commit is not a pull. In the chain `shared < local < state`,
+    /// a commit to shared outside the stack leaves the stack behind; a
+    /// stack write that touches only state still succeeds, builds on
+    /// the captured heads, and moves nothing else: local is not
+    /// touched and the stack stays behind until it pulls.
+    #[dialog_common::test]
+    async fn it_commits_on_captured_heads_without_capturing() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let local = repo.branch("main.local").open().perform(&operator).await?;
+        let state = Ephemeral::new();
+
+        shared
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, name("state")))
+            .commit()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let stack = Stack::builder()
+            .line(shared.clone())
+            .line(local.clone())
+            .link(&shared, name("shared"))
+            .line(state.clone())
+            .link(&local, name("state"))
+            .build()
+            .perform(&operator)
+            .await?;
+        // `memory:state` is bound where its link points: local.
+        local.refresh(&operator).await?;
+        let captured = stack.captured();
+        let local_before = local.revision();
+
+        let doc: Entity = "doc:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(stack.behind());
+
+        // A write routed to local only succeeds on the captured heads.
+        stack
+            .transaction()
+            .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(stack.behind(), "a commit captures nothing it did not move");
+        assert_eq!(
+            stack.captured()[0],
+            captured[0],
+            "shared is still read at the captured head"
+        );
+        assert!(
+            values::<String>(&stack, &operator, "doc/title", &doc)
+                .await?
+                .is_empty(),
+            "so the outside commit stays invisible"
+        );
+        local.refresh(&operator).await?;
+        assert_ne!(local.revision(), local_before, "local took the write");
+
+        // A write to shared itself refuses: shared moved past the
+        // captured revision.
+        let result = stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/author")
+                    .of(doc.clone())
+                    .is("me".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(result, Err(CommitError::Behind { .. })),
+            "expected Behind, got {result:?}"
+        );
+
+        stack.pull(&operator).await?;
+        assert!(!stack.behind());
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())]
+        );
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/author")
+                    .of(doc.clone())
+                    .is("me".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
         Ok(())
     }
 
