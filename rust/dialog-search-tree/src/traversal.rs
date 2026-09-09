@@ -230,16 +230,18 @@ where
                                 // `ArchivedIndex::upper_bound`). Span alone
                                 // therefore cannot decide relevance.
                                 //
-                                // So the buffer is consulted too -- but per
-                                // CHILD, not per node. A buffered op belongs
-                                // to the child whose span covers it (that is
-                                // where the descent would route it), so an
-                                // in-scope buffered key rescues that one
-                                // child. Rescuing every child instead would
-                                // retain the whole level, which on a
-                                // tag-partitioned tree means retaining every
-                                // region -- the root's buffer always holds
-                                // some in-scope op.
+                                // The buffers settle it exactly, with no
+                                // derivation: an op routes to exactly one
+                                // link and is stored in THAT link's buffer
+                                // (`link_novelty`), so asking each link's own
+                                // buffer says precisely which children carry
+                                // in-scope novelty. Re-deriving the routing
+                                // from separators would not agree with
+                                // `route`, which sends a key below the first
+                                // separator to child 0 rather than to no
+                                // child, and a walk that credited such a key
+                                // to nobody would drop content the scope
+                                // needs.
                                 //
                                 // A buffer that fails to decode cannot prove
                                 // itself out of scope, so its node's children
@@ -251,33 +253,16 @@ where
                                             && key <= range.end().as_slice()
                                     })
                                 };
-                                let mut rescued = vec![false; links.len()];
-                                let mut undecodable = false;
                                 for (at, link) in links.iter().enumerate() {
                                     let upper =
                                         links.get(at + 1).map(|next| next.separator.as_slice());
-                                    let lower = link.separator.as_slice();
-                                    match index.any_novelty_key::<Key>(|key| {
-                                        // The child's own span, half-open
-                                        // above exactly as `span_intersects`
-                                        // treats it.
-                                        key >= lower
-                                            && upper.is_none_or(|upper| key < upper)
-                                            && in_scope(key)
-                                    }) {
-                                        Ok(hit) => rescued[at] = hit,
-                                        Err(_) => {
-                                            undecodable = true;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                for (at, link) in links.iter().enumerate() {
-                                    let upper =
-                                        links.get(at + 1).map(|next| next.separator.as_slice());
-                                    if undecodable
-                                        || rescued[at]
+                                    let buffered = match index.buffer_for(at) {
+                                        Some(buffer) => buffer
+                                            .any_key::<Key>(&in_scope)
+                                            .unwrap_or(true),
+                                        None => false,
+                                    };
+                                    if buffered
                                         || span_intersects(&link.separator, upper, scope)
                                     {
                                         next.push(link.node.clone());
@@ -438,6 +423,101 @@ mod tests {
         };
 
         assert_eq!(hashes(true).await?, hashes(false).await?);
+        Ok(())
+    }
+
+    /// An in-scope op that exists ONLY as buffered novelty must keep the
+    /// child it routes to.
+    ///
+    /// This pins the direction the scoped walk must never take: dropping a
+    /// child whose in-scope content the walk cannot see from separators
+    /// alone. The buffers say exactly which child carries what -- an op
+    /// routes to one link and lives in that link's buffer -- so the walk
+    /// asks each link's own buffer rather than re-deriving the routing from
+    /// spans, which does not agree with `route` at the edges.
+    #[dialog_common::test]
+    async fn it_keeps_a_child_whose_only_in_scope_content_is_buffered() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // Stored content is tag 2 and tag 3 only: every stored key, and
+        // every separator, sits outside the tag-1 scope.
+        let tree = tagged_tree(&mut storage, &[2, 3], 1200).await?;
+
+        // Tag-1 keys exist ONLY as buffered novelty.
+        let mut hitchhiker = crate::HitchhikerTree::open(&tree);
+        for i in 0..4u32 {
+            let mut key = [0u8; 5];
+            key[0] = 1;
+            key[1..].copy_from_slice(&i.to_be_bytes());
+            hitchhiker = hitchhiker.insert(key, vec![0u8; 8], &storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let root = hitchhiker.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        let tree = PersistentTree::<[u8; 5], Vec<u8>>::from_hash(root);
+
+        // Fixture check: the ops must live as novelty, or this pins nothing.
+        let buffered = |tree: &PersistentTree<[u8; 5], Vec<u8>>| {
+            let storage = &storage;
+            let tree = tree.clone();
+            async move {
+                let visits = tree.traverse_available(storage);
+                futures_util::pin_mut!(visits);
+                let mut count = 0usize;
+                while let Some(visit) = visits.next().await {
+                    if let Visit::Present(node) = visit?
+                        && let crate::ArchivedNodeBody::Index(index) = node.body()
+                    {
+                        count += index
+                            .all_novelty::<[u8; 5]>()?
+                            .into_iter()
+                            .filter(|entry| entry.key[0] == 1)
+                            .count();
+                    }
+                }
+                anyhow::Ok(count)
+            }
+        };
+        assert_eq!(
+            buffered(&tree).await?,
+            4,
+            "fixture: the in-scope ops must live as novelty, not in a leaf"
+        );
+
+        let scope = [tag_span(1)];
+        let mut found = 0usize;
+        let visits = tree.traverse_available_within(&storage, &scope);
+        futures_util::pin_mut!(visits);
+        while let Some(visit) = visits.next().await {
+            if let Visit::Present(node) = visit? {
+                match node.body() {
+                    crate::ArchivedNodeBody::Segment(segment) => {
+                        segment.for_each_entry::<[u8; 5], _>(|key, _| {
+                            if key[0] == 1 {
+                                found += 1;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    crate::ArchivedNodeBody::Index(index) => {
+                        found += index
+                            .all_novelty::<[u8; 5]>()?
+                            .into_iter()
+                            .filter(|entry| entry.key[0] == 1)
+                            .count();
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            found, 4,
+            "a scoped walk must surface in-scope ops that live only as novelty"
+        );
         Ok(())
     }
 
