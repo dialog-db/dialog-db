@@ -108,7 +108,7 @@ use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
 use crate::{
     Branch, CommitError, Delta, Ephemeral, EphemeralRevision, PullError, PushError, RemoteSite,
-    Revision, Snapshot, Subscription,
+    ResolveError, Revision, Snapshot, Subscription,
 };
 
 /// Who can read a line: the set of principals its facts reach.
@@ -378,6 +378,9 @@ pub enum StackError {
     /// Writing a line's link facts failed.
     #[error("Failed to write link facts: {0}")]
     Commit(#[from] CommitError),
+    /// Re-resolving a line's head from storage failed.
+    #[error("Failed to resolve a line's head: {0}")]
+    Resolve(#[from] ResolveError),
     /// Pulling a line from its upstream failed.
     #[error("Failed to pull a line: {0}")]
     Pull(#[from] PullError),
@@ -628,12 +631,13 @@ impl Stack {
         self.heads() != self.captured()
     }
 
-    /// Bring movement in: pull every branch line that tracks an
-    /// upstream, bottom to top, then capture every line's live head,
+    /// Bring movement in: re-resolve every branch line's head from
+    /// storage (a branch moved through another handle is otherwise
+    /// invisible to this one), pull every line that tracks an
+    /// upstream, bottom to top, then capture every live head,
     /// refreshing the wiring on every line above a line that moved.
-    /// The stack reads at the result from now on. Lines with no
-    /// upstream are only captured, so on a stack of local lines this
-    /// is exactly "notice what moved outside the stack".
+    /// The stack reads at the result from now on. On a stack of local
+    /// lines this is exactly "notice what moved outside the stack".
     pub async fn pull<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Get>
@@ -649,9 +653,11 @@ impl Stack {
             + 'static,
     {
         for line in &self.lines {
-            if let Line::Branch(branch) = line
-                && branch.upstream().is_some()
-            {
+            let Line::Branch(branch) = line else {
+                continue;
+            };
+            branch.refresh(env).await?;
+            if branch.upstream().is_some() {
                 Box::pin(branch.pull().perform(env)).await?;
             }
         }
@@ -1664,6 +1670,142 @@ mod tests {
         assert_eq!(delta.asserted.len(), 1);
         assert!(!subscription.behind());
         assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// A branch moved through another handle is invisible to the
+    /// stack's own handle, so `behind` cannot see it; `pull`
+    /// re-resolves the head from storage and then captures.
+    #[dialog_common::test]
+    async fn it_notices_movement_through_another_handle_on_pull() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let other = repo.branch("main").open().perform(&operator).await?;
+
+        let stack = Stack::builder()
+            .line(shared.clone())
+            .line(Ephemeral::new())
+            .link(&shared, name("shared"))
+            .build()
+            .perform(&operator)
+            .await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(
+            !stack.behind(),
+            "the stack's handle has not seen the other handle's commit"
+        );
+        assert!(
+            values::<String>(&stack, &operator, "doc/title", &doc)
+                .await?
+                .is_empty()
+        );
+
+        stack.pull(&operator).await?;
+        assert!(!stack.behind());
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "pull re-resolved the head and captured it"
+        );
+        assert_eq!(shared.revision(), other.revision());
+        Ok(())
+    }
+
+    /// A stack transaction builds on the head its handle knows. When
+    /// the branch moved through another handle, the bottom's publish
+    /// fails the version check before anything above it commits, and
+    /// the same transaction succeeds after a pull.
+    #[dialog_common::test]
+    async fn it_refuses_a_stale_write_and_recovers_on_pull() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::new();
+
+        shared
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, name("state")))
+            .commit()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        other.refresh(&operator).await?;
+
+        let stack = Stack::builder()
+            .line(shared.clone())
+            .line(state.clone())
+            .link(&shared, name("state"))
+            .build()
+            .perform(&operator)
+            .await?;
+        let state_before = state.revision();
+
+        let doc: Entity = "doc:1".parse()?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let write = || {
+            stack
+                .transaction()
+                .assert(
+                    dialog_query::the!("doc/author")
+                        .of(doc.clone())
+                        .is("me".to_string()),
+                )
+                .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
+                .commit()
+        };
+        let result = write().perform(&operator).await;
+        assert!(
+            matches!(
+                result,
+                Err(CommitError::Publish(
+                    crate::PublishError::VersionMismatch { .. }
+                ))
+            ),
+            "expected a version mismatch, got {result:?}"
+        );
+        assert_eq!(
+            state.revision(),
+            state_before,
+            "the bottom failed first, so the line above it never wrote"
+        );
+
+        stack.pull(&operator).await?;
+        write().perform(&operator).await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "the other handle's commit is kept"
+        );
+        assert_eq!(
+            committed(&shared, &operator, "doc/author", &doc).await?,
+            vec![Value::String("me".into())],
+            "and the retried write lands on top of it"
+        );
+        assert_ne!(state.revision(), state_before);
         Ok(())
     }
 
