@@ -308,7 +308,8 @@ struct Link {
     to: usize,
     /// The layer name the link binds.
     name: Entity,
-    /// The link entity: `link:<hash(address(from) ‖ id(to))>`.
+    /// The link entity: `link:<blake3(dagcbor{from, to})>` over the
+    /// encloser's address entity and the enclosed line's identity.
     entity: Entity,
 }
 
@@ -492,11 +493,23 @@ impl Build {
     }
 }
 
-/// `link:<base58(blake3(from ‖ to))>`.
+/// What a link entity hashes: the encloser's address entity and the
+/// enclosed line's stack identity, in canonical dag-cbor like the
+/// descriptor.
+#[derive(Debug, Clone, Serialize)]
+struct LinkKey<'a> {
+    from: &'a str,
+    to: &'a str,
+}
+
+/// `link:<base58(blake3(dagcbor{from, to}))>`.
 fn link_entity(from: &Entity, to: &Entity) -> Entity {
-    let hash =
-        Blake3Hash::hash_iter([from.to_string().as_bytes(), to.to_string().as_bytes()].into_iter());
-    format!("link:{}", hash.as_bytes().to_base58())
+    let key = LinkKey {
+        from: from.as_str(),
+        to: to.as_str(),
+    };
+    let bytes = serde_ipld_dagcbor::to_vec(&key).expect("two strings encode");
+    format!("link:{}", Blake3Hash::hash(&bytes).as_bytes().to_base58())
         .parse()
         .expect("a base58 hash is an opaque URI path")
 }

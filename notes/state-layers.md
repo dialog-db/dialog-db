@@ -443,7 +443,9 @@ names, read as one composite and written by placement.
   same in every stack that holds it; renaming or re-linking changes
   only the lines above.
 - Links are facts held by the enclosing line: `dialog.link/{from, to,
-  name, revision}` on `link:<base58(blake3(from ‖ id(to)))>`, plus the
+  name, revision}` on `link:<base58(blake3(dagcbor{from, to}))>`
+  with `from` the encloser's address entity and `to` the enclosed
+  line's identity, plus the
   target's address (`dialog.link/repository` and `dialog.link/branch`,
   `dialog.link/tree`, or `dialog.link/ephemeral`). `revision` is the
   target's head as the encloser last saw it: written at build and
