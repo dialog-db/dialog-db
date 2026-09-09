@@ -44,8 +44,8 @@
 //! [`Branch::query`](crate::Branch::query).
 //!
 //! Deductive-rule resolution is built into the shared [`QueryEnv`] this
-//! routes through (a durable layer per branch + the overlay as a
-//! transient layer), so rules resolve identically whether a concept is
+//! routes through (a durable rule source per branch + the overlay as a
+//! transient rule source), so rules resolve identically whether a concept is
 //! queried mid-transaction or after commit — it's part of evaluating a
 //! query, not an optional composition.
 
@@ -67,7 +67,7 @@ use crate::repository::source::SourceRef;
 /// and [`SnapshotTransaction::query`](crate::SnapshotTransaction::query).
 ///
 /// Holds an immutable snapshot of the transaction's pending changes
-/// plus a reference to the line (branch or snapshot) it runs on. The
+/// plus a reference to the layer (branch or snapshot) it runs on. The
 /// transaction itself remains open and committable.
 ///
 /// See module docs for tombstone semantics.
@@ -147,7 +147,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
                 .with(changes)
                 .overlay(&operator);
 
-            // A transaction query is just a single-line `QueryEnv`.
+            // A transaction query is just a single-layer `QueryEnv`.
             // Constructing the *same* env type the branch-session path
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule

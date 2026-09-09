@@ -17,9 +17,9 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
 
-/// A transaction on a line of the repository.
+/// A transaction on a layer of the repository.
 ///
-/// `Line` is what the transaction runs on, and it decides what
+/// `Layer` is what the transaction runs on, and it decides what
 /// committing does:
 ///
 /// - `&`[`Branch`]: `.commit().perform(&env)` STAGES the batch. It mints
@@ -51,14 +51,14 @@ use dialog_effects::memory::{Publish, Resolve};
 /// and to inductive-rule bodies during commit-time induction, but they
 /// never enter the durable batch: they live for exactly one induction
 /// round and leave no trace in the committed tree.
-pub struct Transaction<Line> {
-    line: Line,
+pub struct Transaction<Layer> {
+    line: Layer,
     changes: Changes,
     transients: Changes,
 }
 
-impl<Line> Transaction<Line> {
-    pub(crate) fn on(line: Line) -> Self {
+impl<Layer> Transaction<Layer> {
+    pub(crate) fn on(line: Layer) -> Self {
         Transaction {
             line,
             changes: Changes::new(),
@@ -123,7 +123,7 @@ impl<Line> Transaction<Line> {
     /// into the commit while transient heads seed further rounds. Only
     /// then is the durable batch committed; transients are dropped,
     /// never written.
-    pub fn commit(self) -> TransactionCommit<Line> {
+    pub fn commit(self) -> TransactionCommit<Layer> {
         TransactionCommit {
             line: self.line,
             changes: self.changes,
@@ -135,7 +135,7 @@ impl<Line> Transaction<Line> {
 }
 
 /// The "as-if committed" view over `changes` + `transients` that
-/// [`Transaction::query`] serves on every line kind.
+/// [`Transaction::query`] serves on every layer kind.
 fn transaction_view(changes: &Changes, transients: &Changes) -> Changes {
     let mut view = changes.clone();
     transients.clone().assert(&mut view);
@@ -198,23 +198,23 @@ impl Snapshot {
 
 /// Command committing a [`Transaction`]: runs commit-time induction
 /// over the transaction's delta, then mints the settled durable batch
-/// on the line.
+/// on the layer.
 ///
-/// What `perform` returns follows the line — see [`Transaction`]. The
+/// What `perform` returns follows the layer — see [`Transaction`]. The
 /// builder mirrors [`Commit`](crate::Commit)'s surface
 /// ([`allow_empty`](Self::allow_empty) /
 /// [`canonicalize`](Self::canonicalize)); the difference is the
 /// induction step in front and that transients never reach the
 /// durable batch.
-pub struct TransactionCommit<Line> {
-    pub(super) line: Line,
+pub struct TransactionCommit<Layer> {
+    pub(super) line: Layer,
     pub(super) changes: Changes,
     pub(super) transients: Changes,
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
 }
 
-impl<Line> TransactionCommit<Line> {
+impl<Layer> TransactionCommit<Layer> {
     /// Mint a revision even when the settled change batch leaves the
     /// indexes untouched. See [`Commit::allow_empty`](crate::Commit::allow_empty).
     pub fn allow_empty(mut self) -> Self {
@@ -309,7 +309,7 @@ pub(crate) fn carry_footprint(
     revision: &Revision,
 ) {
     let footprint = match previous {
-        // A genesis commit sees an empty line: no committed rules
+        // A genesis commit sees an empty layer: no committed rules
         // exist, so the empty footprint is exact.
         None => Some(TriggerFootprint::default()),
         Some(previous) => cache.footprint(previous),

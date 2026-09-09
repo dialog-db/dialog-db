@@ -34,11 +34,11 @@ use crate::rules::{
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
 use crate::{Branch, Ephemeral, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snapshot};
 
-/// A composable query over one or more lines (branches, snapshots)
+/// A composable query over one or more layers (branches, snapshots)
 /// plus an in-memory overlay.
 ///
 /// `branch.query()` (or `snapshot.query()`) returns a `QueryLayer`
-/// rooted at that line. From there:
+/// rooted at that layer. From there:
 ///
 /// - [`with`](Self::with) folds any [`Statement`] (a concept
 ///   instance, an attribute expression, a [`Changes`] batch) into the
@@ -48,8 +48,8 @@ use crate::{Branch, Ephemeral, NetworkedIndex, RemoteSite, RepositoryArchiveExt 
 ///   `QueryLayer`.
 /// - [`select`](Self::select) stages a query; `.perform(&env)` runs it.
 ///
-/// All lines in the layer are peers — there is no distinguished
-/// "primary". A query reads the union of every line's facts plus the
+/// All layers in the layer are peers — there is no distinguished
+/// "primary". A query reads the union of every layer's facts plus the
 /// overlay.
 ///
 /// # Auto-injected schema metadata
@@ -60,7 +60,7 @@ use crate::{Branch, Ephemeral, NetworkedIndex, RemoteSite, RepositoryArchiveExt 
 /// (+ [`BranchRevision`](crate::schema::BranchRevision) when committed)
 /// per branch, a [`Replica`](crate::schema::Replica) per snapshot,
 /// plus a single [`Session`]. Callers don't pass the profile or
-/// operator DID, and nothing is written to any line's tree.
+/// operator DID, and nothing is written to any layer's tree.
 ///
 /// ```no_run
 /// # use dialog_repository::{Branch, Snapshot};
@@ -68,7 +68,7 @@ use crate::{Branch, Ephemeral, NetworkedIndex, RemoteSite, RepositoryArchiveExt 
 /// # fn example<Q: Application>(branch: &Branch, snapshot: &Snapshot, query: Q, facts: dialog_artifacts::Changes) {
 /// let layer = branch
 ///     .query()
-///     .join(snapshot)                 // another line
+///     .join(snapshot)                 // another layer
 ///     .with(facts);                   // user-asserted overlay facts
 /// let staged = layer.select(query);   // `.perform(&env)` injects metadata
 /// # let _ = staged;
@@ -77,14 +77,14 @@ use crate::{Branch, Ephemeral, NetworkedIndex, RemoteSite, RepositoryArchiveExt 
 #[derive(Default, Clone)]
 pub struct QueryLayer<'a> {
     sources: Vec<SourceRef<'a>>,
-    /// Ephemeral lines joined on their own, not as some tree line's
-    /// session store: the memory lines of a [`Stack`](crate::Stack).
+    /// Ephemeral layers joined on their own, not as some tree layer's
+    /// session store: the memory layers of a [`Stack`](crate::Stack).
     ephemerals: Vec<&'a Ephemeral>,
     changes: Changes,
 }
 
-/// The lines a query env reads, owned: every tree line with its
-/// session store, plus every standalone ephemeral line. What a
+/// The layers a query env reads, owned: every tree layer with its
+/// session store, plus every standalone ephemeral layer. What a
 /// [`QueryLayer`] resolves to at perform time, and what a
 /// [`Stack`](crate::Stack) hands its induction.
 #[derive(Default, Clone)]
@@ -94,7 +94,7 @@ pub(crate) struct Composite {
 }
 
 impl Composite {
-    /// A composite of one tree line.
+    /// A composite of one tree layer.
     pub(crate) fn of(source: Source) -> Self {
         Self {
             sources: vec![source],
@@ -123,7 +123,7 @@ impl<'a> QueryLayer<'a> {
         self
     }
 
-    /// Merge another layer in: union the lines, fold the other
+    /// Merge another layer in: union the layers, fold the other
     /// layer's changes via its `Statement` impl. Accepts anything
     /// convertible into a `QueryLayer` — a `&Branch`, a `&Snapshot`, or
     /// a `Changes`.
@@ -135,7 +135,7 @@ impl<'a> QueryLayer<'a> {
         self
     }
 
-    /// The owned lines this layer reads.
+    /// The owned layers this layer reads.
     pub(crate) fn composite(&self) -> Composite {
         Composite {
             sources: self
@@ -202,7 +202,7 @@ impl<'a> QueryLayer<'a> {
     }
 }
 
-// A line's ephemeral store ([`Branch::overlay`], [`Snapshot::overlay`])
+// A layer's ephemeral store ([`Branch::overlay`], [`Snapshot::overlay`])
 // is not folded here: [`QueryEnv`] reads it live at every evaluation,
 // so every read path — `select`, `query`, transaction queries,
 // subscription evaluations — sees session facts with no per-path
@@ -249,7 +249,7 @@ impl From<Changes> for QueryLayer<'_> {
     }
 }
 
-/// The schema-metadata [`Changes`] for a set of lines: every line's
+/// The schema-metadata [`Changes`] for a set of layers: every layer's
 /// own metadata plus a single [`Session`] with one
 /// `dialog.session/branch` per branch in scope. See
 /// [`QueryLayer::metadata`].
@@ -307,7 +307,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// Resolves the operator's identity via [`Identify`], builds the
     /// query overlay (caller changes + auto-injected schema metadata)
     /// via [`QueryLayer::overlay`], lifts any retracts in it into
-    /// tombstones, and unions every line's stream (tombstone-filtered)
+    /// tombstones, and unions every layer's stream (tombstone-filtered)
     /// with the overlay.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
@@ -337,7 +337,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     }
 }
 
-/// The runtime environment that bridges the layer's lines and
+/// The runtime environment that bridges the layer's layers and
 /// per-query overlay changes into the query engine's Provider bounds.
 ///
 /// Built fresh on each `.perform(env)`; the environment reference
@@ -351,18 +351,18 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
-    /// Standalone ephemeral lines, read live like each tree line's
+    /// Standalone ephemeral layers, read live like each tree layer's
     /// session store.
     ephemerals: Vec<Ephemeral>,
     /// All overlay facts — caller-asserted + auto-injected metadata —
     /// merged into one batch. Queried via `Provider<Select> for Changes`.
     changes: Changes,
-    /// `sort_key`s of every retracted fact in `changes`. Each line's
+    /// `sort_key`s of every retracted fact in `changes`. Each layer's
     /// ephemeral stream is filtered against these before the merge so
     /// a staged retract suppresses a session fact.
     staged: Arc<HashSet<SortKey>>,
     /// `staged` plus every ephemeral store's own tombstones, session
-    /// and standalone alike. Each line's tree stream is filtered
+    /// and standalone alike. Each layer's tree stream is filtered
     /// against these before the merge so retracts in the overlay and
     /// ephemeral tombstones suppress matching facts in the tree.
     tombstones: Arc<HashSet<SortKey>>,
@@ -380,17 +380,17 @@ pub(crate) struct QueryEnv<'a, Env> {
 }
 
 impl<'a, Env> QueryEnv<'a, Env> {
-    /// Build a runtime env from already-resolved parts: the lines to
+    /// Build a runtime env from already-resolved parts: the layers to
     /// read, the per-query overlay (caller changes + injected metadata),
     /// and the underlying capability env. The tombstones are lifted
-    /// here: the overlay's retracts, plus each line's own session
+    /// here: the overlay's retracts, plus each layer's own session
     /// tombstones for the tree streams.
     ///
     /// `Branch::query`, `Snapshot::query`, and the transaction-query
     /// paths all construct through here so there is exactly one query
-    /// env — a transaction query is just a single-line `QueryEnv`.
-    /// Deductive-rule resolution is built in (a durable layer per line,
-    /// its ephemeral store, and the overlay as a transient layer), so
+    /// env — a transaction query is just a single-layer `QueryEnv`.
+    /// Deductive-rule resolution is built in (a durable rule source per layer,
+    /// its ephemeral store, and the overlay as a transient rule source), so
     /// the paths can never diverge on it.
     pub(crate) fn new(composite: Composite, changes: Changes, env: &'a Env) -> Self {
         let Composite {
@@ -398,7 +398,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
             ephemerals,
         } = composite;
         let staged = tombstones_from(&changes);
-        // The common case, one line and nothing staged, shares the
+        // The common case, one layer and nothing staged, shares the
         // store's own set rather than copying it per query.
         let tombstones = match (sources.as_slice(), ephemerals.as_slice()) {
             ([only], []) if staged.is_empty() => only.as_ref().overlay().tombstones(),
@@ -465,12 +465,12 @@ impl<Env> Clone for QueryEnv<'_, Env> {
     }
 }
 
-/// Execute a select against a single line, transparently routing through
+/// Execute a select against a single layer, transparently routing through
 /// a branch's remote upstream when configured. Extracted as a freestanding
-/// helper so every line in a [`QueryEnv`] shares the exact same read path
-/// (a transaction query is itself a single-line `QueryEnv`).
+/// helper so every layer in a [`QueryEnv`] shares the exact same read path
+/// (a transaction query is itself a single-layer `QueryEnv`).
 ///
-/// Takes the line by value (a cheap clone: shared caches) and moves it
+/// Takes the layer by value (a cheap clone: shared caches) and moves it
 /// into the returned stream, so the stream borrows only the env —
 /// errors surface as the stream's first item.
 pub(crate) fn select_from_source<'a, Env>(
@@ -530,18 +530,18 @@ where
         self.record_demand(&input);
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
 
-        // Line streams — each filtered by tombstones from the
+        // Layer streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
         // retract in `with(..)`) suppresses matching source facts, and
-        // by the line's own session tombstones. Each owns its line
+        // by the layer's own session tombstones. Each owns its layer
         // clone and borrows only `self.env`.
         for source in &self.sources {
             let raw = select_from_source(source.clone(), self.env, input.clone());
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
-        // Each line's ephemeral store, then each standalone ephemeral
-        // line, read live. Filtered by the overlay's staged retracts
+        // Each layer's ephemeral store, then each standalone ephemeral
+        // layer, read live. Filtered by the overlay's staged retracts
         // only: a store's own tombstones hide facts *beneath* it,
         // never its own. Pushed only when it has rows, for the same
         // reason the overlay stream is below.
@@ -582,11 +582,11 @@ where
 // co). No demand is recorded: the block behind a hash is
 // content-addressed and can never change, so no tree diff could ever
 // invalidate a row derived from it — the soundness argument lives in
-// `dialog_artifacts::inspect`. Reads go through each line's archive
+// `dialog_artifacts::inspect`. Reads go through each layer's archive
 // catalog capability with the same remote fallback a fact scan uses;
-// the first line that has the block wins (content addressing makes
+// the first layer that has the block wins (content addressing makes
 // them interchangeable), and a block absent everywhere contributes
-// nothing. Reads go through the line's shared node cache (the same
+// nothing. Reads go through the layer's shared node cache (the same
 // one the eager root probe in `select.rs` and `Subscription::touched`
 // use): a resolver join re-resolves the same reference once per outer
 // row, and a raw backend get would re-fetch that identical immutable
@@ -634,11 +634,11 @@ where
         + ConditionalSync
         + 'static,
 {
-    /// Read a `dialog.rule/*` selector against a single line's committed
+    /// Read a `dialog.rule/*` selector against a single layer's committed
     /// tree only (NOT the overlay) and collect the matching artifacts.
-    /// The durable layer's reads must be tree-only so the head-keyed
+    /// The durable rule source's reads must be tree-only so the head-keyed
     /// discovery cache stays correct — overlay rules are handled
-    /// separately, fresh, by the transient layer.
+    /// separately, fresh, by the transient rule source.
     async fn select_tree(
         &self,
         source: &Source,
@@ -661,7 +661,7 @@ where
     }
 
     /// The rules concluding `concept` held in an ephemeral store, a
-    /// line's session store or a standalone line: `dialog.rule/*`
+    /// layer's session store or a standalone layer: `dialog.rule/*`
     /// facts read fresh (the store is in memory and never
     /// head-cached).
     fn ephemeral_rules(
@@ -747,8 +747,8 @@ where
         + 'static,
 {
     /// Resolve a concept's deductive rules by unioning across layers:
-    /// each line is a durable layer (committed `dialog.rule/*`, head-cached),
-    /// the overlay is a transient layer (uncommitted `dialog.rule/*`, fresh).
+    /// each layer is a durable rule source (committed `dialog.rule/*`, head-cached),
+    /// the overlay is a transient rule source (uncommitted `dialog.rule/*`, fresh).
     /// The implicit per-descriptor rule is assembled once on top.
     ///
     /// The resolved rule set is checked against the program analysis
@@ -771,8 +771,8 @@ where
         // `dialog.revision/*`.
         rules.extend(builtin(&concept));
 
-        // Durable layers — one per line — and each line's ephemeral
-        // store, then every standalone ephemeral line, read fresh.
+        // Durable rule sources, one per layer, and each layer's ephemeral
+        // store, then every standalone ephemeral layer, read fresh.
         for source in &self.sources {
             rules.extend(self.durable_rules(source, &concept).await?);
             rules.extend(self.ephemeral_rules(source.as_ref().overlay(), &concept)?);
@@ -783,9 +783,9 @@ where
         // Transient layer — the per-query overlay, read fresh.
         rules.extend(overlay_rules(&self.changes, &concept));
 
-        // Plan cache rides a line (peers share content-addressed plans;
-        // any line's cache is correct). The overlay-only query has no
-        // line, so it falls back to a private cache.
+        // Plan cache rides a layer (peers share content-addressed plans;
+        // any layer's cache is correct). The overlay-only query has no
+        // layer, so it falls back to a private cache.
         let plan_cache = self
             .sources
             .first()
@@ -999,7 +999,7 @@ mod rule_tests {
             .publish()
             .perform(&operator)
             .await?;
-        // refresh handle so the durable layer sees the new head
+        // refresh handle so the durable rule source sees the new head
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let employees = query_employees(&branch, &operator).await?;
@@ -1009,7 +1009,7 @@ mod rule_tests {
 
     /// A *reducing* rule stores, discovers, and hydrates through the
     /// same `db.rule/*` rail: the committed rule's reduce block
-    /// survives the durable layer round trip, and queries evaluate
+    /// survives the durable rule source round trip, and queries evaluate
     /// its fold over committed facts.
     #[dialog_common::test]
     async fn it_resolves_a_committed_reducing_rule() -> anyhow::Result<()> {
@@ -1105,7 +1105,7 @@ mod rule_tests {
         Ok(())
     }
 
-    // ----- (2) overlay rule resolves via the transient layer ----------
+    // ----- (2) overlay rule resolves via the transient rule source ----------
 
     #[dialog_common::test]
     async fn it_resolves_an_overlay_rule() -> anyhow::Result<()> {
@@ -1233,7 +1233,7 @@ mod rule_tests {
         assert!(with_overlay.iter().any(|c| *c.entity() == alice));
 
         // A subsequent PLAIN query (no overlay) must NOT see it — the
-        // transient layer is per-query; nothing was committed.
+        // transient rule source is per-query; nothing was committed.
         assert!(
             query_employees(&branch, &operator).await?.is_empty(),
             "overlay rule must not persist into a later plain query"
@@ -1568,7 +1568,7 @@ mod rule_tests {
         let main = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("other").open().perform(&operator).await?;
 
-        // Query across both branches — each is a durable layer, so both
+        // Query across both branches — each is a durable rule source, so both
         // rules (and both their input facts) participate.
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));

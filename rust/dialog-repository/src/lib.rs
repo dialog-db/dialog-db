@@ -52,11 +52,11 @@ pub use rules::{RuleCache, Transient};
 
 /// Attribute placement: which layer an attribute's facts live in.
 pub mod placement;
-pub use placement::{Bindings, DefaultLayer, Placement, Target, attribute_entity};
+pub use placement::{Bindings, DefaultScope, Placement, Target, attribute_entity};
 
 pub mod stack;
 pub use stack::{
-    AsLine, Audience, Build, Head, Line, Stack, StackBuilder, StackCommit, StackError,
+    AsLayer, Audience, Build, Head, Layer, Stack, StackBuilder, StackCommit, StackError,
     StackTransaction,
 };
 

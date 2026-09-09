@@ -12,7 +12,7 @@
 //! have before advancing.
 //!
 //! Nothing here publishes or moves a branch head. A snapshot's commits
-//! are minted on a line of their own (see [`Snapshot`]); making one
+//! are minted on a layer of their own (see [`Snapshot`]); making one
 //! visible under a name stays a separate act, as does content transfer:
 //! [`Snapshot::export`] reads content out, [`Repository::import`] writes
 //! content in.
@@ -156,7 +156,7 @@ impl Block {
 /// # }
 /// ```
 ///
-/// # Its own line
+/// # Its own layer
 ///
 /// A revision's [`Version`] is `(origin, edition)`, and an origin must be
 /// a single sequential actor: two revisions minted under one origin at
@@ -165,7 +165,7 @@ impl Block {
 /// concurrently — so its commits are minted on a *lineage* of their own.
 /// The lineage is allocated on the snapshot's first commit and kept for
 /// the ones after, which is what makes a chain of transactions one
-/// origin with increasing editions. A clone starts a line of its own for
+/// origin with increasing editions. A clone starts a layer of its own for
 /// the same reason: two clones transacting from the same base must not
 /// collide.
 ///
@@ -189,7 +189,7 @@ pub struct Snapshot {
     bindings: Bindings,
 }
 
-/// What a snapshot's commits move: the revision, and the line they are
+/// What a snapshot's commits move: the revision, and the layer they are
 /// minted on once one has been allocated.
 #[derive(Debug, Clone)]
 struct Head {
@@ -254,7 +254,7 @@ impl Snapshot {
     }
 
     /// The staged view inside a [`TransactionBatch`](crate::TransactionBatch):
-    /// reads like any snapshot of `revision`, but its line is pre-seeded
+    /// reads like any snapshot of `revision`, but its layer is pre-seeded
     /// with the branch entity, so commits through it mint on the branch's
     /// OWN origin — successor editions of the head the batch was staged
     /// from — instead of allocating a random lineage of their own. That
@@ -303,14 +303,14 @@ impl Snapshot {
         self.subject.clone().archive().index()
     }
 
-    /// The revision a commit builds on and the line it mints on, read
+    /// The revision a commit builds on and the layer it mints on, read
     /// together so they name the same head.
     pub(crate) fn head(&self) -> (Revision, Option<Entity>) {
         let head = self.head.read();
         (head.revision.clone(), head.lineage.clone())
     }
 
-    /// Move the head from `base` to `next`, recording the line `next`
+    /// Move the head from `base` to `next`, recording the layer `next`
     /// was minted on.
     ///
     /// The in-memory counterpart of a branch's CAS publish: a commit
@@ -393,7 +393,7 @@ impl Snapshot {
     }
 
     /// This snapshot's blob store, the target for [`Blob`](crate::Blob)
-    /// reads. Blob writes advance the line through the branch's memory
+    /// reads. Blob writes advance the layer through the branch's memory
     /// cell, which a snapshot does not have — see [`BlobArchive`].
     pub fn blobs(&self) -> BlobArchive<'_> {
         BlobArchive::from(self)
@@ -442,7 +442,7 @@ impl Snapshot {
     }
 }
 
-// A clone is the same view on its own line: it copies the head (so the
+// A clone is the same view on its own layer: it copies the head (so the
 // original advancing leaves it where it is, and vice versa), shares the
 // caches and the session overlay (both safe to share, like a branch
 // clone's), and starts without a lineage — see the type docs for why
