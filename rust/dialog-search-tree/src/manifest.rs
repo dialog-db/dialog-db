@@ -131,13 +131,20 @@ impl Default for Manifest {
         // manifest their root node carries.
         //
         // Read once per process: `default()` sits on the per-commit persist
-        // path, and the environment scan (four variables) showed up as ~4%
-        // of a profiled commit before this memo. The environment of a
-        // running process does not change underneath it.
+        // path, and the environment scan showed up as ~4% of a profiled
+        // commit before this memo. The environment of a running process
+        // does not change underneath it.
+        //
+        // `DIALOG_TREE_FANOUT_N` overrides the branching parameter `n` for
+        // fresh trees (clamped to the representable 0..=63; see
+        // `branch_factor`), so the sync soak harness can sweep expected
+        // fanout (e.g. 5 = 32, 8 = 256) across processes without a code
+        // change. Existing trees keep the manifest their root carries.
         static DEFAULT: std::sync::OnceLock<Manifest> = std::sync::OnceLock::new();
         *DEFAULT.get_or_init(|| Self {
             version: FORMAT_VERSION,
-            fanout_n: DEFAULT_FANOUT_N,
+            fanout_n: env_override("DIALOG_TREE_FANOUT_N", u32::from(DEFAULT_FANOUT_N)).min(63)
+                as u8,
             max_separator: DEFAULT_MAX_SEPARATOR,
             inline_n: env_override("DIALOG_TREE_INLINE_N", DEFAULT_INLINE_N),
             spill_prefix: DEFAULT_SPILL_PREFIX,

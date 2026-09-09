@@ -170,6 +170,16 @@ where
 
         match remote_result {
             Some(bytes) => {
+                // Every hydration is one remote round trip (two, behind a
+                // UCAN remote whose permit was not cached); this event is
+                // what lets a slow first read be attributed to on-demand
+                // replication rather than local work.
+                tracing::debug!(
+                    target: "dialog::sync::hydrate",
+                    block = %dialog_common::Blake3Hash::from(*key),
+                    bytes = bytes.len(),
+                    "hydrated block from remote"
+                );
                 // Cache locally
                 let cache = self
                     .local
