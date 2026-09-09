@@ -33,7 +33,7 @@ pub use blob::*;
 mod claims;
 pub use claims::*;
 
-mod commit;
+pub(crate) mod commit;
 pub use commit::*;
 
 mod delegation;
@@ -379,6 +379,10 @@ impl Branch {
     }
 
     /// A shared handle to this branch's deductive-rule cache.
+    pub(crate) fn revision_cell(&self) -> &Cell<Revision> {
+        &self.revision
+    }
+
     pub(crate) fn induction_cell(&self) -> &Cell<Revision> {
         &self.induction
     }

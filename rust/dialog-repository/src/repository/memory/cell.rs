@@ -186,9 +186,19 @@ where
     /// successful publish through it advances this cell (and every clone), so
     /// there is nothing to copy back. See `Branch::pull`.
     pub fn checkpoint(&self) -> Checkpoint<T, Codec> {
+        self.checkpoint_at(self.cache.version())
+    }
+
+    /// A [`Checkpoint`] against an explicit version rather than the
+    /// cache's current one: for a writer that captured the cell's
+    /// version earlier and builds on the value it read then, whatever
+    /// the cache has since learned. Publishing through it fails with
+    /// [`VersionMismatch`](dialog_effects::memory::MemoryError::VersionMismatch)
+    /// unless the cell still holds `expected`.
+    pub(crate) fn checkpoint_at(&self, expected: Option<Version>) -> Checkpoint<T, Codec> {
         Checkpoint {
             cell: self.clone(),
-            expected: self.cache.version(),
+            expected,
         }
     }
 

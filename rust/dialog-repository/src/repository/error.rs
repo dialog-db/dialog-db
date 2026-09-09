@@ -262,15 +262,6 @@ pub enum CommitError {
     /// [`Snapshot::commit`](crate::Snapshot::commit).
     #[error("A snapshot cannot be advanced through a reference; transact it instead")]
     Detached,
-
-    /// The commit builds on a captured revision the branch has moved
-    /// past: a [`Stack`](crate::Stack) writing to a line that moved
-    /// outside it. Pull the stack to reconcile, then retry.
-    #[error("Branch {branch} moved past the revision this commit builds on; pull to reconcile")]
-    Behind {
-        /// The branch that moved.
-        branch: String,
-    },
 }
 
 /// Errors specific to a pull operation.

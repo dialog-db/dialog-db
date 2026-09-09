@@ -490,7 +490,7 @@ async fn mint_link<Env>(
     source: SourceRef<'_>,
     base: Option<Revision>,
     line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
-    mut changes: Changes,
+    changes: Changes,
     transients: Changes,
     allow_empty: bool,
     canonicalize: bool,
@@ -509,17 +509,65 @@ where
         + 'static,
 {
     let view = Composite::of(source.to_source());
-    induce(source, &view, &mut changes, transients, env).await?;
+    let changes = settle(source, &view, changes, transients, env).await?;
+    mint(source, base, line, changes, allow_empty, canonicalize, env).await
+}
 
-    // Route the settled batch by attribute placement: tree-bound
-    // instructions are minted, session-bound ones land in the line's
-    // ephemeral store once the mint has succeeded.
+/// Settle a transaction's changes against `view`: run commit-time
+/// induction, then route by attribute placement. Session-bound
+/// instructions land in `source`'s ephemeral store now; the tree-bound
+/// remainder is returned for minting.
+pub(crate) async fn settle<Env>(
+    source: SourceRef<'_>,
+    view: &Composite,
+    mut changes: Changes,
+    transients: Changes,
+    env: &Env,
+) -> Result<Changes, CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Identify>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    induce(source, view, &mut changes, transients, env).await?;
     let placements = Placements::resolve(source, &changes, env).await?;
     let Partitioned {
         tree: changes,
         session,
     } = placements.partition(changes, source.bindings())?;
+    source.overlay().apply(session);
+    Ok(changes)
+}
 
+/// Mint one link from already-settled, tree-bound changes on `base`,
+/// carrying the trigger footprint forward when the changes touch no
+/// rule structure.
+async fn mint<Env>(
+    source: SourceRef<'_>,
+    base: Option<Revision>,
+    line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
+    changes: Changes,
+    allow_empty: bool,
+    canonicalize: bool,
+    env: &Env,
+) -> Result<Outcome, CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Import>
+        + Provider<Resolve>
+        + Provider<Identify>
+        + Provider<Attest>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
     let touches = touches_rules(&changes);
     let previous = base.clone();
     let outcome = Mint {
@@ -533,13 +581,154 @@ where
     }
     .perform(env, line)
     .await?;
-    source.overlay().apply(session);
     if let Outcome::Minted(minted) = &outcome
         && !touches
     {
         carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
     }
     Ok(outcome)
+}
+
+impl TransactionBatch {
+    /// Stage a batch on `branch` from an explicit base rather than the
+    /// handle's head: the first link is minted from already-settled
+    /// changes on `base`, and publish will CAS against `base_version`.
+    /// What a [`Stack`](crate::Stack) opens for a line at the head it
+    /// captured, so a handle that moved since the capture cannot make
+    /// the publish overwrite the move.
+    pub(crate) async fn stage<Env>(
+        branch: &Branch,
+        base: Option<Revision>,
+        base_version: Option<MemoryVersion>,
+        changes: Changes,
+        env: &Env,
+    ) -> Result<TransactionBatch, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let head = branch.revision_cell().checkpoint_at(base_version.clone());
+        let cell = branch.revision_cell().clone();
+
+        let authority = Identify.perform(env).await?;
+        let (line, _) = branch.commit_identity(authority.profile(), &authority.did());
+
+        let pinned = base.clone();
+        let outcome = Box::pin(mint(
+            SourceRef::Pinned(branch, pinned.as_ref()),
+            base,
+            |profile, issuer| branch.commit_identity(profile, issuer),
+            changes,
+            false,
+            false,
+            env,
+        ))
+        .await?;
+
+        let caches = Caches {
+            causality: CausalityCache::new(),
+            contexts: ContextCache::new(),
+            records: Cache::new(),
+            ..branch.caches()
+        };
+
+        Ok(match outcome {
+            Outcome::Unchanged(tip) => TransactionBatch {
+                snapshot: Snapshot::staged(branch.subject(), tip, caches, line),
+                head,
+                cell,
+                base_version,
+                induction: branch.induction_cell().clone(),
+                chain: Vec::new(),
+                context: None,
+                records: branch.records(),
+                contexts: branch.contexts(),
+            },
+            Outcome::Minted(minted) => {
+                let Minted {
+                    revision,
+                    record,
+                    context,
+                } = *minted;
+                let snapshot = Snapshot::staged(branch.subject(), revision.clone(), caches, line);
+                let version = revision.version();
+                snapshot.caches().records.insert(version, record.clone());
+                snapshot.caches().contexts.insert(version, context.clone());
+                TransactionBatch {
+                    snapshot,
+                    head,
+                    cell,
+                    base_version,
+                    induction: branch.induction_cell().clone(),
+                    chain: vec![(version, record)],
+                    context: Some(context),
+                    records: branch.records(),
+                    contexts: branch.contexts(),
+                }
+            }
+        })
+    }
+
+    /// Extend the chain by one link minted from already-settled
+    /// changes: no induction, no routing.
+    pub(crate) async fn mint<Env>(
+        &mut self,
+        changes: Changes,
+        env: &Env,
+    ) -> Result<Revision, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let (base, lineage) = self.snapshot.head();
+        let line = lineage.expect("a transaction batch's line is seeded at construction");
+        let outcome = Box::pin(mint(
+            SourceRef::Snapshot(&self.snapshot),
+            Some(base.clone()),
+            |_, issuer| (line.clone(), origin_of(&line, issuer)),
+            changes,
+            false,
+            false,
+            env,
+        ))
+        .await?;
+        if let Outcome::Minted(minted) = outcome {
+            let Minted {
+                revision,
+                record,
+                context,
+            } = *minted;
+            self.snapshot.advance(&base, revision.clone(), line)?;
+            let version = revision.version();
+            self.snapshot
+                .caches()
+                .records
+                .insert(version, record.clone());
+            self.snapshot
+                .caches()
+                .contexts
+                .insert(version, context.clone());
+            self.chain.push((version, record));
+            self.context = Some(context);
+        }
+        Ok(self.snapshot.revision())
+    }
 }
 
 #[cfg(test)]

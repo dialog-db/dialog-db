@@ -85,6 +85,7 @@
 //! branch.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::sync::Arc;
 
 use base58::ToBase58 as _;
@@ -96,7 +97,7 @@ use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
-use dialog_effects::memory::{Publish, Resolve};
+use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use parking_lot::RwLock;
@@ -105,13 +106,12 @@ use thiserror::Error;
 
 use crate::placement::{Placements, Target};
 use crate::repository::branch::session::{Composite, QueryEnv, session_metadata};
-use crate::repository::branch::transaction::commit_settled;
 use crate::repository::branch::transaction::induce::induce;
 use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
 use crate::{
     Branch, CommitError, Delta, Ephemeral, EphemeralRevision, PullError, PushError, RemoteSite,
-    ResolveError, Revision, Snapshot, Subscription,
+    ResolveError, Revision, Snapshot, Subscription, TransactionBatch,
 };
 
 /// Who can read a line: the set of principals its facts reach.
@@ -390,6 +390,17 @@ pub enum StackError {
     /// Pushing a line to its upstream failed.
     #[error("Failed to push a line: {0}")]
     Push(#[from] PushError),
+    /// Publishing a line's staged chain failed, most often because its
+    /// head moved outside the stack. The chain and every chain above
+    /// it are dropped; pull, then re-run the transactions.
+    #[error("Failed to publish line {line}: {source}")]
+    Publish {
+        /// The address entity of the line whose publish failed.
+        line: Entity,
+        /// Why.
+        #[source]
+        source: CommitError,
+    },
 }
 
 /// A line as the builder holds it: with the links declared so far.
@@ -520,17 +531,28 @@ impl Build {
             }
         }
 
+        let lines: Vec<Line> = self.lines.into_iter().map(|pending| pending.line).collect();
+        let published: Vec<Head> = lines.iter().map(Line::head).collect();
         let stack = Stack {
-            lines: self.lines.into_iter().map(|pending| pending.line).collect(),
+            state: Arc::new(RwLock::new(State {
+                published,
+                versions: Vec::new(),
+                staged: lines.iter().map(|_| None).collect(),
+            })),
+            lines,
             ids,
             links,
             bound,
-            captured: Arc::new(RwLock::new(Vec::new())),
         };
+        stack.state.write().versions = stack.versions();
         // Every encloser records its wiring now, at the heads it sees,
-        // and the stack reads at those heads from here on.
-        let live = stack.heads();
-        stack.capture(BTreeMap::new(), live, env).await?;
+        // and publishes it, so the stack reads at those heads from
+        // here on. Nothing beneath has moved yet, so every line with
+        // links is treated as reaching a move.
+        let heads = stack.heads();
+        let never: Vec<Head> = Vec::new();
+        stack.capture(BTreeMap::new(), heads, &never, env).await?;
+        stack.publish(env).await?;
         Ok(stack)
     }
 }
@@ -568,6 +590,12 @@ fn identity(descriptor: &[u8]) -> Entity {
 
 /// Lines linked under layer names, read as one composite and written
 /// by placement. Built by [`Stack::builder`]; cheap to clone.
+///
+/// A stack holds, per line, the head it last **published** or pulled,
+/// and for branch lines a **staged** chain of commits not yet
+/// published. Reads and commits build on the staged tip where there
+/// is one and on the published head otherwise; [`publish`](Self::publish)
+/// moves every branch line's head to its staged tip, bottom to top.
 #[derive(Debug, Clone)]
 pub struct Stack {
     /// Bottom first.
@@ -578,9 +606,48 @@ pub struct Stack {
     links: Vec<Vec<Link>>,
     /// Layer name → the lines linked under it.
     bound: HashMap<Entity, Vec<usize>>,
-    /// What the stack reads each line at: the heads the last stack
-    /// commit or pull captured, bottom first. Shared by clones.
-    captured: Arc<RwLock<Vec<Head>>>,
+    /// Heads and staged chains, shared by clones.
+    state: Arc<RwLock<State>>,
+}
+
+/// What a stack knows about its lines' heads.
+struct State {
+    /// Per line, the head the stack last published or pulled: the
+    /// base every staged chain builds on. An ephemeral line's head
+    /// moves here directly, since it has nothing to publish.
+    published: Vec<Head>,
+    /// Per branch line, the head cell's version at `published`, which
+    /// a publish CAS's against. `None` for other lines.
+    versions: Vec<Option<MemoryVersion>>,
+    /// Per branch line, the staged chain of commits since
+    /// `published`, or `None` when nothing is staged.
+    staged: Vec<Option<TransactionBatch>>,
+}
+
+impl fmt::Debug for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let staged: Vec<Option<Revision>> = self
+            .staged
+            .iter()
+            .map(|chain| chain.as_ref().map(TransactionBatch::revision))
+            .collect();
+        f.debug_struct("State")
+            .field("published", &self.published)
+            .field("versions", &self.versions)
+            .field("staged", &staged)
+            .finish()
+    }
+}
+
+impl State {
+    /// The head the stack reads line `index` at: the staged tip, or
+    /// the published head.
+    fn captured(&self, index: usize) -> Head {
+        match &self.staged[index] {
+            Some(batch) => Head::Tree(Some(batch.revision())),
+            None => self.published[index].clone(),
+        }
+    }
 }
 
 impl Stack {
@@ -615,39 +682,52 @@ impl Stack {
             .unwrap_or_default()
     }
 
-    /// Every line's live head now, bottom first. What the stack reads
-    /// at is [`captured`](Self::captured); the two differ exactly when
-    /// a line moved outside the stack since the last capture.
+    /// Every line's live head now, bottom first: what each line's
+    /// own handle reports, whatever the stack has published or
+    /// staged.
     pub fn heads(&self) -> Vec<Head> {
         self.lines.iter().map(Line::head).collect()
     }
 
-    /// The heads the stack reads each line at, bottom first: what the
-    /// last stack commit or [`pull`](Self::pull) captured.
+    /// The heads the stack reads each line at, bottom first: the
+    /// staged tip where a chain is staged, the published head
+    /// otherwise.
     pub fn captured(&self) -> Vec<Head> {
-        self.captured.read().clone()
+        let state = self.state.read();
+        (0..self.lines.len())
+            .map(|index| state.captured(index))
+            .collect()
     }
 
-    /// Whether some line moved outside the stack since the last
-    /// capture: its live head differs from what the stack reads at.
-    /// [`pull`](Self::pull) catches up.
+    /// The heads the stack last published or pulled, bottom first:
+    /// what every staged chain builds on.
+    pub fn published(&self) -> Vec<Head> {
+        self.state.read().published.clone()
+    }
+
+    /// Whether some branch line holds commits not yet published.
+    pub fn is_staged(&self) -> bool {
+        self.state.read().staged.iter().any(Option::is_some)
+    }
+
+    /// Whether some line's live head differs from the head the stack
+    /// last published or pulled: it moved outside the stack, and a
+    /// publish of that line would fail until a [`pull`](Self::pull).
     pub fn behind(&self) -> bool {
-        self.heads() != self.captured()
+        self.heads() != self.published()
     }
 
     /// Bring movement in: re-resolve every branch line's head from
-    /// storage (a branch moved through another handle is otherwise
-    /// invisible to this one), pull every line that tracks an
-    /// upstream, bottom to top, then capture every live head,
-    /// refreshing the wiring on every line above a line that moved.
-    /// The stack reads at and builds on the result from now on. On a
-    /// stack of local lines this is exactly "notice what moved
-    /// outside the stack".
+    /// storage, pull every line that tracks an upstream, bottom to
+    /// top, then take the live heads as the published base and stage
+    /// and publish the wiring of every line above a line that moved.
     ///
-    /// A pull that fails part way leaves the captured heads where
-    /// they were: lines beneath the failure may have reconciled with
-    /// their upstreams, but the stack does not read at them until a
-    /// pull completes.
+    /// Anything staged and not yet published is dropped: its chain
+    /// built on heads the pull supersedes, so it is stale wholesale,
+    /// and the transaction that staged it is re-run on the fresh
+    /// heads. A pull that fails part way leaves the published heads
+    /// where they were: lines beneath the failure may have reconciled
+    /// with their upstreams, and the next pull captures them.
     pub async fn pull<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Get>
@@ -671,14 +751,22 @@ impl Stack {
                 Box::pin(branch.pull().perform(env)).await?;
             }
         }
+        let previous = self.captured();
         let live = self.heads();
-        Ok(self.capture(BTreeMap::new(), live, env).await?)
+        {
+            let mut state = self.state.write();
+            state.published = live.clone();
+            state.versions = self.versions();
+            state.staged = self.lines.iter().map(|_| None).collect();
+        }
+        self.capture(BTreeMap::new(), live, &previous, env).await?;
+        self.publish(env).await
     }
 
     /// Send movement out: push every branch line that tracks an
     /// upstream, bottom to top, so a pushed line's wiring never names
-    /// a head its upstream lacks. A stack commit never pushes, like a
-    /// branch commit; ephemeral lines never leave the process.
+    /// a head its upstream lacks. Pushes the published heads; staged
+    /// commits are not pushed until [`publish`](Self::publish)ed.
     pub async fn push<Env>(&self, env: &Env) -> Result<(), StackError>
     where
         Env: Provider<Get>
@@ -705,6 +793,63 @@ impl Stack {
         Ok(())
     }
 
+    /// Publish every staged chain, bottom to top: each branch line's
+    /// head moves to its staged tip with one CAS against the version
+    /// the stack last published or pulled. A line whose head moved
+    /// outside the stack fails the CAS; its chain and every chain
+    /// above it are then stale wholesale and dropped (lines beneath
+    /// stay published), and the transactions that staged them are
+    /// re-run after a [`pull`](Self::pull).
+    pub async fn publish<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
+    where
+        Env: Provider<Publish> + Provider<Resolve> + ConditionalSync,
+    {
+        for index in 0..self.lines.len() {
+            let Some(batch) = self.state.write().staged[index].take() else {
+                continue;
+            };
+            match batch.publish().perform(env).await {
+                Ok(revision) => {
+                    let version = match &self.lines[index] {
+                        Line::Branch(branch) => branch
+                            .revision_cell()
+                            .edition()
+                            .map(|edition| edition.version),
+                        _ => None,
+                    };
+                    let mut state = self.state.write();
+                    state.published[index] = Head::Tree(Some(revision));
+                    state.versions[index] = version;
+                }
+                Err(source) => {
+                    let mut state = self.state.write();
+                    for stale in state.staged.iter_mut().skip(index) {
+                        *stale = None;
+                    }
+                    return Err(StackError::Publish {
+                        line: self.lines[index].address_entity(),
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(self.captured())
+    }
+
+    /// Every branch line's head cell version now.
+    fn versions(&self) -> Vec<Option<MemoryVersion>> {
+        self.lines
+            .iter()
+            .map(|line| match line {
+                Line::Branch(branch) => branch
+                    .revision_cell()
+                    .edition()
+                    .map(|edition| edition.version),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The bottom line as a branch: where placements live and where
     /// undeclared attributes go. `None` when the bottom is not a
     /// branch, in which case the stack is read-only.
@@ -715,21 +860,24 @@ impl Stack {
         }
     }
 
-    /// The composite a read sees: every line beneath the top pinned at
-    /// its captured head, the top live.
+    /// The composite a read sees: every line beneath the top at the
+    /// head the stack reads it at, the top live.
     pub(crate) fn composite(&self) -> Composite {
         self.composite_at(&self.captured())
     }
 
     /// The composite with every branch beneath the top read at the
     /// given heads. Ephemeral lines are always live: they are
-    /// process-local and cannot be read at an older sequence.
+    /// process-local, written only through the stack, and cannot be
+    /// read at an older sequence.
     fn composite_at(&self, heads: &[Head]) -> Composite {
         let top = self.lines.len().saturating_sub(1);
         let mut composite = Composite::default();
         for (index, line) in self.lines.iter().enumerate() {
             match line {
-                Line::Branch(branch) if index == top => {
+                Line::Branch(branch)
+                    if index == top && self.state.read().staged[index].is_none() =>
+                {
                     composite.sources.push(Source::Branch(branch.clone()))
                 }
                 Line::Branch(branch) => {
@@ -750,8 +898,8 @@ impl Stack {
         composite
     }
 
-    /// Open a query over the whole stack at its captured heads. Use
-    /// [`select`](StackQuery::select) or
+    /// Open a query over the whole stack at the heads it reads at.
+    /// Use [`select`](StackQuery::select) or
     /// [`subscribe`](StackQuery::subscribe) on it.
     pub fn query(&self) -> StackQuery {
         StackQuery {
@@ -770,16 +918,13 @@ impl Stack {
         }
     }
 
-    /// The wiring line `index` holds at `heads`, folded into
-    /// `changes`: its own link facts, plus a verbatim copy of every
-    /// link fact each linked line holds. Bottom to top commits refresh
-    /// the linked lines first, so the copy is what they hold after
-    /// the same stack commit.
+    /// The link facts line `index` holds at `heads`, folded into
+    /// `changes`: one entity per line it links, naming the target's
+    /// identity, the layer name, the target's head, and its address.
     fn link_facts(&self, index: usize, heads: &[Head], changes: &mut Changes) {
         let from = self.lines[index].address_entity();
         for link in &self.links[index] {
             let target = &self.lines[link.to];
-            self.link_facts(link.to, heads, changes);
             changes.associate_unique(
                 link_attr("from"),
                 link.entity.clone(),
@@ -804,11 +949,12 @@ impl Stack {
         }
     }
 
-    /// Commit `batch` to line `index` on top of `heads[index]`, with
-    /// its wiring at `heads`. A line with nothing to write and no links
-    /// is left alone; one whose wiring already names `heads` commits
-    /// as a no-op and keeps its head. A branch that moved past
-    /// `heads[index]` refuses ([`CommitError::Behind`]).
+    /// Stage `batch` on line `index` on top of `heads[index]`, with
+    /// its links at `heads`. A branch line extends its staged chain
+    /// (or opens one on its published head); an ephemeral line is
+    /// written directly. A line with nothing to write and no links
+    /// is left alone; one whose link facts already hold stages a
+    /// no-op and keeps its head.
     async fn refresh_links<Env>(
         &self,
         index: usize,
@@ -821,7 +967,6 @@ impl Stack {
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
-            + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
@@ -835,25 +980,103 @@ impl Stack {
         self.link_facts(index, heads, &mut batch);
         match &self.lines[index] {
             Line::Branch(branch) => {
-                let base = match &heads[index] {
-                    Head::Tree(revision) => revision.as_ref(),
-                    Head::Ephemeral(_) => None,
+                let staged = self.state.write().staged[index].take();
+                let (chain, tip) = match staged {
+                    Some(mut chain) => {
+                        let tip = match chain.mint(batch, env).await {
+                            Ok(tip) => tip,
+                            Err(error) => {
+                                self.state.write().staged[index] = Some(chain);
+                                return Err(error);
+                            }
+                        };
+                        (chain, tip)
+                    }
+                    None => {
+                        let (base, version) = {
+                            let state = self.state.read();
+                            let base = match &state.published[index] {
+                                Head::Tree(revision) => revision.clone(),
+                                Head::Ephemeral(_) => None,
+                            };
+                            (base, state.versions[index].clone())
+                        };
+                        let chain =
+                            TransactionBatch::stage(branch, base, version, batch, env).await?;
+                        let tip = chain.revision();
+                        (chain, tip)
+                    }
                 };
-                let source = SourceRef::Pinned(branch, base);
-                let revision = commit_settled(source, batch, false, false, env).await?;
-                Ok(Some(Head::Tree(Some(revision))))
+                self.state.write().staged[index] = Some(chain);
+                Ok(Some(Head::Tree(Some(tip))))
             }
             Line::Ephemeral(ephemeral) => {
                 ephemeral.apply(batch);
-                Ok(Some(Head::Ephemeral(ephemeral.revision())))
+                let head = Head::Ephemeral(ephemeral.revision());
+                self.state.write().published[index] = head.clone();
+                Ok(Some(head))
             }
             Line::Snapshot(_) => Err(CommitError::Detached),
         }
     }
+
+    /// Stage each line's batch bottom to top on top of `heads`, every
+    /// line after everything beneath it, writing its own share and its
+    /// wiring at the heads as they stand once the lines beneath it
+    /// staged. A line is touched only when it has something of its
+    /// own to write or a line its wiring reaches moved, either in this
+    /// pass or since `previous`; a line the pass never reaches is
+    /// never asked to write, whatever happened to it outside the
+    /// stack. Returns the heads the stack reads at afterwards.
+    async fn capture<Env>(
+        &self,
+        mut batches: BTreeMap<usize, Changes>,
+        mut heads: Vec<Head>,
+        previous: &[Head],
+        env: &Env,
+    ) -> Result<Vec<Head>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let mut moved: Vec<bool> = heads
+            .iter()
+            .enumerate()
+            .map(|(index, head)| previous.get(index) != Some(head))
+            .collect();
+        for index in 0..self.lines.len() {
+            let batch = batches.remove(&index).unwrap_or_default();
+            if batch.is_empty() && !self.reaches_moved(index, &moved) {
+                continue;
+            }
+            if let Some(head) = self.refresh_links(index, &heads, batch, env).await? {
+                if heads[index] != head {
+                    moved[index] = true;
+                }
+                heads[index] = head;
+            }
+        }
+        Ok(heads)
+    }
+
+    /// Whether any line reachable through `index`'s links moved.
+    fn reaches_moved(&self, index: usize, moved: &[bool]) -> bool {
+        self.links[index]
+            .iter()
+            .any(|link| moved[link.to] || self.reaches_moved(link.to, moved))
+    }
 }
 
 /// A transaction on a [`Stack`]: accumulates facts, then routes each
-/// to the line its attribute's layer is linked under and commits the
+/// to the lines its attribute's layer is linked under and stages the
 /// lines bottom to top.
 pub struct StackTransaction<'a> {
     stack: &'a Stack,
@@ -881,7 +1104,9 @@ impl<'a> StackTransaction<'a> {
         self
     }
 
-    /// Finalize into a commit command.
+    /// Finalize into a commit command. Its `perform` stages; chain
+    /// [`publish`](StackCommit::publish) to stage and publish in one
+    /// step.
     pub fn commit(self) -> StackCommit<'a> {
         StackCommit {
             stack: self.stack,
@@ -891,23 +1116,30 @@ impl<'a> StackTransaction<'a> {
     }
 }
 
-/// Command committing a [`StackTransaction`].
+/// Command staging a [`StackTransaction`].
 pub struct StackCommit<'a> {
     stack: &'a Stack,
     changes: Changes,
     transients: Changes,
 }
 
-impl StackCommit<'_> {
-    /// Induce against the composite, route by placement, commit bottom
-    /// to top. Returns every line's head afterwards, bottom first.
+impl<'a> StackCommit<'a> {
+    /// Stage, then publish every staged chain bottom to top.
+    pub fn publish(self) -> StackPublish<'a> {
+        StackPublish { commit: self }
+    }
+
+    /// Induce against the composite at the heads the stack reads at,
+    /// route by placement, and stage the lines bottom to top. Never
+    /// moves a branch head: the staged chains wait for
+    /// [`Stack::publish`]. Returns the heads the stack reads at
+    /// afterwards, bottom first.
     pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Head>, CommitError>
     where
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
-            + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
@@ -919,16 +1151,16 @@ impl StackCommit<'_> {
         let captured = stack.captured();
         let mut batches: BTreeMap<usize, Changes> = BTreeMap::new();
         if self.changes.is_empty() && self.transients.is_empty() {
-            return stack.capture(batches, captured, env).await;
+            return stack
+                .capture(batches, captured.clone(), &captured, env)
+                .await;
         }
         let Some(primary) = stack.primary() else {
             return Err(CommitError::Detached);
         };
-        // A write builds on the captured heads, like a branch commit
-        // builds on its handle's head: induction reads them, and each
-        // line commits on top of its captured revision. A line that
-        // moved outside the stack refuses (`CommitError::Behind`)
-        // rather than building on a head the stack never saw.
+        // A write builds on the heads the stack reads at, like a
+        // branch commit builds on its handle's head: induction reads
+        // them, and each line stages on top of its own.
         let composite = stack.composite_at(&captured);
         let source = match composite.sources.first() {
             Some(source) => source.as_ref(),
@@ -940,8 +1172,9 @@ impl StackCommit<'_> {
 
         // Route by placement: the primary holds the declarations, the
         // stack's links bind the names. A name no link binds falls
-        // back to the primary's own bindings, so a single-line stack
-        // routes exactly as the branch would.
+        // back to a tree binding on the primary, so a single-line
+        // stack routes exactly as the branch would; the primary's own
+        // session store is not a line and gets nothing.
         let placements = Placements::resolve(source, &changes, env).await?;
         let default = placements.default_layer().cloned();
         for instruction in changes.into_instructions() {
@@ -953,15 +1186,7 @@ impl StackCommit<'_> {
                     Some(indices) => indices.clone(),
                     None => match primary.bindings().target(layer) {
                         Some(Target::Tree) => vec![0],
-                        Some(Target::Session) => {
-                            // The primary's own store is not a stack
-                            // line; write it directly.
-                            let mut own = Changes::new();
-                            apply(&mut own, op, artifact);
-                            primary.overlay().apply(own);
-                            continue;
-                        }
-                        None => {
+                        Some(Target::Session) | None => {
                             return Err(CommitError::UnboundLayer {
                                 attribute: artifact.the.to_string(),
                                 layer: layer.to_string(),
@@ -975,26 +1200,21 @@ impl StackCommit<'_> {
             }
         }
 
-        stack.capture(batches, captured, env).await
+        stack
+            .capture(batches, captured.clone(), &captured, env)
+            .await
     }
 }
 
-impl Stack {
-    /// Commit each line's batch bottom to top on top of `heads`, every
-    /// line after everything beneath it, writing its own share and its
-    /// wiring at the heads as they stand once the lines beneath it
-    /// committed. A line whose wiring already names those heads and
-    /// that has nothing of its own to write is a no-op commit and
-    /// keeps its head, so the refresh reaches exactly the lines above
-    /// a line this pass moved. The resulting heads are what the stack
-    /// reads at and builds on from now on; a pass that fails part way
-    /// leaves them untouched.
-    async fn capture<Env>(
-        &self,
-        mut batches: BTreeMap<usize, Changes>,
-        mut heads: Vec<Head>,
-        env: &Env,
-    ) -> Result<Vec<Head>, CommitError>
+/// Command staging and publishing a [`StackTransaction`] in one step.
+pub struct StackPublish<'a> {
+    commit: StackCommit<'a>,
+}
+
+impl StackPublish<'_> {
+    /// Stage the transaction, then publish every staged chain bottom
+    /// to top. Returns the heads the stack reads at afterwards.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -1008,39 +1228,9 @@ impl Stack {
             + ConditionalSync
             + 'static,
     {
-        // The lines this pass moves: those already moved relative to
-        // the last capture (a pull's live heads), plus each line this
-        // loop commits. A line is touched only when it has something
-        // of its own to write or some line its wiring reaches moved,
-        // so a line the pass never reaches is never asked to commit,
-        // whatever happened to it outside the stack.
-        let previous = self.captured();
-        let mut moved: Vec<bool> = heads
-            .iter()
-            .enumerate()
-            .map(|(index, head)| previous.get(index) != Some(head))
-            .collect();
-        for index in 0..self.lines.len() {
-            let batch = batches.remove(&index).unwrap_or_default();
-            if batch.is_empty() && !self.reaches_moved(index, &moved) {
-                continue;
-            }
-            if let Some(head) = self.refresh_links(index, &heads, batch, env).await? {
-                if heads[index] != head {
-                    moved[index] = true;
-                }
-                heads[index] = head;
-            }
-        }
-        *self.captured.write() = heads.clone();
-        Ok(heads)
-    }
-
-    /// Whether any line reachable through `index`'s links moved.
-    fn reaches_moved(&self, index: usize, moved: &[bool]) -> bool {
-        self.links[index]
-            .iter()
-            .any(|link| moved[link.to] || self.reaches_moved(link.to, moved))
+        let stack = self.commit.stack;
+        self.commit.perform(env).await?;
+        stack.publish(env).await
     }
 }
 
@@ -1313,6 +1503,7 @@ mod tests {
             )
             .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert_eq!(heads.len(), 3);
@@ -1362,6 +1553,7 @@ mod tests {
             .transaction()
             .retract(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -1435,6 +1627,7 @@ mod tests {
                     .is("Notes".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -1467,6 +1660,7 @@ mod tests {
                     .is("draft".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -1517,6 +1711,7 @@ mod tests {
                     .is("Notes".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
@@ -1536,12 +1731,11 @@ mod tests {
         Ok(())
     }
 
-    /// Wiring lifts: the top holds a verbatim copy of every link fact
-    /// beneath it, so the whole topology is readable from the top
-    /// alone, and a stack commit refreshes the copy with the
-    /// original.
+    /// Wiring stays where it is made: local holds its link to shared,
+    /// the top holds only its own link to local, and a stack commit
+    /// that moves shared refreshes local's link in the same commit.
     #[dialog_common::test]
-    async fn it_copies_wiring_upward() -> Result<()> {
+    async fn it_keeps_wiring_where_it_is_made() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
@@ -1557,30 +1751,35 @@ mod tests {
             .build()
             .perform(&operator)
             .await?;
+        local.refresh(&operator).await?;
 
-        // local's own link to shared, as local holds it.
         let local_address = Line::Branch(local.clone()).address_entity();
         let link = link_entity(&local_address, &stack.identities()[0]);
-        let revision_of = |link: &Entity| {
+        let own = link_entity(state.entity(), &stack.identities()[1]);
+        let selector = |the: &str, of: &Entity| {
             ArtifactSelector::new()
-                .the("dialog.link/revision".parse().expect("attribute"))
-                .of(link.clone())
+                .the(the.parse().expect("attribute"))
+                .of(of.clone())
         };
-        let from_of = |link: &Entity| {
-            ArtifactSelector::new()
-                .the("dialog.link/from".parse().expect("attribute"))
-                .of(link.clone())
-        };
-        let values = |facts: Vec<Artifact>| facts.into_iter().map(|a| a.is).collect::<Vec<_>>();
-        assert_eq!(
-            values(state.scan(&from_of(&link))),
-            vec![Value::Entity(local_address.clone())],
-            "the top holds local's link with local as its from"
+        assert!(
+            state
+                .scan(&selector("dialog.link/revision", &link))
+                .is_empty(),
+            "the top does not hold local's link"
         );
         assert_eq!(
-            values(state.scan(&revision_of(&link))),
+            state
+                .scan(&selector("dialog.link/to", &own))
+                .into_iter()
+                .map(|a| a.is)
+                .collect::<Vec<_>>(),
+            vec![Value::Entity(stack.identities()[1].clone())],
+            "only its own link to local"
+        );
+        assert_eq!(
+            committed(&local, &operator, "dialog.link/revision", &link).await?,
             vec![Value::Bytes(Head::Tree(shared.revision()).bytes())],
-            "at the head local captured"
+            "local holds its link to shared at the head it saw"
         );
 
         let doc: Entity = "doc:1".parse()?;
@@ -1592,19 +1791,15 @@ mod tests {
                     .is("Notes".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
         local.refresh(&operator).await?;
         assert_eq!(
-            values(state.scan(&revision_of(&link))),
-            vec![Value::Bytes(Head::Tree(shared.revision()).bytes())],
-            "the copy follows the original in the same commit"
-        );
-        assert_eq!(
             committed(&local, &operator, "dialog.link/revision", &link).await?,
-            values(state.scan(&revision_of(&link))),
-            "and the two agree"
+            vec![Value::Bytes(Head::Tree(shared.revision()).bytes())],
+            "local's link follows shared in the same stack commit"
         );
         Ok(())
     }
@@ -1776,12 +1971,13 @@ mod tests {
         Ok(())
     }
 
-    /// A stack transaction builds on the captured heads. When the
-    /// branch moved through another handle, the bottom's publish
-    /// fails the version check before anything above it commits, and
-    /// the same transaction succeeds after a pull.
+    /// A chain staged on a head another handle moved past stages
+    /// fine and fails to publish; the ephemeral share of the same
+    /// transaction is already in place, and re-running the
+    /// transaction after a pull lands the rest on top of the other
+    /// handle's commit.
     #[dialog_common::test]
-    async fn it_refuses_a_stale_write_and_recovers_on_pull() -> Result<()> {
+    async fn it_fails_a_stale_publish_and_recovers_on_pull() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
@@ -1801,11 +1997,12 @@ mod tests {
         let stack = Stack::builder()
             .line(shared.clone())
             .line(state.clone())
-            .link(&shared, name("state"))
+            .link(&shared, name("shared"))
+            .line(Ephemeral::new())
+            .link(&state, name("state"))
             .build()
             .perform(&operator)
             .await?;
-        let state_before = state.revision();
 
         let doc: Entity = "doc:1".parse()?;
         other
@@ -1820,7 +2017,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let write = || {
+        fn write<'a>(stack: &'a Stack, doc: &Entity) -> StackPublish<'a> {
             stack
                 .transaction()
                 .assert(
@@ -1830,25 +2027,27 @@ mod tests {
                 )
                 .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
                 .commit()
-        };
-        let result = write().perform(&operator).await;
+                .publish()
+        }
+        let result = write(&stack, &doc).perform(&operator).await;
         assert!(
             matches!(
                 result,
-                Err(CommitError::Publish(
-                    crate::PublishError::VersionMismatch { .. }
-                ))
+                Err(StackError::Publish {
+                    source: CommitError::Publish(crate::PublishError::VersionMismatch { .. }),
+                    ..
+                })
             ),
             "expected a version mismatch, got {result:?}"
         );
         assert_eq!(
-            state.revision(),
-            state_before,
-            "the bottom failed first, so the line above it never wrote"
+            values::<bool>(&stack, &operator, "ui/selected", &doc).await?,
+            vec![Value::Boolean(true)],
+            "the ephemeral share is in place regardless"
         );
 
         stack.pull(&operator).await?;
-        write().perform(&operator).await?;
+        write(&stack, &doc).perform(&operator).await?;
         shared.refresh(&operator).await?;
         assert_eq!(
             committed(&shared, &operator, "doc/title", &doc).await?,
@@ -1858,19 +2057,90 @@ mod tests {
         assert_eq!(
             committed(&shared, &operator, "doc/author", &doc).await?,
             vec![Value::String("me".into())],
-            "and the retried write lands on top of it"
+            "and the re-run write lands on top of it"
         );
-        assert_ne!(state.revision(), state_before);
         Ok(())
     }
 
-    /// A commit is not a pull. In the chain `shared < local < state`,
-    /// a commit to shared outside the stack leaves the stack behind; a
-    /// stack write that touches only state still succeeds, builds on
-    /// the captured heads, and moves nothing else: local is not
-    /// touched and the stack stays behind until it pulls.
+    /// Commits stage and publish moves heads: after a stack commit the
+    /// branch head is unchanged and the stack reads its staged chain;
+    /// a second commit chains onto it; one publish makes both visible.
     #[dialog_common::test]
-    async fn it_commits_on_captured_heads_without_capturing() -> Result<()> {
+    async fn it_stages_commits_and_publishes_the_chain() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+
+        let stack = Stack::builder()
+            .line(shared.clone())
+            .line(Ephemeral::new())
+            .link(&shared, name("shared"))
+            .build()
+            .perform(&operator)
+            .await?;
+        let published = shared.revision();
+
+        let doc: Entity = "doc:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/author")
+                    .of(doc.clone())
+                    .is("me".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(stack.is_staged());
+        assert!(!stack.behind(), "nothing moved outside the stack");
+        assert_eq!(shared.revision(), published, "the head has not moved");
+        assert_ne!(stack.captured()[0], stack.published()[0]);
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "the stack reads its staged chain"
+        );
+        assert!(
+            committed(&shared, &operator, "doc/title", &doc)
+                .await?
+                .is_empty(),
+            "the branch does not"
+        );
+
+        let heads = stack.publish(&operator).await?;
+        assert!(!stack.is_staged());
+        assert_eq!(heads, stack.published());
+        assert_ne!(shared.revision(), published);
+        assert_eq!(
+            committed(&shared, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())]
+        );
+        assert_eq!(
+            committed(&shared, &operator, "doc/author", &doc).await?,
+            vec![Value::String("me".into())],
+            "one publish made both commits visible"
+        );
+        Ok(())
+    }
+
+    /// A commit is not a pull, and staging never fails for a moved
+    /// head. In the chain `shared < local < state`, a commit to shared
+    /// outside the stack leaves the stack behind; a stack write that
+    /// touches only local stages and publishes fine, and a write to
+    /// shared stages fine but fails to publish, until a pull brings
+    /// the movement in and the write is re-run.
+    #[dialog_common::test]
+    async fn it_stages_on_captured_heads_and_publishes_against_them() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
@@ -1897,7 +2167,7 @@ mod tests {
             .await?;
         // `memory:state` is bound where its link points: local.
         local.refresh(&operator).await?;
-        let captured = stack.captured();
+        let published = stack.published();
         let local_before = local.revision();
 
         let doc: Entity = "doc:1".parse()?;
@@ -1914,18 +2184,20 @@ mod tests {
             .await?;
         assert!(stack.behind());
 
-        // A write routed to local only succeeds on the captured heads.
+        // A write routed to local only stages and publishes on the
+        // heads the stack holds; shared is never touched.
         stack
             .transaction()
             .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert!(stack.behind(), "a commit captures nothing it did not move");
         assert_eq!(
-            stack.captured()[0],
-            captured[0],
-            "shared is still read at the captured head"
+            stack.published()[0],
+            published[0],
+            "shared is still read at the published head"
         );
         assert!(
             values::<String>(&stack, &operator, "doc/title", &doc)
@@ -1936,21 +2208,42 @@ mod tests {
         local.refresh(&operator).await?;
         assert_ne!(local.revision(), local_before, "local took the write");
 
-        // A write to shared itself refuses: shared moved past the
-        // captured revision.
-        let result = stack
-            .transaction()
-            .assert(
-                dialog_query::the!("doc/author")
-                    .of(doc.clone())
-                    .is("me".to_string()),
-            )
-            .commit()
-            .perform(&operator)
-            .await;
+        // A write to shared itself stages, then fails to publish:
+        // shared moved past the head the chain builds on.
+        fn write<'a>(stack: &'a Stack, doc: &Entity) -> StackCommit<'a> {
+            stack
+                .transaction()
+                .assert(
+                    dialog_query::the!("doc/author")
+                        .of(doc.clone())
+                        .is("me".to_string()),
+                )
+                .commit()
+        }
+        write(&stack, &doc).perform(&operator).await?;
+        assert!(stack.is_staged());
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/author", &doc).await?,
+            vec![Value::String("me".into())],
+            "the stack reads its staged chain"
+        );
+        let result = stack.publish(&operator).await;
         assert!(
-            matches!(result, Err(CommitError::Behind { .. })),
-            "expected Behind, got {result:?}"
+            matches!(
+                result,
+                Err(StackError::Publish {
+                    source: CommitError::Publish(crate::PublishError::VersionMismatch { .. }),
+                    ..
+                })
+            ),
+            "expected a version mismatch, got {result:?}"
+        );
+        assert!(!stack.is_staged(), "the stale chain is dropped");
+        assert!(
+            values::<String>(&stack, &operator, "doc/author", &doc)
+                .await?
+                .is_empty(),
+            "and the stack reads its published heads again"
         );
 
         stack.pull(&operator).await?;
@@ -1959,16 +2252,14 @@ mod tests {
             values::<String>(&stack, &operator, "doc/title", &doc).await?,
             vec![Value::String("Notes".into())]
         );
-        stack
-            .transaction()
-            .assert(
-                dialog_query::the!("doc/author")
-                    .of(doc.clone())
-                    .is("me".to_string()),
-            )
-            .commit()
-            .perform(&operator)
-            .await?;
+        write(&stack, &doc).perform(&operator).await?;
+        stack.publish(&operator).await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "doc/author", &doc).await?,
+            vec![Value::String("me".into())],
+            "the re-run write lands on top of the outside commit"
+        );
         Ok(())
     }
 
@@ -2025,6 +2316,7 @@ mod tests {
             .transaction()
             .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         local.refresh(&operator).await?;
@@ -2168,6 +2460,7 @@ mod tests {
             .transaction()
             .assert(dialog_query::the!("ui/cursor").of(doc.clone()).is(3u64))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert_eq!(left.len(), 1);
