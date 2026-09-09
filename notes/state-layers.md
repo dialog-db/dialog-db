@@ -332,8 +332,10 @@ line that moved. Consequences:
   siblings, state's wiring names both local and shared; the top
   always names everything.
 - **Movement enters on pull, leaves on push.** A stack syncs the way
-  a branch does. `stack.pull()` pulls every branch line that tracks
-  an upstream, bottom to top, then captures every live head, so a
+  a branch does. `stack.pull()` re-resolves every branch line's head
+  from storage (a branch moved through another handle is invisible
+  to this one otherwise), pulls every line that tracks an upstream,
+  bottom to top, then captures every live head, so a
   direct commit to one line or a pull on the bottom lands as the
   stack's own instant. `stack.push()` pushes every line with an
   upstream, bottom to top, so a pushed line's wiring never names a
@@ -341,6 +343,16 @@ line that moved. Consequences:
   the live heads) but never pushes, like a branch commit. Reads and
   subscription polls never write: until the pull, the stack is
   behind, not wrong, and `behind()` says so.
+- **A stale write fails first, then recovers on pull.** A stack
+  transaction builds on the heads its handles know. If a branch moved
+  through another handle, the bottom's publish fails its version
+  check before any line above it commits, so nothing is half-written;
+  the same transaction succeeds after `stack.pull()`. If an upper
+  line's publish fails after the bottom committed, the bottom keeps
+  the routed share it received and the capture is not recorded; a
+  retry re-applies the whole batch, which is idempotent on the lines
+  that already hold it. Wiring conflicts that a merge resolves either
+  way are overwritten by the next capture with the actual head.
 - **Stale derivation is a rule.** A line whose link revision differs
   from the enclosed line's current head is behind, and a rule can say
   so, which is the induction watermark generalized to a pair of lines.
