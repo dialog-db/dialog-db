@@ -1008,14 +1008,39 @@ impl Stack {
             + ConditionalSync
             + 'static,
     {
+        // The lines this pass moves: those already moved relative to
+        // the last capture (a pull's live heads), plus each line this
+        // loop commits. A line is touched only when it has something
+        // of its own to write or some line its wiring reaches moved,
+        // so a line the pass never reaches is never asked to commit,
+        // whatever happened to it outside the stack.
+        let previous = self.captured();
+        let mut moved: Vec<bool> = heads
+            .iter()
+            .enumerate()
+            .map(|(index, head)| previous.get(index) != Some(head))
+            .collect();
         for index in 0..self.lines.len() {
             let batch = batches.remove(&index).unwrap_or_default();
+            if batch.is_empty() && !self.reaches_moved(index, &moved) {
+                continue;
+            }
             if let Some(head) = self.refresh_links(index, &heads, batch, env).await? {
+                if heads[index] != head {
+                    moved[index] = true;
+                }
                 heads[index] = head;
             }
         }
         *self.captured.write() = heads.clone();
         Ok(heads)
+    }
+
+    /// Whether any line reachable through `index`'s links moved.
+    fn reaches_moved(&self, index: usize, moved: &[bool]) -> bool {
+        self.links[index]
+            .iter()
+            .any(|link| moved[link.to] || self.reaches_moved(link.to, moved))
     }
 }
 
@@ -1935,6 +1960,69 @@ mod tests {
             .commit()
             .perform(&operator)
             .await?;
+        Ok(())
+    }
+
+    /// A line that moved outside the stack is left alone by a write
+    /// that never reaches it, even when it holds links: in the chain
+    /// `shared < local < state < tab`, local moving outside the stack
+    /// does not stop a write routed only to state.
+    #[dialog_common::test]
+    async fn it_leaves_a_moved_line_alone_when_the_write_misses_it() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let local = repo.branch("main.local").open().perform(&operator).await?;
+        let state = Ephemeral::new();
+
+        shared
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, name("state")))
+            .commit()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let stack = Stack::builder()
+            .line(shared.clone())
+            .line(local.clone())
+            .link(&shared, name("shared"))
+            .line(state.clone())
+            .link(&local, name("local"))
+            .line(Ephemeral::new())
+            .link(&state, name("state"))
+            .build()
+            .perform(&operator)
+            .await?;
+        local.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        local
+            .transaction()
+            .assert(
+                dialog_query::the!("local/note")
+                    .of(doc.clone())
+                    .is("draft".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let local_after = local.revision();
+        assert!(stack.behind());
+
+        stack
+            .transaction()
+            .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
+            .commit()
+            .perform(&operator)
+            .await?;
+        local.refresh(&operator).await?;
+        assert_eq!(local.revision(), local_after, "local was not touched");
+        assert!(stack.behind(), "and the stack is still behind on it");
+        assert_eq!(
+            values::<bool>(&stack, &operator, "ui/selected", &doc).await?,
+            vec![Value::Boolean(true)]
+        );
         Ok(())
     }
 
