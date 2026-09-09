@@ -313,7 +313,7 @@ the stack revision.
 ### Transactions and capture
 
 A stack transaction accumulates instructions as today. At commit,
-the stack first advances to the live heads (induction reads what the
+the stack first captures the live heads (induction reads what the
 write builds on), settles the batch against that view, partitions it
 by each attribute's layer, and commits the lines **bottom to top**.
 Each line's commit folds in its wiring at the heads as they stand
@@ -331,13 +331,16 @@ line that moved. Consequences:
   transitively names the head of every line beneath it. With
   siblings, state's wiring names both local and shared; the top
   always names everything.
-- **External movement is an instant.** A pull on the bottom or a
-  direct commit to one line moves a live head the stack has not
-  captured. The stack is then behind, not wrong: `heads()` differs
-  from `captured()`, and `advance` (a stack commit with nothing to
-  write) captures it. Every stack commit advances, and a stack
-  subscription advances on each poll, so the external change lands
-  as that poll's delta rather than leaking in beneath the hash.
+- **Movement enters on pull, leaves on push.** A stack syncs the way
+  a branch does. `stack.pull()` pulls every branch line that tracks
+  an upstream, bottom to top, then captures every live head, so a
+  direct commit to one line or a pull on the bottom lands as the
+  stack's own instant. `stack.push()` pushes every line with an
+  upstream, bottom to top, so a pushed line's wiring never names a
+  head its upstream lacks. A stack commit captures (a write builds on
+  the live heads) but never pushes, like a branch commit. Reads and
+  subscription polls never write: until the pull, the stack is
+  behind, not wrong, and `behind()` says so.
 - **Stale derivation is a rule.** A line whose link revision differs
   from the enclosed line's current head is behind, and a rule can say
   so, which is the induction watermark generalized to a pair of lines.
@@ -496,9 +499,11 @@ names, read as one composite and written by placement.
 - Reads are pinned: `Stack::query()` reads every line beneath the top
   at its captured head, through a new `Source::Pinned` (a branch
   handle read at a fixed revision, keeping its caches, remote
-  fallback and session store), and the top live. `Stack::advance`
-  captures the live heads; `StackSubscription::poll` advances first,
-  so an external commit lands as a delta. Standalone
+  fallback and session store), and the top live. `Stack::pull` pulls
+  each upstream-tracking line and captures the live heads;
+  `Stack::push` pushes them bottom to top; `StackSubscription::poll`
+  is a pure read, so an external commit lands as a delta on the first
+  poll after a pull. Standalone
   ephemeral lines are first-class in the query layer now (`join` a
   `&Ephemeral`), the query env unions their streams and tombstones
   and resolves their rules, and a subscription pins each one's
@@ -552,10 +557,10 @@ archive, `Stack::open` by hash, `named` and the registry metadata.
   means induction on one stack's commit reads other stacks' lines.
   Either such rules are disallowed on tab layers, or the registry is
   what induction joins. Decide when a rule needs it.
-- **Push-based advance.** A pull is captured on the next stack commit
-  or subscription poll. If a memory cell ever notifies on change, the
-  stack can advance on the notification instead of on poll; the
-  semantics do not change, only the latency.
+- **Who calls `stack.pull()`.** Movement lands only on pull, so
+  something has to pull on a schedule or on a signal. If a memory
+  cell ever notifies on change, that is the signal; the semantics do
+  not change, only the latency.
 - **Layer name convention.** `memory:shared`, `memory:local`,
   `memory:state`, `memory:tab` are used above as a convention only;
   the repository default fact and the placements are what bind them.
