@@ -39,11 +39,15 @@
 //!
 //! plus the enclosed line's address (`dialog.link/repository` and
 //! `dialog.link/branch` for a branch, `dialog.link/ephemeral` for an
-//! ephemeral line). `revision` is refreshed only when the enclosing
-//! line commits for its own reasons: nothing propagates eagerly, so a
-//! diamond costs nothing and no line commits because another moved.
-//! Staleness stays a query: the enclosed line's current head is
-//! readable as metadata.
+//! ephemeral line). A stack commit refreshes `revision` on every line
+//! above a line that moved, bottom to top, so after the commit the
+//! top line's head transitively names the head of every line beneath
+//! it: one hash for the whole composite. A link whose target did not
+//! move is a no-op refresh and mints nothing. Linking is capturing:
+//! a line that should not record another's head does not link it,
+//! and sits beside it under a common encloser instead. Movement that
+//! bypasses the stack, a pull on the bottom or a direct commit to a
+//! line, is not seen until the next stack commit.
 //!
 //! # Identity
 //!
@@ -656,7 +660,8 @@ impl Stack {
 
     /// Commit `batch` to line `index` with its links refreshed to the
     /// heads its targets have now. A line with nothing to write and
-    /// no links is left alone.
+    /// no links is left alone; one whose link facts are already
+    /// current commits as a no-op and keeps its head.
     async fn refresh_links<Env>(
         &self,
         index: usize,
@@ -806,21 +811,19 @@ impl StackCommit<'_> {
             }
         }
 
-        // Bottom to top: every line that has something of its own to
-        // write commits after everything beneath it, refreshing its
-        // links to the heads it now sees. A line with nothing to
-        // write does not commit, so its links stay where they were:
-        // refresh is lazy, and a commit reaching only the bottom
-        // moves nothing above it.
+        // Bottom to top: every line commits after everything beneath
+        // it, writing its own share and its links at the heads it now
+        // sees. A line whose links all point at unmoved heads and
+        // that has nothing of its own to write is a no-op commit and
+        // keeps its head, so the refresh reaches exactly the lines
+        // above a line that moved.
         let mut heads = Vec::with_capacity(stack.lines.len());
         for index in 0..stack.lines.len() {
-            let head = match batches.remove(&index) {
-                Some(batch) if !batch.is_empty() => stack
-                    .refresh_links(index, batch, env)
-                    .await?
-                    .unwrap_or_else(|| stack.lines[index].head()),
-                _ => stack.lines[index].head(),
-            };
+            let batch = batches.remove(&index).unwrap_or_default();
+            let head = stack
+                .refresh_links(index, batch, env)
+                .await?
+                .unwrap_or_else(|| stack.lines[index].head());
             heads.push(head);
         }
         Ok(heads)
@@ -1028,9 +1031,10 @@ mod tests {
     }
 
     /// An enclosing branch records its links as facts with the heads
-    /// it saw, and refreshes them only when it commits itself.
+    /// it saw, and a stack commit that moves the bottom refreshes the
+    /// link on the branch above it in the same commit.
     #[dialog_common::test]
-    async fn it_records_links_and_refreshes_them_lazily() -> Result<()> {
+    async fn it_records_links_and_refreshes_them_when_the_target_moves() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
@@ -1075,8 +1079,10 @@ mod tests {
             "the link carries the target's address"
         );
 
-        // A commit to the bottom alone moves shared but not local's link.
+        // A commit reaching only the bottom moves shared, and local's
+        // link follows in the same stack commit.
         let doc: Entity = "doc:1".parse()?;
+        let before = local.revision();
         stack
             .transaction()
             .assert(
@@ -1090,12 +1096,25 @@ mod tests {
         shared.refresh(&operator).await?;
         local.refresh(&operator).await?;
         assert_ne!(
+            local.revision(),
+            before,
+            "local committed to capture shared"
+        );
+        assert_eq!(
             committed(&local, &operator, "dialog.link/revision", &link).await?,
             vec![Value::Bytes(shared_head(&shared))],
-            "local did not commit, so its link is behind"
+            "local's link names shared's new head"
+        );
+        assert!(
+            committed(&local, &operator, "doc/title", &doc)
+                .await?
+                .is_empty(),
+            "and local holds nothing but its links"
         );
 
-        // A commit that reaches local refreshes its link.
+        // A commit reaching only local leaves shared alone and mints
+        // no refresh anywhere beneath.
+        let shared_before = shared.revision();
         stack
             .transaction()
             .assert(
@@ -1109,19 +1128,66 @@ mod tests {
         shared.refresh(&operator).await?;
         local.refresh(&operator).await?;
         assert_eq!(
-            committed(&local, &operator, "local/note", &doc).await?,
-            vec![Value::String("draft".into())],
-            "the placed attribute lands in local's tree"
-        );
-        assert!(
-            committed(&shared, &operator, "local/note", &doc)
-                .await?
-                .is_empty()
+            shared.revision(),
+            shared_before,
+            "nothing propagates downward"
         );
         assert_eq!(
-            committed(&local, &operator, "dialog.link/revision", &link).await?,
-            vec![Value::Bytes(shared_head(&shared))],
-            "local's own commit refreshed its link"
+            committed(&local, &operator, "local/note", &doc).await?,
+            vec![Value::String("draft".into())]
+        );
+        Ok(())
+    }
+
+    /// Siblings under one encloser: when local does not link shared,
+    /// a commit to shared refreshes only the ephemeral top and local
+    /// never moves. Topology chooses what is captured.
+    #[dialog_common::test]
+    async fn it_refreshes_only_the_lines_above_a_moved_one() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let local = repo.branch("main.local").open().perform(&operator).await?;
+        let state = Ephemeral::new();
+
+        let stack = Stack::builder()
+            .line(shared.clone())
+            .line(local.clone())
+            .line(state.clone())
+            .link(&shared, name("shared"))
+            .link(&local, name("local"))
+            .build()
+            .perform(&operator)
+            .await?;
+        local.refresh(&operator).await?;
+        let local_before = local.revision();
+        let state_before = state.revision();
+        let link = link_entity(&state.entity().clone(), &stack.identities()[0]);
+
+        let doc: Entity = "doc:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        local.refresh(&operator).await?;
+
+        assert_eq!(local.revision(), local_before, "a sibling does not capture");
+        assert_ne!(state.revision(), state_before, "the encloser does");
+        let selector = ArtifactSelector::new()
+            .the("dialog.link/revision".parse()?)
+            .of(link);
+        let seen: Vec<Value> = state.scan(&selector).into_iter().map(|a| a.is).collect();
+        assert_eq!(
+            seen,
+            vec![Value::Bytes(Head::Tree(shared.revision()).bytes())],
+            "the top's link names shared's new head"
         );
         Ok(())
     }

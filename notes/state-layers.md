@@ -99,7 +99,8 @@ The bottom line, linking nothing, has the descriptor `{address}` and
 so the same identity on every replica. The descriptor holds the
 *shape* and nothing that moves: what an encloser last saw is the
 `dialog.link/revision` fact in its tree, keyed by
-`link:blake3({address(from), id(to)})`, refreshed lazily. `from` is
+`link:blake3({address(from), id(to)})`, refreshed eagerly by stack
+commits. `from` is
 an address, not an identity, because the link is part of what defines
 the encloser's identity. The descriptor names the shape; the facts
 name the time.
@@ -139,27 +140,41 @@ derivation is a rule's concern, not engine code. The audience rule
 (below) guarantees a link is resolvable wherever it is readable,
 because a line only ever links lines beneath it.
 
-### Refresh is lazy
+### Refresh is eager, and topology decides what is captured
 
-A link's `revision` records what the enclosing line saw when it last
-committed, and only that line's own commits refresh it. Nothing
-propagates eagerly. This is a deliberate choice against the
-alternative, where a tip moving commits every line that links to it:
+A link's `revision` records the head of the enclosed line as the
+encloser last saw it, and a stack commit refreshes it on every line
+above a line that moved, bottom to top, in the same commit. After a
+stack commit the top line's head therefore transitively names the
+head of every line beneath it: the one hash for the composite. A
+link whose target did not move is a no-op refresh and mints nothing,
+so the refresh reaches exactly the lines above the movement.
 
-- an eager refresh is itself a commit, so it would cascade up every
-  path, and a diamond (state over local and gossip, both over shared) would
-  refresh state twice per shared commit unless propagation were
-  batched in topological order;
-- a refresh on a durable line is a durable commit, so every shared
-  commit would cost a local commit.
+The cost is bounded by the audience rule: a durable line may only
+link durable lines, so ephemeral churn never forces a durable commit,
+and the only thing that ripples into a branch is another branch
+moving. Where even that is unwanted, the topology is the knob, not
+the refresh policy. Linking is capturing, so a line that should not
+record another's head does not link it:
 
-Lazy refresh costs nothing, and staleness stays fully detectable at
-query time through the metadata head. What "the top names the whole
-composite" then means, precisely: the top's revision transitively
-names the heads each layer *saw when it last committed*, which is the
-consistent snapshot a handler acting on a tab instant wants. A
-subscription still pins actual current heads; the two are different
-questions and both stay answerable.
+```
+shared          shared
+  |               \
+local     vs.      state
+  |               /
+state           local
+```
+
+In the chain, local commits whenever shared moves and durably records
+which shared head it was consistent with. In the sibling shape, a
+commit to shared refreshes only state, local never moves, and the
+pairing lives only in the ephemeral top: gone after a restart, which
+is the case where the chain is the right choice.
+
+Movement that bypasses the stack, a pull on the bottom or a direct
+commit to one line, is not seen until the next stack commit; the top
+hash is then stale, not wrong. Capturing that is the open question
+on pulls below.
 
 ### Recovery
 
@@ -449,9 +464,10 @@ names, read as one composite and written by placement.
   target's address (`dialog.link/repository` and `dialog.link/branch`,
   `dialog.link/tree`, or `dialog.link/ephemeral`). `revision` is the
   target's head as the encloser last saw it: written at build and
-  refreshed only when the encloser commits for its own reasons, so a
-  commit reaching only the bottom leaves an upper line's link behind
-  and the next commit reaching the upper line catches it up. The
+  refreshed by every stack commit on each line above a line that
+  moved, so after a stack commit the top line's head names the whole
+  composite. A line that must not capture another sits beside it
+  instead of linking it. The
   `dialog.link/` prefix is carved out of the reserved-attribute gate
   like `dialog.attribute/`.
 - Reads: `Stack::query()` joins every line into one `QueryLayer`;
@@ -489,7 +505,8 @@ archive, `Stack::open` by hash, `named` and the registry metadata.
    the unbound-layer error.~~ Done: increment 3.
 3. ~~`Stack` over `QueryLayer`: the builder with explicit `link`, the
    `build`-time checks, descriptor identities, `dialog.link/*` facts
-   with lazy refresh, `transaction` with bottom-to-top commit.~~
+   refreshed by stack commits, `transaction` with bottom-to-top
+   commit.~~
    Done: increment 4. Still open from this item: descriptor blobs in
    the archive, `Stack::open` by hash, `named`, the registry
    metadata.
