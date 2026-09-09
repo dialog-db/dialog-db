@@ -3882,11 +3882,17 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
 
     // Every live fact is readable, and the revision DAG walks: revision
     // records are data-region facts, so a scoped download keeps them.
+    // Read through the counting env with the tally cleared: the download
+    // must have put these blocks on disk, so the reads may not reach the
+    // remote. Without this the assertion would pass on lazy hydration
+    // alone, which is exactly what the download is supposed to make
+    // unnecessary.
+    scoped_env.reset();
     let facts: Vec<_> = scoped
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .to_owned()
-        .perform(&operator)
+        .perform(&scoped_env)
         .await?
         .collect::<Vec<_>>()
         .await
@@ -3897,8 +3903,13 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
         720,
         "every live fact survives an operational download"
     );
+    assert_eq!(
+        scoped_env.count("fork::Fork"),
+        0,
+        "the facts must read from the local store, not hydrate from the remote"
+    );
 
-    let log = scoped.log(&operator, 100).await?;
+    let log = scoped.log(&scoped_env, 100).await?;
     assert!(
         log.len() >= 6,
         "the revision DAG survives an operational download (got {} entries)",
