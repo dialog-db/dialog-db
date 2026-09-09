@@ -1469,6 +1469,7 @@ dependencies = [
  "hyper-util",
  "ipld-core",
  "md5",
+ "parking_lot",
  "rand 0.8.5",
  "reqwest",
  "s3s",

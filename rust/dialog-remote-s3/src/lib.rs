@@ -45,6 +45,7 @@
 
 mod client;
 mod error;
+pub mod flight;
 pub mod request;
 pub mod s3;
 
