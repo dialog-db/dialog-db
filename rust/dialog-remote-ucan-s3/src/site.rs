@@ -45,7 +45,8 @@ fn read_rejection(status: u16, body: &[u8]) -> S3Error {
     })
 }
 
-use crate::permit_cache::PermitCache;
+use crate::permit_cache::{PermitCache, PermitKey};
+use dialog_remote_s3::flight::Flight;
 
 // Re-export UCAN types for convenience.
 pub use dialog_ucan::{Ucan, UcanInvocation};
@@ -214,15 +215,33 @@ fn now_s() -> u64 {
 /// this site (one `Network`, hence one `Operator`) and are dropped with
 /// it; another operator in the same process has its own site and can
 /// never be served a permit this one redeemed. Clones share the cache.
+///
+/// The site also owns the in-flight redeem [`Flight`]: concurrent
+/// requests for one cacheable object share a single redeem round-trip
+/// instead of each POSTing an invocation for the same permit. Scoped to
+/// the site for the same reason the cache is — a redeem carries this
+/// operator's authorization, and nobody else may ride it.
 #[derive(Debug, Clone, Default)]
 pub struct UcanSite {
     permits: Arc<PermitCache>,
+    redeems: Arc<Flight<PermitKey, Result<Permit, S3Error>>>,
 }
 
 impl UcanSite {
     /// The cache of redeemed GET permits shared by clones of this site.
     pub(crate) fn permits(&self) -> &PermitCache {
         &self.permits
+    }
+
+    /// The permit cache as an owned handle, for futures that outlive
+    /// any one borrow of the site.
+    pub(crate) fn permits_shared(&self) -> Arc<PermitCache> {
+        self.permits.clone()
+    }
+
+    /// The in-flight redeems shared by clones of this site.
+    pub(crate) fn redeems(&self) -> &Flight<PermitKey, Result<Permit, S3Error>> {
+        &self.redeems
     }
 }
 
