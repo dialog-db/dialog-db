@@ -123,7 +123,7 @@ impl<'a> BlobArchive<'a> {
     /// it; a snapshot's archive refuses them.
     fn branch(&self) -> Result<&'a Branch, CommitError> {
         match self.source {
-            SourceRef::Branch(branch) => Ok(branch),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => Ok(branch),
             SourceRef::Snapshot(_) => Err(CommitError::Detached),
         }
     }

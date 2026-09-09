@@ -70,9 +70,19 @@ impl Branch {
     /// [`Identify`](dialog_effects::authority::Identify)) carries both
     /// the profile and operator DIDs.
     pub fn metadata(&self, operator: &Capability<Operator>) -> BranchMetadata {
+        self.metadata_at(operator, self.revision())
+    }
+
+    /// The schema metadata for this branch as if its head were
+    /// `revision`: what a read pinned at a captured revision injects.
+    pub(crate) fn metadata_at(
+        &self,
+        operator: &Capability<Operator>,
+        revision: Option<crate::Revision>,
+    ) -> BranchMetadata {
         let replica = Replica::new(operator.profile().clone(), self.of().clone());
         let branch = BranchConcept::new(&replica, self.name());
-        let revision = self.revision().map(|revision| {
+        let revision = revision.map(|revision| {
             let tree_bytes: &[u8] = revision.tree.hash();
             BranchRevision {
                 this: branch.this.clone(),

@@ -78,6 +78,18 @@ entity rather than a fact on the enclosed line because a composite
 read unions every tree: local and gossip both link shared, at
 different revisions, and only a link entity keeps the two apart.
 
+**Wiring lifts by copy.** An enclosing line also holds, verbatim, every
+link fact each line it links holds: the same link entities, with
+`from` still naming the line that made the link. So the top line
+carries the whole stack's wiring, every edge is queryable from it
+alone, and an opener needs no recursion to learn the shape. The copy
+is refreshed with the original: commits go bottom to top, so a line
+copies what its enclosed lines hold *after* the same stack commit,
+and every captured revision of a given line agrees across the DAG,
+both arms of a diamond included. Lifted links are facts, not
+descriptor entries: the descriptor stays the direct shape, and
+`id(local)` already covers `id(shared)`.
+
 ### Two identities per line, and the descriptor blob
 
 A line has an **address**, where its head lives: repository DID plus
@@ -301,23 +313,31 @@ the stack revision.
 ### Transactions and capture
 
 A stack transaction accumulates instructions as today. At commit,
-after induction has settled the batch against the composite view, the
-batch is partitioned by each attribute's layer, and the lines commit
-**bottom to top**, in a topological order of the links touched. Each
-enclosing line's commit folds in a replace of `dialog.link/revision`
-on each of its links, naming the enclosed heads as they stand after
-their own commits. Only enclosing lines pay this: one small replace
-per link per commit, recorded in that line's history, and only when
-that line commits for its own reasons. Consequences:
+the stack first advances to the live heads (induction reads what the
+write builds on), settles the batch against that view, partitions it
+by each attribute's layer, and commits the lines **bottom to top**.
+Each line's commit folds in its wiring at the heads as they stand
+after the lines beneath it committed. A line with nothing of its own
+to write and wiring that already names the current heads is a no-op
+and keeps its head, so the refresh reaches exactly the lines above a
+line that moved. Consequences:
 
-- **Consistency without atomicity.** A reader of the tab line knows,
-  transitively, which shared revision that state was computed
-  against, and a handler acting on a tab instant reads shared state
-  *at that revision* rather than at "now".
-- **One identity.** The top line's revision transitively names the
-  heads each layer saw when it last committed. `stack.revision()` is
-  that. With siblings, the first line whose links name both local and
-  gossip is state; the top always names everything.
+- **Reads are pinned.** A stack is read at its top's head: every line
+  beneath the top is read at the revision the wiring captured, not
+  at its live head, so what a read sees is exactly what the top's
+  hash names. A branch is read pinned through its own handle (caches,
+  remote fallback, session store intact), not through a snapshot.
+- **One identity.** After a stack commit the top line's head
+  transitively names the head of every line beneath it. With
+  siblings, state's wiring names both local and shared; the top
+  always names everything.
+- **External movement is an instant.** A pull on the bottom or a
+  direct commit to one line moves a live head the stack has not
+  captured. The stack is then behind, not wrong: `heads()` differs
+  from `captured()`, and `advance` (a stack commit with nothing to
+  write) captures it. Every stack commit advances, and a stack
+  subscription advances on each poll, so the external change lands
+  as that poll's delta rather than leaking in beneath the hash.
 - **Stale derivation is a rule.** A line whose link revision differs
   from the enclosed line's current head is behind, and a rule can say
   so, which is the induction watermark generalized to a pair of lines.
@@ -457,6 +477,9 @@ names, read as one composite and written by placement.
   the ephemeral store's nonce entity). The bottom's identity is the
   same in every stack that holds it; renaming or re-linking changes
   only the lines above.
+- Wiring lifts by copy: each line also holds every link fact its
+  linked lines hold, verbatim, refreshed in the same bottom-to-top
+  commit. The top holds the whole stack's wiring.
 - Links are facts held by the enclosing line: `dialog.link/{from, to,
   name, revision}` on `link:<base58(blake3(dagcbor{from, to}))>`
   with `from` the encloser's address entity and `to` the enclosed
@@ -470,8 +493,12 @@ names, read as one composite and written by placement.
   instead of linking it. The
   `dialog.link/` prefix is carved out of the reserved-attribute gate
   like `dialog.attribute/`.
-- Reads: `Stack::query()` joins every line into one `QueryLayer`;
-  `select` and `subscribe` work unchanged over it. Standalone
+- Reads are pinned: `Stack::query()` reads every line beneath the top
+  at its captured head, through a new `Source::Pinned` (a branch
+  handle read at a fixed revision, keeping its caches, remote
+  fallback and session store), and the top live. `Stack::advance`
+  captures the live heads; `StackSubscription::poll` advances first,
+  so an external commit lands as a delta. Standalone
   ephemeral lines are first-class in the query layer now (`join` a
   `&Ephemeral`), the query env unions their streams and tombstones
   and resolves their rules, and a subscription pins each one's
@@ -525,10 +552,10 @@ archive, `Stack::open` by hash, `named` and the registry metadata.
   means induction on one stack's commit reads other stacks' lines.
   Either such rules are disallowed on tab layers, or the registry is
   what induction joins. Decide when a rule needs it.
-- **Capture on the bottom line's pull.** A pull moves the shared head
-  without any upper line committing, so upper captures are briefly
-  behind. That is the stale-derivation signal working as intended,
-  but the first read after a pull should probably re-capture eagerly.
+- **Push-based advance.** A pull is captured on the next stack commit
+  or subscription poll. If a memory cell ever notifies on change, the
+  stack can advance on the notification instead of on poll; the
+  semantics do not change, only the latency.
 - **Layer name convention.** `memory:shared`, `memory:local`,
   `memory:state`, `memory:tab` are used above as a convention only;
   the repository default fact and the placements are what bind them.
