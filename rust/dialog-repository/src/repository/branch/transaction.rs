@@ -284,65 +284,6 @@ impl TransactionCommit<&Snapshot> {
     }
 }
 
-/// Commit an already-settled batch to `source`'s tree: no induction,
-/// no routing. Advances the induction watermark and carries the
-/// trigger footprint forward, exactly as a transaction commit does
-/// after its own induction. A [`Stack`](crate::Stack) commits each
-/// line's routed share through here after inducing once over the
-/// composite.
-pub(crate) async fn commit_settled<Env>(
-    source: SourceRef<'_>,
-    changes: Changes,
-    allow_empty: bool,
-    canonicalize: bool,
-    env: &Env,
-) -> Result<Revision, CommitError>
-where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Import>
-        + Provider<Resolve>
-        + Provider<Publish>
-        + Provider<Identify>
-        + Provider<Attest>
-        + Provider<Fork<RemoteSite, Get>>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
-    let previous = source.revision();
-    let touches_rules = touches_rules(&changes);
-
-    let mut commit = Commit::new(source, changes.into_stream());
-    if allow_empty {
-        commit = commit.allow_empty();
-    }
-    if canonicalize {
-        commit = commit.canonicalize();
-    }
-    let revision = Box::pin(commit.perform(env)).await?;
-
-    // Advance the induction watermark: rules have now evaluated
-    // through this revision (induction ran over the commit's delta
-    // plus any lag, and the settled batch is what `revision`
-    // holds). A raced publish here at worst regresses the
-    // watermark, which re-induces a covered span — idempotent
-    // under the novelty check. A snapshot keeps no watermark: its
-    // head moves only through commits like this one, every one of
-    // which induces, so it is always at the head.
-    if let Some(branch) = source.branch() {
-        let cell = branch.induction_cell();
-        if cell.content().as_ref() != Some(&revision) {
-            cell.publish(revision.clone()).perform(env).await?;
-        }
-    }
-
-    if !touches_rules {
-        carry_footprint(&source.rule_cache(), previous.as_ref(), &revision);
-    }
-    Ok(revision)
-}
-
 /// Whether a settled change batch touches the trigger structures, i.e.
 /// asserts or retracts `dialog.rule/on` or `dialog.rule/reads` facts.
 pub(crate) fn touches_rules(changes: &Changes) -> bool {

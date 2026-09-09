@@ -78,17 +78,12 @@ entity rather than a fact on the enclosed line because a composite
 read unions every tree: local and gossip both link shared, at
 different revisions, and only a link entity keeps the two apart.
 
-**Wiring lifts by copy.** An enclosing line also holds, verbatim, every
-link fact each line it links holds: the same link entities, with
-`from` still naming the line that made the link. So the top line
-carries the whole stack's wiring, every edge is queryable from it
-alone, and an opener needs no recursion to learn the shape. The copy
-is refreshed with the original: commits go bottom to top, so a line
-copies what its enclosed lines hold *after* the same stack commit,
-and every captured revision of a given line agrees across the DAG,
-both arms of a diamond included. Lifted links are facts, not
-descriptor entries: the descriptor stays the direct shape, and
-`id(local)` already covers `id(shared)`.
+**Wiring stays where it is made.** Each line holds only its own links.
+The whole topology is still one composite read away, since every
+line is in the composite, and an opener walks direct links from the
+top. Copying every link fact upward was considered and dropped: it
+amplified writes, and under placement-guided reads the copies would
+have needed their own exemption from routing.
 
 ### Two identities per line, and the descriptor blob
 
@@ -312,52 +307,52 @@ the stack revision.
 
 ### Transactions and capture
 
-A stack holds a **captured head per line**, the way a branch handle
-holds its head, and everything it does builds on them. A transaction
-accumulates instructions as today. At commit, induction reads the
-captured heads, the settled batch is partitioned by each attribute's
-layer, and the lines commit **bottom to top**, each on top of its
-captured revision, folding in its wiring at the heads as they stand
-after the lines beneath it committed. A line with nothing of its own
-to write and wiring that already names those heads is a no-op and
-keeps its head, so the refresh reaches exactly the lines above a line
-the commit moved. A commit is not a pull: it captures nothing it did
-not move. Consequences:
+A stack holds, per line, the head it last **published** or pulled and,
+for branch lines, a **staged** chain of commits not yet published,
+mirroring a branch transaction after #488: `commit` stages, `publish`
+moves heads. A transaction accumulates instructions as today. At
+commit, induction reads the heads the stack reads at (staged tips over
+published heads), the settled batch is partitioned by each attribute's
+layer, and the lines stage **bottom to top**: each branch line extends
+its staged chain (or opens one on its published head) with its own
+share and its wiring at the heads as they stand once the lines beneath
+it staged; an ephemeral line is written directly, having nothing to
+publish. A commit never moves a branch head and never fails because
+one moved. `publish` then moves every staged line's head to its chain
+tip, bottom to top, each with one CAS against the version the stack
+last published or pulled. `commit().publish()` does both.
+Consequences:
 
 - **Reads are pinned.** A stack is read at its top's head: every line
-  beneath the top is read at the revision the wiring captured, not
+  beneath the top is read at its staged tip or published head, not
   at its live head, so what a read sees is exactly what the top's
   hash names. A branch is read pinned through its own handle (caches,
   remote fallback, session store intact), not through a snapshot.
-- **A moved line refuses a write.** A line whose branch moved past
-  its captured revision, through this handle or another, fails the
-  write (`CommitError::Behind`, or the publish's `VersionMismatch`
-  when storage moved under a handle that did not notice) before any
-  line above it commits. Pull to reconcile, then retry. A write that
-  does not touch the moved line is unaffected.
-- **One identity.** After a stack commit the top line's head
-  transitively names the head of every line beneath it. With
-  siblings, state's wiring names both local and shared; the top
-  always names everything.
-- **Movement enters on pull, leaves on push.** A stack syncs the way
-  a branch does. `stack.pull()` re-resolves every branch line's head
-  from storage (a branch moved through another handle is invisible
-  to this one otherwise), pulls every line that tracks an upstream,
-  bottom to top, then captures every live head, so a
-  direct commit to one line or a pull on the bottom lands as the
-  stack's own instant. `stack.push()` pushes every line with an
-  upstream, bottom to top, so a pushed line's wiring never names a
-  head its upstream lacks. A stack commit captures (a write builds on
-  the live heads) but never pushes, like a branch commit. Reads and
-  subscription polls never write: until the pull, the stack is
-  behind, not wrong, and `behind()` says so.
-- **Partial failure.** If an upper line's write fails after the
-  bottom committed, the bottom keeps the routed share it received and
-  the captured heads do not move; a retry re-applies the whole batch,
-  which is idempotent on the lines that already hold it. A pull that
-  fails part way likewise leaves the captured heads where they were:
-  lines beneath the failure may have reconciled with their upstreams,
-  the stack does not read at them until a pull completes, and a later
+- **A moved line fails to publish, never to commit.** If a line's
+  head moved outside the stack, through this handle or another, its
+  chain fails the publish CAS. That chain and every chain above it
+  are stale wholesale and dropped; lines beneath stay published. The
+  recovery is a pull and a re-run of the transactions, never a rewrite
+  of staged versions, exactly as for a branch batch.
+- **Ephemeral shares land at stage time.** A transaction's ephemeral
+  share is applied when the transaction stages, so if a lower line's
+  publish later fails, the ephemeral lines are ahead until the re-run,
+  which re-applies the same facts. An ephemeral line has no write API
+  outside the stack, so this is the only way it gets ahead.
+- **Movement enters on pull, leaves on push.** `stack.pull()`
+  re-resolves every branch line's head from storage, pulls every line
+  that tracks an upstream, bottom to top, drops everything staged,
+  takes the live heads as published, and stages and publishes the
+  wiring of every line above a line that moved. `stack.push()` pushes
+  every line with an upstream, bottom to top, so a pushed line's
+  wiring never names a head its upstream lacks; it pushes published
+  heads only. Reads and subscription polls never write: until the
+  pull, the stack is behind, not wrong, and `behind()` says so.
+- **Partial failure.** A publish that fails at line `i` leaves lines
+  beneath it published and drops the chains from `i` up. A pull that
+  fails part way leaves the published heads where they were: lines
+  beneath the failure may have reconciled with their upstreams, the
+  stack does not read at them until a pull completes, and a later
   push of those lines may find nothing to push. Wiring conflicts that
   a merge resolves either way are overwritten by the next capture
   with the actual head.
@@ -500,9 +495,7 @@ names, read as one composite and written by placement.
   the ephemeral store's nonce entity). The bottom's identity is the
   same in every stack that holds it; renaming or re-linking changes
   only the lines above.
-- Wiring lifts by copy: each line also holds every link fact its
-  linked lines hold, verbatim, refreshed in the same bottom-to-top
-  commit. The top holds the whole stack's wiring.
+- Each line holds only its own link facts.
 - Links are facts held by the enclosing line: `dialog.link/{from, to,
   name, revision}` on `link:<base58(blake3(dagcbor{from, to}))>`
   with `from` the encloser's address entity and `to` the enclosed
@@ -517,31 +510,30 @@ names, read as one composite and written by placement.
   `dialog.link/` prefix is carved out of the reserved-attribute gate
   like `dialog.attribute/`.
 - Reads are pinned: `Stack::query()` reads every line beneath the top
-  at its captured head, through a new `Source::Pinned` (a branch
-  handle read at a fixed revision, keeping its caches, remote
-  fallback and session store), and the top live. `Stack::pull` pulls
-  each upstream-tracking line and captures the live heads;
+  at its staged tip or published head, through a new `Source::Pinned`
+  (a branch handle read at a fixed revision, keeping its caches,
+  remote fallback and session store), and the top live. `Stack::pull`
+  pulls each upstream-tracking line and captures the live heads;
   `Stack::push` pushes them bottom to top; `StackSubscription::poll`
   is a pure read, so an external commit lands as a delta on the first
-  poll after a pull. Standalone
-  ephemeral lines are first-class in the query layer now (`join` a
-  `&Ephemeral`), the query env unions their streams and tombstones
-  and resolves their rules, and a subscription pins each one's
-  sequence beside the tree pins, maintaining from the instant ring
-  exactly as it does for a line's session store.
-- Writes: `Stack::transaction()` induces once over the whole
-  composite (`induce` now takes the view separately from the
-  dispatching line, which stays the bottom branch: only the bottom's
-  committed rules fire in a stack transaction, and an upper branch's
-  own rules are a gap this increment leaves open), resolves
-  placements from the bottom, routes each instruction to the lines
-  its layer is linked under (an undeclared or default-layer attribute
-  goes to the bottom; a name no link binds falls back to the bottom's
-  own bindings, so a one-line stack routes exactly as the branch
-  would; anything else is `UnboundLayer`), then commits bottom to
-  top through `commit_settled`, the settled half of a transaction
-  commit, refreshing each committing line's links. A stack whose
-  bottom is not a branch is read-only (`Detached`).
+  poll after a pull. Standalone- Writes stage: `Stack::transaction().commit()` induces once over the
+  composite at the heads the stack reads at (`induce` takes the view
+  separately from the dispatching line, which stays the bottom
+  branch: only the bottom's committed rules fire in a stack
+  transaction, and an upper branch's own rules are a gap this
+  increment leaves open), resolves placements from the bottom, routes
+  each instruction to the lines its layer is linked under (an
+  undeclared or default-layer attribute goes to the bottom; a name no
+  link binds falls back to a tree binding on the bottom; a session
+  binding or nothing is `UnboundLayer`), then stages the lines bottom
+  to top: a branch line extends a per-line `TransactionBatch` opened
+  on its published head with a checkpoint at the version captured
+  then; an ephemeral line is written directly. `Stack::publish`
+  publishes the chains bottom to top; `commit().publish()` is the
+  one-shot form. A stack whose bottom is not a branch is read-only
+  (`Detached`).
+- `Ephemeral` has no public write API: it is written through a stack
+  (or, for a line's session store, through that line's transaction).
 
 Carries over unchanged from increment 1: composite subscriptions,
 `Changes::cancel` and `Changes::subtract`, partition after induction,

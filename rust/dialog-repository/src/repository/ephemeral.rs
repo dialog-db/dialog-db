@@ -286,7 +286,8 @@ impl Ephemeral {
     /// Assert a statement: its asserts and replaces land in the store
     /// with the tree's semantics, its retracts remove or tombstone.
     /// Chainable; use [`apply`](Self::apply) to get the instant minted.
-    pub fn assert<S: Statement>(&self, statement: S) -> &Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn assert<S: Statement>(&self, statement: S) -> &Self {
         let mut changes = Changes::new();
         statement.assert(&mut changes);
         self.apply(changes);
@@ -296,7 +297,8 @@ impl Ephemeral {
     /// Retract a statement: each of its facts is removed from the
     /// store if held here, and otherwise hidden beneath by a
     /// tombstone. Chainable.
-    pub fn retract<S: Statement>(&self, statement: S) -> &Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn retract<S: Statement>(&self, statement: S) -> &Self {
         let mut changes = Changes::new();
         statement.retract(&mut changes);
         self.apply(changes);
@@ -304,7 +306,7 @@ impl Ephemeral {
     }
 
     /// Land a batch of instructions as one instant.
-    pub fn apply(&self, changes: Changes) -> Option<Instant> {
+    pub(crate) fn apply(&self, changes: Changes) -> Option<Instant> {
         if changes.is_empty() {
             return None;
         }
@@ -320,7 +322,8 @@ impl Ephemeral {
     /// `keep`, outright rather than by tombstoning. The
     /// garbage-collection primitive for per-client facts keyed by
     /// short-lived entities. Returns whether anything was dropped.
-    pub fn retain_entities<F: FnMut(&Entity) -> bool>(&self, mut keep: F) -> bool {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn retain_entities<F: FnMut(&Entity) -> bool>(&self, mut keep: F) -> bool {
         let mut state = self.state.write();
         let mut delta = Delta::default();
         let dropped: Vec<Artifact> = state
@@ -349,7 +352,8 @@ impl Ephemeral {
     }
 
     /// Drop every fact and tombstone. Chainable.
-    pub fn clear(&self) -> &Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn clear(&self) -> &Self {
         let mut state = self.state.write();
         let mut delta = Delta::default();
         let held: Vec<Artifact> = state.facts.values().cloned().collect();
