@@ -312,21 +312,29 @@ the stack revision.
 
 ### Transactions and capture
 
-A stack transaction accumulates instructions as today. At commit,
-the stack first captures the live heads (induction reads what the
-write builds on), settles the batch against that view, partitions it
-by each attribute's layer, and commits the lines **bottom to top**.
-Each line's commit folds in its wiring at the heads as they stand
+A stack holds a **captured head per line**, the way a branch handle
+holds its head, and everything it does builds on them. A transaction
+accumulates instructions as today. At commit, induction reads the
+captured heads, the settled batch is partitioned by each attribute's
+layer, and the lines commit **bottom to top**, each on top of its
+captured revision, folding in its wiring at the heads as they stand
 after the lines beneath it committed. A line with nothing of its own
-to write and wiring that already names the current heads is a no-op
-and keeps its head, so the refresh reaches exactly the lines above a
-line that moved. Consequences:
+to write and wiring that already names those heads is a no-op and
+keeps its head, so the refresh reaches exactly the lines above a line
+the commit moved. A commit is not a pull: it captures nothing it did
+not move. Consequences:
 
 - **Reads are pinned.** A stack is read at its top's head: every line
   beneath the top is read at the revision the wiring captured, not
   at its live head, so what a read sees is exactly what the top's
   hash names. A branch is read pinned through its own handle (caches,
   remote fallback, session store intact), not through a snapshot.
+- **A moved line refuses a write.** A line whose branch moved past
+  its captured revision, through this handle or another, fails the
+  write (`CommitError::Behind`, or the publish's `VersionMismatch`
+  when storage moved under a handle that did not notice) before any
+  line above it commits. Pull to reconcile, then retry. A write that
+  does not touch the moved line is unaffected.
 - **One identity.** After a stack commit the top line's head
   transitively names the head of every line beneath it. With
   siblings, state's wiring names both local and shared; the top
@@ -343,16 +351,16 @@ line that moved. Consequences:
   the live heads) but never pushes, like a branch commit. Reads and
   subscription polls never write: until the pull, the stack is
   behind, not wrong, and `behind()` says so.
-- **A stale write fails first, then recovers on pull.** A stack
-  transaction builds on the heads its handles know. If a branch moved
-  through another handle, the bottom's publish fails its version
-  check before any line above it commits, so nothing is half-written;
-  the same transaction succeeds after `stack.pull()`. If an upper
-  line's publish fails after the bottom committed, the bottom keeps
-  the routed share it received and the capture is not recorded; a
-  retry re-applies the whole batch, which is idempotent on the lines
-  that already hold it. Wiring conflicts that a merge resolves either
-  way are overwritten by the next capture with the actual head.
+- **Partial failure.** If an upper line's write fails after the
+  bottom committed, the bottom keeps the routed share it received and
+  the captured heads do not move; a retry re-applies the whole batch,
+  which is idempotent on the lines that already hold it. A pull that
+  fails part way likewise leaves the captured heads where they were:
+  lines beneath the failure may have reconciled with their upstreams,
+  the stack does not read at them until a pull completes, and a later
+  push of those lines may find nothing to push. Wiring conflicts that
+  a merge resolves either way are overwritten by the next capture
+  with the actual head.
 - **Stale derivation is a rule.** A line whose link revision differs
   from the enclosed line's current head is behind, and a rule can say
   so, which is the induction watermark generalized to a pair of lines.

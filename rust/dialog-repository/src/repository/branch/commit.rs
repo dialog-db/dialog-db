@@ -157,7 +157,19 @@ where
             + 'static,
     {
         match self.source {
-            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => {
+            SourceRef::Branch(branch) => self.perform_on_branch(branch, env).await,
+            // A pinned base is a stack's captured revision: the commit
+            // builds on it exactly as a branch commit builds on its
+            // handle's head, so the handle must still be there. A
+            // handle that moved past it is a line the stack has not
+            // pulled; storage that moved past it fails the publish CAS
+            // below like any stale write.
+            SourceRef::Pinned(branch, pinned) => {
+                if branch.revision().as_ref() != pinned {
+                    return Err(CommitError::Behind {
+                        branch: branch.name().to_string(),
+                    });
+                }
                 self.perform_on_branch(branch, env).await
             }
             SourceRef::Snapshot(snapshot) => self.perform_on_snapshot(snapshot, env).await,

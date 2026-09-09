@@ -740,10 +740,10 @@ where
     use dialog_common::Blake3Hash as NodeHash;
     use dialog_search_tree::{Change as TreeChange, ContentAddressedStorage};
 
-    let SourceRef::Branch(branch) = source else {
+    let Some(branch) = source.branch() else {
         return Ok(Vec::new());
     };
-    let Some(head) = branch.revision() else {
+    let Some(head) = source.revision() else {
         return Ok(Vec::new());
     };
     let cell = branch.induction_cell();

@@ -274,7 +274,7 @@ where
     // under the novelty check. A snapshot keeps no watermark: its
     // head moves only through commits like this one, every one of
     // which induces, so it is always at the head.
-    if let SourceRef::Branch(branch) = source {
+    if let Some(branch) = source.branch() {
         let cell = branch.induction_cell();
         if cell.content().as_ref() != Some(&revision) {
             cell.publish(revision.clone()).perform(env).await?;
