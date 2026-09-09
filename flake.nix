@@ -295,8 +295,8 @@
           "soak:sync" = {
             description = "Sync/join cost sweep over simulated networks, gated against soak/baseline";
             command = ''
-              OUT_DIR=target/soak-current scripts/soak.sh
-              scripts/soak-compare.py soak/baseline target/soak-current
+              cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current
+              cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
             '';
           };
 

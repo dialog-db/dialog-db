@@ -2,34 +2,50 @@
 
 //! # dialog-soak
 //!
-//! Runs the sync/join soak scenario over a simulated network and prints a
-//! JSON report (stdout) plus a human-readable table (stderr).
+//! The sync/join soak CLI.
 //!
 //! ```text
-//! cargo run -p dialog-soak --release -- --network mobile
-//! cargo run -p dialog-soak --release -- --network custom \
-//!     --latency-ms 120 --auth-ms 200 --bandwidth-mbps 8
-//! DIALOG_TREE_FANOUT_N=5 cargo run -p dialog-soak --release -- --network mobile
+//! soak run --network mobile          # one scenario run (JSON to stdout)
+//! soak sweep --out-dir target/soak   # profiles x repeats, median reports
+//! soak compare soak/baseline target/soak   # regression gate
 //! ```
 //!
-//! By default the harness runs under tokio's paused test clock: simulated
+//! `run` executes under tokio's paused test clock by default: simulated
 //! delays complete instantly while virtual time advances by exactly the
 //! modeled amount, so a run over a 300 ms link finishes in real seconds
 //! and reports deterministic modeled times. `--real-time` opts into real
 //! sleeps for validation.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use dialog_remote_fs::simulation::NetworkShape;
-use dialog_soak::{JoinScenario, run_join};
+use dialog_soak::{JoinScenario, SweepConfig, compare_dirs, run_join, sweep};
 
 /// Sync/join soak harness over a simulated network.
 #[derive(Debug, Parser)]
 #[command(name = "soak", version, about)]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run the join scenario once and print its JSON report to stdout.
+    Run(RunArgs),
+    /// Run the scenario across network profiles, keeping each
+    /// configuration's median run as its report.
+    Sweep(SweepArgs),
+    /// Compare two sweep directories and fail on regressions.
+    Compare(CompareArgs),
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
     /// Network preset: none, localhost, broadband, mobile, intercontinental,
     /// or custom (with --latency-ms/--auth-ms/--bandwidth-mbps).
     #[arg(long, default_value = "broadband")]
@@ -75,8 +91,56 @@ struct Cli {
     json_only: bool,
 }
 
+#[derive(Debug, Args)]
+struct SweepArgs {
+    /// Directory the per-configuration reports are written into.
+    #[arg(long, default_value = "target/soak")]
+    out_dir: PathBuf,
+
+    /// Entities to seed per run.
+    #[arg(long, default_value_t = 4000)]
+    entities: usize,
+
+    /// Commits to split the seed into.
+    #[arg(long, default_value_t = 32)]
+    commits: usize,
+
+    /// Runs per configuration; the median by lazy-join time is kept.
+    #[arg(long, default_value_t = 3)]
+    repeats: usize,
+
+    /// Network profiles to sweep. `none` runs unshaped: its request
+    /// counts are deterministic and the regression gate holds them tight.
+    #[arg(long, value_delimiter = ',', default_values_t = [
+        "none".to_string(),
+        "localhost".to_string(),
+        "broadband".to_string(),
+        "mobile".to_string(),
+        "intercontinental".to_string(),
+    ])]
+    networks: Vec<String>,
+
+    /// Tree branching factors to sweep (`DIALOG_TREE_FANOUT_N` per child
+    /// process); empty sweeps only the default.
+    #[arg(long, value_delimiter = ',')]
+    fanouts: Vec<u8>,
+}
+
+#[derive(Debug, Args)]
+struct CompareArgs {
+    /// The baseline sweep directory.
+    baseline: PathBuf,
+
+    /// The new sweep directory to gate.
+    new: PathBuf,
+
+    /// Percent growth in a total that counts as a regression.
+    #[arg(long, default_value_t = 10.0)]
+    threshold: f64,
+}
+
 /// A named preset link model.
-fn preset(name: &str, cli: &Cli) -> Result<(Option<NetworkShape>, String)> {
+fn preset(name: &str, run: &RunArgs) -> Result<(Option<NetworkShape>, String)> {
     let shape = |latency_ms: f64, auth_ms: f64, bandwidth_mbps: f64| {
         Some(NetworkShape {
             latency: Duration::from_secs_f64(latency_ms / 1000.0),
@@ -95,7 +159,7 @@ fn preset(name: &str, cli: &Cli) -> Result<(Option<NetworkShape>, String)> {
         "mobile" => shape(80.0, 120.0, 20.0),
         // Cross-ocean or degraded link.
         "intercontinental" => shape(250.0, 250.0, 50.0),
-        "custom" => shape(cli.latency_ms, cli.auth_ms, cli.bandwidth_mbps),
+        "custom" => shape(run.latency_ms, run.auth_ms, run.bandwidth_mbps),
         other => anyhow::bail!(
             "unknown network {other:?} (use none, localhost, broadband, mobile, \
              intercontinental, or custom)"
@@ -104,31 +168,72 @@ fn preset(name: &str, cli: &Cli) -> Result<(Option<NetworkShape>, String)> {
     Ok((network, name.to_string()))
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let (network, network_label) = preset(&cli.network, &cli)?;
+fn run(args: RunArgs) -> Result<()> {
+    let (network, network_label) = preset(&args.network, &args)?;
     let scenario = JoinScenario {
-        entities: cli.entities,
-        commits: cli.commits,
-        members: cli.members,
+        entities: args.entities,
+        commits: args.commits,
+        members: args.members,
         network,
         network_label,
-        vault_dir: cli.vault_dir.clone().unwrap_or_else(std::env::temp_dir),
+        vault_dir: args.vault_dir.clone().unwrap_or_else(std::env::temp_dir),
     };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let report = runtime.block_on(async {
-        if !cli.real_time {
+        if !args.real_time {
             tokio::time::pause();
         }
         run_join(scenario).await
     })?;
 
-    if !cli.json_only {
+    if !args.json_only {
         eprintln!("{}", report.table());
     }
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+fn main() -> Result<ExitCode> {
+    match Cli::parse().command {
+        Command::Run(args) => {
+            run(args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Sweep(args) => {
+            let table = sweep(&SweepConfig {
+                out_dir: args.out_dir.clone(),
+                entities: args.entities,
+                commits: args.commits,
+                repeats: args.repeats,
+                networks: args.networks,
+                fanouts: args.fanouts,
+            })?;
+            eprintln!("reports written to {}", args.out_dir.display());
+            eprintln!("{table}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Compare(args) => {
+            let comparison = compare_dirs(&args.baseline, &args.new, args.threshold)?;
+            for line in &comparison.summary {
+                println!("{line}");
+            }
+            if comparison.passed() {
+                println!("\nno regressions");
+                Ok(ExitCode::SUCCESS)
+            } else {
+                println!(
+                    "\n{} regression(s) over {:.0}% threshold:",
+                    comparison.regressions.len(),
+                    args.threshold
+                );
+                for line in &comparison.regressions {
+                    println!("  {line}");
+                }
+                Ok(ExitCode::FAILURE)
+            }
+        }
+    }
 }

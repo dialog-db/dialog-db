@@ -23,8 +23,11 @@ and repeatable.
   real application join (tonk's space join): `pull` (adopt the head),
   `probe` (the validation point-reads), `roster` (membership selects),
   `claim` (commit + push the joiner's facts), `render` (first content
-  query), `entity` (open one item), `requery` (warm re-read), and
-  `download` (full materialization, on a second fresh client).
+  query), `entity` (open one item), `requery` (warm re-read), `concept`
+  and `filtered` (the landing page as the query engine runs it — a
+  five-attribute concept join on a fresh cold client, balanced and
+  status-pinned), and `download` (full materialization, on another fresh
+  client).
 - The `Fs` transport meters every remote effect (`dialog_remote_fs::simulation`)
   and, when a `NetworkShape` is configured, delays each one by its modeled
   cost: per-request **auth latency** (the per-object access-service redeem),
@@ -40,14 +43,14 @@ and repeatable.
 
 ```sh
 # One run, one profile
-cargo run -p dialog-soak --release -- --network mobile
+cargo run -p dialog-soak --release -- run --network mobile
 
 # Custom link
-cargo run -p dialog-soak --release -- --network custom \
+cargo run -p dialog-soak --release -- run --network custom \
     --latency-ms 120 --auth-ms 200 --bandwidth-mbps 8
 
 # Sweep the tree's branching factor (fanout 2^5 = 32 vs 2^8 = 256)
-DIALOG_TREE_FANOUT_N=5 cargo run -p dialog-soak --release -- --network mobile
+DIALOG_TREE_FANOUT_N=5 cargo run -p dialog-soak --release -- run --network mobile
 ```
 
 Network presets: `none` (counts only), `localhost`, `broadband`, `mobile`
@@ -59,25 +62,28 @@ The JSON report goes to stdout, a human-readable table to stderr.
 
 ```sh
 # Full sweep (networks × optionally fanouts), one JSON per configuration
-SWEEP_FANOUT=1 OUT_DIR=target/soak-new scripts/soak.sh
+cargo run -p dialog-soak --release -- sweep --out-dir target/soak-new --fanouts 5,8
 
 # Compare against a stored baseline; non-zero exit on regression
-scripts/soak-compare.py soak/baseline target/soak-new
+cargo run -p dialog-soak --release -- compare soak/baseline target/soak-new
 ```
 
 The sweep runs each configuration three times and keeps the median run
 (identities and commit timestamps shift leaf boundaries slightly between
-runs). The `none` profile's request counts are deterministic — no delays
-means no duplicate in-flight fetches — so the gate holds them tight;
-shaped profiles gate their lazy-join and download totals loosely (see
-`scripts/soak-compare.py`'s docstring). The nightly `soak:sync` arm runs
+runs). The `none` profile's request counts are deterministic, so the gate
+holds them tight; shaped profiles gate their lazy-join and download
+totals loosely, and every profile gates duplicate fetches per phase (see
+the `dialog_soak::compare` module docs). The nightly `soak:sync` arm runs
 exactly this against the checked-in baseline under `soak/baseline`.
 
 ## Reading a report
 
-Per phase: `virtual_ms` (modeled time), `requests`, `bytes`, and a
-per-effect-kind breakdown (`archive.get`, `memory.resolve`, ...). Things to
-watch:
+Per phase: `virtual_ms` (modeled time), `rounds` (modeled time over the
+per-request serial cost: an upper-bound estimate of the longest
+sequential fetch chain), `requests`, `unique` (distinct blocks received),
+`dup` (requests that re-downloaded an already-received block), `empty`
+(requests the remote had no block for), `bytes`, and a per-effect-kind
+breakdown (`archive.get`, `memory.resolve`, ...). Things to watch:
 
 - **`pull` should stay O(1)** — one head resolve, no block reads (the
   fast-forward adoption by root). If block gets appear here, a merge path
@@ -87,6 +93,12 @@ watch:
   `depth × (auth + latency)` each; growth here means deeper trees, lost
   cache locality, or a new sequential round trip.
 - **`requery` should be 0 requests** — a warm replica must not re-fetch.
+- **`dup` should stay 0 everywhere** — a duplicate fetch means a block
+  was paid for and thrown away (the walker's range-bounded read-ahead
+  and `NetworkedIndex` hydration exist to prevent exactly this).
+- **`concept`'s `rounds`** is the sequential-chain depth of the query
+  engine's cold join — the number the parallel-replication work (#492)
+  drives down.
 - **`download`** tracks total space size and the transfer's shape
   (`ceil(blocks/16)` waves of latency + bytes/bandwidth).
 
