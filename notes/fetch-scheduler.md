@@ -151,3 +151,19 @@ Measured (cold 5-attribute concept join, 4k entities; campaign start 8.4s / 105 
 | mobile | 9.3 | 1.86s | 69 |
 
 **17x faster than the campaign start on broadband, 15x on mobile, 5x faster than downloading the entire space — and strictly fewer blocks than the fold (69 vs 110), because the merge consumes the three AEV ranges and never touches the EAV probe region.** The original rejection (merge reads more blocks) is fully dissolved for the balanced case: fewer rounds AND fewer blocks. `filtered` (status pinned) correctly folds at the 3x balance threshold and keeps the pipelined-fold profile (~20 rounds); tuning that guard against latency-weighted cost rather than block estimates is future work, as is bead 79 (locality) and 80 (rule-join speculation).
+
+## v2 design: the env holds the work (2026-09-10, after review)
+
+The per-query plan misses the paths the UI actually runs on: of the six `QueryEnv` construction sites, only plain `.perform` queries (session.rs) ever get a plan, a driven stream, or a hydration flight. All three subscription sites and both transaction-query sites run the old sequential cold path, and concurrent subscriptions during load get no cross-query sharing. Review verdict: the env is the natural holder of the work queue — it is the thing passed into every effectful operation — and the per-query design was routing around the failure that blocked env placement instead of removing it.
+
+**The root failure, removed.** Both earlier failures (the `'static` wall, the `QueryEnv` invariance break) came from in-flight work expressed as futures that *borrow* the env. The operator is `#[derive(Provider, Clone)]` over Arc-backed fields — a cheap handle implementing every provider a fetch needs. So fetch-and-hydrate futures own `env.clone()` plus their owned capability context, making them genuinely `'static`: no borrow, no lifetime parameter, no invariance anywhere. The registry holds them as `WeakShared`, so an operator clone inside a fetch lives exactly as long as some `.perform` is driving it — the ownership rule restated, not bent: components never own the env; the env owns its work; work in flight holds a handle only while driven.
+
+**Shape:**
+
+- `FetchState` (dialog-repository): the ranked plan, the digest-keyed hydration flight (`WeakShared<BoxFuture<'static, ..>>`), budget. Reached from a generic env via a `FetchHost` trait; the operator (which depends on dialog-repository, so the direction works) hosts it as a field and implements the trait.
+- `QueryEnv` stores nothing and forwards `Provider<Preload>` to the env's state unconditionally — every construction site, subscriptions and transaction queries included, emits and benefits from hints with zero per-path wiring.
+- `NetworkedIndex` bounds gain `Env: FetchHost + Clone`; demand reads join the flight — cross-query, cross-subscription, by construction.
+- Driving: joiners co-drive their own fetch (unchanged); demand reads drive queued jobs while awaiting (env-level `while_warming`); and the env may own its own driver task (native spawn, wasm `spawn_local`) — permitted precisely because the env owning its work was never the forbidden thing.
+- `.preload(..)` survives as per-query budget/scoping sugar; with the state ambient, hints can be default-on, which also answers the tonk question.
+
+The `Driven`-scoped flight and the `ScopedFlight<'env>` lifetime machinery become migration casualties of this design. The yardstick grows a `subscribe` phase (cold first poll of a standing query on a fresh client) so the subscription gap is a gated number rather than an anecdote.
