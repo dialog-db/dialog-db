@@ -35,6 +35,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
 use crate::RemoteSite;
+use crate::repository::archive::networked::HydrationFlight;
 use crate::repository::branch::select_from_source;
 use crate::repository::source::Source;
 
@@ -56,13 +57,14 @@ pub struct FetchBudget {
 }
 
 impl Default for FetchBudget {
-    /// Matches the read-ahead widths already in the tree layer (the
-    /// walker's and the level-parallel traversal's 16), halved for
-    /// `Maybe` work.
+    /// Sized from the soak's cold-join budget sweep (see
+    /// `notes/fetch-scheduler.md`): rounds shrink with budget up to a
+    /// knee near 256 once hydration is single-flighted; `Maybe` work
+    /// stays narrow until something promotes it.
     fn default() -> Self {
         Self {
-            likely: 16,
-            maybe: 8,
+            likely: 256,
+            maybe: 16,
         }
     }
 }
@@ -179,6 +181,7 @@ impl FetchPlan {
         stream: S,
         sources: Vec<Source>,
         env: &'a Env,
+        hydration: Arc<HydrationFlight<'a>>,
     ) -> Driven<'a, S, Env>
     where
         S: Stream + Unpin + 'a,
@@ -195,6 +198,7 @@ impl FetchPlan {
             plan: self.clone(),
             sources,
             env,
+            hydration,
             budget: self.budget,
             likely_inflight: 0,
             maybe_inflight: 0,
@@ -251,6 +255,7 @@ pub(crate) struct Driven<'a, S, Env> {
     plan: FetchPlan,
     sources: Vec<Source>,
     env: &'a Env,
+    hydration: Arc<HydrationFlight<'a>>,
     budget: FetchBudget,
     likely_inflight: usize,
     maybe_inflight: usize,
@@ -286,9 +291,15 @@ where
             }
             let sources = self.sources.clone();
             let env = self.env;
+            let hydration = self.hydration.clone();
             let future = async move {
                 for source in sources {
-                    let mut scan = select_from_source(source, env, job.selector.clone());
+                    let mut scan = select_from_source(
+                        source,
+                        env,
+                        job.selector.clone(),
+                        Some(hydration.clone()),
+                    );
                     // Drain: rows are discarded, blocks land in the
                     // caches. An error ends this source's scan silently.
                     while let Some(row) = scan.next().await {
