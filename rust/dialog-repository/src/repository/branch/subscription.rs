@@ -67,9 +67,10 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::repository::fetch::Driven;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled, selector_range};
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Key, State};
+use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Key, Speculation, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -464,6 +465,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -569,6 +572,8 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -703,6 +708,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -833,6 +840,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -862,7 +871,20 @@ where
                 query_env = query_env
                     .with_fixpoint(concept.this(), Continuation::new(self.fixpoint.clone()));
             }
-            query.clone().perform(&query_env).try_vec().await
+            // The evaluation's own stream drives the env's preload
+            // queue, so a standing query's cold poll overlaps
+            // replication with evaluation exactly as a plain query
+            // does (see `crate::repository::fetch`).
+            let queue = Provider::<Speculation>::execute(env, ()).await;
+            let results = Box::pin(query.clone().perform(&query_env));
+            Driven::new(
+                results,
+                vec![Source::Branch(self.branch.clone())],
+                env,
+                queue,
+            )
+            .try_vec()
+            .await
         })
     }
 
@@ -882,6 +904,8 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -913,7 +937,18 @@ where
                 concept.this(),
                 Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
             );
-            self.query.clone().perform(&query_env).try_vec().await
+            // Driven for the same reason `evaluate` is: the
+            // continuation's reads warm through the ambient queue.
+            let queue = Provider::<Speculation>::execute(env, ()).await;
+            let results = Box::pin(self.query.clone().perform(&query_env));
+            Driven::new(
+                results,
+                vec![Source::Branch(self.branch.clone())],
+                env,
+                queue,
+            )
+            .try_vec()
+            .await
         })
     }
 }
@@ -995,6 +1030,8 @@ mod tests {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSend
             + ConditionalSync

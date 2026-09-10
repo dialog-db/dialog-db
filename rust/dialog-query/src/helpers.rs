@@ -418,6 +418,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -450,6 +452,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -488,6 +492,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -604,6 +610,8 @@ where
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
         + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -1715,6 +1723,8 @@ mod test {
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
             + Provider<dialog_repository::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -1833,6 +1843,8 @@ mod test {
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
             + Provider<dialog_repository::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -1960,6 +1972,8 @@ mod test {
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
             + Provider<dialog_repository::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

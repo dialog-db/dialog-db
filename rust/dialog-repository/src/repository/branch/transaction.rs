@@ -236,6 +236,8 @@ impl TransactionCommit<&Snapshot> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -330,6 +332,8 @@ impl Branch {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
