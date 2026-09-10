@@ -226,18 +226,24 @@ where
     }
 
     /// An advisory upper-bound estimate of how many entries fall in the key
-    /// range `[lower, upper)`, read from the root node alone.
+    /// range `[lower, upper)`, read from the root path alone.
     ///
-    /// Reads one block (the root, already the hottest and usually cached) and,
-    /// if it is an index, sums the [`Scale`](crate::Scale)s of the children the
-    /// range touches via [`range_scale`](crate::node::archive::ArchivedIndex::range_scale). A
-    /// root that is itself a leaf reports its own entry count. Returns `None`
-    /// for an empty tree.
+    /// Descends while the range lies within a single child: a node whose
+    /// spanning-children count is one says nothing about the range (every
+    /// range inside that child would report the child's whole subtree, so
+    /// two very different ranges would compare equal — near a height
+    /// boundary the root routinely has few children and every range falls
+    /// into one of them). The estimate is taken at the first level where
+    /// the range spans siblings, via
+    /// [`range_scale`](crate::node::archive::ArchivedIndex::range_scale);
+    /// a leaf reports its own entry count. At most one cached block per
+    /// tree level is read. Returns `None` for an empty tree.
     ///
     /// The estimate is a [`Scale`](crate::Scale) upper bound and is
-    /// edge-inflated: a range narrower than one child counts that whole
-    /// child's subtree. It answers "is this range large or small" cheaply, not
-    /// "exactly how many", which is what a planner comparing scan sizes needs.
+    /// edge-inflated: a range narrower than one child at the measuring
+    /// level counts that whole child's subtree. It answers "is this range
+    /// large or small" cheaply, not "exactly how many", which is what a
+    /// planner comparing scan sizes needs.
     pub async fn range_estimate<Backend>(
         &self,
         lower: &[u8],
@@ -252,13 +258,22 @@ where
             return Ok(None);
         }
         let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
-        let node: PersistentNode<Key, Value> = accessor.get_node(&self.root).await?;
-        let estimate = match node.as_index() {
-            Ok(index) => index.range_scale(lower, upper)?.estimate(),
-            // A root leaf holds every entry; the whole-node scale is its count.
-            Err(_) => node.scale().estimate(),
-        };
-        Ok(Some(estimate))
+        let mut hash = self.root.clone();
+        loop {
+            let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
+            let index = match node.as_index() {
+                Ok(index) => index,
+                // A leaf holds every entry the range narrowed down to;
+                // the whole-node scale is its count.
+                Err(_) => return Ok(Some(node.scale().estimate())),
+            };
+            let children = index.children_spanning(lower, upper)?;
+            if children.len() == 1 {
+                hash = index.hash_at(children.start)?.clone();
+                continue;
+            }
+            return Ok(Some(index.range_scale(lower, upper)?.estimate()));
+        }
     }
 
     /// Returns an async stream over entries with keys within the provided
@@ -580,6 +595,57 @@ mod tests {
             "scale drifted more than an order of magnitude: {estimate} vs {COUNT}"
         );
 
+        Ok(())
+    }
+
+    /// A narrow range's estimate must discriminate from a broad range's,
+    /// whatever shape the root happens to take. A root-only estimate
+    /// loses this whenever the range falls inside a single child (near a
+    /// height boundary the root routinely has few children, and then
+    /// every range reports the same whole-subtree scale — the planner's
+    /// merge-versus-fold guard saw exactly that): the estimate must
+    /// descend to the first level where the range spans siblings.
+    #[dialog_common::test]
+    async fn it_discriminates_narrow_ranges_from_broad_ones() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+
+        const COUNT: u32 = 2_000;
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+        let mut edit = tree.edit();
+        for i in 0..COUNT {
+            edit = edit
+                .insert(i.to_be_bytes(), i.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        tree = edit.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let full = tree
+            .range_estimate(&0u32.to_be_bytes(), &COUNT.to_be_bytes(), &storage)
+            .await?
+            .expect("a populated tree estimates");
+        let narrow = tree
+            .range_estimate(&1000u32.to_be_bytes(), &1020u32.to_be_bytes(), &storage)
+            .await?
+            .expect("a populated tree estimates");
+
+        assert!(
+            full >= COUNT as u64,
+            "full-range estimate is an upper bound"
+        );
+        assert!(
+            narrow >= 20,
+            "narrow-range estimate is an upper bound: {narrow}"
+        );
+        assert!(
+            narrow.saturating_mul(4) < full,
+            "a 20-entry range must not estimate like a {COUNT}-entry one: narrow={narrow} full={full}"
+        );
         Ok(())
     }
 
