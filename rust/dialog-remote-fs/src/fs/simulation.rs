@@ -252,6 +252,13 @@ impl GetLedger {
         GetLedger { map: delta }
     }
 
+    /// The accounting for one key (zeroes when never requested). Keys are
+    /// digest-scoped, so a test asserting on its own unique content is
+    /// isolated from whatever else the process fetches concurrently.
+    pub fn record(&self, key: &str) -> GetRecord {
+        self.map.get(key).copied().unwrap_or_default()
+    }
+
     /// Keys requested more than once, most-requested first: the blocks a
     /// duplicate-fetch investigation should look at.
     pub fn offenders(&self) -> Vec<(String, GetRecord)> {
