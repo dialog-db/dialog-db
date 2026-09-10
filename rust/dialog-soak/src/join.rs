@@ -30,7 +30,12 @@
 //!     its five attribute ranges): the everyday two-views-of-one-space
 //!     shape, gating that overlapping evaluations hydrate shared ranges
 //!     once through the env-owned flight and queue.
-//! 12. **download** — a second fresh client materializes the entire space
+//! 12. **rule** — a fresh cold client queries a concept that exists only
+//!     through a seeded deductive rule (no conclusion facts are ever
+//!     written): rule discovery, body hydration, and the body's join all
+//!     run cold. The yardstick for binding-aware rule-join speculation
+//!     (bead dialog-db-80).
+//! 13. **download** — a second fresh client materializes the entire space
 //!     (`pull().download()`): the eager-replication cost the lazy join
 //!     avoids up front but pays incrementally.
 
@@ -43,7 +48,11 @@ use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::{Directory, Location};
 use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 use dialog_operator::{Operator, Profile};
-use dialog_query::{Concept, Entity, Output as _, Query, Term};
+use dialog_query::rule::DeductiveRuleDescriptor;
+use dialog_query::{
+    Concept, ConceptConclusion, ConceptDescriptor, ConceptQuery, DeductiveRule, Entity,
+    Output as _, Parameters, Query, Term,
+};
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::simulation::{self, NetworkShape};
 use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
@@ -214,6 +223,51 @@ fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
         }));
     }
     Ok(facts)
+}
+
+/// The concept the seeded rule derives: an open card, title and rank
+/// projected off the bug entity. No `open/*` fact is ever written, so
+/// every row exists only through the rule.
+fn open_card_descriptor() -> Result<ConceptDescriptor> {
+    Ok(serde_json::from_value(serde_json::json!({
+        "with": {
+            "title": { "the": "open/title", "as": "Text" },
+            "rank": { "the": "open/rank", "as": "Text" }
+        }
+    }))?)
+}
+
+/// The deductive rule shipped with the space: a bug whose status is
+/// "open" concludes an open card carrying its title and rank. The body
+/// is the general rule-join shape (two bound scans plus a value-pinned
+/// guard) that bead dialog-db-80's speculation targets.
+fn open_card_rule() -> Result<DeductiveRule> {
+    let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+        "deduce": {
+            "with": {
+                "title": { "the": "open/title", "as": "Text" },
+                "rank": { "the": "open/rank", "as": "Text" }
+            }
+        },
+        "when": [{
+            "assert": {
+                "with": {
+                    "title": { "the": "bug/title", "as": "Text" },
+                    "rank": { "the": "bug/rank", "as": "Text" },
+                    "status": { "the": "bug/status", "as": "Text" }
+                }
+            },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "title": { "?": { "name": "title" } },
+                "rank": { "?": { "name": "rank" } },
+                "status": "open"
+            }
+        }]
+    }))?;
+    descriptor
+        .compile()
+        .map_err(|error| anyhow::anyhow!("open-card rule should compile: {error}"))
 }
 
 /// The joiner's claim: the membership facts a join commits.
@@ -419,6 +473,16 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // number of commits (history depth shapes the head the client adopts).
     branch
         .commit(stream::iter(meta_facts(scenario.members)?))
+        .perform(&operator)
+        .await?;
+    // The derived-concept rule ships with the space: its facts live in
+    // the tree like any others, so a cold client discovers and hydrates
+    // the rule on first use (the `rule` phase).
+    branch
+        .transaction()
+        .assert(open_card_rule()?)
+        .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let commits = scenario.commits.max(1);
@@ -671,6 +735,32 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             cards.len() == expected && rows.len() == expected,
             "both overlapping queries should see every entity"
         );
+        Ok(())
+    })
+    .await?;
+
+    // A concept that exists only through the seeded rule, on a fresh
+    // cold client: the query must discover the rule (conclusion index
+    // scan), hydrate its body (source fetch), and run the body's join
+    // cold. The general rule-join speculation of bead dialog-db-80 is
+    // measured against this phase.
+    let rule_client = mount_client(&operator, &profile, &server, &address, "soak-rule").await?;
+    rule_client.pull().perform(&operator).await?;
+    let open = (0..scenario.entities)
+        .filter(|index| index % 3 == 0)
+        .count();
+    measured("rule", &mut phases, async {
+        let layer = rule_client.query();
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("title".into(), Term::var("title"));
+        terms.insert("rank".into(), Term::var("rank"));
+        let query = ConceptQuery {
+            predicate: open_card_descriptor()?,
+            terms,
+        };
+        let rows: Vec<ConceptConclusion> = layer.select(query).perform(&operator).try_vec().await?;
+        anyhow::ensure!(rows.len() == open, "the rule should derive every open card");
         Ok(())
     })
     .await?;
