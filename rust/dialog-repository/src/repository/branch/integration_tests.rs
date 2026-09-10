@@ -4216,3 +4216,376 @@ async fn it_does_not_refetch_cached_blocks_over_a_ucan_remote(ucan: UcanS3Addres
 
     Ok(())
 }
+
+/// A PARTIAL replica pulls an upstream that moved, over a real remote.
+///
+/// This is the shape a space join takes and the one the local-storage pull
+/// tests cannot reach: the replica holds the head by reference with most
+/// of the tree still remote, so every read the merge issues is a network
+/// round trip that can also come back missing. Retractions and replaces
+/// make the incoming history carry COVERING records, which is what drives
+/// the R3 slot scans in `screen_history` — the stage whose reads were made
+/// concurrent for #492.
+///
+/// The pull must complete and the merged state must be right. A screen
+/// that reads ahead of demand can drag in blocks the serial walk never
+/// touched, and on a partial replica those are exactly the blocks that are
+/// not there — which surfaces as a pull that fails instead of one that is
+/// merely slow.
+#[dialog_common::test]
+async fn it_pulls_a_moved_upstream_into_a_partial_replica(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let (source_repo, source) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "partial-merge-a").await?;
+
+    // A base with enough facts that the tree has interior structure.
+    for round in 0..4 {
+        let facts: Vec<_> = (0..60)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{round}-{i}").repeat(16)),
+                    cause: None,
+                })
+            })
+            .collect();
+        source.commit(stream::iter(facts)).perform(&operator).await?;
+    }
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // The replica adopts that head BY REFERENCE — no download, so the tree
+    // stays mostly remote. This is the partial state.
+    let replica_repo = profile
+        .repository(unique_name("partial-merge-b"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(source_repo.did())
+        .perform(&operator)
+        .await?;
+    let replica = replica_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+    assert!(replica.pull().perform(&operator).await?.is_some());
+
+    // The upstream moves with REPLACES and RETRACTIONS, so the history the
+    // next pull replays carries covering records and the screen must run
+    // its R3 slot scans against the replica's partial tree.
+    let mut replaced = Vec::new();
+    for i in 0..40 {
+        replaced.push(Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: format!("user:0-{i}").parse()?,
+            is: Value::String(format!("renamed-{i}").repeat(16)),
+            cause: None,
+        }));
+    }
+    source
+        .commit(stream::iter(replaced))
+        .perform(&operator)
+        .await?;
+
+    let live: Vec<_> = source
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut retracted = Vec::new();
+    for artifact in live.iter().take(20) {
+        retracted.push(Instruction::Retract(artifact.clone()));
+    }
+    source
+        .commit(stream::iter(retracted))
+        .perform(&operator)
+        .await?;
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // The pull under test. It must COMPLETE — a partial replica whose
+    // screen reads past what it holds fails here instead.
+    replica
+        .pull()
+        .perform(&operator)
+        .await?
+        .expect("the replica merges the moved upstream");
+
+    // And it must agree with the upstream, fact for fact.
+    let mut theirs: Vec<_> = source
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|artifact| (artifact.of.to_string(), format!("{:?}", artifact.is)))
+        .collect();
+    let mut ours: Vec<_> = replica
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|artifact| (artifact.of.to_string(), format!("{:?}", artifact.is)))
+        .collect();
+    theirs.sort();
+    ours.sort();
+    assert_eq!(
+        ours, theirs,
+        "the partial replica's merged state matches the upstream"
+    );
+
+    Ok(())
+}
+
+/// First contact: an EMPTY local branch adopts a populated upstream with
+/// `pull().download().operational()`, in one call and with no prior pull.
+///
+/// This is `hydrate_untrusted` in tonk-worker — the account hydration a
+/// freshly created account runs after upload, and the call that fails in
+/// the app with "failed to hydrate the account into profile main: Tree
+/// operation failed during pull: Byte hash verification failed".
+///
+/// The distinction from the other download tests is that there is NO
+/// shared base: the local tree is empty, so the merge's differential has
+/// nothing of its own to prune against and every block it compares comes
+/// from the remote. A scoped download then materializes only the data
+/// regions, leaving history and coverage by reference — so a later read
+/// that strays outside the scope finds a block the store does not hold.
+#[dialog_common::test]
+async fn it_hydrates_an_empty_branch_from_a_populated_upstream(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let (source_repo, source) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "first-contact-a").await?;
+
+    // The upstream accumulates real history: asserts, then replaces and
+    // retractions, so the tree carries coverage and history regions that
+    // an operational download deliberately leaves behind.
+    for round in 0..4 {
+        let facts: Vec<_> = (0..60)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{round}-{i}").repeat(16)),
+                    cause: None,
+                })
+            })
+            .collect();
+        source.commit(stream::iter(facts)).perform(&operator).await?;
+    }
+    let replaced: Vec<_> = (0..40)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "user/name".parse().expect("valid attribute"),
+                of: format!("user:0-{i}").parse().expect("valid entity"),
+                is: Value::String(format!("renamed-{i}").repeat(16)),
+                cause: None,
+            })
+        })
+        .collect();
+    source
+        .commit(stream::iter(replaced))
+        .perform(&operator)
+        .await?;
+    let live: Vec<_> = source
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    source
+        .commit(stream::iter(
+            live.iter()
+                .take(20)
+                .cloned()
+                .map(Instruction::Retract)
+                .collect::<Vec<_>>(),
+        ))
+        .perform(&operator)
+        .await?;
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // A brand-new, EMPTY branch. No prior pull: this is first contact.
+    let replica_repo = profile
+        .repository(unique_name("first-contact-b"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(source_repo.did())
+        .perform(&operator)
+        .await?;
+    let replica = replica_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+    assert!(
+        replica.revision().is_none(),
+        "the replica starts with no revision at all"
+    );
+
+    // The call under test, exactly as the account hydration issues it.
+    replica
+        .pull()
+        .download()
+        .operational()
+        .perform(&operator)
+        .await?
+        .expect("first contact adopts the upstream head");
+
+    // Every live fact is present and matches the upstream.
+    let mut theirs: Vec<_> = source
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|artifact| (artifact.of.to_string(), format!("{:?}", artifact.is)))
+        .collect();
+    let mut ours: Vec<_> = replica
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|artifact| (artifact.of.to_string(), format!("{:?}", artifact.is)))
+        .collect();
+    theirs.sort();
+    ours.sort();
+    assert_eq!(ours, theirs, "first contact reproduces the upstream state");
+
+    // And a SECOND pull, the keepalive's shape, must still succeed: the
+    // app fails on the repeat, not always on the first.
+    replica.pull().download().operational().perform(&operator).await?;
+
+    Ok(())
+}
+
+/// A corrupt local block must fail the push, not travel to the remote.
+///
+/// The archive is content-addressed but S3 is not: a `Put` names its key
+/// by hashing the bytes it is handed, and the object store writes whatever
+/// arrives under whatever key the presigned URL names, checking only the
+/// HTTP status. Nothing on the far side compares bytes to digest. So if a
+/// push ships bytes that do not hash to the reference the tree points at,
+/// the remote ends up holding them under `hash(bytes)` while the digest
+/// the tree names stays ABSENT there — and every later reader fetches that
+/// digest, misses, and raises a hash-verification failure against a remote
+/// that appears to have answered. Worse, the failure is durable: it
+/// survives restarts on both sides, because the bad state is in storage.
+///
+/// The client is therefore the only place this can be caught, and it has
+/// to be caught before the bytes leave.
+#[dialog_common::test]
+async fn it_refuses_to_push_a_block_that_does_not_match_its_reference(
+    s3: S3Address,
+) -> Result<()> {
+    use dialog_effects::archive::prelude::CatalogExt as _;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let (repo, branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "corrupt-push").await?;
+
+    // A spilled value: large enough to live as its own content-addressed
+    // block rather than inline in a leaf, which is the shipment path that
+    // reads local bytes and re-keys them on upload.
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "document/body".parse()?,
+            of: "document:one".parse()?,
+            is: Value::String("spilled value bytes".repeat(512)),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    assert!(branch.push().perform(&operator).await?.is_some());
+
+    let revision = branch.revision().expect("the branch has a revision");
+    let (current, history) = raw_spill_references(&operator, &repo, &revision).await?;
+    let reference = current
+        .union(&history)
+        .next()
+        .cloned()
+        .expect("the commit spilled a value");
+
+    // Corrupt the local block: same key, different bytes. This is the
+    // state a torn write or a bad cache leaves behind, and it is exactly
+    // what must never be uploaded.
+    let catalog = repo.subject().archive().index();
+    catalog
+        .clone()
+        .put(dialog_common::Buffer::from(b"not the bytes".to_vec()))
+        .perform(&operator)
+        .await?;
+    let backend = crate::LocalIndex::new(&operator, catalog.clone());
+    dialog_storage::StorageBackend::set(
+        &mut backend.clone(),
+        dialog_storage::Blake3Hash::from(*reference.as_bytes()),
+        b"not the bytes".to_vec(),
+    )
+    .await?;
+
+    // A fresh commit so there is something to push, then the push must
+    // refuse rather than ship the corrupt block.
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "document/title".parse()?,
+            of: "document:one".parse()?,
+            is: Value::String("second".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+    let pushed = branch.push().perform(&operator).await;
+    match pushed {
+        Err(error) => {
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("refusing to ship") || rendered.contains("hashes to"),
+                "the push must name the corrupt block, got: {rendered}"
+            );
+        }
+        Ok(_) => panic!("the push shipped a block that does not match its reference"),
+    }
+
+    Ok(())
+}

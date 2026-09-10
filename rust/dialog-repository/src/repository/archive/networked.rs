@@ -257,6 +257,27 @@ where
 
     match remote_result {
         Some(bytes) => {
+            // The remote answered; the bytes are still unverified. `put`
+            // derives the key it stores under FROM THE BYTES, so caching
+            // them unchecked files a bad answer under `hash(bytes)` and
+            // leaves `digest` itself just as absent as before — the next
+            // read misses again and re-fetches, forever, while the local
+            // archive accumulates blocks under keys nothing looks up. The
+            // caller then hashes what it got and raises "Byte hash
+            // verification failed" a layer up, far from the cause.
+            //
+            // Verify here, where the bytes enter: a mismatch is the
+            // REMOTE's failure and is reported as such, nothing is
+            // cached, and the digest stays honestly missing.
+            if !digest.matches(bytes.as_slice()) {
+                let actual = dialog_common::Blake3Hash::hash(bytes.as_slice());
+                return Err(ArchiveError::Storage(format!(
+                    "the remote answered for block {digest} with bytes that \
+                     hash to {actual} ({} bytes); refusing to cache them",
+                    bytes.len()
+                )));
+            }
+
             // Every hydration is one remote round trip (two, behind a
             // UCAN remote whose permit was not cached); this event is
             // what lets a slow first read be attributed to on-demand
