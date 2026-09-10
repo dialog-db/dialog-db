@@ -1207,15 +1207,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialog-dbsp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dialog-common",
- "tokio",
-]
-
-[[package]]
 name = "dialog-diagnose"
 version = "0.1.0"
 dependencies = [
