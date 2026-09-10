@@ -44,26 +44,36 @@ use futures_util::future::BoxFuture;
 use futures_util::future::LocalBoxFuture;
 
 #[cfg(not(target_arch = "wasm32"))]
-type Stored<V> = Shared<BoxFuture<'static, V>>;
+type Stored<'f, V> = Shared<BoxFuture<'f, V>>;
 #[cfg(target_arch = "wasm32")]
-type Stored<V> = Shared<LocalBoxFuture<'static, V>>;
+type Stored<'f, V> = Shared<LocalBoxFuture<'f, V>>;
 
 #[cfg(not(target_arch = "wasm32"))]
-type Map<K, V> = parking_lot::Mutex<HashMap<K, Stored<V>>>;
+type Map<'f, K, V> = parking_lot::Mutex<HashMap<K, Stored<'f, V>>>;
 // A worker context is single-threaded; RefCell is enough, and the
 // borrow never crosses an await (see `join`).
 #[cfg(target_arch = "wasm32")]
-type Map<K, V> = std::cell::RefCell<HashMap<K, Stored<V>>>;
+type Map<'f, K, V> = std::cell::RefCell<HashMap<K, Stored<'f, V>>>;
 
-/// A map of in-flight computations, joined by key.
+/// A map of in-flight computations, joined by key. The lifetime is the
+/// scope the shared futures may borrow: a `ScopedFlight<'env, ..>` can
+/// hold work borrowing an environment for `'env`, which lets a
+/// fetch-and-hydrate flight live inside one query evaluation with
+/// nothing owning the env. The holder becomes invariant in `'f`, so
+/// scope one to a structure whose lifetime nothing needs to shrink.
+/// [`Flight`] is the `'static` alias the process-wide transport
+/// registries use.
 ///
-/// See the module docs for the semantics; [`join`](Flight::join) is the
-/// whole API.
-pub struct Flight<K, V> {
-    inflight: Map<K, V>,
+/// See the module docs for the semantics; [`join`](ScopedFlight::join)
+/// is the whole API.
+pub struct ScopedFlight<'f, K, V> {
+    inflight: Map<'f, K, V>,
 }
 
-impl<K, V> Default for Flight<K, V> {
+/// A [`ScopedFlight`] whose work borrows nothing: the process-wide form.
+pub type Flight<K, V> = ScopedFlight<'static, K, V>;
+
+impl<K, V> Default for ScopedFlight<'_, K, V> {
     fn default() -> Self {
         Self {
             inflight: Map::default(),
@@ -71,7 +81,7 @@ impl<K, V> Default for Flight<K, V> {
     }
 }
 
-impl<K, V> std::fmt::Debug for Flight<K, V> {
+impl<K, V> std::fmt::Debug for ScopedFlight<'_, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Flight")
             .field("inflight", &self.lock().len())
@@ -79,19 +89,19 @@ impl<K, V> std::fmt::Debug for Flight<K, V> {
     }
 }
 
-impl<K, V> Flight<K, V> {
+impl<'f, K, V> ScopedFlight<'f, K, V> {
     #[cfg(not(target_arch = "wasm32"))]
-    fn lock(&self) -> parking_lot::MutexGuard<'_, HashMap<K, Stored<V>>> {
+    fn lock(&self) -> parking_lot::MutexGuard<'_, HashMap<K, Stored<'f, V>>> {
         self.inflight.lock()
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn lock(&self) -> std::cell::RefMut<'_, HashMap<K, Stored<V>>> {
+    fn lock(&self) -> std::cell::RefMut<'_, HashMap<K, Stored<'f, V>>> {
         self.inflight.borrow_mut()
     }
 }
 
-impl<K, V> Flight<K, V>
+impl<'f, K, V> ScopedFlight<'f, K, V>
 where
     K: Eq + Hash + Clone,
     V: Clone,
@@ -106,7 +116,7 @@ where
     pub async fn join<F, Make>(&self, key: K, make: Make) -> V
     where
         Make: FnOnce() -> F,
-        F: Future<Output = V> + ConditionalSend + 'static,
+        F: Future<Output = V> + ConditionalSend + 'f,
     {
         let shared = {
             let mut inflight = self.lock();
