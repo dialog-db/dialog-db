@@ -188,6 +188,32 @@ where
         Ok(start..end.max(start + 1))
     }
 
+    /// The exclusive index of the last child a scan bounded by `end` can
+    /// visit: children at or beyond it hold only keys past the bound. The
+    /// same upper-edge rule as [`children_spanning`](Self::children_spanning),
+    /// exposed over a [`Bound`] so a range walk can prune per level.
+    pub fn children_within(
+        &self,
+        end: core::ops::Bound<&[u8]>,
+    ) -> Result<usize, DialogSearchTreeError> {
+        Ok(match end {
+            core::ops::Bound::Unbounded => self.len(),
+            // A child whose separator is at or below the bound can hold a
+            // key at or below it; children beyond that count cannot.
+            core::ops::Bound::Included(end) => self.children_at_or_below(end)?,
+            // Same, except a child whose separator equals the bound holds
+            // only keys `>= end`, all excluded by the half-open range.
+            core::ops::Bound::Excluded(end) => {
+                let below = self.children_at_or_below(end)?;
+                if below > 0 && self.separator(below - 1)? == end {
+                    below - 1
+                } else {
+                    below
+                }
+            }
+        })
+    }
+
     /// A rough estimate of how many entries in this node's subtrees fall in
     /// the half-open key range `[lower, upper)`, read from this node alone.
     ///

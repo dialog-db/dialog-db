@@ -263,6 +263,7 @@
               soak:program
               soak:artifacts
               soak:converge
+              soak:sync
             '';
           };
 
@@ -288,6 +289,14 @@
             command = ''
               export DIALOG_PROGRAM_OPS="''${DIALOG_PROGRAM_OPS:-2000}"
               cargo test -p dialog-search-tree --release --test program
+            '';
+          };
+
+          "soak:sync" = {
+            description = "Sync/join cost sweep over simulated networks, gated against soak/baseline";
+            command = ''
+              cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current
+              cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
             '';
           };
 
