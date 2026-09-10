@@ -762,6 +762,23 @@ pub trait ArtifactTreeExt {
             + Clone
             + ConditionalSync
             + 's;
+
+    /// An advisory upper-bound estimate of how many artifacts the `selector`'s
+    /// key range spans, read from the tree root alone (see
+    /// `PersistentTree::range_estimate`).
+    ///
+    /// Reads one block instead of scanning, so a planner can compare the range
+    /// sizes of independent scans cheaply. Returns `None` for an empty tree.
+    async fn estimate<S>(
+        self,
+        store: S,
+        selector: ArtifactSelector<Constrained>,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        Self: Sized,
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -962,6 +979,32 @@ impl ArtifactTreeExt for ArtifactTree {
         };
         *self = transient.persist(delta)?;
         Ok(())
+    }
+
+    async fn estimate<S>(
+        self,
+        store: S,
+        selector: ArtifactSelector<Constrained>,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let tree = self;
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        // The range must be built under the manifest the facts were written
+        // with, the same requirement `scan` has.
+        let manifest = tree.manifest(&storage).await?;
+        let range = selector_range(&selector, &manifest);
+        // `range_scale` intersects half-open `[lower, upper)`; the selector's
+        // range is inclusive, so the upper bound is the successor of the last
+        // key. A single extra trailing byte is below any real successor key
+        // and keeps the estimate an upper bound.
+        let lower = range.start().as_ref();
+        let mut upper = range.end().as_ref().to_vec();
+        upper.push(0);
+        Ok(tree.range_estimate(lower, &upper, &storage).await?)
     }
 
     fn scan<'s, S>(
