@@ -545,9 +545,13 @@ impl<Env> Provider<Preload> for QueryEnv<'_, Env>
 where
     Env: ConditionalSync,
 {
-    async fn execute(&self, input: PreloadRequest) {
-        if let Some(plan) = &self.plan {
-            plan.preload(input.selector, input.likelihood);
+    async fn execute(&self, input: PreloadRequest) -> bool {
+        match &self.plan {
+            Some(plan) => {
+                plan.preload(input.selector, input.likelihood);
+                true
+            }
+            None => false,
         }
     }
 }

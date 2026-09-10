@@ -2,6 +2,7 @@ use crate::Cardinality;
 use crate::Claim;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained, decode_value};
 use crate::attribute::The;
+use crate::attribute::query::pipelined;
 use crate::environment::Environment;
 use crate::formula::number::Numeric;
 use crate::query::Application;
@@ -318,6 +319,17 @@ impl AttributeQueryAll {
         Env: crate::Scope<'a>,
     {
         let selector = self;
+        // Pipeline the probes: while this loop awaits one row's scan, the
+        // scans the next rows will issue are offered as preload hints, so
+        // a cold replica replicates them concurrently instead of paying
+        // one round trip per row (see `super::pipelined`).
+        let hinted = selector.clone();
+        let selection = pipelined(selection, env, move |base| {
+            if hinted.absent_blocked(base) {
+                return None;
+            }
+            (&hinted.resolve(base)).try_into().ok()
+        });
         try_stream! {
             for await candidate in selection {
                 let base = candidate?;

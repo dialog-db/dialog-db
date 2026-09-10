@@ -93,3 +93,24 @@ Stay inside the remote providers, invisible to this API, as settled in the campa
 - State placement is the caller's choice by construction; `QueryEnv` is the v1 owner.
 - Budgets are configurable.
 - No component ever owns the env; deferred work is data until an env borrower drives it.
+
+## M3 addendum: probe pipelining, measured (2026-09-09)
+
+The first consumer of the plan is probe pipelining (bead dialog-db-77): a premise's upstream selection is wrapped (`attribute/query.rs::pipelined`) so rows buffer up to `PROBE_LOOKAHEAD` ahead and each buffered row's would-be probe is offered as a `Likely` hint. A row entering an empty window is never hinted (it is the next demand, so its hint could overlap with nothing), which also makes a single-row seed hint-free. Hinting stops permanently on the env's first refusal, so un-staged queries pay one refused call.
+
+Measured on the soak's cold concept join (broadband, 4,000 entities), from the pre-M3 105 rounds / 8.4s:
+
+| lookahead / budget | rounds | modeled time |
+|---|---|---|
+| 64 / 16 (shipping default) | 87 | 6.9s |
+| 64 / 64 | 51 | 4.1s |
+| 128 / 128 | 33 | 2.6s |
+| 256 / 256 | 21 | 1.7s |
+| 512 / 512 | 14 | 1.2s |
+
+Two findings behind the numbers:
+
+- **Budget, not window, is the binding constraint** past small sizes: hint jobs queue behind the per-rank concurrency cap, and a queued cold-leaf hint that starts late completes late. Row-count lead gives little *time* lead (warm rows process in ~zero modeled time), so what matters is how many cold fetches are in flight when the chain stalls.
+- **Raising the budget past ~16 currently re-fetches blocks** (bead dialog-db-81): a post-flight hydration race in which a reader passes its local check before a peer's hydration lands and reaches the transport after the peer's flight closed. Mitigations landed (a local re-check before the remote fork in `NetworkedIndex`; the walker now drives its remaining range-bounded warms home at scan end instead of dropping them), but the full fix is a hydration-inclusive single-flight at the `NetworkedIndex` layer, which needs its own design pass against the env-ownership rule. Until then the default budget stays 16 and the soak's unshaped profile runs without preload, pinning the engine's deterministic demand shape (110 requests, zero duplicates).
+
+The ~6x still on the table behind dialog-db-81 is a constant-factor ceiling of row-granular hints; the structural next steps remain M2 (range-granular expansion: spine + leaf frontier, `range_scale`-budgeted) and M4 (the merge path consuming contiguous AEV ranges preloads align with), which the region analysis in this note's campaign predicted and these measurements confirm.

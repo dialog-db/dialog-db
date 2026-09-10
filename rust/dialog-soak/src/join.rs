@@ -37,7 +37,7 @@ use dialog_operator::{Operator, Profile};
 use dialog_query::{Concept, Entity, Output as _, Query, Term};
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::simulation::{self, NetworkShape};
-use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
+use dialog_repository::{Branch, FetchBudget, Repository, RepositoryExt as _, SiteAddress};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource as _;
@@ -524,20 +524,28 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     let concept_client =
         mount_client(&operator, &profile, &server, &address, "soak-concept").await?;
     concept_client.pull().perform(&operator).await?;
+    // Preload staging is measured on shaped profiles only: replication
+    // overlap is a latency behavior, and the unshaped profile's job is to
+    // pin the engine's deterministic demand shape. (An instant link also
+    // exposes a known post-flight hydration race that re-fetches a
+    // handful of blocks; see the fetch-plan bead trail.)
+    let preload = scenario.network.is_some();
     measured("concept", &mut phases, async {
-        let cards: Vec<Card> = concept_client
-            .query()
-            .select(Query::<Card> {
-                this: Term::var("this"),
-                title: Term::var("title"),
-                status: Term::var("status"),
-                rank: Term::var("rank"),
-                reporter: Term::var("reporter"),
-                created: Term::var("created"),
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?;
+        let layer = concept_client.query();
+        let query = layer.select(Query::<Card> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::var("status"),
+            rank: Term::var("rank"),
+            reporter: Term::var("reporter"),
+            created: Term::var("created"),
+        });
+        let query = if preload {
+            query.preload(FetchBudget::default())
+        } else {
+            query
+        };
+        let cards: Vec<Card> = query.perform(&operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == expected,
             "concept join should see every card"
@@ -557,19 +565,21 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         .filter(|index| index % 3 == 2)
         .count();
     measured("filtered", &mut phases, async {
-        let cards: Vec<Card> = filtered_client
-            .query()
-            .select(Query::<Card> {
-                this: Term::var("this"),
-                title: Term::var("title"),
-                status: Term::from("closed".to_string()),
-                rank: Term::var("rank"),
-                reporter: Term::var("reporter"),
-                created: Term::var("created"),
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?;
+        let layer = filtered_client.query();
+        let query = layer.select(Query::<Card> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::from("closed".to_string()),
+            rank: Term::var("rank"),
+            reporter: Term::var("reporter"),
+            created: Term::var("created"),
+        });
+        let query = if preload {
+            query.preload(FetchBudget::default())
+        } else {
+            query
+        };
+        let cards: Vec<Card> = query.perform(&operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == closed,
             "filtered join should see the closed cards"

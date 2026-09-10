@@ -65,6 +65,15 @@ impl Provider<ForkInvocation<Fs, Get>> for Fs {
         let capability = input.capability;
         let outcome = block_gets()
             .join(key, move || async move {
+                #[cfg(not(target_arch = "wasm32"))]
+                if std::env::var("DIALOG_SOAK_TRACE_GETS").is_ok() {
+                    static EPOCH: std::sync::LazyLock<tokio::time::Instant> =
+                        std::sync::LazyLock::new(tokio::time::Instant::now);
+                    eprintln!(
+                        "GET t={} {digest}",
+                        (tokio::time::Instant::now() - *EPOCH).as_millis()
+                    );
+                }
                 let flight = simulation::begin(Traffic::ArchiveGet).await;
                 let result = Provider::<Get>::execute(&filesystem, capability).await;
                 let bytes = match &result {

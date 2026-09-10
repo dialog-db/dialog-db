@@ -159,6 +159,18 @@ where
         let address = remote.address();
         let remote_catalog = address.subject.clone().archive().catalog("index");
 
+        // Re-check local before paying the remote round trip: between the
+        // miss above and this point, a concurrent reader of the same block
+        // may have completed its fetch, hydrated, and closed its transport
+        // flight — a window in which joining is no longer possible and a
+        // naive fetch re-downloads bytes the archive already holds. The
+        // recheck costs one local read on genuine cold misses and turns
+        // the sequential half of that race into a hit; the overlapping
+        // half is joined at the transport as before.
+        if let Some(bytes) = StorageBackend::get(&self.local, key).await? {
+            return Ok(Some(bytes));
+        }
+
         let env = self.local.env();
         let remote_result = remote_catalog
             .clone()
