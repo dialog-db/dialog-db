@@ -170,13 +170,33 @@ where
 
         match remote_result {
             Some(bytes) => {
+                // Every hydration is one remote round trip (two, behind a
+                // UCAN remote whose permit was not cached); this event is
+                // what lets a slow first read be attributed to on-demand
+                // replication rather than local work.
+                tracing::debug!(
+                    target: "dialog::sync::hydrate",
+                    block = %dialog_common::Blake3Hash::from(*key),
+                    bytes = bytes.len(),
+                    "hydrated block from remote"
+                );
                 // Cache locally
                 let cache = self
                     .local
                     .catalog()
                     .clone()
                     .put(Buffer::from(bytes.as_slice()));
-                let _: Result<(), _> = cache.perform(self.local.env()).await;
+                // A failed write-back is not a failed read, but it silently
+                // turns every future read of this block into another remote
+                // round trip — worth a trace, never worth failing the read.
+                if let Err(error) = cache.perform(self.local.env()).await {
+                    tracing::debug!(
+                        target: "dialog::sync::hydrate",
+                        block = %dialog_common::Blake3Hash::from(*key),
+                        %error,
+                        "failed to cache hydrated block locally"
+                    );
+                }
                 Ok(Some(bytes))
             }
             None => Ok(None),
