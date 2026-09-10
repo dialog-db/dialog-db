@@ -667,12 +667,17 @@ where
                         break;
                     }
                 }
+                dialog_common::probe(&format!("durable_rules discovery-miss concept={concept}"));
                 let claims = self
                     .select_tree(source, conclusion_selector(concept))
                     .await
                     .map_err(|e| {
                         EvaluationError::Store(format!("rule conclusion lookup: {e:?}"))
                     })?;
+                dialog_common::probe(&format!(
+                    "durable_rules discovered concept={concept} n={}",
+                    claims.len()
+                ));
                 let entities = rule_entities(claims);
                 if let Some(head) = head.clone() {
                     cache.record_discovery(concept.clone(), head, entities.clone());
@@ -736,6 +741,7 @@ where
     /// [`RuleRegistry::acquire`]: dialog_query::session::RuleRegistry::acquire
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let concept = input.this();
+        dialog_common::probe(&format!("SelectRules start concept={concept}"));
         let mut rules: Vec<DeductiveRule> = Vec::new();
 
         // Built-in rules first: the derived version-control concepts
@@ -763,7 +769,12 @@ where
             .unwrap_or_default();
 
         let bundle = assemble(&input, rules, plan_cache);
+        dialog_common::probe(&format!(
+            "SelectRules assembled concept={concept} rules={}",
+            bundle.rules().count()
+        ));
         let analysis = self.program_analysis(&input, &bundle).await?;
+        dialog_common::probe(&format!("SelectRules analyzed concept={concept}"));
         analysis.check(&input)?;
         Ok(if analysis.is_recursive(&concept) {
             let bundle = bundle.with_recursion(analysis);

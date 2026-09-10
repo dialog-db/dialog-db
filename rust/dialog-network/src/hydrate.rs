@@ -9,6 +9,7 @@
 //! `hydrate`, and the operator's provider wraps it in a process-wide
 //! [`HydrationFlight`].
 
+use core::panic::Location;
 use std::sync::Arc;
 
 use dialog_capability::{Capability, Command, Did};
@@ -60,6 +61,12 @@ pub struct HydrationRequest {
     pub catalog: Capability<Catalog>,
     /// The block to hydrate.
     pub digest: Blake3Hash,
+    /// Where the reading store was constructed, attributing the demand
+    /// to its consumer (pull, session read, query source, ...).
+    pub origin: &'static Location<'static>,
+    /// A stable name for the reading phase, when the consumer set one.
+    /// Unlike `origin` this does not move when the file is edited.
+    pub label: Option<&'static str>,
 }
 
 /// The digest-keyed single-flight a sharing [`Hydrate`] provider joins

@@ -64,6 +64,16 @@ fn now_s() -> u64 {
         .unwrap_or_default()
 }
 
+/// The in-flight proof resolutions a concurrent reader joins, keyed by
+/// the chain cache's own `(principal, subject, command)`.
+///
+/// Held weakly by the operator, for the reason
+/// [`HydrationFlight`](dialog_network::HydrationFlight) is: the shared
+/// work captures an operator clone, so the strong futures must live only
+/// in the joiners currently driving them.
+pub(crate) type ProofFlight =
+    dialog_common::WeakFlight<(Did, Did, String), Result<UcanProof, AuthorizeError>>;
+
 /// Resolved chains, valid for one branch head version.
 #[derive(Default)]
 pub(crate) struct ChainCache {
@@ -352,6 +362,16 @@ impl<S: Clone> Operator<S> {
         Self: LocalEnv,
         S: ConditionalSend + ConditionalSync + 'static,
     {
+        // Ahead of the cache check, and load-bearing there: `cached`
+        // validates the cache's epoch against `branch.revision()`, which
+        // is this HANDLE's cached head cell rather than storage, and
+        // `refresh` is the only thing that re-resolves that cell. Check
+        // the cache first and both sides of the comparison are stale in
+        // the same way, so they agree and the guard passes — a chain a
+        // pull through another handle has moved past keeps being served.
+        // The guard fails open, not closed, which is why the ~1 ms this
+        // costs per claim is not reclaimable by reordering. Pinned by
+        // `it_stops_serving_a_chain_another_handle_moved_past`.
         self.refresh().await;
 
         let key = Self::cache_key(&claim);
@@ -360,6 +380,44 @@ impl<S: Clone> Operator<S> {
         {
             return Ok(proof);
         }
+
+        // A cold key sends every concurrent claimant through its own
+        // sequential delegation walk, and `record` clears the whole
+        // cache on an epoch bump, so a head movement mid-burst starts
+        // that herd deliberately. Joining here collapses it: one walk
+        // runs and every claimant of the same key co-drives it.
+        //
+        // Only a full-route operator joins. The reach-less clone that
+        // bounds the walk's own recursion answers `None` where a full
+        // route would fetch, so the proof it resolves is not
+        // interchangeable with an ordinary one and must not be shared
+        // under the same key — the rule the walk's unshared hydration
+        // follows for exactly the same reason.
+        let Some(key) = key.filter(|_| self.reach.get().is_some()) else {
+            return self.resolved(claim).await;
+        };
+        // `Prove` is not `Clone`; the shared future rebuilds the claim
+        // from its parts, as every other construction site does.
+        let operator = self.clone();
+        let (principal, access, duration) = (claim.principal, claim.access, claim.duration);
+        self.proofs
+            .join(key, move || async move {
+                let mut claim = Prove::<Ucan>::new(principal, access);
+                claim.duration = duration;
+                operator.resolved(claim).await
+            })
+            .await
+    }
+
+    /// Resolve a proof without joining the flight: the walk itself, plus
+    /// the cache record. Split out of [`Operator::resolve`] so the
+    /// shared future owns everything it touches.
+    async fn resolved(&self, claim: Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
+        let key = Self::cache_key(&claim);
         // Captured before the walk: the facts the walk reads are at most
         // this fresh, so the record must not claim a later head.
         let epoch = self
@@ -569,6 +627,7 @@ mod tests {
     use dialog_ucan_core::command::Command as UcanCommand;
     use dialog_ucan_core::time::timestamp::Timestamp;
     use dialog_varsig::Principal as _;
+    use futures_util::future::join_all;
 
     fn unique(prefix: &str) -> String {
         unique_name(prefix)
@@ -621,6 +680,43 @@ mod tests {
 
     fn claim(holder: &Ed25519Signer, space: &Ed25519Signer) -> Prove<Ucan> {
         Prove::<Ucan>::new(holder.did(), storage_scope(space))
+    }
+
+    /// Concurrent claimants of one key share a single proof resolution.
+    ///
+    /// A cold key used to send every concurrent reader through its own
+    /// sequential delegation walk, and `record` clears the whole cache on
+    /// an epoch bump, so a head movement mid-burst starts that herd on
+    /// purpose. The flight collapses it: the claimants co-drive one walk
+    /// and every one of them gets the same chain.
+    #[dialog_common::test]
+    async fn it_shares_one_walk_between_concurrent_claims() -> Result<()> {
+        let (operator, _profile) = operator("proof-flight").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        // Cold: the retain above recorded under this very key, so clear
+        // the cache to model the epoch bump that starts the herd.
+        operator.chains.lock().chains.clear();
+
+        let claims = (0..8).map(|_| operator.resolve(claim(&holder, &space)));
+        let proofs = join_all(claims).await;
+
+        for proof in &proofs {
+            let proof = proof.as_ref().expect("every claimant resolves");
+            assert_eq!(
+                proof.proofs().len(),
+                1,
+                "a joiner gets the same chain the walk resolved"
+            );
+        }
+        assert_eq!(
+            operator.cached_chains(),
+            1,
+            "one shared walk recorded one chain"
+        );
+        Ok(())
     }
 
     /// A retain succeeds after another handle advanced the access branch.
@@ -717,6 +813,71 @@ mod tests {
         retain_grant(&operator, &other, &holder, None).await;
         let proof = operator.resolve(claim(&holder, &other)).await?;
         assert_eq!(proof.proofs().len(), 1);
+        Ok(())
+    }
+
+    /// A chain retracted through ANOTHER handle stops being served.
+    ///
+    /// This is what `resolve`'s leading `refresh()` buys, and why it must
+    /// stay ahead of the cache check. `cached` validates the cache's
+    /// epoch against `branch.revision()`, which is the HANDLE's cached
+    /// head cell, not storage; `refresh` is the only thing that
+    /// re-resolves that cell. Check the cache first and both sides of
+    /// the comparison are stale in the same way, so they agree and the
+    /// guard passes — a chain another handle's commit has moved past
+    /// keeps being served until something else refreshes this handle.
+    /// The guard fails open, not closed, which is why reordering
+    /// `refresh` for the ~1 ms it costs is not a safe trade.
+    #[dialog_common::test]
+    async fn it_stops_serving_a_chain_another_handle_moved_past() -> Result<()> {
+        use dialog_artifacts::{Attribute, Changes, Entity, Update as _, Value};
+        use dialog_repository::{ACCESS_BRANCH, Repository};
+
+        let (operator, profile) = operator("cache-other-handle").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        // Warm the cache under this key.
+        operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(operator.cached_chains(), 1);
+
+        // A second handle commits, moving the head in STORAGE while this
+        // operator's own handle still caches the pre-commit revision.
+        let elsewhere = Repository::from(&profile)
+            .branch(ACCESS_BRANCH)
+            .open()
+            .perform(&operator)
+            .await?;
+        let mut moved = Changes::new();
+        moved.associate(
+            Attribute::try_from("test.profile/name".to_string())?,
+            Entity::new()?,
+            Value::String("moved elsewhere".to_string()),
+        );
+        elsewhere
+            .transaction()
+            .integrate(moved)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // The head in storage has moved, so this operator's own handle
+        // must observe it — that is precisely what the leading refresh
+        // does. Assert the OBSERVATION, not the cache size: the entry is
+        // re-recorded either way, so a count cannot tell a live epoch
+        // from a stale one.
+        let epoch_before = operator.chains.lock().epoch;
+        operator.resolve(claim(&holder, &space)).await?;
+        let epoch_after = operator.chains.lock().epoch;
+
+        assert_ne!(
+            epoch_after, epoch_before,
+            "the resolve must observe the head another handle moved; if the \
+             epoch is unchanged the cache validated itself against an equally \
+             stale handle head and served a chain that may have been retracted"
+        );
         Ok(())
     }
 

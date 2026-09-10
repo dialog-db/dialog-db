@@ -1,3 +1,4 @@
+use core::panic::Location;
 use std::sync::Arc;
 
 use crate::RemoteSite;
@@ -91,6 +92,8 @@ impl From<RemoteRepository> for RemoteFallback {
 pub struct NetworkedIndex<'a, Env> {
     local: LocalIndex<'a, Env>,
     remote: RemoteFallback,
+    origin: &'static Location<'static>,
+    label: Option<&'static str>,
 }
 
 impl<Env> Clone for NetworkedIndex<'_, Env> {
@@ -98,6 +101,8 @@ impl<Env> Clone for NetworkedIndex<'_, Env> {
         Self {
             local: self.local.clone(),
             remote: self.remote.clone(),
+            origin: self.origin,
+            label: self.label,
         }
     }
 }
@@ -106,6 +111,11 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
     /// Create a networked index. With [`RemoteFallback::Remote`] (or a
     /// `Some(remote)`), reads that miss locally fall back to the remote
     /// and cache the result; see [`RemoteFallback`] for the other modes.
+    ///
+    /// The construction site is captured as the index's origin so a
+    /// hydration triggered by its reads can be attributed to its
+    /// consumer (pull, session read, query source, ...).
+    #[track_caller]
     pub fn new(
         env: &'a Env,
         index: Capability<Catalog>,
@@ -114,6 +124,34 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
         Self {
             local: LocalIndex::new(env, index),
             remote: remote.into(),
+            origin: Location::caller(),
+            label: None,
+        }
+    }
+
+    /// A clone whose origin is the caller. A consumer with several
+    /// distinct read phases over one index (pull's merge) retags a
+    /// clone per phase so each phase's hydrations attribute to it.
+    #[track_caller]
+    pub fn retag(&self) -> Self {
+        Self {
+            local: self.local.clone(),
+            remote: self.remote.clone(),
+            origin: Location::caller(),
+            label: self.label,
+        }
+    }
+
+    /// A clone tagged with a STABLE name. Unlike [`retag`](Self::retag),
+    /// which records a line number that moves with every edit, this
+    /// survives refactoring — so a probe naming a phase still names the
+    /// same phase after the file changes.
+    pub fn labeled(&self, label: &'static str) -> Self {
+        Self {
+            local: self.local.clone(),
+            remote: self.remote.clone(),
+            origin: self.origin,
+            label: Some(label),
         }
     }
 }
@@ -169,6 +207,8 @@ where
             subject: route.subject,
             catalog: self.local.catalog().clone(),
             digest: dialog_common::Blake3Hash::from(*key),
+            origin: self.origin,
+            label: self.label,
         };
         let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
         Ok(hydrated.map(|bytes| bytes.as_ref().clone()))
@@ -200,6 +240,8 @@ where
         subject,
         catalog,
         digest,
+        origin: _,
+        label: _,
     } = request;
 
     if let Some(bytes) = catalog.clone().get(digest.clone()).perform(env).await? {
@@ -230,6 +272,7 @@ where
             // turns every future read of this block into another remote
             // round trip — worth a trace, never worth failing the read.
             if let Err(error) = cache.perform(env).await {
+                dialog_common::probe(&format!("hydrate write-back FAILED {digest}: {error}"));
                 tracing::debug!(
                     target: "dialog::sync::hydrate",
                     block = %digest,

@@ -93,6 +93,7 @@ impl<'a> Pull<'a> {
     /// #         + dialog_capability::Provider<dialog_effects::memory::Publish>
     /// #         + dialog_capability::Provider<dialog_effects::authority::Identify>
     /// #         + dialog_capability::Provider<dialog_effects::authority::Attest>
+    /// #         + dialog_capability::Provider<dialog_repository::Hydrate>
     /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::archive::Get>>
     /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::memory::Resolve>>
     /// #         + dialog_common::ConditionalSync
@@ -351,7 +352,7 @@ impl<'a> Pull<'a> {
                     .min(theirs.divergence(&local_context))
                     > SMALL_DIVERGENCE
             {
-                let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+                let tree_store = TreeStorage::new(TreeStorageBridge(store.labeled("replay-diff")));
                 let base_tree =
                     Index::from_hash_with_cache(NodeHash::from(*base.hash()), branch.node_cache());
                 let local_tree = Index::from_hash_with_cache(
@@ -368,7 +369,7 @@ impl<'a> Pull<'a> {
                 // frontiers, no entry enumeration.
                 let full = merge::full_scope();
                 let ours_spans = merge::spans_from_bounds(
-                    dialog_search_tree::TreeDifference::compute_within(
+                    dialog_search_tree::TreeDifference::compute_within_preloading(
                         &base_tree,
                         &local_tree,
                         &tree_store,
@@ -379,7 +380,7 @@ impl<'a> Pull<'a> {
                     .divergent_bounds(),
                 );
                 let theirs_spans = merge::spans_from_bounds(
-                    dialog_search_tree::TreeDifference::compute_within(
+                    dialog_search_tree::TreeDifference::compute_within_preloading(
                         &base_tree,
                         &upstream_tree,
                         &tree_store,
@@ -442,12 +443,11 @@ impl<'a> Pull<'a> {
                     // frontier level in one round trip instead of one
                     // per node; against a hydrating store that turns a
                     // per-block network chain into a per-level one.
-                    let changes = base_tree.differentiate_within_with(
+                    let changes = base_tree.differentiate_within_preloading(
                         changed_side,
                         &contested,
                         &tree_store,
                         &tree_store,
-                        dialog_search_tree::Prefetch::Eager,
                     );
                     let screened = merge::screen_data(changes, screen_context);
                     stitched = Box::pin(stitched.integrate(screened, &tree_store)).await?;
@@ -463,12 +463,11 @@ impl<'a> Pull<'a> {
                 // fresh version no coverage names.
                 let coverage_scope = merge::coverage_scope();
                 for (from, to) in [(&base_tree, &local_tree), (&base_tree, &upstream_tree)] {
-                    let coverage = from.differentiate_within_with(
+                    let coverage = from.differentiate_within_preloading(
                         to,
                         &coverage_scope,
                         &tree_store,
                         &tree_store,
-                        dialog_search_tree::Prefetch::Eager,
                     );
                     futures_util::pin_mut!(coverage);
                     while let Some(change) = futures_util::StreamExt::next(&mut coverage).await {
@@ -662,28 +661,37 @@ impl<'a> Pull<'a> {
 
                 let history_scope = merge::history_scope();
                 let data_scope = merge::data_scope();
-                let history_changes = base_tree.differentiate_within_with(
+                let history_changes = base_tree.differentiate_within_preloading(
                     &local_tree,
                     &history_scope,
                     &tree_store,
                     &tree_store,
-                    dialog_search_tree::Prefetch::Eager,
                 );
-                let data_changes = base_tree.differentiate_within_with(
+                let data_changes = base_tree.differentiate_within_preloading(
                     &local_tree,
                     &data_scope,
                     &tree_store,
                     &tree_store,
-                    dialog_search_tree::Prefetch::Eager,
                 );
-                let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+                let screen_store =
+                    TreeStorage::new(TreeStorageBridge(store.labeled("replay-screen")));
+                let integrate_store =
+                    TreeStorage::new(TreeStorageBridge(store.labeled("replay-integrate")));
+                // Both stores read the upstream tree: the screen scans its
+                // coverage slots, the integrate descends it per entry. They
+                // share `branch.node_cache()` (and the same root), so the
+                // screen's scans warm the cache the integrate then walks —
+                // whatever the screen touched, the integrate gets locally.
+                // The screen overlaps its own scans internally; the
+                // integrate stays sequential because it mutates as it goes.
                 let screened_history =
-                    merge::screen_history(history_changes, upstream_snapshot, screen_store);
+                    merge::screen_history(history_changes, upstream_snapshot, screen_store)
+                        .stream();
                 let screened_data = merge::screen_data(data_changes, theirs.clone());
                 let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
                 let mut delta = Delta::zero();
-                merged = Box::pin(merged.edit().integrate(screened, &tree_store))
+                merged = Box::pin(merged.edit().integrate(screened, &integrate_store))
                     .await?
                     .persist(&mut delta)?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
@@ -777,8 +785,9 @@ impl<'a> Pull<'a> {
         // preserved by construction — the merge starts from the local
         // tree — and each differential only reads blocks on paths where
         // base and upstream actually differ within its region.
-        let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-        let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+        let tree_store = TreeStorage::new(TreeStorageBridge(store.labeled("diff")));
+        let screen_store = TreeStorage::new(TreeStorageBridge(store.labeled("screen")));
+        let integrate_store = TreeStorage::new(TreeStorageBridge(store.labeled("integrate")));
         let local_snapshot =
             Index::from_hash_with_cache(NodeHash::from(local_tree_hash), branch.node_cache());
 
@@ -794,21 +803,20 @@ impl<'a> Pull<'a> {
         // fetches each frontier level in one network round trip instead
         // of one per block (the serial chain a fresh clone otherwise
         // degenerates into).
-        let history_changes = base_tree.differentiate_within_with(
+        let history_changes = base_tree.differentiate_within_preloading(
             &upstream_tree,
             &history_scope,
             &tree_store,
             &tree_store,
-            dialog_search_tree::Prefetch::Eager,
         );
-        let data_changes = base_tree.differentiate_within_with(
+        let data_changes = base_tree.differentiate_within_preloading(
             &upstream_tree,
             &data_scope,
             &tree_store,
             &tree_store,
-            dialog_search_tree::Prefetch::Eager,
         );
-        let screened_history = merge::screen_history(history_changes, local_snapshot, screen_store);
+        let screened_history =
+            merge::screen_history(history_changes, local_snapshot, screen_store).stream();
         // Collect the version of every revision record riding the delta
         // into `observed` while the data differential streams anyway.
         // Those records are exactly the upstream-ancestry revisions we
@@ -823,7 +831,7 @@ impl<'a> Pull<'a> {
         let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
         let mut delta = Delta::zero();
-        merged = Box::pin(merged.edit().integrate(screened, &tree_store))
+        merged = Box::pin(merged.edit().integrate(screened, &integrate_store))
             .await?
             .persist(&mut delta)?;
 
@@ -3237,6 +3245,94 @@ mod history_tests {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(churn.len(), 200, "the upstream churn is all adopted");
+
+        Ok(())
+    }
+
+    /// A pull's block reads must OVERLAP, not merely be few.
+    ///
+    /// Over a remote archive each read that is awaited before the next is
+    /// issued costs its own round trip, so a phase that reads n blocks
+    /// serially costs n round trips: on a throttled link that is the
+    /// difference between a pull that takes a second and one that takes a
+    /// minute. Read count alone cannot see this — the neighbouring tests
+    /// bound the count and still passed throughout a serial regression —
+    /// so this one measures how many reads are in flight AT ONCE.
+    ///
+    /// The shape is the one that stalls in the app: a replica with local
+    /// novelty pulls an upstream that has moved underneath it, which takes
+    /// the reverse-replay path (`replay-diff` / `replay-screen` /
+    /// `replay-integrate`). Enough divergence on both sides that the merge
+    /// must read many blocks, so a serial phase has nowhere to hide.
+    #[dialog_common::test]
+    async fn it_overlaps_the_block_reads_of_a_replaying_pull() -> Result<()> {
+        use crate::RepositoryExt as _;
+        use crate::helpers::Counting;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&env)
+            .await?;
+
+        // A shared base both sides know, big enough that the trees have
+        // interior structure to descend rather than a single leaf.
+        let main = repo.branch("main").open().perform(&env).await?;
+        for i in 0..64 {
+            main.commit(stream::iter(vec![assert_one(
+                "user/name",
+                &format!("user:{i}"),
+                "resident",
+            )]))
+            .perform(&env)
+            .await?;
+        }
+
+        let feature = repo.branch("feature").open().perform(&env).await?;
+        feature.set_upstream(&main).perform(&env).await?;
+        feature.pull().perform(&env).await?;
+
+        // Both sides move away from that base: the replica accumulates
+        // novelty to replay, the upstream accumulates the tree that
+        // novelty must be screened and integrated against.
+        for i in 0..32 {
+            feature
+                .commit(stream::iter(vec![assert_one(
+                    "post/title",
+                    &format!("post:{i}"),
+                    "ours",
+                )]))
+                .perform(&env)
+                .await?;
+            main.commit(stream::iter(vec![assert_one(
+                "user/name",
+                &format!("user:{i}"),
+                "moved",
+            )]))
+            .perform(&env)
+            .await?;
+        }
+
+        env.reset();
+        feature.pull().perform(&env).await?.expect("merged");
+
+        let reads = env.block_reads();
+        let peak = env.peak_block_reads_in_flight();
+        assert!(
+            reads > 8,
+            "the merge must actually read the trees for this to measure \
+             anything (got {reads} block reads): {:?}",
+            env.snapshot()
+        );
+        assert!(
+            peak > 1,
+            "a replaying pull must overlap its block reads: {reads} reads \
+             but never more than {peak} in flight at once, so each cost its \
+             own round trip. Attribute the serial phase by label \
+             (replay-diff / replay-screen / replay-integrate) before fixing.",
+        );
 
         Ok(())
     }
