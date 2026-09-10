@@ -57,9 +57,25 @@ where
     ) -> Result<Option<Vec<u8>>, DialogStorageError> {
         if let Some(bytes) = self.backend.get(identity).await? {
             if !identity.matches(&bytes) {
-                return Err(DialogStorageError::Verification(
-                    "Retrieved bytes did not match the provided hash".to_string(),
+                // TEMPORARY (#492): say WHAT came back, not just that it was
+                // wrong. A bare "did not match" cannot distinguish a
+                // truncated body, an error document stored as block bytes,
+                // or a write-back keyed by the wrong digest — and the app's
+                // keepalive retries the same block forever on this error, so
+                // the difference is the whole diagnosis.
+                let actual = Blake3Hash::hash(&bytes);
+                let head: Vec<u8> = bytes.iter().take(32).copied().collect();
+                dialog_common::probe(&format!(
+                    "VERIFY FAIL wanted={identity} got={actual} len={} head={head:02x?} \
+                     as_text={:?}",
+                    bytes.len(),
+                    String::from_utf8_lossy(&head),
                 ));
+                return Err(DialogStorageError::Verification(format!(
+                    "Retrieved bytes did not match the provided hash \
+                     (wanted {identity}, got {actual}, {} bytes)",
+                    bytes.len()
+                )));
             }
 
             Ok(Some(bytes))

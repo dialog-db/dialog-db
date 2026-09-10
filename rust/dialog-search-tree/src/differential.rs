@@ -8,7 +8,7 @@
 //! subtrees themselves, so the number of storage reads is proportional to the
 //! size of the difference rather than the size of the trees. A caller that
 //! consumes the whole difference over a high-latency backend can opt into
-//! [`Prefetch::Eager`], which relaxes the contract at the margin (a bounded
+//! preloading, which relaxes the contract at the margin (a bounded
 //! number of prunable or by-hash-reportable blocks may be read) in exchange
 //! for fetching each frontier level concurrently instead of node by node.
 //!
@@ -26,6 +26,7 @@ use std::collections::HashSet;
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_storage::{DialogStorageError, StorageBackend};
+
 use futures_core::Stream;
 use futures_util::StreamExt;
 use rkyv::{
@@ -37,9 +38,9 @@ use rkyv::{
 };
 
 use crate::{
-    ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry,
-    Key, Link, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Value, into_owned,
-    resolve_pending,
+    Accessor, ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError,
+    Distribution, Entry, Key, Link, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Value,
+    into_owned, resolve_pending,
 };
 
 /// How many frontier blocks a comparison pass fetches concurrently in the
@@ -150,36 +151,6 @@ pub struct MissingPolicy {
     pub target: MissingBlocks,
 }
 
-/// How the comparison walk acquires the blocks it reads.
-///
-/// The choice is a latency/frugality trade, and which one wins depends on
-/// what the caller does with the difference:
-///
-/// - [`Lazy`](Prefetch::Lazy) (the default) reads a block only at the
-///   moment the walk needs it. This is what upholds the module's
-///   frugality contract to the letter: a block the walk can settle
-///   without reading (a shared subtree that prunes once both sides
-///   surface it, a unique-range segment a novelty report names by hash)
-///   is never fetched. The cost is one backend round trip per node,
-///   serially, because each pass expands one node and restarts.
-/// - [`Eager`](Prefetch::Eager) concurrently loads, once per pass, every
-///   frontier block that survived scope and hash pruning: one round trip
-///   per tree level instead of one per node. The sweep may read blocks
-///   the lazy walk would have skipped, so it is for consumers that go on
-///   to consume the whole difference anyway (streaming its changes for a
-///   merge or replication) over a high-latency backend, where the level
-///   parallelism dwarfs the waste. Novelty computation over partial
-///   replicas should stay lazy: its report names unique subtrees by hash
-///   without ever reading them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Prefetch {
-    /// Read a block only when the walk needs it (strict frugality).
-    #[default]
-    Lazy,
-    /// Load surviving frontier blocks concurrently, one sweep per pass.
-    Eager,
-}
-
 /// Represents a change in the key-value store.
 #[derive(Clone, Debug)]
 pub enum Change<Key, Value> {
@@ -188,16 +159,153 @@ pub enum Change<Key, Value> {
     /// Removes an entry from the key-value store.
     Remove(Entry<Key, Value>),
 }
+/// How many blocks a [`Differential::preload`] keeps in flight by default.
+///
+/// Sized so a batch of root→leaf paths, whose upper levels the node cache
+/// collapses, costs about one round trip per tree level instead of one per
+/// change.
+pub const PRELOAD_CONCURRENCY: usize = 64;
 
 /// Represents a differential stream of changes in the key-value store.
 pub trait Differential<Key, Value>:
     Stream<Item = Result<Change<Key, Value>, DialogSearchTreeError>>
 {
+    /// The same differential, with the blocks each change will be read
+    /// against fetched ahead of demand.
+    ///
+    /// A consumer that reads the tree once per change — a merge screen
+    /// scanning a slot, an integrate descending to a key — is serial by
+    /// construction: it awaits one root→leaf descent before pulling the
+    /// next change, so a remote-backed substrate costs one network round
+    /// trip per change. Preloading walks ahead of the consumer and fetches
+    /// those paths concurrently, so the consumer's own read finds them in
+    /// the node cache.
+    ///
+    /// Changes are yielded in their original order and unchanged; only the
+    /// fetching runs ahead. Warming is speculative — a block that fails to
+    /// load is simply not warm, and the consumer's own read still owns the
+    /// error and the missing-block policy.
+    fn preload<'a, Backend>(
+        self,
+        tree: PersistentTree<Key, Value>,
+        storage: ContentAddressedStorage<Backend>,
+    ) -> impl Differential<Key, Value> + 'a
+    where
+        Self: Sized + 'a,
+        Key: self::Key + ConditionalSync + 'static,
+        Value: self::Value
+            + ConditionalSync
+            + 'static
+            + for<'v> rkyv::Serialize<
+                Strategy<
+                    rkyv::ser::Serializer<
+                        rkyv::util::AlignedVec,
+                        rkyv::ser::allocator::ArenaHandle<'v>,
+                        rkyv::ser::sharing::Share,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+        Value::Archived: for<'v> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'v>, SharedValidator>, rkyv::rancor::Error>,
+            > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+            + ConditionalSync,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'a,
+    {
+        self.preload_with(tree, storage, PRELOAD_CONCURRENCY)
+    }
+
+    /// [`preload`](Self::preload) with an explicit concurrency. A value of
+    /// 1 fetches nothing ahead: the fully serial walk.
+    fn preload_with<'a, Backend>(
+        self,
+        tree: PersistentTree<Key, Value>,
+        storage: ContentAddressedStorage<Backend>,
+        concurrency: usize,
+    ) -> impl Differential<Key, Value> + 'a
+    where
+        Self: Sized + 'a,
+        Key: self::Key + ConditionalSync + 'static,
+        Value: self::Value
+            + ConditionalSync
+            + 'static
+            + for<'v> rkyv::Serialize<
+                Strategy<
+                    rkyv::ser::Serializer<
+                        rkyv::util::AlignedVec,
+                        rkyv::ser::allocator::ArenaHandle<'v>,
+                        rkyv::ser::sharing::Share,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+        Value::Archived: for<'v> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'v>, SharedValidator>, rkyv::rancor::Error>,
+            > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+            + ConditionalSync,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'a,
+    {
+        let accessor = Accessor::new(tree.node_cache(), storage);
+        let root = tree.root().clone();
+        self.map(move |change| {
+            let accessor = accessor.clone();
+            let root = root.clone();
+            async move {
+                let change = change?;
+                let key = match &change {
+                    Change::Add(entry) => entry.key.clone(),
+                    Change::Remove(entry) => entry.key.clone(),
+                };
+                // Speculative: the consumer's own descent owns any error.
+                warm_path::<Key, Value, Backend>(&accessor, root, &key).await;
+                Ok(change)
+            }
+        })
+        .buffered(concurrency.max(1))
+    }
 }
 
 impl<Key, Value, T> Differential<Key, Value> for T where
     T: Stream<Item = Result<Change<Key, Value>, DialogSearchTreeError>>
 {
+}
+
+/// Load the root→leaf path of `key`, so a later descent for it is served
+/// from the node cache. Absence and failure are ignored: the descent that
+/// needs the block reports them.
+async fn warm_path<Key, Value, Backend>(accessor: &Accessor<Backend>, root: Blake3Hash, key: &Key)
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'v> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'v>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+{
+    if root == *NULL_BLAKE3_HASH {
+        return;
+    }
+    let mut hash = root;
+    loop {
+        let Ok(node) = accessor.get_node::<Key, Value>(&hash).await else {
+            return;
+        };
+        let Ok(index) = node.as_index() else {
+            return;
+        };
+        let Ok(at) = index.route(key.as_ref()) else {
+            return;
+        };
+        let Ok(child) = index.hash_at(at) else {
+            return;
+        };
+        hash = child.clone();
+    }
 }
 
 /// Either a loaded node or an unloaded reference in a [`SparseTree`].
@@ -1298,7 +1406,7 @@ where
             target_storage,
             None,
             missing,
-            Prefetch::Lazy,
+            false,
         )
         .await?;
 
@@ -1342,26 +1450,27 @@ where
     where
         D: Distribution,
     {
-        Self::compute_within_with(
+        Self::compute_scoped(
             source_tree,
             target_tree,
             source_storage,
             target_storage,
-            scope,
-            Prefetch::Lazy,
+            Some(scope),
+            MissingPolicy::default(),
+            false,
         )
         .await
     }
 
-    /// [`compute_within`](Self::compute_within), with an explicit
-    /// [`Prefetch`] choice for how blocks are acquired.
-    pub async fn compute_within_with<D>(
+    /// [`compute_within`](Self::compute_within) that preloads: each
+    /// surviving frontier level is fetched concurrently, one round trip per
+    /// tree level rather than one per block.
+    pub async fn compute_within_preloading<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
         source_storage: &'a ContentAddressedStorage<Backend>,
         target_storage: &'a ContentAddressedStorage<Backend>,
         scope: &[core::ops::RangeInclusive<Key>],
-        prefetch: Prefetch,
     ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
     where
         D: Distribution,
@@ -1373,7 +1482,7 @@ where
             target_storage,
             Some(scope),
             MissingPolicy::default(),
-            prefetch,
+            true,
         )
         .await
     }
@@ -1385,7 +1494,7 @@ where
         target_storage: &'a ContentAddressedStorage<Backend>,
         scope: Option<&[core::ops::RangeInclusive<Key>]>,
         missing: MissingPolicy,
-        prefetch: Prefetch,
+        preloading: bool,
     ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
     where
         D: Distribution,
@@ -1413,10 +1522,16 @@ where
             });
         }
 
-        let mut source: SparseTree<'a, Key, Value, Backend> =
-            SparseTree::from_root(source_tree.root(), source_storage, missing.source).await?;
-        let mut target: SparseTree<'a, Key, Value, Backend> =
-            SparseTree::from_root(target_tree.root(), target_storage, missing.target).await?;
+        // The two roots are independent reads; awaiting them in sequence
+        // costs two round trips against a hydrating backend before the
+        // comparison can start at all. Joined, they cost one.
+        let (source, target) = futures_util::future::try_join(
+            SparseTree::from_root(source_tree.root(), source_storage, missing.source),
+            SparseTree::from_root(target_tree.root(), target_storage, missing.target),
+        )
+        .await?;
+        let mut source: SparseTree<'a, Key, Value, Backend> = source;
+        let mut target: SparseTree<'a, Key, Value, Backend> = target;
 
         // Iteratively prune shared nodes and expand differing ones until a
         // fixed point: only differing leaf segments (and unique-range
@@ -1429,11 +1544,11 @@ where
             }
             source.prune(&mut target);
 
-            // The eager loading sweep. Under [`Prefetch::Lazy`] every read
+            // The preloading sweep. Without it, every read
             // happens inside the comparison, one backend round trip per
             // node (against a hydrating backend, a network round trip per
             // node), because each pass expands one node and restarts.
-            // Under [`Prefetch::Eager`] each pass first loads every
+            // With it, each pass first loads every
             // frontier block that survived scope and hash pruning
             // concurrently, one round trip per tree level instead, and
             // installs each fetched node into its frontier slot so no
@@ -1441,14 +1556,14 @@ where
             // walk would have skipped (a shared node whose twin has not
             // surfaced on the other frontier yet, a unique-range segment
             // a novelty report would only name by hash), which is why it
-            // is opt-in; see [`Prefetch`]. Absence and failure are
+            // is opt-in. Absence and failure are
             // swallowed here (the slot stays a reference), so
             // `expand_at`'s own read keeps owning the error and the
             // `MissingBlocks` policy; the `attempted` set keeps a block
             // that stayed a reference from being refetched every pass.
             let mut pending: Vec<(bool, usize, &ContentAddressedStorage<Backend>, Blake3Hash)> =
                 Vec::new();
-            if prefetch == Prefetch::Eager {
+            if preloading {
                 for (is_target, offset, storage, hash) in source
                     .unloaded()
                     .map(|(offset, hash)| (false, offset, source_storage, hash))
@@ -2409,9 +2524,16 @@ mod tests {
         let scope = [[0u8; 4]..=[0xFF; 4]];
         type Fingerprint = Vec<(bool, [u8; 4], Vec<u8>)>;
         let mut collected: Vec<Fingerprint> = Vec::new();
-        for prefetch in [crate::Prefetch::Lazy, crate::Prefetch::Eager] {
-            let stream =
-                base.differentiate_within_with(&modified, &scope, &storage, &storage, prefetch);
+        for preloading in [false, true] {
+            let stream = if preloading {
+                futures_util::future::Either::Left(
+                    base.differentiate_within_preloading(&modified, &scope, &storage, &storage),
+                )
+            } else {
+                futures_util::future::Either::Right(
+                    base.differentiate_within(&modified, &scope, &storage, &storage),
+                )
+            };
             futures_util::pin_mut!(stream);
             let mut changes = Vec::new();
             while let Some(change) = stream.next().await {
@@ -2423,10 +2545,10 @@ mod tests {
             collected.push(changes);
         }
 
-        let eager = collected.pop().expect("eager run collected");
+        let preloaded = collected.pop().expect("preloading run collected");
         let lazy = collected.pop().expect("lazy run collected");
         assert!(!lazy.is_empty(), "the fixture diverges");
-        assert_eq!(eager, lazy, "eager and lazy walks must agree");
+        assert_eq!(preloaded, lazy, "preloading and lazy walks must agree");
 
         Ok(())
     }
@@ -2529,23 +2651,16 @@ mod tests {
         TreeDifference::compute_within(&base, &tree, &storage, &storage, &scope).await?;
         assert_eq!(
             max_in_flight.load(AtomicOrdering::Relaxed),
-            1,
-            "the lazy comparison reads one block at a time"
+            2,
+            "the lazy comparison reads one block at a time once under way; \
+             only the two roots, which are independent, are joined"
         );
 
         max_in_flight.store(0, AtomicOrdering::Relaxed);
-        TreeDifference::compute_within_with(
-            &base,
-            &tree,
-            &storage,
-            &storage,
-            &scope,
-            crate::Prefetch::Eager,
-        )
-        .await?;
+        TreeDifference::compute_within_preloading(&base, &tree, &storage, &storage, &scope).await?;
         assert!(
             max_in_flight.load(AtomicOrdering::Relaxed) > 1,
-            "the eager sweep overlaps frontier reads"
+            "the preloading sweep overlaps frontier reads"
         );
 
         Ok(())

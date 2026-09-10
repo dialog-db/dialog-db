@@ -3919,3 +3919,300 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
 
     Ok(())
 }
+
+/// `pull().download().operational()` must fetch its blocks CONCURRENTLY.
+///
+/// This is the shape an app takes when it joins a space: commit some
+/// facts, point the branch at a remote that holds a different database,
+/// and materialize it in one call. Every block that misses locally is a
+/// network round trip, so whether those round trips overlap decides
+/// whether the join takes a second or a minute — on a throttled link a
+/// serial fetch of a few hundred blocks is minutes of staring at a
+/// spinner.
+///
+/// Read COUNT cannot see this. The neighbouring download tests bound the
+/// count and passed throughout a serial regression, because n serial
+/// reads and n overlapped reads tally identically. This measures how many
+/// hydrations are in flight AT ONCE, which is the quantity that maps to
+/// wall clock, and attributes the peak to the phase that owns it.
+#[dialog_common::test]
+async fn it_downloads_concurrently_rather_than_one_block_at_a_time(s3: S3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // A database with facts in it, pushed to the remote. Wide values and
+    // several rounds so the tree has real interior structure: a handful
+    // of blocks could be fetched serially without anyone noticing.
+    let (source_repo, source) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "download-concurrency-a").await?;
+    for round in 0..6 {
+        let facts: Vec<_> = (0..120)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        source
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // A second, initially empty database that adds the first as upstream.
+    let replica_repo = profile
+        .repository(unique_name("download-concurrency-b"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(source_repo.did())
+        .perform(&operator)
+        .await?;
+    let replica = replica_repo
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+
+    // The call under test, measured from cold.
+    let env = Counting::new(operator.clone());
+    replica
+        .pull()
+        .download()
+        .operational()
+        .perform(&env)
+        .await?
+        .expect("the replica adopts the upstream head");
+
+    let reads = env.block_reads();
+    let peak = env.peak_block_reads_in_flight();
+    let phases = env.hydration_peaks();
+
+    assert!(
+        reads >= 8,
+        "the download must fetch a real tree for this to measure anything \
+         (got {reads} block reads): {:?}",
+        env.snapshot()
+    );
+    assert!(
+        peak > 1,
+        "pull().download().operational() must fetch blocks concurrently: \
+         {reads} block reads but never more than {peak} in flight at once, \
+         so each cost its own round trip. Per-phase peaks: {phases:?}",
+    );
+
+    // A hydrated block is cached locally, so a SECOND download of the same
+    // unchanged revision must reach the remote for nothing. This is what a
+    // repeating sync (a keepalive poll, a re-open) does, and it is the
+    // failure a HAR from the app showed: 42 fetches of 5 distinct blocks,
+    // the same 75KB block pulled 13 times on a 10s cadence because the
+    // write-back never stuck. Concurrency cannot help there — parallel
+    // refetching is still refetching — so it is asserted separately.
+    env.reset();
+    replica.download().operational().perform(&env).await?;
+    let refetched = env.count("hydrate::Hydrate");
+    assert_eq!(
+        refetched,
+        0,
+        "a second download of an unchanged revision must serve entirely \
+         from the local store, but it hydrated {refetched} blocks from the \
+         remote: {:?}",
+        env.snapshot()
+    );
+
+    // The same guarantee for a repeated PULL, which is what a keepalive
+    // sync does every few seconds against an upstream that has not moved.
+    // A HAR from the app showed this refetching one 75KB block 13 times on
+    // a 10s cadence, so a pull over an unchanged upstream must reach the
+    // remote only to learn the head has not moved.
+    env.reset();
+    replica.pull().perform(&env).await?;
+    let polled = env.count("hydrate::Hydrate");
+    assert_eq!(
+        polled,
+        0,
+        "a pull from an unchanged upstream must not re-hydrate blocks the \
+         download already cached, but it hydrated {polled}: {:?}",
+        env.snapshot()
+    );
+
+    // Every fact landed locally: concurrency must not have cost coverage.
+    env.reset();
+    let facts: Vec<_> = replica
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&env)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        facts.len(),
+        720,
+        "the download materialized every live fact"
+    );
+    assert_eq!(
+        env.count("fork::Fork"),
+        0,
+        "the facts read from the local store, not the remote"
+    );
+
+    Ok(())
+}
+
+/// The same download/refetch guarantee over a UCAN remote, which is what
+/// the app actually runs.
+///
+/// A HAR captured from the app while it joined a space showed 42 block
+/// fetches resolving to only 5 distinct blocks: one 75KB block pulled 13
+/// times, `revision` 26 times, on a strict 10-second cadence matching the
+/// keepalive sync, never more than one request in flight. Concurrency
+/// cannot fix that shape — refetching in parallel is still refetching —
+/// so what has to hold is that a hydrated block STAYS local: the repeated
+/// sync must reach the remote only to learn the head has not moved.
+///
+/// The bare-S3 sibling of this test passes, so if this one fails the
+/// difference is the UCAN remote (its permit handling), not the archive.
+#[dialog_common::test]
+async fn it_does_not_refetch_cached_blocks_over_a_ucan_remote(ucan: UcanS3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // A database with facts in it, pushed to the UCAN remote.
+    let source_repo = profile
+        .repository(unique_name("ucan-refetch-a"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let chain = source_repo
+        .access()
+        .claim(&source_repo)
+        .delegate(profile.did())
+        .perform(&operator)
+        .await?;
+    profile.access().save(chain).perform(&operator).await?;
+
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+    let source_origin = source_repo
+        .remote("origin")
+        .create(site.clone())
+        .perform(&operator)
+        .await?;
+    let source = source_repo.branch("main").open().perform(&operator).await?;
+    let source_remote = source_origin
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    source
+        .set_upstream(source_remote)
+        .perform(&operator)
+        .await?;
+
+    for round in 0..4 {
+        let facts: Vec<_> = (0..120)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        source
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // A replica that adopts that head and materializes it.
+    let replica_repo = profile
+        .repository(unique_name("ucan-refetch-b"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(site)
+        .subject(source_repo.did())
+        .perform(&operator)
+        .await?;
+    let replica = replica_repo
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+
+    let env = Counting::new(operator.clone());
+    replica
+        .pull()
+        .download()
+        .operational()
+        .perform(&env)
+        .await?
+        .expect("the replica adopts the upstream head");
+
+    let reads = env.block_reads();
+    let peak = env.peak_block_reads_in_flight();
+    assert!(
+        reads >= 8,
+        "the download must fetch a real tree for this to measure anything \
+         (got {reads}): {:?}",
+        env.snapshot()
+    );
+    assert!(
+        peak > 1,
+        "the download must fetch blocks concurrently: {reads} reads, peak \
+         {peak} in flight. Per-phase peaks: {:?}",
+        env.hydration_peaks()
+    );
+
+    // Three repeats of what the app's keepalive actually runs on an
+    // account branch: `pull().download().operational()` every beat,
+    // whether or not the head moved (tonk-worker router/sync.rs, the
+    // `hydrate` arm of the retry loop). The head has not moved and every
+    // block is already cached, so none of these may reach the remote for
+    // block bytes.
+    for round in 0..3 {
+        env.reset();
+        replica
+            .pull()
+            .download()
+            .operational()
+            .perform(&env)
+            .await?;
+        let hydrated = env.count("hydrate::Hydrate");
+        assert_eq!(
+            hydrated,
+            0,
+            "keepalive sync {round} over an unchanged upstream re-hydrated \
+             {hydrated} blocks from the remote: {:?}",
+            env.snapshot()
+        );
+    }
+
+    Ok(())
+}
