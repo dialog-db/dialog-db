@@ -14,7 +14,7 @@ pub mod selector;
 pub use selector::{ArtifactSelector, ValueBound};
 
 mod query;
-pub use query::{ArtifactStream, Select};
+pub use query::{ArtifactStream, Likelihood, Preload, PreloadRequest, Select};
 
 mod store;
 pub use store::*;

@@ -4,7 +4,7 @@ use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Select, SortKey, Statement,
+    DialogArtifactsError, Entity, Preload, PreloadRequest, Select, SortKey, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -26,6 +26,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::repository::fetch::FetchPlan;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
     assemble, builtin, conclusion_selector, hydrate, overlay_rules, rule_entities, source_bytes,
@@ -191,6 +192,7 @@ impl<'a> QueryLayer<'a> {
         SelectQuery {
             layer: self.clone(),
             query,
+            preload: None,
         }
     }
 }
@@ -234,6 +236,7 @@ impl From<Changes> for QueryLayer<'_> {
 pub struct SelectQuery<'a, Q> {
     layer: QueryLayer<'a>,
     query: Q,
+    preload: Option<FetchPlan>,
 }
 
 impl<'a, Q> SelectQuery<'a, Q> {
@@ -241,7 +244,27 @@ impl<'a, Q> SelectQuery<'a, Q> {
         Self {
             layer: QueryLayer::from(source.into()),
             query,
+            preload: None,
         }
+    }
+
+    /// Replicate speculatively while this query runs: evaluation hooks
+    /// may enqueue ranges they expect to need (via the env's `Preload`
+    /// capability), and the query's own stream drives those fetches
+    /// under the plan's budget, so a cold replica overlaps replication
+    /// with evaluation instead of fetching one awaited block at a time.
+    ///
+    /// Takes anything that makes a [`FetchPlan`]: a bare
+    /// [`FetchBudget`] stages a fresh plan for the evaluator's own
+    /// hints, while a caller-owned plan (pass a clone) lets the caller
+    /// enqueue ranges and keep handles to abort or promote them.
+    ///
+    /// The plan lives exactly as long as the query's stream; dropping
+    /// the stream drops any not-yet-started work. Without this call
+    /// nothing is enqueued, nothing is driven, and nothing is paid.
+    pub fn preload(mut self, plan: impl Into<FetchPlan>) -> Self {
+        self.preload = Some(plan.into());
+        self
     }
 }
 
@@ -264,7 +287,11 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + ConditionalSync
             + 'static,
     {
-        let SelectQuery { layer, query } = self;
+        let SelectQuery {
+            layer,
+            query,
+            preload,
+        } = self;
         async_stream::try_stream! {
             let operator = Identify
                 .perform(env)
@@ -274,11 +301,28 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             let overlay = layer.overlay(&operator);
             let tombstones = Arc::new(tombstones_from(&overlay));
 
-            let sources = layer.sources.iter().map(|source| source.to_source()).collect();
-            let query_env = QueryEnv::new(sources, overlay, tombstones, env);
+            let sources: Vec<Source> =
+                layer.sources.iter().map(|source| source.to_source()).collect();
+            let mut query_env = QueryEnv::new(sources.clone(), overlay, tombstones, env);
+            if let Some(plan) = &preload {
+                query_env = query_env.with_plan(plan.clone());
+            }
             let results = Box::pin(query.perform(&query_env));
-            for await result in results {
-                yield result?;
+            match preload {
+                // The query's own stream drives the plan's speculative
+                // fetches: they borrow this same env and end with the
+                // stream. See `crate::repository::fetch`.
+                Some(plan) => {
+                    let driven = plan.drive(results, sources, env);
+                    for await result in driven {
+                        yield result?;
+                    }
+                }
+                None => {
+                    for await result in results {
+                        yield result?;
+                    }
+                }
             }
         }
     }
@@ -315,6 +359,10 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// evaluation continues (or rebuilds into) the retained answer
     /// table instead of computing a throwaway one.
     fixpoint: Option<(Entity, Continuation)>,
+    /// When present, `Preload` hints enqueue speculative replication
+    /// here; the query's driven stream executes them. Absent, a hint
+    /// is a no-op.
+    plan: Option<FetchPlan>,
     env: &'a Env,
 }
 
@@ -341,6 +389,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
             tombstones,
             demand: None,
             fixpoint: None,
+            plan: None,
             env,
         }
     }
@@ -361,6 +410,13 @@ impl<'a, Env> QueryEnv<'a, Env> {
         self
     }
 
+    /// Route `Preload` hints into `plan`: the enqueue half of
+    /// speculative replication (the driven stream is the execute half).
+    pub(crate) fn with_plan(mut self, plan: FetchPlan) -> Self {
+        self.plan = Some(plan);
+        self
+    }
+
     /// Record a selector's demanded range, when recording is on.
     fn record_demand(&self, selector: &ArtifactSelector<Constrained>) {
         if let Some(demand) = &self.demand {
@@ -377,6 +433,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             tombstones: self.tombstones.clone(),
             demand: self.demand.clone(),
             fixpoint: self.fixpoint.clone(),
+            plan: self.plan.clone(),
             env: self.env,
         }
     }
@@ -473,6 +530,25 @@ where
         }
 
         Ok(merge_grouped(streams))
+    }
+}
+
+// A `Preload` hint enqueues speculative replication into the query's
+// plan, when one is attached. Hints are advisory by contract (the
+// command's output is `()`), so without a plan — the query was not
+// staged with `.preload(..)` — the hint is a no-op. The enqueue is
+// synchronous queue surgery; the driven stream wrapped around the
+// query's output does the fetching (see `crate::repository::fetch`).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env> Provider<Preload> for QueryEnv<'_, Env>
+where
+    Env: ConditionalSync,
+{
+    async fn execute(&self, input: PreloadRequest) {
+        if let Some(plan) = &self.plan {
+            plan.preload(input.selector, input.likelihood);
+        }
     }
 }
 
