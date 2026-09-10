@@ -6,7 +6,11 @@
 //! Subtrees whose hashes match between the two versions are pruned by
 //! comparing the hashes carried in their parents' links, without loading the
 //! subtrees themselves, so the number of storage reads is proportional to the
-//! size of the difference rather than the size of the trees.
+//! size of the difference rather than the size of the trees. A caller that
+//! consumes the whole difference over a high-latency backend can opt into
+//! [`Prefetch::Eager`], which relaxes the contract at the margin (a bounded
+//! number of prunable or by-hash-reportable blocks may be read) in exchange
+//! for fetching each frontier level concurrently instead of node by node.
 //!
 //! [`TreeDifference::compute`] produces a sparse representation of both trees
 //! holding only the differing regions. From it, two products are available:
@@ -37,6 +41,74 @@ use crate::{
     Key, Link, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Value, into_owned,
     resolve_pending,
 };
+
+/// How many frontier blocks a comparison pass fetches concurrently in the
+/// loading sweep (see `compute_scoped`).
+const LOAD_CONCURRENCY: usize = 16;
+
+/// One read of the loading sweep: fetches and parses a node, reporting it
+/// back tagged with the frontier slot it was collected for. Absence and
+/// failure both come back as `None`; the comparison read that actually
+/// needs the block owns the error and the [`MissingBlocks`] policy.
+async fn preload_block<Key, Value, Backend>(
+    storage: &ContentAddressedStorage<Backend>,
+    is_target: bool,
+    offset: usize,
+    hash: Blake3Hash,
+) -> (bool, usize, Option<PersistentNode<Key, Value>>)
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSend,
+{
+    let node = match storage.retrieve(&hash).await {
+        Ok(Some(bytes)) => PersistentNode::try_from(Buffer::from(bytes)).ok(),
+        _ => None,
+    };
+    (is_target, offset, node)
+}
+
+/// A slot of the child-level batch in [`SparseTree::stream`]'s descent:
+/// `None` until the fetch for that position completes, then the fetch's
+/// outcome (which itself is `None` for an absent block).
+type FetchedChild<Key, Value> =
+    Option<Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>>;
+
+/// One read of the child-level batch in [`SparseTree::stream`]'s descent:
+/// fetches and parses a node, tagged with its child position. Unlike
+/// [`preload_block`] this is not speculative — every child of a visited
+/// index is consumed — so errors are returned for the descent to own.
+async fn fetch_block<Key, Value, Backend>(
+    storage: &ContentAddressedStorage<Backend>,
+    at: usize,
+    hash: Blake3Hash,
+) -> (
+    usize,
+    Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>,
+)
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSend,
+{
+    let result = match storage.retrieve(&hash).await {
+        Ok(Some(bytes)) => match PersistentNode::try_from(Buffer::from(bytes)) {
+            Ok(node) => Ok(Some(node)),
+            Err(error) => Err(error),
+        },
+        Ok(None) => Ok(None),
+        Err(error) => Err(error.into()),
+    };
+    (at, result)
+}
 
 /// How a comparison side treats a block that is absent from its storage.
 ///
@@ -76,6 +148,36 @@ pub struct MissingPolicy {
     pub source: MissingBlocks,
     /// Policy for the target side of the comparison.
     pub target: MissingBlocks,
+}
+
+/// How the comparison walk acquires the blocks it reads.
+///
+/// The choice is a latency/frugality trade, and which one wins depends on
+/// what the caller does with the difference:
+///
+/// - [`Lazy`](Prefetch::Lazy) (the default) reads a block only at the
+///   moment the walk needs it. This is what upholds the module's
+///   frugality contract to the letter: a block the walk can settle
+///   without reading (a shared subtree that prunes once both sides
+///   surface it, a unique-range segment a novelty report names by hash)
+///   is never fetched. The cost is one backend round trip per node,
+///   serially, because each pass expands one node and restarts.
+/// - [`Eager`](Prefetch::Eager) concurrently loads, once per pass, every
+///   frontier block that survived scope and hash pruning: one round trip
+///   per tree level instead of one per node. The sweep may read blocks
+///   the lazy walk would have skipped, so it is for consumers that go on
+///   to consume the whole difference anyway (streaming its changes for a
+///   merge or replication) over a high-latency backend, where the level
+///   parallelism dwarfs the waste. Novelty computation over partial
+///   replicas should stay lazy: its report names unique subtrees by hash
+///   without ever reading them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Prefetch {
+    /// Read a block only when the walk needs it (strict frugality).
+    #[default]
+    Lazy,
+    /// Load surviving frontier blocks concurrently, one sweep per pass.
+    Eager,
 }
 
 /// Represents a change in the key-value store.
@@ -262,6 +364,48 @@ where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSend,
 {
+    /// The frontier slots still held by reference, with their hashes: the
+    /// blocks a later pass reads unless pruning settles them first.
+    fn unloaded(&self) -> impl Iterator<Item = (usize, &Blake3Hash)> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, node)| match node {
+                SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
+                    Some((offset, &link.node))
+                }
+                SparseTreeNode::Loaded { .. } | SparseTreeNode::Settled { .. } => None,
+            })
+    }
+
+    /// Installs a node fetched by the loading sweep into its frontier slot,
+    /// turning the by-reference entry into a loaded one so the reads ahead
+    /// (expansion, buffer settling, entry streaming) cost nothing. A slot
+    /// that no longer holds the expected reference is left alone; that
+    /// entry keeps working lazily through [`SparseTree::expand_at`].
+    fn install(&mut self, offset: usize, node: PersistentNode<Key, Value>) {
+        let Some(slot) = self.nodes.get_mut(offset) else {
+            return;
+        };
+        match slot {
+            SparseTreeNode::Ref(link) if link.node == *node.hash() => {
+                *slot = SparseTreeNode::Loaded {
+                    lower_bound: link.separator.clone(),
+                    pending: Vec::new(),
+                    node,
+                };
+            }
+            SparseTreeNode::Pending { link, pending } if link.node == *node.hash() => {
+                *slot = SparseTreeNode::Loaded {
+                    lower_bound: link.separator.clone(),
+                    pending: core::mem::take(pending),
+                    node,
+                };
+            }
+            _ => {}
+        }
+    }
+
     /// Reads a node from storage by hash.
     async fn load(
         storage: &ContentAddressedStorage<Backend>,
@@ -867,13 +1011,43 @@ where
                     };
                     match node.body() {
                         ArchivedNodeBody::Index(index) => {
+                            // Fetch the whole child level in one concurrent
+                            // batch before routing. Every child of a visited
+                            // index is consumed by the routing below, so the
+                            // batch reads exactly the blocks the one-by-one
+                            // loads did; it only collapses the round trips a
+                            // hydrating backend pays per index from one per
+                            // child to one per batch.
+                            let mut fetched: Vec<FetchedChild<Key, Value>> =
+                                (0..index.len()).map(|_| None).collect();
+                            {
+                                let mut hashes = Vec::with_capacity(index.len());
+                                for at in 0..index.len() {
+                                    hashes.push(index.hash_at(at)?.clone());
+                                }
+                                let mut queue = hashes.into_iter().enumerate();
+                                let mut reads = futures_util::stream::FuturesUnordered::new();
+                                loop {
+                                    while reads.len() < LOAD_CONCURRENCY {
+                                        let Some((at, hash)) = queue.next() else {
+                                            break;
+                                        };
+                                        reads.push(fetch_block(self.storage, at, hash));
+                                    }
+                                    match reads.next().await {
+                                        Some((at, result)) => fetched[at] = Some(result),
+                                        None => break,
+                                    }
+                                }
+                            }
+
                             let mut children = Vec::with_capacity(index.len());
-                            for at in 0..index.len() {
-                                let hash = index.hash_at(at)?;
-                                let child = match Self::try_load(self.storage, hash).await? {
+                            for (at, slot) in fetched.iter_mut().enumerate() {
+                                let child = match slot.take().expect("fetched above")? {
                                     Some(child) => Some(child),
                                     None if self.missing == MissingBlocks::Boundary => None,
                                     None => {
+                                        let hash = index.hash_at(at)?;
                                         Err(DialogSearchTreeError::Node(format!(
                                             "Blob not found in storage: {hash}"
                                         )))?;
@@ -1124,6 +1298,7 @@ where
             target_storage,
             None,
             missing,
+            Prefetch::Lazy,
         )
         .await?;
 
@@ -1167,6 +1342,30 @@ where
     where
         D: Distribution,
     {
+        Self::compute_within_with(
+            source_tree,
+            target_tree,
+            source_storage,
+            target_storage,
+            scope,
+            Prefetch::Lazy,
+        )
+        .await
+    }
+
+    /// [`compute_within`](Self::compute_within), with an explicit
+    /// [`Prefetch`] choice for how blocks are acquired.
+    pub async fn compute_within_with<D>(
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
+        source_storage: &'a ContentAddressedStorage<Backend>,
+        target_storage: &'a ContentAddressedStorage<Backend>,
+        scope: &[core::ops::RangeInclusive<Key>],
+        prefetch: Prefetch,
+    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    where
+        D: Distribution,
+    {
         Self::compute_scoped(
             source_tree,
             target_tree,
@@ -1174,6 +1373,7 @@ where
             target_storage,
             Some(scope),
             MissingPolicy::default(),
+            prefetch,
         )
         .await
     }
@@ -1185,6 +1385,7 @@ where
         target_storage: &'a ContentAddressedStorage<Backend>,
         scope: Option<&[core::ops::RangeInclusive<Key>]>,
         missing: MissingPolicy,
+        prefetch: Prefetch,
     ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
     where
         D: Distribution,
@@ -1220,12 +1421,71 @@ where
         // Iteratively prune shared nodes and expand differing ones until a
         // fixed point: only differing leaf segments (and unique-range
         // subtrees) remain.
+        let mut attempted: HashSet<Blake3Hash> = HashSet::new();
         loop {
             if let Some(scope) = scope {
                 source.retain_scope(scope);
                 target.retain_scope(scope);
             }
             source.prune(&mut target);
+
+            // The eager loading sweep. Under [`Prefetch::Lazy`] every read
+            // happens inside the comparison, one backend round trip per
+            // node (against a hydrating backend, a network round trip per
+            // node), because each pass expands one node and restarts.
+            // Under [`Prefetch::Eager`] each pass first loads every
+            // frontier block that survived scope and hash pruning
+            // concurrently, one round trip per tree level instead, and
+            // installs each fetched node into its frontier slot so no
+            // block is read twice. The sweep can read blocks the lazy
+            // walk would have skipped (a shared node whose twin has not
+            // surfaced on the other frontier yet, a unique-range segment
+            // a novelty report would only name by hash), which is why it
+            // is opt-in; see [`Prefetch`]. Absence and failure are
+            // swallowed here (the slot stays a reference), so
+            // `expand_at`'s own read keeps owning the error and the
+            // `MissingBlocks` policy; the `attempted` set keeps a block
+            // that stayed a reference from being refetched every pass.
+            let mut pending: Vec<(bool, usize, &ContentAddressedStorage<Backend>, Blake3Hash)> =
+                Vec::new();
+            if prefetch == Prefetch::Eager {
+                for (is_target, offset, storage, hash) in source
+                    .unloaded()
+                    .map(|(offset, hash)| (false, offset, source_storage, hash))
+                    .chain(
+                        target
+                            .unloaded()
+                            .map(|(offset, hash)| (true, offset, target_storage, hash)),
+                    )
+                {
+                    if attempted.insert(hash.clone()) {
+                        pending.push((is_target, offset, storage, hash.clone()));
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                let mut pending = pending.into_iter();
+                let mut reads = futures_util::stream::FuturesUnordered::new();
+                loop {
+                    while reads.len() < LOAD_CONCURRENCY {
+                        let Some((is_target, offset, storage, hash)) = pending.next() else {
+                            break;
+                        };
+                        reads.push(preload_block(storage, is_target, offset, hash));
+                    }
+                    match reads.next().await {
+                        Some((is_target, offset, Some(node))) => {
+                            if is_target {
+                                target.install(offset, node);
+                            } else {
+                                source.install(offset, node);
+                            }
+                        }
+                        Some((_, _, None)) => {}
+                        None => break,
+                    }
+                }
+            }
 
             let mut expanded = false;
             let mut source_idx = 0;
@@ -2118,6 +2378,174 @@ mod tests {
             reads <= 16,
             "diff of a single-entry change read {reads} blocks; expected a \
              path-proportional number, not the whole tree"
+        );
+
+        Ok(())
+    }
+
+    /// The eager prefetch is a scheduling choice, not a semantic one: the
+    /// streamed changes are identical to the lazy walk's.
+    #[dialog_common::test]
+    async fn it_streams_the_same_changes_eagerly() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let entries: Vec<(u32, Vec<u8>)> = (0..500u32).map(|i| (i, vec![i as u8])).collect();
+        let base = build(entries, &mut storage).await?;
+
+        let mut modified = base.clone();
+        let mut delta = Delta::zero();
+        for key in [3u32, 128, 250, 251, 499, 600, 601] {
+            modified = modified
+                .edit()
+                .insert(key.to_le_bytes(), vec![0xAB], &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        let scope = [[0u8; 4]..=[0xFF; 4]];
+        type Fingerprint = Vec<(bool, [u8; 4], Vec<u8>)>;
+        let mut collected: Vec<Fingerprint> = Vec::new();
+        for prefetch in [crate::Prefetch::Lazy, crate::Prefetch::Eager] {
+            let stream =
+                base.differentiate_within_with(&modified, &scope, &storage, &storage, prefetch);
+            futures_util::pin_mut!(stream);
+            let mut changes = Vec::new();
+            while let Some(change) = stream.next().await {
+                changes.push(match change? {
+                    Change::Add(entry) => (true, entry.key, entry.value),
+                    Change::Remove(entry) => (false, entry.key, entry.value),
+                });
+            }
+            collected.push(changes);
+        }
+
+        let eager = collected.pop().expect("eager run collected");
+        let lazy = collected.pop().expect("lazy run collected");
+        assert!(!lazy.is_empty(), "the fixture diverges");
+        assert_eq!(eager, lazy, "eager and lazy walks must agree");
+
+        Ok(())
+    }
+
+    /// The eager sweep actually overlaps its frontier reads: with a
+    /// backend that yields once per read, concurrent fetches stack up
+    /// in flight, while the lazy comparison never has more than one
+    /// read outstanding.
+    #[dialog_common::test]
+    async fn it_overlaps_frontier_reads_when_eager() -> Result<()> {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        /// Returns `Pending` once (waking immediately), so concurrently
+        /// driven reads get a chance to start before any completes.
+        struct YieldOnce(bool);
+        impl Future for YieldOnce {
+            type Output = ();
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                if self.0 {
+                    Poll::Ready(())
+                } else {
+                    self.0 = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }
+
+        #[derive(Clone)]
+        struct GaugeBackend {
+            inner: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+            in_flight: Arc<AtomicUsize>,
+            max_in_flight: Arc<AtomicUsize>,
+        }
+
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        impl StorageBackend for GaugeBackend {
+            type Key = Blake3Hash;
+            type Value = Vec<u8>;
+            type Error = DialogStorageError;
+
+            async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+                self.inner.set(key, value).await
+            }
+
+            async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+                let now = self.in_flight.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                self.max_in_flight.fetch_max(now, AtomicOrdering::Relaxed);
+                YieldOnce(false).await;
+                let result = self.inner.get(key).await;
+                self.in_flight.fetch_sub(1, AtomicOrdering::Relaxed);
+                result
+            }
+        }
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let mut storage = ContentAddressedStorage::new(GaugeBackend {
+            inner: MemoryStorageBackend::default(),
+            in_flight: in_flight.clone(),
+            max_in_flight: max_in_flight.clone(),
+        });
+
+        let mut tree = TestTree::empty();
+        let mut delta = Delta::zero();
+        for key in 0..2000u32 {
+            tree = tree
+                .edit()
+                .insert(key.to_le_bytes(), vec![key as u8], &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+        let base = tree.clone();
+        // Divergence across the whole key space, so the comparison's
+        // frontier holds many unloaded references at once.
+        for key in (0..2000u32).step_by(50) {
+            tree = tree
+                .edit()
+                .insert(key.to_le_bytes(), vec![0xCD], &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        let scope = [[0u8; 4]..=[0xFF; 4]];
+
+        max_in_flight.store(0, AtomicOrdering::Relaxed);
+        TreeDifference::compute_within(&base, &tree, &storage, &storage, &scope).await?;
+        assert_eq!(
+            max_in_flight.load(AtomicOrdering::Relaxed),
+            1,
+            "the lazy comparison reads one block at a time"
+        );
+
+        max_in_flight.store(0, AtomicOrdering::Relaxed);
+        TreeDifference::compute_within_with(
+            &base,
+            &tree,
+            &storage,
+            &storage,
+            &scope,
+            crate::Prefetch::Eager,
+        )
+        .await?;
+        assert!(
+            max_in_flight.load(AtomicOrdering::Relaxed) > 1,
+            "the eager sweep overlaps frontier reads"
         );
 
         Ok(())
