@@ -4839,9 +4839,9 @@ async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) ->
 /// measured something other than the bug -- a tree too small for overlap
 /// to mean anything, or a differential's fan-out standing in for the
 /// download's. This one imports an actual profile: 83 blocks and 63
-/// blobs exported from a live tonk through the `vnd.dialog.snapshot`
-/// route, whose shape is what the app's own `/diagnose` view reports
-/// (one index node, 68 children, fanout 256).
+/// blobs exported from a live tonk as a CARv1, whose shape is what the
+/// app's own `/diagnose` view reports (one index node, 68 children,
+/// fanout 256).
 ///
 /// The blobs matter as much as the blocks. A delegation's envelope is a
 /// blob, and blobs travel their own channel in the snapshot export --
@@ -4858,8 +4858,17 @@ async fn it_downloads_a_real_profile_without_serializing(ucan: UcanS3Address) ->
     use crate::helpers::Counting;
     use crate::repository::snapshot::codec;
 
-    let snapshot = include_bytes!("../../../tests/fixtures/profile-snapshot.bin");
-    let items = codec::decode(snapshot)?;
+    // The fixture is a real CAR, stored zstd-compressed: 820 KiB of tree
+    // shrinks to 54, which is the difference between a fixture that
+    // belongs in the tree and one that does not. `ruzstd` is pure Rust,
+    // so this decompresses in the browser as well as natively.
+    let compressed = include_bytes!("../../../tests/fixtures/profile.car.zst");
+    let mut snapshot = Vec::new();
+    std::io::copy(
+        &mut ruzstd::decoding::StreamingDecoder::new(&compressed[..])?,
+        &mut snapshot,
+    )?;
+    let items = codec::decode(&snapshot)?;
     let blobs = items
         .iter()
         .filter(|item| matches!(item, Ok(crate::Item::Blob { .. })))
@@ -4890,7 +4899,7 @@ async fn it_downloads_a_real_profile_without_serializing(ucan: UcanS3Address) ->
 
     // Seed the source with the captured tree, then publish it.
     let imported = source_repo
-        .import(stream::iter(codec::decode(snapshot)?))
+        .import(stream::iter(codec::decode(&snapshot)?))
         .perform(&operator)
         .await?;
     println!("IMPORTED {imported:?}");
