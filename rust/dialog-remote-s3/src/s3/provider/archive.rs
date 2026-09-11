@@ -29,6 +29,19 @@ fn request_tag() -> usize {
 /// / end 0 / end 1` means they were genuinely in flight together. Unlike
 /// a counter this cannot be inflated by joiners on a shared flight, and
 /// it reads the same on native and in a service worker.
+/// TEMPORARY (#492): mark a phase boundary in the request trace.
+///
+/// The socket probe sees every fetch but not who asked for it, and the
+/// serial run starts at request #0 -- before the download's tree walk
+/// exists. Marking boundaries is what says which phase owns it.
+pub fn trace_phase(phase: &str) {
+    let line = format!("[phase {phase}]");
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&line));
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{line}");
+}
+
 fn trace_request(phase: &str, tag: usize, block: &str) {
     let line = format!("[s3 {phase} #{tag}] {block}");
     #[cfg(target_arch = "wasm32")]
