@@ -4333,15 +4333,24 @@ async fn it_downloads_serially_while_pushing_concurrently(
         .perform(&replica_operator)
         .await?;
 
-    // The download, measured the same way.
+    // Adopt the head FIRST, unmeasured. `pull().download()` runs the
+    // merge and the materialization under one env, and the merge's
+    // differential has a fan-out of its own -- measuring both together
+    // lets the differential's overlap mask a strictly serial download.
+    // The download is the subject here, so it is measured alone.
     let pull_env = Counting::new(replica_operator.clone());
     replica
         .pull()
-        .download()
-        .operational()
         .perform(&pull_env)
         .await?
         .expect("the replica adopts the upstream head");
+    pull_env.reset();
+
+    replica
+        .download()
+        .operational()
+        .perform(&pull_env)
+        .await?;
     let reads = pull_env.block_reads();
     let pull_peak = pull_env.peak_block_reads_in_flight();
 
