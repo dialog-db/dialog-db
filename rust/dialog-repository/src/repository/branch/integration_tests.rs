@@ -4174,48 +4174,51 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
     Ok(())
 }
 
-/// #492: do concurrent block reads over a UCAN remote actually overlap?
+/// #492: a download's block GETs are serial, while a push's PUTs of the
+/// same tree are concurrent.
 ///
-/// The two tests above show a download saturating the fan-out over bare
-/// S3 while the same download over UCAN does not, which localizes the
-/// fault to the authorization each remote read performs but does not
-/// name the mechanism.
+/// THE REPRODUCTION. A throttled HAR of a real space join measured, in
+/// one run, over one link, against one UCAN remote:
 ///
-/// This isolates that path from everything else. The reads are issued
-/// DIRECTLY through `NetworkedIndex` with `join_all`, so they are
-/// concurrent by construction: there is no walk, no `try_stream!`
-/// generator, and no one-item-per-poll drain that could explain a serial
-/// result. Whatever overlap this measures is the overlap the authorized
-/// remote read path permits.
+/// - PUT (push/upload): 29 requests, peak 15 in flight.
+/// - GET (pull/download): 20 requests, peak 1 in flight, in exact
+///   lockstep (`/ucan` 2.0s -> GET 2.0s -> `/ucan` 2.0s -> ...).
 ///
-/// What each number means:
-/// - `peak > 1` means concurrent hydrations genuinely overlap, and the
-///   serialization the app sees lives in the download machinery above
-///   this layer rather than in authorization.
-/// - `peak == 1` means the authorize-then-fetch path itself serializes,
-///   and no amount of fan-out upstream can help until it is fixed.
-/// - `forks` counts the effects that actually cross the network (block
-///   GETs plus any per-read access-service traffic), so `forks` well
-///   above `blocks` says each read pays a preamble of its own.
+/// Because both paths share the app, the browser, the link, the remote,
+/// the block `Flight`, and the single-threaded worker, none of those can
+/// be the cause: the push has all of them and still fans out. The
+/// difference is the shape of the consumer.
 ///
-/// Note `memory::Resolve` is deliberately NOT the suspect here: the
-/// operator routes it to local storage, and only the separate
-/// `Fork<RemoteSite, memory::Resolve>` reaches a remote.
+/// - `Upload::perform` feeds a FULLY MATERIALIZED wave into
+///   `.buffer_unordered(16).try_collect()`. `try_collect` is a TERMINAL
+///   consumer: it polls until everything finishes, so all 16 uploads stay
+///   in flight.
+/// - The download's fan-out is `buffered(16)` inside `try_stream!`
+///   (`traversal.rs`), wrapped by a second `try_stream!` (the snapshot
+///   export), drained by `Download::perform`'s
+///   `while let Some(item) = items.next().await`. An `async_stream`
+///   generator SUSPENDS at every `yield`, so the reads only advance while
+///   the consumer polls; the fan-out is parked after each item and never
+///   accumulates.
+///
+/// This asserts the contrast directly, in one test, so the fix is pinned
+/// by the same comparison that found it: push the tree (measuring PUT
+/// overlap), then download it into a cold replica (measuring GET
+/// overlap). It must run on wasm as well as native -- the browser is
+/// where the symptom was observed.
 #[dialog_common::test]
-async fn it_serializes_concurrent_block_reads_on_ucan_authorization(
+async fn it_downloads_serially_while_pushing_concurrently(
     ucan: UcanS3Address,
 ) -> Result<()> {
     use crate::helpers::Counting;
-    use dialog_storage::StorageBackend;
-    use futures_util::future::join_all;
 
     let (operator, profile) = test_operator_with_profile().await;
     let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
 
-    // A source database with enough facts that its tree has interior
-    // structure, published to the UCAN remote.
+    // A database with enough facts that its tree has interior structure:
+    // a handful of blocks could be fetched serially unnoticed.
     let source_repo = profile
-        .repository(unique_name("ucan-authz-serial-a"))
+        .repository(unique_name("serial-get-a"))
         .create()
         .perform(&operator)
         .await?;
@@ -4257,35 +4260,18 @@ async fn it_serializes_concurrent_block_reads_on_ucan_authorization(
             .perform(&operator)
             .await?;
     }
-    assert!(source.push().perform(&operator).await?.is_some());
 
-    // Collect the digests the source tree is made of, read locally so
-    // the collection itself costs no remote traffic and pollutes no
-    // tally.
-    let head = NodeHash::from(*source.revision().expect("committed").tree.hash());
-    let local_index = NetworkedIndex::new(&operator, source.archive().index(), None);
-    let local_storage = TreeStorage::new(TreeStorageBridge(local_index));
-    let tree = Index::from_hash(head);
-    let visits = tree.traverse_available(&local_storage);
-    futures_util::pin_mut!(visits);
-    let mut digests: Vec<NodeHash> = Vec::new();
-    while let Some(visit) = visits.next().await {
-        if let Visit::Present(node) = visit? {
-            digests.push(node.hash().clone());
-        }
-    }
-    assert!(
-        digests.len() >= 16,
-        "the source tree must have enough blocks to measure overlap (got {})",
-        digests.len()
-    );
-    digests.truncate(16);
+    // The push, measured. This is the control: the same tree, the same
+    // remote, the same authorization, going the other way.
+    let push_env = Counting::new(operator.clone());
+    assert!(source.push().perform(&push_env).await?.is_some());
+    let writes = push_env.count("archive::Put");
+    let push_peak = push_env.peak_block_writes_in_flight();
 
-    // A replica that holds NONE of those blocks and reaches the source
-    // through the UCAN remote, so every read below is a true remote
-    // hydration.
+    // A cold replica that holds none of those blocks, reaching the source
+    // through the UCAN remote, so every read below is a true hydration.
     let replica_repo = profile
-        .repository(unique_name("ucan-authz-serial-b"))
+        .repository(unique_name("serial-get-b"))
         .open()
         .perform(&operator)
         .await?;
@@ -4300,52 +4286,48 @@ async fn it_serializes_concurrent_block_reads_on_ucan_authorization(
         .open()
         .perform(&operator)
         .await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
 
-    // The measurement: N independent block reads, issued together.
-    // `join_all` polls them all on every pass, so any serialization
-    // observed here is imposed by the code under test, not the driver.
-    let env = Counting::new(operator.clone());
-    let index = NetworkedIndex::new(&env, replica.archive().index(), Some(origin));
-    let reads = digests
-        .iter()
-        .map(|digest| {
-            let index = index.clone();
-            let key: dialog_storage::Blake3Hash =
-                digest.as_ref().try_into().expect("a blake3 digest is 32 bytes");
-            async move { StorageBackend::get(&index, &key).await }
-        })
-        .collect::<Vec<_>>();
-    let fetched = join_all(reads).await;
+    // The download, measured the same way.
+    let pull_env = Counting::new(operator.clone());
+    replica
+        .pull()
+        .download()
+        .operational()
+        .perform(&pull_env)
+        .await?
+        .expect("the replica adopts the upstream head");
+    let reads = pull_env.block_reads();
+    let pull_peak = pull_env.peak_block_reads_in_flight();
 
-    let found = fetched
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .count();
-    let blocks = env.block_reads();
-    let peak = env.peak_block_reads_in_flight();
-    let forks = env.count("fork::Fork");
-    let local_resolves = env.count("memory::Resolve");
     println!(
-        "AUTHZ MEASURED blocks={blocks} peak_in_flight={peak} \
-         forks={forks} local_resolves={local_resolves} hydrated={found}/{}",
-        digests.len()
-    );
-
-    assert_eq!(
-        found,
-        digests.len(),
-        "every requested block must hydrate through the UCAN remote for \
-         this to measure the authorized path"
+        "PUSH writes={writes} peak={push_peak} | PULL reads={reads} peak={pull_peak}"
     );
 
     assert!(
-        peak > 1,
-        "{blocks} block reads were issued together via `join_all` but never \
-         more than {peak} was in flight at once ({forks} effects crossed the \
-         network). With no walk, no generator, and no serial drain in the \
-         path, the serialization is in the authorized remote read itself.",
+        writes > 8 && reads > 8,
+        "both directions must move a real tree to compare them \
+         (writes={writes}, reads={reads})"
+    );
+    assert!(
+        push_peak > 1,
+        "the push is the control and must fan out: {writes} uploads reached \
+         peak {push_peak}. If this fails the comparison proves nothing and \
+         the harness is at fault, not the download."
+    );
+    assert!(
+        pull_peak > 1,
+        "the push fanned out to peak {push_peak} over {writes} uploads, but \
+         the download of the SAME tree over the SAME remote reached only \
+         peak {pull_peak} over {reads} reads. Same app, link, remote, \
+         flight and executor -- so the cause is the consumer shape: \
+         `Upload::perform` drains a materialized wave with a terminal \
+         `try_collect`, while the download's `buffered(16)` sits inside \
+         `try_stream!` generators that suspend at every `yield`."
     );
 
     Ok(())
