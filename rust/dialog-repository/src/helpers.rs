@@ -45,10 +45,13 @@ pub async fn test_repo(
 /// rows. A profile is not a data store; its branch holds definitions and
 /// authority, not bulk.
 ///
-/// `scale` of 1 is that real shape. Larger scales exist only to ask what
-/// changes with volume, and are not what a login pulls: sizing a fixture
-/// up to make a measurement move is how a test stops describing the
-/// system it was written about.
+/// `scale` of 1 targets the shape the app's own `/diagnose` view reports
+/// for a real profile: ONE index node with ~68 children (fanout 256,
+/// max-segment 65536), i.e. a root plus a wide child level. That shape is
+/// the whole point -- the download walks the root, then a level of ~68
+/// siblings whose reads are independent. Fetched together they cost one
+/// round trip; fetched one at a time they cost 68, which over a 2s link
+/// is the difference between a second and a minute.
 ///
 /// Returns the number of delegations retained, so a caller can assert
 /// the envelope blobs actually shipped.
@@ -81,6 +84,8 @@ where
 
     let space = Ed25519Signer::generate().await?;
     let delegations = 3 * scale;
+    // Sized so the tree reaches a wide child level rather than a single
+    // leaf: the siblings are what must overlap.
     for _ in 0..delegations {
         let holder = Ed25519Signer::generate().await?;
         let delegation = dialog_ucan_core::DelegationBuilder::new()
@@ -99,8 +104,8 @@ where
             .await?;
     }
 
-    for round in 0..scale {
-        let rows: Vec<_> = (0..4)
+    for round in 0..(6 * scale) {
+        let rows: Vec<_> = (0..150)
             .map(|i| {
                 Instruction::Assert(Artifact {
                     the: "device/link".parse().expect("valid attribute"),
