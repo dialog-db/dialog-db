@@ -4390,3 +4390,165 @@ async fn it_downloads_serially_while_pushing_concurrently(
 
     Ok(())
 }
+
+/// #492, the profile's shape: many delegations, each an envelope BLOB.
+///
+/// The sibling above measures a download whose content is facts, so its
+/// reads are tree blocks and the fan-out under test is the traversal's.
+/// A tonk profile is not that. It stores delegations, and a retained
+/// delegation decomposes into facts PLUS a signed envelope blob (see
+/// `branch/delegation.rs`) — and blobs travel their own channel in the
+/// snapshot export, a second `buffer_unordered` loop downstream of the
+/// block walk, each blob additionally consulting the tree's blob index
+/// before its bytes can be fetched.
+///
+/// So the profile sync exercises a read path the fact-only test never
+/// reaches, and it is the path the login flow actually drives: the
+/// account branch is the one tonk still materializes with
+/// `.download().operational()`, precisely so the authorization walk
+/// reads locally afterwards.
+///
+/// Same measurement as the sibling, same reason: peak overlap is
+/// latency-independent, so a memory-backed local server cannot hide a
+/// serial download behind fast responses.
+#[dialog_common::test]
+async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Result<()> {
+    use crate::helpers::Counting;
+    use dialog_credentials::Ed25519Signer;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    let source_repo = profile
+        .repository(unique_name("blob-sync-a"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let chain = source_repo
+        .access()
+        .claim(&source_repo)
+        .delegate(profile.did())
+        .perform(&operator)
+        .await?;
+    profile.access().save(chain).perform(&operator).await?;
+    let source_origin = source_repo
+        .remote("origin")
+        .create(site.clone())
+        .perform(&operator)
+        .await?;
+    let source = source_repo.branch("main").open().perform(&operator).await?;
+    let source_remote = source_origin
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    source
+        .set_upstream(source_remote)
+        .perform(&operator)
+        .await?;
+
+    // Many retained delegations: each contributes facts AND one envelope
+    // blob, which is what makes this the profile's shape rather than a
+    // generic fact sync.
+    let space = Ed25519Signer::generate().await?;
+    for _ in 0..24 {
+        let holder = Ed25519Signer::generate().await?;
+        let delegation = dialog_ucan_core::DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&dialog_varsig::Principal::did(&holder))
+            .subject(dialog_ucan_core::subject::Subject::Specific(
+                dialog_varsig::Principal::did(&space),
+            ))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await?;
+        source
+            .delegations()
+            .retain(dialog_ucan::UcanDelegation::new(
+                dialog_ucan_core::DelegationChain::new(delegation),
+            ))
+            .perform(&operator)
+            .await?;
+    }
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // A cold replica on its own profile, operator and space: two repos on
+    // one operator would share an archive and make every read local. The
+    // `fork::Fork` assertion below is what keeps that from passing quietly.
+    let (replica_operator, replica_profile) = test_operator_with_profile().await;
+    replica_profile
+        .access()
+        .save(
+            source_repo
+                .access()
+                .claim(&source_repo)
+                .delegate(replica_profile.did())
+                .perform(&operator)
+                .await?,
+        )
+        .perform(&replica_operator)
+        .await?;
+    let replica_repo = replica_profile
+        .repository(unique_name("blob-sync-b"))
+        .open()
+        .perform(&replica_operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(site)
+        .subject(source_repo.did())
+        .perform(&replica_operator)
+        .await?;
+    let replica = replica_repo
+        .branch("main")
+        .open()
+        .perform(&replica_operator)
+        .await?;
+    let remote_branch = origin
+        .branch("main")
+        .open()
+        .perform(&replica_operator)
+        .await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&replica_operator)
+        .await?;
+
+    // Adopt the head first, unmeasured: the merge's differential has a
+    // fan-out of its own, and measuring it alongside the download lets
+    // that overlap mask a serial materialization.
+    let env = Counting::new(replica_operator.clone());
+    replica
+        .pull()
+        .perform(&env)
+        .await?
+        .expect("the replica adopts the upstream head");
+    env.reset();
+
+    replica.download().operational().perform(&env).await?;
+
+    let reads = env.block_reads();
+    let peak = env.peak_block_reads_in_flight();
+    let hydrations = env.count("fork::Fork");
+    println!("PROFILE reads={reads} peak={peak} forks={hydrations}");
+
+    assert!(
+        hydrations > 0,
+        "the replica materialized without one remote fetch, so it was not \
+         cold and this measured local reads"
+    );
+    assert!(
+        reads > 8,
+        "the download must move a real tree to measure anything (got {reads})"
+    );
+    assert!(
+        peak > 1,
+        "a profile carrying 24 delegation envelope blobs materialized \
+         {reads} reads but never had more than {peak} in flight at once, so \
+         each cost its own round trip. Blobs travel their own channel in \
+         the snapshot export, downstream of the block walk, so a fan-out \
+         restored in the traversal alone does not cover them."
+    );
+
+    Ok(())
+}
