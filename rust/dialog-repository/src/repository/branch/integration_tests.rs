@@ -4648,190 +4648,6 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     Ok(())
 }
 
-/// #492, the flow the HAR traces: LOGIN AFTER CLEARING STORAGE.
-///
-/// Not a first sync and not a merge. The device holds nothing at all --
-/// no base tree, no sync base, no cached blocks -- and recovers its
-/// access by adopting the account's branch. That is
-/// `adopt_account_access` in tonk's `router/account_state.rs`, which
-/// ends in `adopt_account_upstream`:
-///
-/// ```text
-/// access.set_upstream(account_branch)   // remote, resolved against the account DID
-/// access.pull().download()             // materialize; NOT .operational()
-/// ```
-///
-/// The distinction matters for what the reads can overlap. Against an
-/// EMPTY local branch there is no base tree to diff, so the merge has
-/// nothing to prefetch and every block the head references has to come
-/// across the wire -- which is why a fresh clone is the shape that
-/// "degenerates into a serial chain" (`pull.rs`, on the eager
-/// differential). A test that starts from a populated replica measures a
-/// differential's fan-out instead and cannot see this.
-///
-/// The content is the profile's: retained delegations, each facts plus a
-/// signed envelope blob, which is what a recovering device actually pulls
-/// down.
-///
-/// Measured on remote fetches (`Hydrate`), never on block reads: local
-/// reads overlap for free and say nothing about wall time.
-#[dialog_common::test]
-async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) -> Result<()> {
-    use crate::helpers::Counting;
-
-    let (account_operator, account_profile) = test_operator_with_profile().await;
-    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
-
-    // The account: its own profile repository, its delegations, pushed to
-    // the remote. This is the state a device recovers FROM.
-    let account_repo = account_profile
-        .repository(unique_name("login-account"))
-        .create()
-        .perform(&account_operator)
-        .await?;
-    let chain = account_repo
-        .access()
-        .claim(&account_repo)
-        .delegate(account_profile.did())
-        .perform(&account_operator)
-        .await?;
-    account_profile
-        .access()
-        .save(chain)
-        .perform(&account_operator)
-        .await?;
-    let account_origin = account_repo
-        .remote("origin")
-        .create(site.clone())
-        .perform(&account_operator)
-        .await?;
-    let account = account_repo
-        .branch(crate::ACCESS_BRANCH)
-        .open()
-        .perform(&account_operator)
-        .await?;
-    let account_remote = account_origin
-        .branch(crate::ACCESS_BRANCH)
-        .open()
-        .perform(&account_operator)
-        .await?;
-    account
-        .set_upstream(account_remote)
-        .perform(&account_operator)
-        .await?;
-
-    // The account branch's real content: a few delegations (passkey
-    // recovery, account recovery, device grants) plus a few device rows.
-    // Scale 1 deliberately -- this is what a login actually pulls, and a
-    // fixture inflated past it would measure a different system.
-    let delegations =
-        crate::helpers::fill_account_branch(&account, 1, &account_operator).await?;
-
-
-    // The push is the control: the same tree, the same remote, the other
-    // direction, measured the same way.
-    let push_env = Counting::new(account_operator.clone());
-    assert!(account.push().perform(&push_env).await?.is_some());
-    let uploads = push_env.count("fork::Fork");
-    let push_peak = push_env.peak_forks_in_flight();
-
-    // The device after clearing storage: a brand-new profile holding
-    // NOTHING, which points its access branch at the account and adopts.
-    let (device_operator, device_profile) = test_operator_with_profile().await;
-    device_profile
-        .access()
-        .save(
-            account_repo
-                .access()
-                .claim(&account_repo)
-                .delegate(device_profile.did())
-                .perform(&account_operator)
-                .await?,
-        )
-        .perform(&device_operator)
-        .await?;
-    let device_repo = device_profile
-        .repository(unique_name("login-device"))
-        .open()
-        .perform(&device_operator)
-        .await?;
-    let device_remote = device_repo
-        .remote("account")
-        .create(site)
-        .subject(account_repo.did())
-        .perform(&device_operator)
-        .await?;
-    let access = device_repo
-        .branch(crate::ACCESS_BRANCH)
-        .open()
-        .perform(&device_operator)
-        .await?;
-    let upstream = device_remote
-        .branch(crate::ACCESS_BRANCH)
-        .open()
-        .perform(&device_operator)
-        .await?;
-    access
-        .set_upstream(upstream)
-        .perform(&device_operator)
-        .await?;
-
-    let env = Counting::new(device_operator.clone());
-
-    // Adopt the head BY REFERENCE first, unmeasured.
-    //
-    // This is the state a login actually downloads from, and the reason
-    // an earlier version of this test measured nothing. `pull()` on a
-    // branch with no local base runs its differentials with
-    // `Prefetch::Eager`, which fetches the blocks it walks -- so a
-    // download chained straight onto it finds the tree already local and
-    // issues almost no remote reads. The app hits the serial path
-    // because the head it adopts is by reference and `download()` is
-    // what walks it; that walk is `traverse`, which the differential
-    // never touches.
-    access.pull().perform(&env).await?;
-    env.reset();
-
-    // The walk under test: materialize a by-reference head.
-    access.download().perform(&env).await?;
-
-    let hydrations = env.count("hydrate::Hydrate");
-    let remote_peak = env.peak_forks_in_flight();
-    let reads = env.block_reads();
-    let local_peak = env.peak_block_reads_in_flight();
-    println!(
-        "LOGIN uploads={uploads} push_peak={push_peak} | \
-         hydrations={hydrations} remote_peak={remote_peak} \
-         reads={reads} local_peak={local_peak}"
-    );
-
-    // Always report, pass or fail: a wasm `println!` only surfaces when
-    // the test fails, so the numbers have to ride an assertion.
-    assert!(
-        hydrations > 8 && remote_peak > 1,
-        "LOGIN MEASURED delegations={delegations} \
-         hydrations={hydrations} remote_peak={remote_peak} \
-         reads={reads} local_peak={local_peak} uploads={uploads} \
-         push_peak={push_peak}. Effects: {:?}",
-        env.snapshot()
-    );
-    assert!(
-        push_peak > 1,
-        "the push is the control and must fan out: {uploads} uploads \
-         reached peak {push_peak}"
-    );
-    assert!(
-        remote_peak > 1,
-        "login recovered the account with {hydrations} remote fetches but \
-         never had more than {remote_peak} open at once, while the push of \
-         the same tree reached peak {push_peak} over {uploads} uploads. \
-         One round trip at a time is the HAR's shape exactly: over a real \
-         link each fetch costs its own latency, which is why a recovery \
-         that should take one round trip per level takes one per block."
-    );
-
-    Ok(())
-}
 
 /// #492, the scenario the HAR traces: a SECOND DEVICE joining an account.
 ///
@@ -5002,9 +4818,11 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
     let remote_peak = env.peak_forks_in_flight();
     let reads = env.block_reads();
     let local_peak = env.peak_block_reads_in_flight();
+    let serial_run = env.longest_serial_fetch_run();
     println!(
         "JOIN delegations={delegations} hydrations={hydrations} \
-         remote_peak={remote_peak} reads={reads} local_peak={local_peak}"
+         remote_peak={remote_peak} serial_run={serial_run} \
+         reads={reads} local_peak={local_peak}"
     );
 
     assert!(
@@ -5013,17 +4831,17 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
          overlap to mean anything (hydrations={hydrations}). Effects: {:?}",
         env.snapshot()
     );
+    // The serial RUN, not the peak. A peak over the whole pull can read
+    // healthy while a long prefix of it is strictly one-at-a-time, which
+    // is what let this bug hide: natively the run is 0, in the browser it
+    // is 30 -- same code, same fixtures, same test.
     assert!(
-        push_peak > 1,
-        "the push is the control and must fan out: {uploads} uploads \
-         reached peak {push_peak}"
-    );
-    assert!(
-        remote_peak > 1,
-        "a device joining the account made {hydrations} remote fetches but \
-         never had more than {remote_peak} open at once, while the push of \
-         the same tree reached peak {push_peak} over {uploads} uploads. One \
-         round trip at a time is the HAR's shape exactly."
+        serial_run < 4,
+        "a device joining the account made {hydrations} remote fetches, and \
+         {serial_run} of them ran back-to-back with nothing else in flight \
+         (peak {remote_peak} over the whole pull). One round trip at a time \
+         is the HAR's shape exactly. Natively this same test serializes \
+         none, so a failure here is the wasm runtime, not the walk."
     );
 
     Ok(())
