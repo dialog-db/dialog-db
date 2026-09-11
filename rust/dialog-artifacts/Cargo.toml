@@ -9,7 +9,10 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["csv"]
+default = ["csv", "web"]
+# The wasm-bindgen surface in `web.rs`. Off, the crate compiles for wasm32
+# without exporting anything, so a dependant can bind its own surface.
+web = []
 debug = []
 helpers = ["dep:anyhow"]
 csv = ["dep:csv-async"]
