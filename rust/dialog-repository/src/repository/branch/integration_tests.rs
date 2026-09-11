@@ -4385,6 +4385,13 @@ async fn it_downloads_serially_while_pushing_concurrently(
          the harness is at fault, not the download."
     );
     assert!(
+        hydrations > 8,
+        "the download made only {hydrations} remote fetches, too few for its \
+         overlap to mean anything: the replica must actually pull the tree \
+         across the wire. Effects seen: {:?}",
+        pull_env.snapshot()
+    );
+    assert!(
         remote_peak > 1,
         "the push fanned out to peak {push_peak} over {writes} uploads, but \
          the login path's remote fetches reached only peak {remote_peak} \
