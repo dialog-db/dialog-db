@@ -69,6 +69,10 @@ tower-http = { workspace = true, features = ["cors"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["js"] }
+# TEMPORARY (#492): the request tracing in the archive provider prints to
+# the worker console, which has no stderr. Remove with the tracing.
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true, features = ["console"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }

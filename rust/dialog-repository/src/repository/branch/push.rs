@@ -391,31 +391,6 @@ impl Push<'_> {
                                     continue;
                                 }
                             };
-                            // `blob_store.get` is a raw backend read: it
-                            // returns whatever is filed under `reference`
-                            // without checking it, and `put` derives the key
-                            // it ships under FROM THE BYTES. Uploading
-                            // unverified local bytes therefore files them on
-                            // the remote under `hash(bytes)` while
-                            // `reference` itself stays absent there — every
-                            // later reader of `reference` fetches, misses,
-                            // and raises a hash-verification failure against
-                            // a remote that looks like it answered. Verify
-                            // before shipping so a corrupt local block fails
-                            // the push that would have spread it.
-                            let reference_hash = NodeHash::from(reference);
-                            if !reference_hash.matches(&bytes) {
-                                return Err(dialog_search_tree::DialogSearchTreeError::Node(
-                                    format!(
-                                        "refusing to ship spilled value {reference_hash}: \
-                                         the local block under that reference hashes to \
-                                         {} ({} bytes)",
-                                        NodeHash::hash(&bytes),
-                                        bytes.len(),
-                                    ),
-                                )
-                                .into());
-                            }
                             remote_index.put(Buffer::from(bytes)).perform(env).await?;
                         }
                     }
@@ -755,21 +730,6 @@ where
         ))
         .into());
     };
-    // The bytes came from whichever store answered first, unverified, and
-    // `put` keys the upload by hashing them. Shipping them unchecked would
-    // file a wrong answer on the target under `hash(bytes)` and leave
-    // `hash` absent there, so readers fetch it forever and fail
-    // verification. Adjudicate here instead: a source that answers wrongly
-    // fails the push rather than propagating.
-    if !hash.matches(&bytes) {
-        return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
-            "block {hash} was answered by a source with bytes hashing to {} \
-             ({} bytes); refusing to ship them",
-            NodeHash::hash(&bytes),
-            bytes.len(),
-        ))
-        .into());
-    }
     target
         .archive()
         .index()

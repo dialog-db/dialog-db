@@ -169,17 +169,3 @@ pub use dialog_macros::test;
 /// See the macro documentation for details.
 #[cfg(feature = "helpers")]
 pub use dialog_macros::provider;
-
-/// TEMPORARY diagnostic probe: timestamped line to the console (wasm)
-/// or stderr (native). Strip before merge.
-pub fn probe(message: &str) {
-    let ms = time::now()
-        .duration_since(time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let line = format!("[probe {}] {}", ms % 1_000_000, message);
-    #[cfg(target_arch = "wasm32")]
-    web_sys::console::log_1(&line.as_str().into());
-    #[cfg(not(target_arch = "wasm32"))]
-    eprintln!("{line}");
-}

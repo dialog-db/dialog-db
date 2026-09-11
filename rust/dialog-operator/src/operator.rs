@@ -124,16 +124,6 @@ pub struct Operator<S: Clone> {
     /// Resolved-chain cache (see `operator/access.rs`).
     chains: Arc<Mutex<access::ChainCache>>,
 
-    /// In-flight proof resolutions, joined by `(principal, subject,
-    /// command)` — the same key the chain cache records under (see
-    /// `operator/access.rs`). A cold cache used to send every
-    /// concurrent reader of one subject through its own sequential
-    /// delegation walk, and an epoch bump clears the whole cache at
-    /// once, so the herd is real rather than theoretical. Held weakly
-    /// for the reason the hydration flight is: the shared work captures
-    /// an operator clone, so nothing may own it through a field.
-    proofs: Arc<access::ProofFlight>,
-
     /// The authorization walk's remote reach (see [`WalkReach`]).
     /// Deliberately EMPTY on the operator clone captured inside the reach
     /// closures — the proof that authorizes a fetch must resolve from

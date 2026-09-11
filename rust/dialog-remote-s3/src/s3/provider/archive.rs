@@ -13,6 +13,33 @@ use crate::S3Error;
 use crate::flight::Flight;
 use crate::s3::{S3, S3Invocation};
 
+/// TEMPORARY (#492): a serial number per traced request, so a start can
+/// be matched to its end in an interleaved log.
+fn request_tag() -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// TEMPORARY (#492): print one line per request boundary.
+///
+/// The ORDER of these lines is the measurement. `start 0 / end 0 / start
+/// 1 / end 1` is a serial chain: each request was awaited before the next
+/// was issued, so each cost its own round trip. `start 0 / start 1 / ...
+/// / end 0 / end 1` means they were genuinely in flight together. Unlike
+/// a counter this cannot be inflated by joiners on a shared flight, and
+/// it reads the same on native and in a service worker.
+fn trace_request(phase: &str, tag: usize, block: &str) {
+    let line = format!("[s3 {phase} #{tag}] {block}");
+    #[cfg(target_arch = "wasm32")]
+    {
+        // The worker has no stderr; its console is where a probe lands.
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&line));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{line}");
+}
+
 /// In-flight block GETs, joined by presigned URL.
 ///
 /// A block is immutable content, so every caller holding the same
@@ -69,9 +96,34 @@ impl Provider<S3Invocation<Get>> for S3 {
         let permit = input.permit;
         let (status, bytes) = block_gets()
             .join(key, move || async move {
-                let response = permit.send().await?;
+                // TEMPORARY (#492): bracket the ACTUAL request so the log
+                // says whether requests interleave. Serial reads print
+                // start/end/start/end; overlapping ones print
+                // start/start/.../end/end. This sits at the last point
+                // before the socket, so unlike a counter over effect
+                // dispatches it cannot be inflated by joiners on a shared
+                // flight or by work the transport later serializes.
+                let tag = request_tag();
+                let block = permit
+                    .url
+                    .path()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(12)
+                    .collect::<String>();
+                trace_request("start", tag, &block);
+                let response = match permit.send().await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        trace_request("fail", tag, &block);
+                        return Err(error);
+                    }
+                };
                 let status = response.status().as_u16();
                 let bytes = response.bytes().await.map_err(S3Error::from)?;
+                trace_request("end", tag, &block);
                 Ok((status, Arc::new(bytes.to_vec())))
             })
             .await?;

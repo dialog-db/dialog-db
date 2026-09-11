@@ -202,7 +202,13 @@ where
                         (hash, bytes)
                     },
                 ))
-                .buffer_unordered(FETCH_CONCURRENCY);
+                // `buffered`, not `buffer_unordered`: the whole level's
+                // reads go in flight together, but a node that lands early
+                // still waits its turn, so the walk yields in level order.
+                // The stream stays streaming — the first node is yielded
+                // as soon as IT is ready, never after the level's slowest
+                // — while the reads behind it keep running.
+                .buffered(FETCH_CONCURRENCY);
 
                 let mut next = Vec::new();
                 while let Some((hash, bytes)) = reads.next().await {
@@ -303,6 +309,42 @@ mod tests {
         tags: &[u8],
         per_tag: u32,
     ) -> Result<PersistentTree<[u8; 5], Vec<u8>>> {
+        let mut tree = PersistentTree::<[u8; 5], Vec<u8>>::empty();
+        let mut delta = Delta::zero();
+        for tag in tags {
+            for i in 0..per_tag {
+                let mut key = [0u8; 5];
+                key[0] = *tag;
+                key[1..].copy_from_slice(&i.to_be_bytes());
+                tree = tree
+                    .edit()
+                    .insert(key, vec![*tag; 512], storage)
+                    .await?
+                    .persist(&mut delta)?;
+                for (_, buffer) in delta.flush() {
+                    storage
+                        .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                        .await?;
+                }
+            }
+        }
+        Ok(tree)
+    }
+
+    /// [`tagged_tree`] over any backend, so a test can observe the reads.
+    async fn tagged_tree_over<B>(
+        storage: &mut ContentAddressedStorage<B>,
+        tags: &[u8],
+        per_tag: u32,
+    ) -> Result<PersistentTree<[u8; 5], Vec<u8>>>
+    where
+        B: dialog_storage::StorageBackend<
+                Key = Blake3Hash,
+                Value = Vec<u8>,
+                Error = dialog_storage::DialogStorageError,
+            > + dialog_common::ConditionalSend
+            + dialog_common::ConditionalSync,
+    {
         let mut tree = PersistentTree::<[u8; 5], Vec<u8>>::empty();
         let mut delta = Delta::zero();
         for tag in tags {
@@ -565,6 +607,113 @@ mod tests {
             pruned < all,
             "an unmeetable scope must prune: kept {pruned} of {all}"
         );
+        Ok(())
+    }
+
+    /// The per-level fan-out must survive a consumer that takes ONE item
+    /// per poll.
+    ///
+    /// That is the service worker's discipline and where #492 bites.
+    /// `buffered` keeps its futures inside whatever task polls it, and a
+    /// `yield` inside this generator suspends the generator until the
+    /// consumer returns — so if the level's remaining reads advance only
+    /// while the generator runs, a one-at-a-time consumer collapses the
+    /// level into one round trip per node. A reactor-backed runtime hides
+    /// this (sockets progress regardless of who polls), which is exactly
+    /// why it has to be ASSERTED rather than eyeballed on native.
+    ///
+    /// `ObservingBackend` yields once inside every read, so an overlap
+    /// here means the reads genuinely coexisted rather than merely
+    /// completing back to back.
+    #[dialog_common::test]
+    async fn it_overlaps_a_level_under_a_one_item_consumer() -> Result<()> {
+        use crate::helpers::ObservingBackend;
+
+        let backend = ObservingBackend::new();
+        let mut storage = ContentAddressedStorage::new(backend.clone());
+        // Wide enough that a level holds many siblings to overlap.
+        let tree = tagged_tree_over(&mut storage, &[0u8, 1, 3], 1200).await?;
+
+        backend.reset();
+        let visits = tree.traverse_available(&storage);
+        futures_util::pin_mut!(visits);
+        let mut seen = 0usize;
+        while let Some(visit) = visits.next().await {
+            match visit? {
+                Visit::Present(_) => seen += 1,
+                Visit::Absent(hash) => panic!("a complete tree has no absent node: {hash}"),
+            }
+        }
+
+        let peak = backend.peak_reads_in_flight();
+        assert!(seen > 3, "the walk must visit a real tree (saw {seen})");
+        assert!(
+            peak > 1,
+            "a level's reads must overlap even when the consumer takes one \
+             item per poll: peak was {peak} over {seen} nodes, so each read \
+             cost its own round trip",
+        );
+
+        Ok(())
+    }
+
+    /// The same overlap, but observed THROUGH A NESTED GENERATOR — the
+    /// shape the download actually has.
+    ///
+    /// `snapshot.rs` wraps this walk in its own `try_stream!`: the outer
+    /// generator drains `traverse` with a `while let` and yields each
+    /// block onward. This codebase already documents what that costs
+    /// (dialog-db-81, in the scoped-flight commit): "nested generators
+    /// poll only their current await chain". A fan-out living inside the
+    /// inner generator therefore stops advancing whenever the OUTER
+    /// generator is suspended at its own yield — which, under a consumer
+    /// that takes one item per poll, is most of the time.
+    ///
+    /// The direct-consumer sibling of this test passes, so if this one
+    /// reports a lower peak, the nesting is the serializer and the
+    /// download's problem is structural rather than a missing knob.
+    #[dialog_common::test]
+    async fn it_overlaps_a_level_through_a_nested_generator() -> Result<()> {
+        use crate::helpers::ObservingBackend;
+
+        let backend = ObservingBackend::new();
+        let mut storage = ContentAddressedStorage::new(backend.clone());
+        let tree = tagged_tree_over(&mut storage, &[0u8, 1, 3], 1200).await?;
+
+        backend.reset();
+        // Wrap the walk the way the snapshot export does: an outer
+        // generator that drains it and re-yields each visit.
+        let relayed = async_stream::try_stream! {
+            let visits = tree.traverse_available(&storage);
+            futures_util::pin_mut!(visits);
+            while let Some(visit) = visits.next().await {
+                let visit: Visit<[u8; 5], Vec<u8>> = visit?;
+                yield visit;
+            }
+        };
+        let relayed: std::pin::Pin<
+            Box<dyn futures_core::Stream<Item = Result<Visit<[u8; 5], Vec<u8>>, crate::DialogSearchTreeError>>>,
+        > = Box::pin(relayed);
+        futures_util::pin_mut!(relayed);
+
+        let mut seen = 0usize;
+        while let Some(visit) = relayed.next().await {
+            match visit? {
+                Visit::Present(_) => seen += 1,
+                Visit::Absent(hash) => panic!("a complete tree has no absent node: {hash}"),
+            }
+        }
+
+        let peak = backend.peak_reads_in_flight();
+        assert!(seen > 3, "the walk must visit a real tree (saw {seen})");
+        assert!(
+            peak > 1,
+            "a level's reads must still overlap when the walk is relayed \
+             through an outer generator: peak was {peak} over {seen} nodes. \
+             The unnested sibling of this test overlaps, so the nesting is \
+             what serializes the download.",
+        );
+
         Ok(())
     }
 }
