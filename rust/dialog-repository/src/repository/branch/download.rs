@@ -110,7 +110,7 @@ impl Download<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,
@@ -202,7 +202,7 @@ impl<'a> PullDownload<'a> {
             + Provider<Attest>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync

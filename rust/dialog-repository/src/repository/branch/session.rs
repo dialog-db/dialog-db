@@ -26,7 +26,6 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
-use crate::repository::archive::networked::HydrationFlight;
 use crate::repository::fetch::FetchPlan;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
@@ -34,7 +33,7 @@ use crate::rules::{
     source_selector,
 };
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
-use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snapshot};
+use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snapshot};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -283,7 +282,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -311,11 +310,11 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             let results = Box::pin(query.perform(&query_env));
             match preload {
                 // The query's own stream drives the plan's speculative
-                // fetches: they borrow this same env, share the demand
-                // reads' hydration flight, and end with the stream. See
-                // `crate::repository::fetch`.
+                // fetches: they borrow this same env and end with the
+                // stream; hydration is shared process-wide by the env's
+                // own flight. See `crate::repository::fetch`.
                 Some(plan) => {
-                    let driven = plan.drive(results, sources, env, Arc::default());
+                    let driven = plan.drive(results, sources, env);
                     for await result in driven {
                         yield result?;
                     }
@@ -453,13 +452,12 @@ pub(crate) fn select_from_source<'a, Env>(
     source: Source,
     env: &'a Env,
     input: ArtifactSelector<Constrained>,
-    flight: Option<Arc<HydrationFlight<'a>>>,
 ) -> ArtifactStream<'a>
 where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -467,13 +465,10 @@ where
     Box::pin(async_stream::try_stream! {
         let select = crate::Select::from_source(source.as_ref(), input);
         let remote = source.as_ref().fallback(env).await;
+        // Concurrent reads of one digest share fetch-and-hydrate through
+        // the env's own `Hydrate` flight (see `crate::Hydrate`), with
+        // every other evaluation in the process.
         let store = NetworkedIndex::new(env, select.catalog(), remote);
-        // Concurrent reads within one evaluation share fetch-and-hydrate
-        // through the query's hydration flight (see `HydrationFlight`).
-        let store = match flight {
-            Some(flight) => store.with_flight(flight),
-            None => store,
-        };
         let stream = select.execute(store).await?;
         for await artifact in stream {
             yield artifact?;
@@ -501,7 +496,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -518,7 +513,7 @@ where
         // retract in `with(..)`) suppresses matching source facts. Each
         // owns its line clone and borrows only `self.env`.
         for source in &self.sources {
-            let raw = select_from_source(source.clone(), self.env, input.clone(), None);
+            let raw = select_from_source(source.clone(), self.env, input.clone());
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
@@ -556,7 +551,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -621,7 +616,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -652,7 +647,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -677,7 +672,7 @@ where
         }
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
-        select_from_source(source.clone(), self.env, selector, None)
+        select_from_source(source.clone(), self.env, selector)
             .owned()
             .try_collect()
             .await
@@ -744,7 +739,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -812,7 +807,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -951,7 +946,7 @@ mod rule_tests {
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
-            + dialog_capability::Provider<Fork<RemoteSite, Get>>
+            + dialog_capability::Provider<crate::Hydrate>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

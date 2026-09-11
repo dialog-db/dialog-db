@@ -5,6 +5,7 @@
 mod access;
 mod builder;
 mod fork;
+mod hydrate;
 mod space;
 #[cfg(test)]
 mod test;
@@ -127,6 +128,12 @@ pub struct Operator<S: Clone> {
     /// closures — the proof that authorizes a fetch must resolve from
     /// what is already local, or the recursion would never bottom out.
     reach: Arc<OnceLock<WalkReach>>,
+
+    /// In-flight remote hydrations, joined by digest across every
+    /// evaluation path performing through this operator (see
+    /// `operator/hydrate.rs`). Held weakly: the shared work lives only
+    /// while some `.perform` call drives it.
+    hydration: Arc<dialog_network::HydrationFlight>,
 }
 
 impl<S: Clone> Operator<S> {

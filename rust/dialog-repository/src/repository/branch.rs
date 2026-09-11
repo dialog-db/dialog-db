@@ -6,8 +6,8 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
+use crate::NetworkedIndex;
 use crate::repository::source::{Caches, SourceRef};
-use crate::{NetworkedIndex, RemoteSite};
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::Entity;
 use dialog_artifacts::history::Origin;
@@ -16,7 +16,6 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
-use dialog_capability::Fork;
 use dialog_capability::{Capability, Did, Subject};
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::Archive;
@@ -279,7 +278,7 @@ impl Branch {
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<memory::Resolve>
-            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -301,7 +300,7 @@ impl Branch {
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<memory::Resolve>
-            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {

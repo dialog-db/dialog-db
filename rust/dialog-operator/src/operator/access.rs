@@ -169,6 +169,28 @@ where
     }
 }
 
+// Hydration for the walk is the plain, unshared read: the local check
+// runs against the operator's storage, and the remote leg routes
+// through the reach exactly as the fork impl above does (degrading to
+// local-only before the reach is installed). Deliberately NOT joined
+// with the operator's shared hydration flight: the walk's reach-less
+// recursion-bounding clone answers `None` where a full route would
+// fetch, so its work is not interchangeable with an ordinary read's.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<dialog_repository::Hydrate> for AccessEnv<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
+{
+    async fn execute(
+        &self,
+        input: <dialog_repository::Hydrate as Command>::Input,
+    ) -> <dialog_repository::Hydrate as Command>::Output {
+        dialog_repository::hydrate(self, input).await
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S> Provider<Fork<RemoteSite, Resolve>> for AccessEnv<S>

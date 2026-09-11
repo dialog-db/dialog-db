@@ -43,9 +43,10 @@ use dialog_search_tree::{
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 
-use crate::repository::archive::networked::HydrationFlight;
 use crate::repository::source::Source;
-use crate::{EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
+use crate::{
+    EMPTY_TREE_HASH, Hydrate, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
@@ -189,14 +190,13 @@ impl FetchPlan {
         stream: S,
         sources: Vec<Source>,
         env: &'a Env,
-        hydration: Arc<HydrationFlight<'a>>,
     ) -> Driven<'a, S, Env>
     where
         S: Stream + Unpin + 'a,
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -206,7 +206,6 @@ impl FetchPlan {
             plan: self.clone(),
             sources,
             env,
-            hydration,
             budget: self.budget,
             likely_inflight: 0,
             maybe_inflight: 0,
@@ -263,7 +262,6 @@ pub(crate) struct Driven<'a, S, Env> {
     plan: FetchPlan,
     sources: Vec<Source>,
     env: &'a Env,
-    hydration: Arc<HydrationFlight<'a>>,
     budget: FetchBudget,
     likely_inflight: usize,
     maybe_inflight: usize,
@@ -276,7 +274,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -299,13 +297,12 @@ where
             }
             let sources = self.sources.clone();
             let env = self.env;
-            let hydration = self.hydration.clone();
             let future = async move {
                 for source in sources {
                     // Warming is advisory: an error ends this source's
                     // walk silently, and the demand read that actually
                     // needs the data owns the failure.
-                    let _ = warm_source(source, env, &job.selector, hydration.clone()).await;
+                    let _ = warm_source(source, env, &job.selector).await;
                 }
                 likelihood
             };
@@ -334,7 +331,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -368,21 +365,21 @@ where
 ///
 /// Reads go through the line's shared node cache (so a later demand read
 /// is free) and the networked index (so every fetched block hydrates the
-/// local archive), sharing in-flight hydrations through `flight`. The
-/// scope is the selector's exact key range; a subtree the range cannot
-/// touch is never fetched, and warming a conservative superset at the
-/// edges is harmless.
-async fn warm_source<'a, Env>(
+/// local archive); in-flight hydrations are shared by the env's own
+/// [`Hydrate`] flight, with every concurrent reader anywhere in the
+/// process. The scope is the selector's exact key range; a subtree the
+/// range cannot touch is never fetched, and warming a conservative
+/// superset at the edges is harmless.
+async fn warm_source<Env>(
     source: Source,
-    env: &'a Env,
+    env: &Env,
     selector: &ArtifactSelector<Constrained>,
-    flight: Arc<HydrationFlight<'a>>,
 ) -> Result<(), DialogSearchTreeError>
 where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -393,7 +390,7 @@ where
     }
     let remote = source.as_ref().fallback(env).await;
     let catalog = source.as_ref().subject().archive().index();
-    let store = NetworkedIndex::new(env, catalog, remote).with_flight(flight);
+    let store = NetworkedIndex::new(env, catalog, remote);
     let store = CacheThrough {
         cache: source.as_ref().node_cache(),
         store,
@@ -440,8 +437,7 @@ impl<Env> Clone for CacheThrough<'_, Env> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> StorageBackend for CacheThrough<'_, Env>
 where
-    Env:
-        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+    Env: Provider<Get> + Provider<Put> + Provider<Hydrate> + ConditionalSync + 'static,
 {
     type Key = Blake3Hash;
     type Value = Vec<u8>;

@@ -37,7 +37,7 @@
 //! #         + Provider<BlobRead>
 //! #         + Provider<BlobWrite>
 //! #         + Provider<BlobImport>
-//! #         + Provider<Fork<RemoteSite, Get>>
+//! #         + Provider<crate::Hydrate>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + Provider<Fork<RemoteSite, BlobRead>>
 //! #         + dialog_common::ConditionalSync
@@ -261,7 +261,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + ConditionalSync
         + 'static,
 {
@@ -289,7 +289,7 @@ impl BlobSize<'_> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -321,7 +321,7 @@ impl ReadBlob<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,
@@ -432,7 +432,7 @@ where
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -498,7 +498,7 @@ where
         + Provider<Publish>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -656,7 +656,7 @@ impl RetractBlob<'_> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

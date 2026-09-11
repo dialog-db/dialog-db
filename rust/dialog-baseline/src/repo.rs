@@ -98,7 +98,7 @@ where
         + Provider<Attest>
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<dialog_repository::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
