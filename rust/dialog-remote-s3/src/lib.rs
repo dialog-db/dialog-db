@@ -54,6 +54,8 @@ pub use dialog_common::flight;
 pub mod helpers;
 
 pub use client::http_client;
+// TEMPORARY (#492): phase markers for the request trace.
+pub use s3::provider::archive::trace_phase;
 pub use error::{AuthorizationFormatError, PermitRejection, S3Error};
 pub use request::{IntoRequest, Precondition, RequestMethod, S3Request};
 pub use request::{archive, memory};
