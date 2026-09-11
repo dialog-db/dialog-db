@@ -4359,10 +4359,32 @@ async fn it_downloads_serially_while_pushing_concurrently(
     let remote_peak = pull_env.peak_forks_in_flight();
 
     let hydrations = pull_env.count("hydrate::Hydrate");
+
+    // The tree's depth, read back from the replica: the descent is
+    // root-to-leaf and each level's read names the next, so depth bounds
+    // how many fetches CANNOT overlap however wide the fan-out is.
+    let head = NodeHash::from(*replica.revision().expect("pulled").tree.hash());
+    let depth_index = NetworkedIndex::new(&replica_operator, replica.archive().index(), None);
+    let depth_storage = TreeStorage::new(TreeStorageBridge(depth_index));
+    let mut depth = 0usize;
+    let mut at = Some(head);
+    while let Some(hash) = at.take() {
+        let Some(bytes) = depth_storage.retrieve(&hash).await? else {
+            break;
+        };
+        depth += 1;
+        let node = dialog_search_tree::PersistentNode::<Key, State<Datum>>::try_from(
+            dialog_search_tree::Buffer::from(bytes),
+        )?;
+        if let ArchivedNodeBody::Index(index) = node.body() {
+            at = index.links()?.first().map(|link| link.node.clone());
+        }
+    }
+
     println!(
         "PUSH writes={writes} peak={push_peak} | \
-         PULL reads={reads} peak={pull_peak} forks={hydrations} \
-         remote_peak={remote_peak}"
+         PULL reads={reads} peak={pull_peak} hydrations={hydrations} \
+         remote_peak={remote_peak} depth={depth}"
     );
 
     assert!(
