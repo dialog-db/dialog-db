@@ -4647,3 +4647,198 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
 
     Ok(())
 }
+
+/// #492, the flow the HAR traces: LOGIN AFTER CLEARING STORAGE.
+///
+/// Not a first sync and not a merge. The device holds nothing at all --
+/// no base tree, no sync base, no cached blocks -- and recovers its
+/// access by adopting the account's branch. That is
+/// `adopt_account_access` in tonk's `router/account_state.rs`, which
+/// ends in `adopt_account_upstream`:
+///
+/// ```text
+/// access.set_upstream(account_branch)   // remote, resolved against the account DID
+/// access.pull().download()             // materialize; NOT .operational()
+/// ```
+///
+/// The distinction matters for what the reads can overlap. Against an
+/// EMPTY local branch there is no base tree to diff, so the merge has
+/// nothing to prefetch and every block the head references has to come
+/// across the wire -- which is why a fresh clone is the shape that
+/// "degenerates into a serial chain" (`pull.rs`, on the eager
+/// differential). A test that starts from a populated replica measures a
+/// differential's fan-out instead and cannot see this.
+///
+/// The content is the profile's: retained delegations, each facts plus a
+/// signed envelope blob, which is what a recovering device actually pulls
+/// down.
+///
+/// Measured on remote fetches (`Hydrate`), never on block reads: local
+/// reads overlap for free and say nothing about wall time.
+#[dialog_common::test]
+async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) -> Result<()> {
+    use crate::helpers::Counting;
+    use dialog_credentials::Ed25519Signer;
+
+    let (account_operator, account_profile) = test_operator_with_profile().await;
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    // The account: its own profile repository, its delegations, pushed to
+    // the remote. This is the state a device recovers FROM.
+    let account_repo = account_profile
+        .repository(unique_name("login-account"))
+        .create()
+        .perform(&account_operator)
+        .await?;
+    let chain = account_repo
+        .access()
+        .claim(&account_repo)
+        .delegate(account_profile.did())
+        .perform(&account_operator)
+        .await?;
+    account_profile
+        .access()
+        .save(chain)
+        .perform(&account_operator)
+        .await?;
+    let account_origin = account_repo
+        .remote("origin")
+        .create(site.clone())
+        .perform(&account_operator)
+        .await?;
+    let account = account_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    let account_remote = account_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    account
+        .set_upstream(account_remote)
+        .perform(&account_operator)
+        .await?;
+
+    let space = Ed25519Signer::generate().await?;
+    for _ in 0..24 {
+        let holder = Ed25519Signer::generate().await?;
+        let delegation = dialog_ucan_core::DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&dialog_varsig::Principal::did(&holder))
+            .subject(dialog_ucan_core::subject::Subject::Specific(
+                dialog_varsig::Principal::did(&space),
+            ))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await?;
+        account
+            .delegations()
+            .retain(dialog_ucan::UcanDelegation::new(
+                dialog_ucan_core::DelegationChain::new(delegation),
+            ))
+            .perform(&account_operator)
+            .await?;
+    }
+    let rows: Vec<_> = (0..200)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "device/link".parse().expect("valid attribute"),
+                of: format!("device:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("device-{i}").repeat(24)),
+                cause: None,
+            })
+        })
+        .collect();
+    account
+        .commit(stream::iter(rows))
+        .perform(&account_operator)
+        .await?;
+
+    // The push is the control: the same tree, the same remote, the other
+    // direction, measured the same way.
+    let push_env = Counting::new(account_operator.clone());
+    assert!(account.push().perform(&push_env).await?.is_some());
+    let uploads = push_env.count("fork::Fork");
+    let push_peak = push_env.peak_forks_in_flight();
+
+    // The device after clearing storage: a brand-new profile holding
+    // NOTHING, which points its access branch at the account and adopts.
+    let (device_operator, device_profile) = test_operator_with_profile().await;
+    device_profile
+        .access()
+        .save(
+            account_repo
+                .access()
+                .claim(&account_repo)
+                .delegate(device_profile.did())
+                .perform(&account_operator)
+                .await?,
+        )
+        .perform(&device_operator)
+        .await?;
+    let device_repo = device_profile
+        .repository(unique_name("login-device"))
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let device_remote = device_repo
+        .remote("account")
+        .create(site)
+        .subject(account_repo.did())
+        .perform(&device_operator)
+        .await?;
+    let access = device_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let upstream = device_remote
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    access
+        .set_upstream(upstream)
+        .perform(&device_operator)
+        .await?;
+
+    // `adopt_account_upstream`, verbatim: pull and materialize.
+    let env = Counting::new(device_operator.clone());
+    access.pull().download().perform(&env).await?;
+
+    let hydrations = env.count("hydrate::Hydrate");
+    let remote_peak = env.peak_forks_in_flight();
+    let reads = env.block_reads();
+    let local_peak = env.peak_block_reads_in_flight();
+    println!(
+        "LOGIN uploads={uploads} push_peak={push_peak} | \
+         hydrations={hydrations} remote_peak={remote_peak} \
+         reads={reads} local_peak={local_peak}"
+    );
+
+    assert!(
+        hydrations > 8,
+        "a device that cleared its storage must pull the account across \
+         the wire; only {hydrations} remote fetches happened, too few for \
+         overlap to mean anything. Effects seen: {:?}",
+        env.snapshot()
+    );
+    assert!(
+        push_peak > 1,
+        "the push is the control and must fan out: {uploads} uploads \
+         reached peak {push_peak}"
+    );
+    assert!(
+        remote_peak > 1,
+        "login recovered the account with {hydrations} remote fetches but \
+         never had more than {remote_peak} open at once, while the push of \
+         the same tree reached peak {push_peak} over {uploads} uploads. \
+         One round trip at a time is the HAR's shape exactly: over a real \
+         link each fetch costs its own latency, which is why a recovery \
+         that should take one round trip per level takes one per block."
+    );
+
+    Ok(())
+}
