@@ -4353,11 +4353,16 @@ async fn it_downloads_serially_while_pushing_concurrently(
         .expect("the replica adopts the upstream head");
     let reads = pull_env.block_reads();
     let pull_peak = pull_env.peak_block_reads_in_flight();
+    // The number that corresponds to the HAR: concurrent ROUND TRIPS.
+    // Block reads that hit the local store overlap for free and tell us
+    // nothing about wall time.
+    let remote_peak = pull_env.peak_forks_in_flight();
 
     let hydrations = pull_env.count("fork::Fork");
     println!(
         "PUSH writes={writes} peak={push_peak} | \
-         PULL reads={reads} peak={pull_peak} forks={hydrations}"
+         PULL reads={reads} peak={pull_peak} forks={hydrations} \
+         remote_peak={remote_peak}"
     );
 
     assert!(
@@ -4378,6 +4383,14 @@ async fn it_downloads_serially_while_pushing_concurrently(
         "the push is the control and must fan out: {writes} uploads reached \
          peak {push_peak}. If this fails the comparison proves nothing and \
          the harness is at fault, not the download."
+    );
+    assert!(
+        remote_peak > 1,
+        "the push fanned out to peak {push_peak} over {writes} uploads, but \
+         the login path's remote fetches reached only peak {remote_peak} \
+         over {hydrations} of them -- one round trip at a time, which is \
+         the HAR's shape exactly. Local block overlap ({pull_peak}) does \
+         not pay for wall time; concurrent round trips do."
     );
     assert!(
         pull_peak > 1,
@@ -4564,9 +4577,10 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     let peak = env.peak_block_reads_in_flight();
     let hydrations = env.count("fork::Fork");
     let blob_reads = env.count("blob::Read");
+    let remote_peak = env.peak_forks_in_flight();
     println!(
         "PROFILE reads={reads} peak={peak} forks={hydrations} \
-         blob_reads={blob_reads}"
+         blob_reads={blob_reads} remote_peak={remote_peak}"
     );
 
     assert!(
@@ -4584,6 +4598,14 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
          this to exercise the blob channel at all (blob::Read={blob_reads}). \
          Without them this is just another fact sync and the sibling test \
          already covers it."
+    );
+    assert!(
+        remote_peak > 1,
+        "a profile carrying 24 delegation envelope blobs made {hydrations} \
+         remote fetches but never had more than {remote_peak} open at once \
+         -- one round trip at a time, the HAR's shape. Blobs travel their \
+         own channel downstream of the block walk, so a fan-out restored in \
+         the traversal alone does not cover them."
     );
     assert!(
         peak > 1,

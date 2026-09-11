@@ -60,6 +60,7 @@ pub struct Counting<P> {
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
     reads: Arc<Mutex<InFlight>>,
     writes: Arc<Mutex<InFlight>>,
+    forks: Arc<Mutex<InFlight>>,
 }
 
 /// How many reads are open now, and the most that were ever open at once.
@@ -93,6 +94,7 @@ impl<P> Counting<P> {
             counts: Arc::new(Mutex::new(BTreeMap::new())),
             reads: Arc::new(Mutex::new(InFlight::default())),
             writes: Arc::new(Mutex::new(InFlight::default())),
+            forks: Arc::new(Mutex::new(InFlight::default())),
         }
     }
 
@@ -111,6 +113,16 @@ impl<P> Counting<P> {
     /// compared against, so its overlap has to be observable too.
     pub fn peak_block_writes_in_flight(&self) -> usize {
         self.writes.lock().peak
+    }
+
+    /// The most REMOTE effects ever in flight at once.
+    ///
+    /// A local read is cheap and its overlap does not matter; what decides
+    /// wall time is how many round trips are open together. Counting forks
+    /// measures exactly those, so a phase reading mostly-local blocks
+    /// cannot inflate it.
+    pub fn peak_forks_in_flight(&self) -> usize {
+        self.forks.lock().peak
     }
 
     /// Total executions of effects whose type name contains `needle`
@@ -134,6 +146,7 @@ impl<P> Counting<P> {
         self.counts.lock().clear();
         *self.reads.lock() = InFlight::default();
         *self.writes.lock() = InFlight::default();
+        *self.forks.lock() = InFlight::default();
     }
 
     /// The full tally, keyed by effect type name.
@@ -158,7 +171,9 @@ where
         // cost a network round trip apiece over a remote archive. The
         // write side is what makes the push usable as a control for the
         // read side.
-        let gauge = if name.contains("archive::Get") {
+        let gauge = if name.contains("fork::Fork") {
+            &self.forks
+        } else if name.contains("archive::Get") {
             &self.reads
         } else if name.contains("archive::Put") {
             &self.writes
