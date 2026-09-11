@@ -154,6 +154,10 @@ pub struct Counting<P> {
 struct InFlight {
     current: usize,
     peak: usize,
+    /// Consecutive opens that were alone in flight, and the longest such
+    /// run seen. See [`Counting::longest_serial_fetch_run`].
+    alone: usize,
+    longest_alone: usize,
 }
 
 /// Yields to the executor exactly once, so work polled alongside the
@@ -210,6 +214,20 @@ impl<P> Counting<P> {
     /// quantity a HAR reports and the one an assertion should use.
     pub fn peak_forks_in_flight(&self) -> usize {
         self.forks.lock().peak
+    }
+
+    /// The longest run of remote fetches that were each ALONE in flight.
+    ///
+    /// A peak hides this. One phase that fans out lifts the peak above 1
+    /// while another is still strictly serial, so a run whose download
+    /// makes thirty one-at-a-time round trips and whose upload then
+    /// overlaps eleven reports a healthy peak and a serial download at the
+    /// same time -- which is exactly the shape a HAR of the app shows.
+    ///
+    /// This counts the serialization directly: how many fetches in a row
+    /// had no company.
+    pub fn longest_serial_fetch_run(&self) -> usize {
+        self.forks.lock().longest_alone
     }
 
     /// Total executions of effects whose type name contains `needle`
@@ -280,6 +298,12 @@ where
             let mut open = gauge.lock();
             open.current += 1;
             open.peak = open.peak.max(open.current);
+            if open.current == 1 {
+                open.alone += 1;
+                open.longest_alone = open.longest_alone.max(open.alone);
+            } else {
+                open.alone = 0;
+            }
         }
         // Yield before answering, so a read issued by work polled
         // alongside this one is in flight together with it. Without this
