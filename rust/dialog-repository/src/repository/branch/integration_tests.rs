@@ -4391,24 +4391,33 @@ async fn it_downloads_serially_while_pushing_concurrently(
     Ok(())
 }
 
-/// #492, the profile's shape: many delegations, each an envelope BLOB.
+/// #492, the login path: a profile branch carrying what tonk's does.
 ///
-/// The sibling above measures a download whose content is facts, so its
-/// reads are tree blocks and the fan-out under test is the traversal's.
-/// A tonk profile is not that. It stores delegations, and a retained
-/// delegation decomposes into facts PLUS a signed envelope blob (see
-/// `branch/delegation.rs`) — and blobs travel their own channel in the
-/// snapshot export, a second `buffer_unordered` loop downstream of the
-/// block walk, each blob additionally consulting the tree's blob index
-/// before its bytes can be fetched.
+/// Modelled on `hydrate_untrusted` in tonk's
+/// `router/account_state.rs`, which is what runs when a device signs in:
+/// point the profile's main branch at the account remote, then
+/// `pull().download().operational()` so the authorization walk afterwards
+/// reads entirely locally.
 ///
-/// So the profile sync exercises a read path the fact-only test never
-/// reaches, and it is the path the login flow actually drives: the
-/// account branch is the one tonk still materializes with
-/// `.download().operational()`, precisely so the authorization walk
-/// reads locally afterwards.
+/// The content matters as much as the call. A tonk profile branch is not
+/// uniform facts -- it accumulates, on one branch:
 ///
-/// Same measurement as the sibling, same reason: peak overlap is
+/// - retained delegations, each decomposing into facts PLUS a signed
+///   envelope blob (`branch/delegation.rs`),
+/// - device-link rows and space/replica index rows, ordinary facts.
+///
+/// Blobs are the part the fact-only sibling cannot reach: they travel
+/// their own channel in the snapshot export, a second `buffer_unordered`
+/// loop downstream of the block walk, and each consults the tree's blob
+/// index before its bytes can be fetched. A fan-out restored in the
+/// traversal alone does not cover them.
+///
+/// The call is chained exactly as the app chains it, rather than split
+/// into a pull and a separate download: the ordering is part of what is
+/// under test. `PullDownload` materializes BEFORE advancing the head, so
+/// the measurement covers the download the login actually performs.
+///
+/// Peak overlap is the assertion for the usual reason: it is
 /// latency-independent, so a memory-backed local server cannot hide a
 /// serial download behind fast responses.
 #[dialog_common::test]
@@ -4470,6 +4479,23 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
             .perform(&operator)
             .await?;
     }
+    // Device links and space index rows: the ordinary facts that sit
+    // beside the delegations on a real profile branch, so the download
+    // walks a tree of mixed content rather than one uniform region.
+    let rows: Vec<_> = (0..160)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "device/link".parse().expect("valid attribute"),
+                of: format!("device:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("device-{i}").repeat(24)),
+                cause: None,
+            })
+        })
+        .collect();
+    source
+        .commit(stream::iter(rows))
+        .perform(&operator)
+        .await?;
     assert!(source.push().perform(&operator).await?.is_some());
 
     // A cold replica on its own profile, operator and space: two repos on
@@ -4514,23 +4540,32 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
         .perform(&replica_operator)
         .await?;
 
-    // Adopt the head first, unmeasured: the merge's differential has a
-    // fan-out of its own, and measuring it alongside the download lets
-    // that overlap mask a serial materialization.
+    // The login call itself, chained as `hydrate_untrusted` chains it.
+    //
+    // This measures the merge's reads as well as the download's, and the
+    // merge's differential has a fan-out of its own -- so unlike the
+    // fact-only sibling (which splits the two to keep the download
+    // isolated) a healthy peak here does not prove the download
+    // parallelized. That is deliberate: this test's job is to reproduce
+    // what the app does, and `blob::Read` below is what pins the blob
+    // channel specifically, whose reads no differential issues.
     let env = Counting::new(replica_operator.clone());
     replica
         .pull()
+        .download()
+        .operational()
         .perform(&env)
         .await?
         .expect("the replica adopts the upstream head");
-    env.reset();
-
-    replica.download().operational().perform(&env).await?;
 
     let reads = env.block_reads();
     let peak = env.peak_block_reads_in_flight();
     let hydrations = env.count("fork::Fork");
-    println!("PROFILE reads={reads} peak={peak} forks={hydrations}");
+    let blob_reads = env.count("blob::Read");
+    println!(
+        "PROFILE reads={reads} peak={peak} forks={hydrations} \
+         blob_reads={blob_reads}"
+    );
 
     assert!(
         hydrations > 0,
@@ -4540,6 +4575,13 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     assert!(
         reads > 8,
         "the download must move a real tree to measure anything (got {reads})"
+    );
+    assert!(
+        blob_reads > 0,
+        "the 24 retained delegations must have shipped envelope blobs for \
+         this to exercise the blob channel at all (blob::Read={blob_reads}). \
+         Without them this is just another fact sync and the sibling test \
+         already covers it."
     );
     assert!(
         peak > 1,
