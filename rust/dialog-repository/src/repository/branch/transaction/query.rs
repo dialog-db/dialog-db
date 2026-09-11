@@ -122,7 +122,9 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -155,9 +157,14 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let query_env = QueryEnv::new(vec![source.to_source()], overlay, Arc::new(tombstones), env);
+            let sources = vec![source.to_source()];
+            let query_env = QueryEnv::new(sources.clone(), overlay, Arc::new(tombstones), env);
             let results = Box::pin(query.perform(&query_env));
-            for await result in results {
+            // Mid-transaction queries drive the ambient preload queue
+            // like any other evaluation (see `crate::repository::fetch`).
+            let queue = Provider::<dialog_artifacts::Speculation>::execute(env, ()).await;
+            let driven = crate::repository::fetch::Driven::new(results, sources, env, queue);
+            for await result in driven {
                 yield result?;
             }
         }

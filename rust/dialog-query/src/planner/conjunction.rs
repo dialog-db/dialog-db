@@ -1,7 +1,24 @@
 use super::Plan;
-use crate::Environment;
-use crate::selection::Selection;
+use crate::attribute::query::DynamicAttributeQuery;
+use crate::selection::{Match, Selection};
+use crate::{Environment, SortOrder, multi_merge_join};
 use core::pin::Pin;
+use dialog_artifacts::{Estimate, Likelihood, Preload, PreloadRequest, encode_value_owned};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use futures_util::StreamExt;
+
+/// Largest ratio of the widest to narrowest scan range estimate that still
+/// takes the merge path. Above it, one scan is selective enough that a nested
+/// loop driving from it reads fewer blocks than a merge scanning every range
+/// in full.
+///
+/// The estimates come from the tree (per-child
+/// [`Scale`](dialog_search_tree::Scale) sums, one root read per scan), so an
+/// all-broad concept join — every attribute a full entity range — has a ratio
+/// near 1, while pinning one attribute to a value collapses that scan's range
+/// to a narrow band and pushes the ratio well past this threshold.
+const MERGE_COST_BALANCE: usize = 3;
 
 /// An ordered sequence of [`Plan`] steps produced by the query planner.
 ///
@@ -44,10 +61,233 @@ impl Conjunction {
     where
         Env: crate::Scope<'a>,
     {
+        // A conjunction whose every step is an attribute scan sorted on the
+        // same free variable is an equi-join on that variable (the shape a
+        // concept's implicit rule always has). Such a run *can* be evaluated
+        // as an N-way merge: each scan runs once and the sorted outputs are
+        // intersected, rather than probing the later scans once per row of
+        // the earlier ones. Whether the merge actually wins depends on the
+        // incoming row's bindings (a pinned selective attribute favors the
+        // nested loop), so that choice is made per query inside
+        // `evaluate_maybe_merge`. Any structurally ineligible conjunction
+        // keeps the fold unchanged.
+        if let Some(variable) = self.merge_variable() {
+            return self.evaluate_maybe_merge(selection, env, variable);
+        }
+
+        self.into_fold(selection, env)
+    }
+
+    /// The nested-loop fold: each step feeds its output to the next.
+    fn into_fold<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        env: &'a Env,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: crate::Scope<'a>,
+    {
         self.steps.into_iter().fold(
             Box::pin(selection) as Pin<Box<dyn Selection + 'a>>,
             |selection, plan| Box::pin(plan.evaluate(selection, env)),
         )
+    }
+
+    /// The single variable every step is sorted on, if this conjunction is
+    /// *structurally* a merge-eligible equi-join, else `None`.
+    ///
+    /// Eligible when there are at least two steps, every one is a positive
+    /// attribute [`Scan`](Plan::Scan) (not optional, not a formula, concept,
+    /// or constraint), and every scan reports the *same* [`SortOrder::On`]
+    /// variable. Because the scans all sort on that shared variable and none
+    /// is a chained probe, they are independent inputs to an intersection.
+    ///
+    /// This is only the structural test. Whether a merge actually reads fewer
+    /// blocks than the nested loop depends on the incoming row's bindings (a
+    /// pinned selective attribute favors the loop), which are not known until
+    /// evaluation; that decision is made per query in
+    /// [`evaluate_maybe_merge`](Self::evaluate_maybe_merge).
+    fn merge_variable(&self) -> Option<String> {
+        if self.steps.len() < 2 {
+            return None;
+        }
+
+        let mut shared: Option<String> = None;
+        for step in &self.steps {
+            let query = match step {
+                Plan::Scan(_, query) => query,
+                _ => return None,
+            };
+            let variable = match query.sort_order() {
+                SortOrder::On(name) => name,
+                SortOrder::None => return None,
+            };
+            match &shared {
+                None => shared = Some(variable),
+                Some(existing) if *existing == variable => {}
+                Some(_) => return None,
+            }
+        }
+        shared
+    }
+
+    /// Whether the scans are balanced enough to merge, given a row's
+    /// bindings, measured from the tree rather than the cost model's fixed
+    /// constants.
+    ///
+    /// A merge reads every input range in full, in parallel; the nested loop
+    /// reads one range and probes the others only at surviving entities. So
+    /// when one scan is far more selective than the rest, the loop touches
+    /// far fewer blocks. Each scan is resolved against `base` (binding any
+    /// value the caller pinned) and its range size estimated via
+    /// [`Estimate`] — one root-node read per scan, an advisory upper bound
+    /// from the tree's per-child [`Scale`](dialog_search_tree::Scale)s. The
+    /// merge is taken only when the widest scan's estimate is within a small
+    /// multiple of the narrowest; a scan a caller pinned to a value estimates
+    /// far narrower and pushes the ratio past the threshold, so the query
+    /// keeps the fold.
+    ///
+    /// A scan that cannot be turned into a selector (no bound field) or that
+    /// the store cannot estimate is treated as maximally broad, which keeps
+    /// the balanced (all-broad) case eligible and only ever errs toward the
+    /// fold.
+    async fn scans_balanced_for<Env>(&self, base: &Match, env: &Env) -> bool
+    where
+        Env: Provider<Estimate> + ConditionalSync,
+    {
+        let mut min_size = u64::MAX;
+        let mut max_size = 0u64;
+        for step in &self.steps {
+            let Plan::Scan(_, query) = step else { continue };
+            // A selector build failure or an unavailable estimate means
+            // "range size unknown"; treat as maximally broad so an all-broad
+            // join stays eligible and a genuinely selective one is never
+            // wrongly merged on a missing estimate.
+            let size = match query.resolved_selector(base) {
+                Ok(selector) => Provider::<Estimate>::execute(env, selector)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(u64::MAX),
+                Err(_) => u64::MAX,
+            };
+            min_size = min_size.min(size);
+            max_size = max_size.max(size);
+        }
+        min_size != 0 && max_size <= min_size.saturating_mul(MERGE_COST_BALANCE as u64)
+    }
+
+    /// Evaluate a structurally merge-eligible conjunction, choosing per query
+    /// between the N-way merge and the nested-loop fold by the incoming
+    /// rows' selectivity.
+    ///
+    /// Every match in a selection shares one binding pattern (only the
+    /// values differ), so the merge-versus-fold choice is uniform across the
+    /// stream. This peeks the first row, decides once via
+    /// [`scans_balanced_for`](Self::scans_balanced_for), and runs the chosen
+    /// strategy over the whole selection (the peeked row put back at the
+    /// head). An empty selection yields nothing either way. On the merge
+    /// path, each scan is resolved against the incoming row (binding any
+    /// variables the caller already supplied), evaluated independently, and
+    /// the sorted outputs are intersected on `variable`'s encoded value via
+    /// [`multi_merge_join`]; the incoming row's own bindings are folded back
+    /// in, preserving the caller's context exactly as the fold would.
+    fn evaluate_maybe_merge<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        env: &'a Env,
+        variable: String,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: crate::Scope<'a>,
+    {
+        Box::pin(crate::try_stream! {
+            let mut selection = Box::pin(selection.peekable());
+
+            // Decide from the first row's bindings; nothing to do if empty.
+            let balanced = match selection.as_mut().peek().await {
+                Some(Ok(first)) => {
+                    let first = first.clone();
+                    self.scans_balanced_for(&first, env).await
+                }
+                // Empty, or a pending error surfaced on the next poll below.
+                _ => true,
+            };
+
+            if !balanced {
+                // A selective attribute is pinned: the nested-loop fold reads
+                // fewer blocks by driving from the narrow scan.
+                for await row in self.into_fold(selection, env) {
+                    yield row?;
+                }
+                return;
+            }
+
+            let scans: Vec<DynamicAttributeQuery> = self
+                .steps
+                .into_iter()
+                .map(|step| match step {
+                    Plan::Scan(_, query) => *query,
+                    // merge_variable already proved every step is a Scan.
+                    _ => unreachable!("merge eligibility guarantees every step is a Scan"),
+                })
+                .collect();
+
+            let mut listening = true;
+            for await incoming in selection {
+                let base = incoming?;
+
+                // The merge will read every input range in full, so each
+                // range is committed work: hint it Likely, and a driven
+                // plan replicates it level-parallel while the merge's own
+                // streams consume — the demand reads join the in-flight
+                // hydrations or find the blocks local. Hinting stops on
+                // the env's first refusal, exactly as probe pipelining
+                // does.
+                if listening {
+                    for scan in &scans {
+                        let Ok(selector) = scan.resolved_selector(&base) else {
+                            continue;
+                        };
+                        listening = Provider::<Preload>::execute(
+                            env,
+                            PreloadRequest {
+                                selector,
+                                likelihood: Likelihood::Likely,
+                            },
+                        )
+                        .await;
+                        if !listening {
+                            break;
+                        }
+                    }
+                }
+
+                // Each scan seeded from the incoming row so any
+                // caller-supplied bindings resolve into the scan's constants;
+                // the shared join variable stays free and drives the merge.
+                let mut inputs: Vec<Pin<Box<dyn Selection + 'a>>> =
+                    Vec::with_capacity(scans.len());
+                for scan in &scans {
+                    let seeded = base.clone().seed();
+                    inputs.push(Box::pin(scan.clone().evaluate(env, seeded)));
+                }
+
+                let variable = variable.clone();
+                let key = move |m: &Match| -> Option<Vec<u8>> {
+                    m.value_of(&variable).map(encode_value_owned)
+                };
+
+                for await row in multi_merge_join(inputs, key) {
+                    let row = row?;
+                    // Fold the joined bindings back onto the incoming row so
+                    // the caller's context (and provenance) is preserved.
+                    if let Some(merged) = base.clone().combine(&row) {
+                        yield merged;
+                    }
+                }
+            }
+        })
     }
 }
 
@@ -84,6 +324,88 @@ mod tests {
     use dialog_artifacts::Entity;
     use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
+
+    /// A two-attribute conjunction over a shared entity is structurally merge
+    /// eligible, and the tree-derived balance check picks merge only when
+    /// neither scan is selective. This pins the regression the merge
+    /// introduced: with a value pinned on one scan, `scans_balanced_for` must
+    /// report imbalance (from the real range estimates) so the query falls
+    /// back to the nested-loop fold instead of scanning every range in full.
+    #[dialog_common::test]
+    async fn it_prefers_the_fold_when_one_scan_is_selective() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Seed a spread of entities, each with a name and a role, so the two
+        // attribute ranges are broad and comparably sized, while any single
+        // value ("name-7") is selective.
+        let mut tx = branch.transaction();
+        for i in 0..2000 {
+            let entity = Entity::new()?;
+            tx = tx
+                .assert(
+                    the!("thing/name")
+                        .of(entity.clone())
+                        .is(format!("name-{i}")),
+                )
+                .assert(the!("thing/role").of(entity).is(format!("role-{}", i % 4)));
+        }
+        tx.commit().publish().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let env = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let name_scan = AttributeQuery::new(
+            Term::from(the!("thing/name")),
+            Term::<Entity>::var("this"),
+            Term::<Any>::var("name"),
+            Term::var("c1"),
+            Some(Cardinality::One),
+        );
+        let role_scan = AttributeQuery::new(
+            Term::from(the!("thing/role")),
+            Term::<Entity>::var("this"),
+            Term::<Any>::var("role"),
+            Term::var("c2"),
+            Some(Cardinality::One),
+        );
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
+            Premise::Assert(Proposition::Attribute(Box::new(role_scan))),
+        ])
+        .plan(&Environment::new())?;
+
+        // Both scans sort on the shared entity, so the conjunction is
+        // structurally eligible.
+        assert_eq!(plan.merge_variable().as_deref(), Some("this"));
+
+        // Nothing pinned: both ranges are the full attribute range,
+        // comparably sized, so the estimates are balanced and the merge is
+        // taken.
+        assert!(
+            plan.scans_balanced_for(&Match::new(), &env).await,
+            "with no value pinned the ranges are comparable and should merge"
+        );
+
+        // Pin the name value, which is unique per entity: the name scan
+        // collapses to a single-entity band while the role scan stays a full
+        // range, so the tree estimates are decisively imbalanced and the
+        // fold is preferred. (A near-unique value makes the ratio
+        // unambiguous, unlike a low-cardinality one near the threshold.)
+        let mut pinned = Match::new();
+        pinned.bind(
+            &Term::<Any>::var("name"),
+            Value::String("name-7".to_string()),
+        )?;
+        assert!(
+            !plan.scans_balanced_for(&pinned, &env).await,
+            "with the name value pinned the name scan is selective and should fold"
+        );
+
+        Ok(())
+    }
 
     /// Coalesce must take the *source* when the lookup finds a value
     /// and the fallback only when it does not. The coalesce's source

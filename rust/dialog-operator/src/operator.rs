@@ -5,6 +5,8 @@
 mod access;
 mod builder;
 mod fork;
+mod hydrate;
+mod preload;
 mod space;
 #[cfg(test)]
 mod test;
@@ -127,6 +129,19 @@ pub struct Operator<S: Clone> {
     /// closures — the proof that authorizes a fetch must resolve from
     /// what is already local, or the recursion would never bottom out.
     reach: Arc<OnceLock<WalkReach>>,
+
+    /// In-flight remote hydrations, joined by digest across every
+    /// evaluation path performing through this operator (see
+    /// `operator/hydrate.rs`). Held weakly: the shared work lives only
+    /// while some `.perform` call drives it.
+    hydration: Arc<dialog_network::HydrationFlight>,
+
+    /// The ambient speculative-fetch queue `Preload` hints land in and
+    /// driven evaluation streams pop from (see `operator/preload.rs`).
+    /// Pure data: selectors and a budget, no futures and no tasks —
+    /// work materializes only inside a `.perform` borrowing this
+    /// operator.
+    speculation: Arc<dialog_artifacts::PreloadQueue>,
 }
 
 impl<S: Clone> Operator<S> {

@@ -112,7 +112,7 @@ impl<'a> Pull<'a> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -138,7 +138,7 @@ impl<'a> Pull<'a> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -437,11 +437,17 @@ impl<'a> Pull<'a> {
                     } else {
                         (&upstream_tree, local_context.clone())
                     };
-                    let changes = base_tree.differentiate_within(
+                    // Every one of pull's differentials is streamed to
+                    // completion, so the eager prefetch fetches each
+                    // frontier level in one round trip instead of one
+                    // per node; against a hydrating store that turns a
+                    // per-block network chain into a per-level one.
+                    let changes = base_tree.differentiate_within_with(
                         changed_side,
                         &contested,
                         &tree_store,
                         &tree_store,
+                        dialog_search_tree::Prefetch::Eager,
                     );
                     let screened = merge::screen_data(changes, screen_context);
                     stitched = Box::pin(stitched.integrate(screened, &tree_store)).await?;
@@ -457,8 +463,13 @@ impl<'a> Pull<'a> {
                 // fresh version no coverage names.
                 let coverage_scope = merge::coverage_scope();
                 for (from, to) in [(&base_tree, &local_tree), (&base_tree, &upstream_tree)] {
-                    let coverage =
-                        from.differentiate_within(to, &coverage_scope, &tree_store, &tree_store);
+                    let coverage = from.differentiate_within_with(
+                        to,
+                        &coverage_scope,
+                        &tree_store,
+                        &tree_store,
+                        dialog_search_tree::Prefetch::Eager,
+                    );
                     futures_util::pin_mut!(coverage);
                     while let Some(change) = futures_util::StreamExt::next(&mut coverage).await {
                         let dialog_search_tree::Change::Add(entry) = change? else {
@@ -651,17 +662,19 @@ impl<'a> Pull<'a> {
 
                 let history_scope = merge::history_scope();
                 let data_scope = merge::data_scope();
-                let history_changes = base_tree.differentiate_within(
+                let history_changes = base_tree.differentiate_within_with(
                     &local_tree,
                     &history_scope,
                     &tree_store,
                     &tree_store,
+                    dialog_search_tree::Prefetch::Eager,
                 );
-                let data_changes = base_tree.differentiate_within(
+                let data_changes = base_tree.differentiate_within_with(
                     &local_tree,
                     &data_scope,
                     &tree_store,
                     &tree_store,
+                    dialog_search_tree::Prefetch::Eager,
                 );
                 let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
                 let screened_history =
@@ -777,14 +790,24 @@ impl<'a> Pull<'a> {
         // in stream order.
         let history_scope = merge::history_scope();
         let data_scope = merge::data_scope();
-        let history_changes = base_tree.differentiate_within(
+        // Streamed to completion over a hydrating store: eager prefetch
+        // fetches each frontier level in one network round trip instead
+        // of one per block (the serial chain a fresh clone otherwise
+        // degenerates into).
+        let history_changes = base_tree.differentiate_within_with(
             &upstream_tree,
             &history_scope,
             &tree_store,
             &tree_store,
+            dialog_search_tree::Prefetch::Eager,
         );
-        let data_changes =
-            base_tree.differentiate_within(&upstream_tree, &data_scope, &tree_store, &tree_store);
+        let data_changes = base_tree.differentiate_within_with(
+            &upstream_tree,
+            &data_scope,
+            &tree_store,
+            &tree_store,
+            dialog_search_tree::Prefetch::Eager,
+        );
         let screened_history = merge::screen_history(history_changes, local_snapshot, screen_store);
         // Collect the version of every revision record riding the delta
         // into `observed` while the data differential streams anyway.

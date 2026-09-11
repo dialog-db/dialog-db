@@ -1,4 +1,5 @@
 use super::all::AttributeQueryAll;
+use super::pipelined;
 use crate::Claim;
 use crate::Value;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
@@ -203,6 +204,33 @@ impl AttributeQueryOnly {
         Env: crate::Scope<'a>,
     {
         let selector = self.query;
+        // Pipeline the probes: while this loop awaits one row's scan, the
+        // scans the next rows will issue are offered as preload hints, so
+        // a cold replica replicates them concurrently instead of paying
+        // one round trip per row (see `super::pipelined`). The hint
+        // mirrors the sliding-window path's blanked scan exactly; the
+        // challenge path's secondary lookups are not hinted.
+        let hinted = selector.clone();
+        let selection = pipelined(selection, env, move |base| {
+            if hinted.absent_blocked(base) {
+                return None;
+            }
+            let resolved = hinted.resolve(base);
+            let entity_known = resolved.of().is_constant();
+            let attribute_known = resolved.the().is_constant();
+            let value_known = resolved.is().is_constant();
+            if entity_known || (attribute_known && !value_known) {
+                let scan = AttributeQueryAll::new(
+                    resolved.the().clone(),
+                    resolved.of().clone(),
+                    Term::blank(),
+                    resolved.cause().clone(),
+                );
+                (&scan).try_into().ok()
+            } else {
+                None
+            }
+        });
         try_stream! {
             for await each in selection {
                 let base = each?;

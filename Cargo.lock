@@ -1059,6 +1059,7 @@ dependencies = [
  "getrandom 0.2.16",
  "leb128",
  "memchr",
+ "parking_lot",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1143,6 +1144,7 @@ dependencies = [
  "dialog-macros",
  "futures-util",
  "getrandom 0.2.16",
+ "parking_lot",
  "rand 0.8.5",
  "rkyv",
  "serde",
@@ -1469,7 +1471,6 @@ dependencies = [
  "hyper-util",
  "ipld-core",
  "md5",
- "parking_lot",
  "rand 0.8.5",
  "reqwest",
  "s3s",
@@ -1485,7 +1486,9 @@ dependencies = [
  "tower",
  "tower-http",
  "url",
+ "wasm-bindgen",
  "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]
@@ -1555,8 +1558,10 @@ dependencies = [
  "dialog-varsig",
  "futures-util",
  "getrandom 0.2.16",
+ "ipld-core",
  "parking_lot",
  "reqwest",
+ "ruzstd",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",
@@ -3885,6 +3890,12 @@ dependencies = [
  "tempfile",
  "wait-timeout",
 ]
+
+[[package]]
+name = "ruzstd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
 
 [[package]]
 name = "ryu"

@@ -28,6 +28,8 @@ pub use create::*;
 mod error;
 pub use error::*;
 
+mod fetch;
+
 mod load;
 pub use load::*;
 

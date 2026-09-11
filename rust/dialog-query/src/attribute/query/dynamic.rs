@@ -114,6 +114,28 @@ impl DynamicAttributeQuery {
         }
     }
 
+    /// The [`ArtifactSelector`] this scan would issue against a store *given*
+    /// the bindings in `source`, resolving each term to a constant where the
+    /// row binds it. This is the same selector the scan's own evaluation
+    /// builds per row; exposed so a planner can estimate the scan's range
+    /// size without evaluating it. Returns an error only when nothing
+    /// constrains the selector (which cannot happen for a well-formed
+    /// attribute scan).
+    pub fn resolved_selector(
+        &self,
+        source: &Match,
+    ) -> Result<ArtifactSelector<Constrained>, EvaluationError> {
+        let the = self.the().resolve(source);
+        let of = self.of().resolve(source);
+        let is = match source.lookup(self.is()).and_then(|b| b.content()) {
+            Ok(value) => Term::Constant(value),
+            Err(_) => self.is().clone(),
+        };
+        let cause = self.cause().resolve(source);
+        let resolved = AttributeQueryAll::new(the, of, is, cause);
+        ArtifactSelector::try_from(&resolved)
+    }
+
     /// Get the source term (internal claim handle).
     pub fn source(&self) -> &Term<Record> {
         match self {

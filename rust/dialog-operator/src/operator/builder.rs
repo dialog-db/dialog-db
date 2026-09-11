@@ -149,6 +149,8 @@ impl OperatorBuilder {
             delegations: Arc::new(OnceLock::new()),
             chains: Arc::default(),
             reach: Arc::new(OnceLock::new()),
+            hydration: Arc::default(),
+            speculation: Arc::default(),
         };
 
         // Open the profile repository's access branch: the store every

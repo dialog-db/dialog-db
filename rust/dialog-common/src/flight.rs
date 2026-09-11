@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
 
-use dialog_common::ConditionalSend;
+use crate::ConditionalSend;
 use futures_util::FutureExt;
 use futures_util::future::Shared;
 
@@ -55,10 +55,11 @@ type Map<K, V> = parking_lot::Mutex<HashMap<K, Stored<V>>>;
 #[cfg(target_arch = "wasm32")]
 type Map<K, V> = std::cell::RefCell<HashMap<K, Stored<V>>>;
 
-/// A map of in-flight computations, joined by key.
+/// A map of in-flight computations, joined by key: the process-wide
+/// form the transport registries and the operator's hydration use.
 ///
-/// See the module docs for the semantics; [`join`](Flight::join) is the
-/// whole API.
+/// See the module docs for the semantics; [`join`](Flight::join) is
+/// the whole API.
 pub struct Flight<K, V> {
     inflight: Map<K, V>,
 }
@@ -139,12 +140,127 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+type WeakStored<V> = futures_util::future::WeakShared<BoxFuture<'static, V>>;
+#[cfg(target_arch = "wasm32")]
+type WeakStored<V> = futures_util::future::WeakShared<LocalBoxFuture<'static, V>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type WeakMap<K, V> = parking_lot::Mutex<HashMap<K, WeakStored<V>>>;
+#[cfg(target_arch = "wasm32")]
+type WeakMap<K, V> = std::cell::RefCell<HashMap<K, WeakStored<V>>>;
+
+/// A [`Flight`] whose map holds its in-flight work weakly.
+///
+/// The strong [`Shared`] handles live only in the joiners, so the work
+/// makes progress exactly while some caller is awaiting it and drops
+/// with its last joiner — nothing long-lived owns an in-flight future
+/// or anything that future captured. That is what lets a process-wide
+/// holder (an operator field) share work whose futures capture the
+/// holder's own internals: abandoning every joiner breaks any would-be
+/// reference cycle by dropping the future itself.
+///
+/// Everything else matches [`Flight`]: joiners co-drive one shared
+/// future per key, outcomes are shared only with callers in flight and
+/// never cached, and only requests whose answer is identical for every
+/// caller belong here.
+pub struct WeakFlight<K, V> {
+    inflight: WeakMap<K, V>,
+}
+
+impl<K, V> Default for WeakFlight<K, V> {
+    fn default() -> Self {
+        Self {
+            inflight: WeakMap::default(),
+        }
+    }
+}
+
+impl<K, V> std::fmt::Debug for WeakFlight<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeakFlight")
+            .field("inflight", &self.lock().len())
+            .finish()
+    }
+}
+
+impl<K, V> WeakFlight<K, V> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn lock(&self) -> parking_lot::MutexGuard<'_, HashMap<K, WeakStored<V>>> {
+        self.inflight.lock()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn lock(&self) -> std::cell::RefMut<'_, HashMap<K, WeakStored<V>>> {
+        self.inflight.borrow_mut()
+    }
+}
+
+impl<K, V> WeakFlight<K, V>
+where
+    K: Eq + Hash + Clone,
+    V: Clone,
+{
+    /// Join the in-flight computation for `key`, or start `make()` as
+    /// the shared one.
+    ///
+    /// Every joiner polls the shared future itself, so completion never
+    /// depends on the caller that started it. The map holds the work
+    /// weakly: if every joiner drops before completion the work drops
+    /// with them, and the next caller under the key starts clean. The
+    /// entry is removed once any joiner observes completion; outcomes —
+    /// failures included — are shared only with callers already in
+    /// flight, never cached.
+    pub async fn join<F, Make>(&self, key: K, make: Make) -> V
+    where
+        Make: FnOnce() -> F,
+        F: Future<Output = V> + ConditionalSend + 'static,
+    {
+        let shared = {
+            let mut inflight = self.lock();
+            match inflight.get(&key).and_then(|weak| weak.upgrade()) {
+                Some(shared) => shared,
+                None => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let shared = make().boxed().shared();
+                    #[cfg(target_arch = "wasm32")]
+                    let shared = make().boxed_local().shared();
+                    if let Some(weak) = shared.downgrade() {
+                        inflight.insert(key.clone(), weak);
+                    }
+                    shared
+                }
+            }
+            // The guard drops here: the map is never held across an await.
+        };
+
+        let value = shared.clone().await;
+
+        // Remove the entry we completed (or one already dead); a fresh
+        // flight started under the same key is left alone.
+        let mut inflight = self.lock();
+        if inflight.get(&key).is_some_and(|current| {
+            current
+                .upgrade()
+                .is_none_or(|current| current.ptr_eq(&shared))
+        }) {
+            inflight.remove(&key);
+        }
+        drop(inflight);
+
+        value
+    }
+}
+
+// Gated on `helpers` because `dialog_common::test` (the cross-target
+// async test macro) is only exported there; CI's test archives build the
+// workspace with `--features integration-tests`, which implies it.
+#[cfg(all(test, feature = "helpers"))]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::Flight;
+    use super::{Flight, WeakFlight};
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test_configure;
@@ -295,5 +411,91 @@ mod tests {
             assert_eq!(value, 5);
             assert_eq!(runs.load(Ordering::SeqCst), expected);
         }
+    }
+
+    /// Concurrent joins of one key on a weak flight run the computation
+    /// once, and the entry is gone once it lands.
+    #[dialog_common::test]
+    async fn it_shares_a_weak_flight_between_concurrent_joiners() {
+        let flight = WeakFlight::<u8, u8>::default();
+        let runs = Arc::new(AtomicUsize::new(0));
+
+        let make = || {
+            let runs = runs.clone();
+            || async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                yield_once().await;
+                7u8
+            }
+        };
+
+        let (first, second) =
+            futures_util::future::join(flight.join(1, make()), flight.join(1, make())).await;
+        assert_eq!((first, second), (7, 7));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        let again = flight.join(1, make()).await;
+        assert_eq!(again, 7);
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "nothing was cached");
+    }
+
+    /// Abandoning every joiner drops the in-flight work and everything
+    /// it captured: the map's hold is weak, so a long-lived holder never
+    /// keeps a future (or a captured handle) alive on its own. The next
+    /// caller under the key starts clean.
+    // Native only: the drop probe hand-polls with a noop waker.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_drops_abandoned_work_with_its_last_joiner() {
+        use std::task::{Context, Poll};
+
+        let flight = WeakFlight::<u8, u8>::default();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::new(());
+
+        let make = {
+            let runs = runs.clone();
+            let captured = captured.clone();
+            || async move {
+                let _held = captured;
+                runs.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+                unreachable!("the flight is abandoned before completion")
+            }
+        };
+
+        let mut parked = Box::pin(flight.join(1, make));
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(parked.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the flight is in flight");
+        assert_eq!(
+            Arc::strong_count(&captured),
+            2,
+            "the work holds its capture"
+        );
+
+        drop(parked);
+        assert_eq!(
+            Arc::strong_count(&captured),
+            1,
+            "the last joiner takes the work and its captures down with it"
+        );
+
+        let fresh = flight
+            .join(1, {
+                let runs = runs.clone();
+                || async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    3u8
+                }
+            })
+            .await;
+        assert_eq!(fresh, 3);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "the next caller starts clean"
+        );
     }
 }

@@ -157,6 +157,24 @@ where
     }
 }
 
+// Hydration under migration is the plain, unshared read: the local
+// check runs, and the remote leg degrades to the fork stub above
+// (migration is a local operation).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<crate::Hydrate> for MigrateEnv<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
+{
+    async fn execute(
+        &self,
+        input: <crate::Hydrate as Command>::Input,
+    ) -> <crate::Hydrate as Command>::Output {
+        crate::hydrate(self, input).await
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S> Provider<Fork<RemoteSite, Resolve>> for MigrateEnv<S>

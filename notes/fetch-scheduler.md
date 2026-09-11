@@ -1,0 +1,207 @@
+# M1: the fetch scheduler (bead dialog-db-75)
+
+The priority work queue from `notes/parallel-fetch-scheduler.md`, designed against the machinery as it stands after PR #495. The goal: a query evaluator can express "I will likely need these blocks" without changing its own semantics, demand reads are never slowed by speculation, and no fetched byte is thrown away by a cancellation the way the pre-#495 walker threw them away.
+
+Revised after review: the first draft's detached driver owned an env clone, which violates the load-bearing invariant that **the env/operator is never owned by anything** — it is borrowed by `.perform` for a job's duration and released after. This version has no spawned driver and no owned env anywhere.
+
+## What the investigation fixed the requirements into
+
+1. **`Flight` gives priority inheritance for free, at the transport.** A `Shared` future is polled by every joiner, so when a rank-1 demand read reaches the transport while a preload's GET for the same object is in flight, joining it *is* promotion: the demand caller co-drives at its own pace. `Flight`'s stored futures are `'static`, which is exactly why it lives at the transport layer, where futures are built from owned pieces (client + URL) and never borrow the env. It stays there.
+
+2. **The seam for preload state is the session read path.** Every query read funnels through `select_from_source` → `NetworkedIndex::get` (local-first, remote-hydrate, write-back) over the line's shared `node_cache`. A preload is precisely "run that path for a block nobody demands yet": local archive checked, remote fetched, block written back and landed in the node cache, so the later demand read is local. No new fetch path exists; preloads reuse the hydrating one.
+
+3. **Nothing may drive work it does not have the env for.** The #466/#468 rule (a reader never waits on a fetch it cannot drive) plus the env-ownership invariant pin the driving model: deferred work is *described* as data and *executed* only by whoever currently holds a borrow of the env — the running query itself.
+
+## Shape
+
+Two pieces: a passive plan and an active driver, split so that ownership of the state is the caller's choice (the same lesson as the caches: placement decoupled, not hardwired).
+
+**`FetchPlan`** — pure data, no futures, no env. A ranked queue of work items:
+
+```text
+FetchPlan
+├── pending: rank 2 (likely: spine) and rank 3 (maybe: leaves, unchosen ranges)
+│            items: (line, hash) or a range-expansion step, tagged by handle
+└── handles: PreloadHandle bookkeeping (abort, promote, budget)
+```
+
+`preload(hash, rank) -> PreloadHandle` and `preload_range(range, budget) -> PreloadHandle` enqueue descriptions. `abort()` removes a handle's still-pending items; `promote(rank)` moves them between ranks. Item ordering is `(rank, sequence)`; the composite `(query priority, rank)` key stays a later knob. Because items are data, an abandoned plan holds no resources and costs nothing.
+
+**`drive`** — a combinator that makes the query's own evaluation the driver:
+
+```text
+plan.drive(stream, env, store..., budget) -> impl Stream
+```
+
+It forwards the inner stream (the query's selection) and, on every poll where capacity allows, materializes pending items into fetch futures *borrowing the same env the stream already borrows*, holding them in a `FuturesUnordered` bounded by the budget. The futures live exactly as long as the evaluation: when the query's stream completes or is dropped, its preload work is dropped with it — which is correct, because the preloads existed for that query. This is the walker's `while_warming` pattern lifted one layer up, and it is the whole wasm story too: progress happens whenever the consumer polls the query stream, on any executor, with nothing detached.
+
+Two consequences worth stating plainly:
+
+- **Demand reads never enter the plan and never wait on it.** They keep today's exact path. If a preload's GET for the same object is in flight, the transport `Flight` joins them (co-driving); if a matching item is merely *queued*, the demand read just fetches — and hydration makes the queued item a no-op when the driver later reaches it (local hit). No cross-layer coordination needed.
+- **Dropping mid-flight is an explicit scope now, not an accident.** A preload fetch cancelled by the query ending mirrors the pre-#495 walker loss in mechanics, but the scope is the query rather than a single probe stream: within one conjunction the work survives across all premises (the drive wrapper sits around the whole evaluation, not per-probe), and what is lost at query end is work for a query that no longer exists. The write-back lives inside each fetch future, so every fetch that completes is persisted even if its result is never decoded.
+
+## Where the state lives, and the API surface
+
+Decoupled, per review: `FetchPlan` is constructed by whoever wants preloading and passed by reference into `drive`; the primitive does not choose its owner. The surfaced form is a query-builder step (settled in review):
+
+```text
+branch.query().select(query).preload(FetchBudget::default()).perform(&env)
+// or, with a caller-owned plan carrying its own budget:
+branch.query().select(query).preload(plan.clone()).perform(&env)
+```
+
+`preload` takes `impl Into<FetchPlan>`: a bare `FetchBudget` stages a fresh plan (for the evaluator's own hints), and a caller-owned plan is passed by clone. The budget lives on the plan (`FetchPlan::with_budget`), settled in review. `preload` stores the plan on the select builder; `perform` hands the plan into the `QueryEnv` and wraps the output stream in `drive`. The stream being driven is the query's selection — the outermost stream `perform` returns — so the drive scope covers the whole evaluation for as long as the consumer pulls rows, and dropping the stream drops the plan (abort-on-drop for free). Without `.preload` there is no plan, no wrapper, and no cost.
+
+The evaluator reaches the plan capability-style: `QueryEnv` implements `Provider<Preload>` by enqueueing into its plan (a no-op when absent), the same threading motion the merge-join spike used for `Provider<Estimate>`; test/bench envs implement it trivially. M3's concept hooks call it; in M1 the plumbing lands with nothing enqueueing yet, keeping M1 independently landable.
+
+An embedder wanting a longer-lived, cross-query plan passes a clone of one it keeps; an env-wrapper form (`Prefetching<'a, Env>`) was considered and set aside — coherence forbids a blanket capability delegation alongside a native `Provider<Preload>` impl, so it degenerates into per-capability boilerplate, and it still cannot wrap the output stream on its own. It remains buildable later as sugar over the same primitives.
+
+## Dedup, and what closes the `NetworkedIndex` single-flight gap
+
+Concurrent identical fetches dedupe at the transport `Flight` (S3/UCAN-S3 today, keyed by presigned URL; permit redeems already single-flighted). Two gaps and their treatment:
+
+- **The `Fs` transport has none**, which makes the soak unrepresentative of production dedup. M1 generalizes `Flight` into `dialog-common` (next to `r#async`) and the `Fs` archive `Get` provider adopts it, `dialog-remote-s3` switching to the shared implementation in the same PR.
+- **`NetworkedIndex` itself still races on the local-check-then-fetch window** across independently borrowed envs. The drive loop dedupes its own items against in-flight work by hash, so a single query never double-fetches; cross-query races remain possible and rare (the transport flight still collapses the actual GET). A session-lifetime `Flight<'env>` inside `QueryEnv` is the refinement if the M0 benchmark ever shows this mattering; deliberately out of v1.
+
+## Range preload (the M2 consumer, designed now so the API fits)
+
+A `preload_range` item expands in the driver: fetching an index node yields its separators; `children_spanning` bounds the next level; spine children re-enqueue at rank 2, leaf children at rank 3; `range_scale` against the handle's remaining budget decides how deep the rank-3 frontier goes. A huge range warms only its spine — round trips proportional to depth times ranges, the #492 sketch. Expansion is part of the item's fetch future (decode what was just cached, enqueue, return), so it borrows the same env session and stops wherever the query's lifetime ends.
+
+## Budgets
+
+Configurable, not constants: a `FetchBudget { likely: usize, maybe: usize }` on the drive call (defaults proposed 16/8, matching the walker's and traversal's 16, tuned against the M0 soak before landing). Handles additionally carry the `range_scale` block budget for rank-3 expansion.
+
+## Permits (rank 4)
+
+Stay inside the remote providers, invisible to this API, as settled in the campaign note. `dialog-remote-ucan-s3` already single-flights permit redeems; a later refinement can degrade an over-budget rank-3 item to permit-only inside the provider. Nothing in M1 mentions permits.
+
+## What M1 explicitly does not do
+
+- No evaluator behavior changes (M3 wires `preload` calls into concept evaluation) and no merge-join (M4). M1 lands: `Flight` in `dialog-common` + `Fs` transport adoption, `FetchPlan`/`drive`, and the session-level plumbing for M2/M3 to call.
+- No negative-result caching (the ledger measured zero empty lookups).
+- No spawned tasks anywhere.
+
+## Testing
+
+- Unit pins: a demand read is never blocked by a full plan (budget zero leaves every demand read working); a queued item already satisfied by a demand read's hydration completes as a local no-op; abort drops pending items while an in-flight fetch that a demand read co-joined still completes and hydrates; rank 2 drains before rank 3; dropping the driven stream drops the work (no leaked fetches, asserted via the observing backend).
+- Transport: the `Fs` provider's `Flight` adoption gets the same concurrent-join pins as #491 gave S3, and the soak's shaped profiles should show concurrent identical GETs collapsing once M3 makes them concurrent.
+- The soak gate keeps duplicates pinned at zero; `concept`'s `rounds` remains the number M3 moves.
+
+## Settled in review
+
+- `Flight` is generalized into `dialog-common`; `dialog-remote-s3` switches to it in the same PR.
+- State placement is the caller's choice by construction; `QueryEnv` is the v1 owner.
+- Budgets are configurable.
+- No component ever owns the env; deferred work is data until an env borrower drives it.
+
+## M3 addendum: probe pipelining, measured (2026-09-09)
+
+The first consumer of the plan is probe pipelining (bead dialog-db-77): a premise's upstream selection is wrapped (`attribute/query.rs::pipelined`) so rows buffer up to `PROBE_LOOKAHEAD` ahead and each buffered row's would-be probe is offered as a `Likely` hint. A row entering an empty window is never hinted (it is the next demand, so its hint could overlap with nothing), which also makes a single-row seed hint-free. Hinting stops permanently on the env's first refusal, so un-staged queries pay one refused call.
+
+Measured on the soak's cold concept join (broadband, 4,000 entities), from the pre-M3 105 rounds / 8.4s:
+
+| lookahead / budget | rounds | modeled time |
+|---|---|---|
+| 64 / 16 (shipping default) | 87 | 6.9s |
+| 64 / 64 | 51 | 4.1s |
+| 128 / 128 | 33 | 2.6s |
+| 256 / 256 | 21 | 1.7s |
+| 512 / 512 | 14 | 1.2s |
+
+Two findings behind the numbers:
+
+- **Budget, not window, is the binding constraint** past small sizes: hint jobs queue behind the per-rank concurrency cap, and a queued cold-leaf hint that starts late completes late. Row-count lead gives little *time* lead (warm rows process in ~zero modeled time), so what matters is how many cold fetches are in flight when the chain stalls.
+- **Raising the budget past ~16 currently re-fetches blocks** (bead dialog-db-81): a post-flight hydration race in which a reader passes its local check before a peer's hydration lands and reaches the transport after the peer's flight closed. Mitigations landed (a local re-check before the remote fork in `NetworkedIndex`; the walker now drives its remaining range-bounded warms home at scan end instead of dropping them), but the full fix is a hydration-inclusive single-flight at the `NetworkedIndex` layer, which needs its own design pass against the env-ownership rule. Until then the default budget stays 16 and the soak's unshaped profile runs without preload, pinning the engine's deterministic demand shape (110 requests, zero duplicates).
+
+The ~6x still on the table behind dialog-db-81 is a constant-factor ceiling of row-granular hints; the structural next steps remain M2 (range-granular expansion: spine + leaf frontier, `range_scale`-budgeted) and M4 (the merge path consuming contiguous AEV ranges preloads align with), which the region analysis in this note's campaign predicted and these measurements confirm.
+
+## dialog-db-81 resolved: hydration-inclusive single-flight (2026-09-09)
+
+The race is closed by sharing the WORK, not a notification: `ScopedFlight<'f, K, V>` generalizes `Flight` over the lifetime its stored futures may borrow (`Flight` stays the `'static` alias the transports use), and the driven preload jobs share a `HydrationFlight<'env>` whose futures carry fetch AND local write-back. A joiner polls the shared work itself, so nothing waits on progress it cannot drive.
+
+Two designs died on the way, both worth remembering:
+
+- **A notification-channel flight (leader announces, waiters await a `'static` receiver) deadlocks.** A leader living in some other scan's read-ahead set is unreachable — nested generators poll only their current await chain — so its waiters park forever. This is the #466 lesson resurfacing one layer up: co-driving is the only sound sharing here.
+- **`QueryEnv` cannot hold the flight.** Interior mutability over `'env`-borrowing futures makes the holder invariant, and `QueryEnv`'s covariance in its lifetime is load-bearing for the `Provider<Select>` lifetime unification (the strict-impl dance its comments document). The flight therefore hangs off `Driven`, whose lifetime nothing shrinks. Demand reads stay outside it, protected by the local re-check and the transport flight; the measured residual is ~2 duplicate fetches per cold join, versus 449 at budget 512 before.
+
+Post-fix sweep (broadband, 4k entities): budget 512 gives 1.18s / 14.8 rounds / zero duplicates; the shipping default moves to 256/16 (1.65s / 20.6 rounds), at which the cold lazy join beats eagerly downloading the entire space (2.4s / 30 rounds) while transferring 3.5x less — the campaign's thesis, landed: from 8.4s / 105 rounds pre-M3, a 5x cut at defaults and 7x at full throttle, with M2 (range-granular preload) and M4 (merge over AEV ranges) still ahead.
+
+## M2 landed: range-granular job executor (2026-09-10)
+
+Preload jobs now execute as scoped level-parallel traversals (`warm_source` in `repository/fetch.rs`): the selector's exact key range (`selector_range` under the tree's manifest) scopes `traverse_available_within`, so each depth's whole frontier fetches concurrently and a cold range costs tree-depth round trips, not block-count round trips. Reads run through the line's shared node cache in front of the hydrating networked index (`CacheThrough`), so jobs share spines with one another and with the demand reads that follow, and every fetched block still hydrates the local archive under the hydration flight. Compared to the select-and-drain executor this drops per-row parsing and spilled-value fetches for rows nobody reads.
+
+One deliberate scope trim against the original sketch: no spine-versus-leaf rank split and no `range_scale` block budget inside the job. Point probes (today's only hints) make both moot, and M4's merge-path ranges are wanted in full once promoted; the budget returns with M6's speculative unbounded ranges if measurements ask for it.
+
+Measured: rounds unchanged at the defaults (20.6), as predicted — the executor is substrate; moving rounds further belongs to range-shaped hints, which arrive with M4's merge over AEV ranges.
+
+## M4 landed: concept joins evaluate as an N-way merge (2026-09-10)
+
+The merge-join stack from `notes/set-at-a-time-joins.md` (branches `feat/merge-join-operator` + `spike/merge-join-planner`), ported onto current main and the preload substrate. Four pieces:
+
+- **The operator** (`merge_join`, `multi_merge_join` in `dialog-query/src/merge_join.rs`): sorted-cursor intersection generic over an `Ord` key with a caller-supplied extractor (index encoding stays in the scan layer), plus `Match::combine`/`value_of`. Ported near-verbatim; the oracle suite (nested-loop equivalence over 350 random shapes, N-way included) passes unchanged on current `Match` internals.
+- **The `Estimate` capability**: one root read summing per-child `Scale`s over a selector's range (`PersistentTree::range_estimate` → `ArtifactTreeExt::estimate` → `Select::estimate` → `Provider<Estimate>` on `QueryEnv`, lines summed). The spike's wide bound-threading collapsed to one addition on `Scope` — the alias absorbed the whole motion, macros included.
+- **The planner**: a conjunction whose every step is a positive attribute scan sorted on one shared variable (`sort_order_of`, now cardinality-independent) is structurally merge-eligible; `scans_balanced_for` resolves each scan against the first row and takes the merge only when the widest range estimate is within 3x of the narrowest, so a pinned selective value keeps the nested-loop fold (pinned by a test against real tree estimates). Optional (left-join) fields are excluded structurally — an `OptionalScan` step disqualifies the merge, so set-widening semantics never route through the inner intersection; only the lockstep N-way was ported (the spike's cascade variant measured identical and was dropped).
+- **The preload wiring**: on the merge path every input range is committed work, so each scan's resolved selector is hinted `Likely` before the streams open; the driven plan warms the ranges level-parallel (M2's executor) while the merge consumes them.
+
+Measured (cold 5-attribute concept join, 4k entities; campaign start 8.4s / 105 rounds / 5.5MB):
+
+| profile | rounds | modeled time | blocks |
+|---|---|---|---|
+| broadband | **6.2** | **498ms** | 69 / 3.0MB |
+| mobile | 9.3 | 1.86s | 69 |
+
+**17x faster than the campaign start on broadband, 15x on mobile, 5x faster than downloading the entire space — and strictly fewer blocks than the fold (69 vs 110), because the merge consumes the three AEV ranges and never touches the EAV probe region.** The original rejection (merge reads more blocks) is fully dissolved for the balanced case: fewer rounds AND fewer blocks. `filtered` (status pinned) correctly folds at the 3x balance threshold and keeps the pipelined-fold profile (~20 rounds); tuning that guard against latency-weighted cost rather than block estimates is future work, as is bead 79 (locality) and 80 (rule-join speculation).
+
+## v2 design: the env holds the work (2026-09-10, after review)
+
+The per-query plan misses the paths the UI actually runs on: of the six `QueryEnv` construction sites, only plain `.perform` queries (session.rs) ever get a plan, a driven stream, or a hydration flight. All three subscription sites and both transaction-query sites run the old sequential cold path, and concurrent subscriptions during load get no cross-query sharing. Review verdict: the env is the natural holder of the work queue — it is the thing passed into every effectful operation — and the per-query design was routing around the failure that blocked env placement instead of removing it.
+
+**The root failure, removed.** Both earlier failures (the `'static` wall, the `QueryEnv` invariance break) came from in-flight work expressed as futures that *borrow* the env. The operator is `#[derive(Provider, Clone)]` over Arc-backed fields — a cheap handle implementing every provider a fetch needs. So fetch-and-hydrate futures own `env.clone()` plus their owned capability context, making them genuinely `'static`: no borrow, no lifetime parameter, no invariance anywhere. The registry holds them as `WeakShared`, so an operator clone inside a fetch lives exactly as long as some `.perform` is driving it — the ownership rule restated, not bent: components never own the env; the env owns its work; work in flight holds a handle only while driven.
+
+**Shape:**
+
+- `FetchState` (dialog-repository): the ranked plan, the digest-keyed hydration flight (`WeakShared<BoxFuture<'static, ..>>`), budget. Reached from a generic env via a `FetchHost` trait; the operator (which depends on dialog-repository, so the direction works) hosts it as a field and implements the trait.
+- `QueryEnv` stores nothing and forwards `Provider<Preload>` to the env's state unconditionally — every construction site, subscriptions and transaction queries included, emits and benefits from hints with zero per-path wiring.
+- `NetworkedIndex` bounds gain `Env: FetchHost + Clone`; demand reads join the flight — cross-query, cross-subscription, by construction.
+- Driving: joiners co-drive their own fetch (unchanged); demand reads drive queued jobs while awaiting (env-level `while_warming`); and the env may own its own driver task (native spawn, wasm `spawn_local`) — permitted precisely because the env owning its work was never the forbidden thing.
+- `.preload(..)` survives as per-query budget/scoping sugar; with the state ambient, hints can be default-on, which also answers the tonk question.
+
+The `Driven`-scoped flight and the `ScopedFlight<'env>` lifetime machinery become migration casualties of this design. The yardstick grows a `subscribe` phase (cold first poll of a standing query on a fresh client) so the subscription gap is a gated number rather than an anecdote.
+
+## v3: replication as the env's own effect (2026-09-10, supersedes v2)
+
+v2 died in review on its central mechanism: fetch futures owning `env.clone()`, parked in a registry, is still a component owning providers cloned out of the env. The `WeakShared` dressing bounds the clone's lifetime but not the ownership direction; the env is borrowed by `.perform` for a job's duration, never held.
+
+The review that followed relocated the actual flaw. `QueryEnv` was never the culprit: its covariance dance, the strict-impl lifetime unification, and the #100013 boxing all trace to `Select<'a>`, the only `Command` in the workspace that carries a lifetime, because it returns a borrowing stream through an otherwise owned-in/owned-out capability layer. That can stay. The flaw is that replication was never *in* the capability system at all. The search tree speaks `StorageBackend`, so hydration (local first, remote fallback, write-back) lives in `NetworkedIndex`: an adapter constructed per call at roughly twenty sites, borrowing the env each time. Every failed design in this campaign was an attempt to share state across borrowed adapters that should not exist as adapters. Sharing state across them is exactly what hit the `'static` wall once and the `QueryEnv` invariance break twice.
+
+**No new routing machinery.** Routing already lives where it belongs: a branch carries its upstream name, `SourceRef::fallback` resolves it per call through the env's `Resolve`, and the operator is already the registry underneath (profiles, spaces, session, network). None of that moves. Only the shared *state* moves.
+
+**Hydration becomes an effect.** A new `Hydrate` command: input is the resolved remote route (site address + subject), the local catalog, and the digest; output the hydrated bytes. `NetworkedIndex`'s miss path performs it, borrowing the env for exactly the duration of the perform, which is the ownership invariant verbatim. The provider impl lives on the concrete `Operator` (dialog-operator already depends on dialog-repository), and *that* is where the sharing lives: the impl joins a digest-keyed single-flight held as operator state, and the shared fetch-and-write-back future is built inside the env's own implementation from its own Arc'd guts. This is the identical move the Fs transport's `Get` made with its `Flight` in #491, one layer up.
+
+One placement lesson from implementation: the command type itself lives in **dialog-network**, not dialog-repository. dialog-repository's unit tests hand `dialog_operator::Operator` to crate APIs, and with the dev-dependency cycle (operator depends on repository, repository dev-depends on operator) a `crate::`-defined bound type in the test build is a *different type* from the one the operator's impl was compiled against. Every effect type in these bounds already lives in shared leaf crates for exactly this reason; `Hydrate` follows suit (dialog-network owns the site address type the request carries), and dialog-repository re-exports it plus keeps the plain `hydrate` implementation providers delegate to.
+
+**Weak entries make the ownership sound.** The flight map holds `WeakShared`; strong clones of the shared future live only in active joiners, i.e. inside `.perform` calls currently borrowing the env. Work lives exactly as long as someone borrowing the env drives it. When the last joiner drops, the future and the operator handle it captured drop with it: no cycle through the operator's own field, no task owning the env, nothing outliving its drivers. Co-driving is preserved because every joiner polls the shared future through its own perform (the #466 liveness rule).
+
+**What falls out:**
+
+- Every `NetworkedIndex` site shares the flight with zero wiring: subscriptions, transaction queries, pull, commit, blob, history, export. Cross-query and cross-subscription sharing is by construction, not threading.
+- `HydrationFlight<'a>`, `with_flight`, the flight parameter on `select_from_source`, and `Driven`'s flight field retire. If nothing else needs the scoped form, `ScopedFlight` collapses back into `Flight`.
+- One accepted edge: two branches tracking different remotes join on the same digest and the first requester's route runs. Content addressing makes every answer identical; the per-query flight had the same property.
+
+**Stage 2, the queue, follows the same principle.** The operator implements `Provider<Preload>` itself, enqueueing pure-data hints into an ambient queue it owns; `QueryEnv` forwards `Preload` to the env unconditionally, so all six construction sites emit hints with no per-path wiring. Driving stays with borrowers: `Driven` wraps an evaluation's stream and pops jobs from the env's queue, warming while borrowing the env for its own poll, at every evaluation path rather than only session selects. `.preload(..)` survives as per-query budget and scoping sugar; with the queue ambient, hints are default-on, which also answers the tonk question.
+
+Stage 1 (the flight) is independently landable and already closes the residual demand-read races plus the subscription hydration gap; stage 2 brings the plan itself to subscriptions and transaction queries, gated by the soak `subscribe` phase.
+
+## Stage 2 landed: the ambient preload queue (2026-09-10)
+
+The queue followed the flight into the env, and the per-query staging API retired with it.
+
+- **Vocabulary** (dialog-artifacts, beside `Preload`): `FetchBudget` (unchanged shape, plus `ZERO` as the off switch), `PreloadQueue` (two bounded rank queues + the budget, pure data, drop-oldest past 1024 pending per rank since hints describe what a running evaluation is about to read and age fast), and the `Speculation` command, whose output is the queue's shared handle. Shared-leaf placement for the same dev-cycle reason as `Hydrate`.
+- **The operator provides both halves**: `Provider<Preload>` enqueues into its own queue (refusing, without enqueueing, when the budget is zero, which is what keeps evaluators' stop-on-first-refusal and the deterministic soak gate working), and `Provider<Speculation>` hands the queue to drivers. The budget is runtime-adjustable through the handle; the soak's unshaped profile sets `ZERO` right after building the operator.
+- **`QueryEnv` forwards `Preload` unconditionally** to the underlying env; the plan field, `with_plan`, `SelectQuery::preload`, `FetchPlan`, and `PreloadHandle` are gone. Nothing in the engine used abort/promote; if M6's speculative ranges want reprioritization it re-enters at the queue.
+- **Every evaluation drives.** `Driven` now pops from the ambient queue (budget read once per stream, still a per-driver cap) and wraps every evaluation path: session queries always, both subscription evaluation forms (full recompute and fixpoint continuation), and mid-transaction queries. One evaluation's polling executes another's hints, which is the cross-subscription sharing by construction.
+- **Explicit warming** needs no dedicated API: performing `Preload` against the env enqueues from anywhere, and whichever evaluation polls next replicates it (the fetch.rs test pins exactly this shape: a hint enqueued outside any query, executed by a query that never asked for it).
+
+Measured (broadband, reproducible across four runs of the committed tree): a standing query's cold first poll and the new `overlap` phase (two concurrent independent concepts sharing three of five attribute ranges, on one fresh client) both land at full parity with a plain preloaded query — 497ms / 6.2 rounds / ~70 blocks, against 1.03s / 12.9 rounds for the stage-1 subscription and 2x that for two sequential queries. The overlap ledger shows the union footprint hydrated once with zero duplicate fetches: the env-owned flight and queue are doing the cross-evaluation sharing they exist for. The filtered fold holds its stage-1 shape (1.56s / 20 rounds / 109 blocks).
+
+The 8.4s tables were real: the estimator lost the plot near a height boundary (2026-09-10). What first looked like a stage-2 regression, then like a stale binary, was bimodal behavior on both stages: some runs showed filtered at 8.4s / 105 rounds / 151 blocks with probe 3 and claim puts 3-4 where others showed 1.56s / 20 / 109 with probe 2 and put 1, and the unshaped profile's demand shape flipped with the same modes. Instrumenting the merge-versus-fold guard found every scan in a bad run estimating the identical constant (92682): `range_estimate` read the root alone, and near a height boundary the root has few children, so every range fell inside one child and reported that child's whole-subtree scale — zero discrimination, the guard called everything balanced, and the filtered concept and the rule body merged instead of folding (the value-pinned merge then ran near-serial, bead dialog-db-83). The shape wobbled per run because the history region's keys derive from signed revisions (per-run keypair and timestamps), while fact keys are deterministic — bead dialog-db-84 tracks making the soak vault byte-deterministic. The fix descends while the range lies within a single child and estimates at the first level where it spans siblings (at most one cached block per level); six consecutive post-fix runs hold the fold and 1.56s. Lessons: an estimator that cannot discriminate is worse than none, because it flips decisions consistently rather than noisily; and a knife-edge gate (closed = exactly 1/3 of entities against a 3x guard) is a feature of the soak, not a bug — it caught this.

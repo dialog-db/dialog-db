@@ -56,7 +56,6 @@ rand = { workspace = true, optional = true }
 # reads the whole body with `bytes()`, and enabling `stream` there would pull in
 # `wasm-streams` (see the note on the workspace `reqwest`).
 reqwest = { workspace = true, features = ["stream"] }
-parking_lot = { workspace = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"], optional = true }
 s3s = { workspace = true, optional = true }
@@ -70,6 +69,10 @@ tower-http = { workspace = true, features = ["cors"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["js"] }
+# TEMPORARY (#492): the request tracing in the archive provider prints to
+# the worker console, which has no stderr. Remove with the tracing.
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true, features = ["console"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }

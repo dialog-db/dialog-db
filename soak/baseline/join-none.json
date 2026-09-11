@@ -9,8 +9,8 @@
   "entities": 4000,
   "facts": 24011,
   "commits": 33,
-  "vault_files": 381,
-  "vault_bytes": 19303010,
+  "vault_files": 387,
+  "vault_bytes": 19308963,
   "phases": [
     {
       "name": "pull",
@@ -25,11 +25,11 @@
           [
             "memory.resolve",
             1,
-            334
+            335
           ]
         ],
         "requests": 1,
-        "bytes": 334
+        "bytes": 335
       }
     },
     {
@@ -45,11 +45,11 @@
           [
             "archive.get",
             2,
-            160384
+            163192
           ]
         ],
         "requests": 2,
-        "bytes": 160384
+        "bytes": 163192
       }
     },
     {
@@ -79,26 +79,26 @@
           [
             "archive.get",
             1,
-            88832
+            109520
           ],
           [
             "archive.put",
             1,
-            72088
+            74896
           ],
           [
             "memory.resolve",
             1,
-            334
+            335
           ],
           [
             "memory.publish",
             1,
-            373
+            374
           ]
         ],
         "requests": 4,
-        "bytes": 161627
+        "bytes": 185125
       }
     },
     {
@@ -159,7 +159,7 @@
       "name": "concept",
       "virtual_ms": 0,
       "rounds": 0.0,
-      "unique_blocks": 110,
+      "unique_blocks": 69,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -167,12 +167,12 @@
         "rows": [
           [
             "archive.get",
-            110,
-            5665464
+            69,
+            3168896
           ]
         ],
-        "requests": 110,
-        "bytes": 5665464
+        "requests": 69,
+        "bytes": 3168896
       }
     },
     {
@@ -188,18 +188,18 @@
           [
             "archive.get",
             109,
-            5643904
+            5672104
           ]
         ],
         "requests": 109,
-        "bytes": 5643904
+        "bytes": 5672104
       }
     },
     {
       "name": "download",
       "virtual_ms": 0,
       "rounds": 0.0,
-      "unique_blocks": 379,
+      "unique_blocks": 385,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -207,17 +207,17 @@
         "rows": [
           [
             "archive.get",
-            379,
-            19306944
+            385,
+            19312896
           ],
           [
             "memory.resolve",
             1,
-            373
+            374
           ]
         ],
-        "requests": 380,
-        "bytes": 19307317
+        "requests": 386,
+        "bytes": 19313270
       }
     }
   ]

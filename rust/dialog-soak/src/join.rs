@@ -21,7 +21,21 @@
 //!    status pinned: the selective shape where a value-bound scan turns the
 //!    other premises into entity probes (the block-count-versus-rounds
 //!    tradeoff recorded in `notes/set-at-a-time-joins.md`).
-//! 10. **download** — a second fresh client materializes the entire space
+//! 10. **subscribe** — a fresh cold client registers the same concept as a
+//!     standing query and pays its first poll: the exact path a UI drives,
+//!     preloading through the same ambient queue every evaluation shares
+//!     (bead dialog-db-82).
+//! 11. **overlap** — a fresh cold client runs two independent concepts
+//!     concurrently (the full board and a compact listing sharing three of
+//!     its five attribute ranges): the everyday two-views-of-one-space
+//!     shape, gating that overlapping evaluations hydrate shared ranges
+//!     once through the env-owned flight and queue.
+//! 12. **rule** — a fresh cold client queries a concept that exists only
+//!     through a seeded deductive rule (no conclusion facts are ever
+//!     written): rule discovery, body hydration, and the body's join all
+//!     run cold. The yardstick for binding-aware rule-join speculation
+//!     (bead dialog-db-80).
+//! 13. **download** — a second fresh client materializes the entire space
 //!     (`pull().download()`): the eager-replication cost the lazy join
 //!     avoids up front but pays incrementally.
 
@@ -34,7 +48,11 @@ use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::{Directory, Location};
 use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 use dialog_operator::{Operator, Profile};
-use dialog_query::{Concept, Entity, Output as _, Query, Term};
+use dialog_query::rule::DeductiveRuleDescriptor;
+use dialog_query::{
+    Concept, ConceptConclusion, ConceptDescriptor, ConceptQuery, DeductiveRule, Entity,
+    Output as _, Parameters, Query, Term,
+};
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::simulation::{self, NetworkShape};
 use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
@@ -118,6 +136,23 @@ pub struct Card {
     pub created: card::Created,
 }
 
+/// A compact list view beside the full board: the same entities through
+/// a second, independent concept that shares three of [`Card`]'s five
+/// attribute ranges (title, status, rank). Two apps rendering different
+/// views of one space is the everyday shape of concurrent overlapping
+/// queries.
+#[derive(Clone, Debug, PartialEq, Concept)]
+pub struct Listing {
+    /// The bug entity the row lists.
+    pub this: Entity,
+    /// Its title.
+    pub title: card::Title,
+    /// Its status.
+    pub status: card::Status,
+    /// Its ordering key.
+    pub rank: card::Rank,
+}
+
 /// Build one entity's facts: sizes chosen to look like an issue-tracker
 /// row (short fields plus one few-hundred-byte body), the shape tonk
 /// spaces carry.
@@ -188,6 +223,51 @@ fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
         }));
     }
     Ok(facts)
+}
+
+/// The concept the seeded rule derives: an open card, title and rank
+/// projected off the bug entity. No `open/*` fact is ever written, so
+/// every row exists only through the rule.
+fn open_card_descriptor() -> Result<ConceptDescriptor> {
+    Ok(serde_json::from_value(serde_json::json!({
+        "with": {
+            "title": { "the": "open/title", "as": "Text" },
+            "rank": { "the": "open/rank", "as": "Text" }
+        }
+    }))?)
+}
+
+/// The deductive rule shipped with the space: a bug whose status is
+/// "open" concludes an open card carrying its title and rank. The body
+/// is the general rule-join shape (two bound scans plus a value-pinned
+/// guard) that bead dialog-db-80's speculation targets.
+fn open_card_rule() -> Result<DeductiveRule> {
+    let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+        "deduce": {
+            "with": {
+                "title": { "the": "open/title", "as": "Text" },
+                "rank": { "the": "open/rank", "as": "Text" }
+            }
+        },
+        "when": [{
+            "assert": {
+                "with": {
+                    "title": { "the": "bug/title", "as": "Text" },
+                    "rank": { "the": "bug/rank", "as": "Text" },
+                    "status": { "the": "bug/status", "as": "Text" }
+                }
+            },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "title": { "?": { "name": "title" } },
+                "rank": { "?": { "name": "rank" } },
+                "status": "open"
+            }
+        }]
+    }))?;
+    descriptor
+        .compile()
+        .map_err(|error| anyhow::anyhow!("open-card rule should compile: {error}"))
 }
 
 /// The joiner's claim: the membership facts a join commits.
@@ -347,6 +427,15 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     simulation::reset_tally();
 
     let (operator, profile) = test_operator_with_profile().await;
+    // Speculative preloading is ambient (the operator's queue, hints
+    // default-on). The unshaped profile turns it off: its job is to pin
+    // the engine's deterministic demand shape, and replication overlap
+    // is a latency behavior only the shaped profiles measure.
+    if scenario.network.is_none() {
+        use dialog_capability::Provider;
+        let queue = Provider::<dialog_artifacts::Speculation>::execute(&operator, ()).await;
+        queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
+    }
     let server = profile
         .repository(unique_name("soak-server"))
         .create()
@@ -384,6 +473,16 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // number of commits (history depth shapes the head the client adopts).
     branch
         .commit(stream::iter(meta_facts(scenario.members)?))
+        .perform(&operator)
+        .await?;
+    // The derived-concept rule ships with the space: its facts live in
+    // the tree like any others, so a cold client discovers and hydrates
+    // the rule on first use (the `rule` phase).
+    branch
+        .transaction()
+        .assert(open_card_rule()?)
+        .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let commits = scenario.commits.max(1);
@@ -525,19 +624,16 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         mount_client(&operator, &profile, &server, &address, "soak-concept").await?;
     concept_client.pull().perform(&operator).await?;
     measured("concept", &mut phases, async {
-        let cards: Vec<Card> = concept_client
-            .query()
-            .select(Query::<Card> {
-                this: Term::var("this"),
-                title: Term::var("title"),
-                status: Term::var("status"),
-                rank: Term::var("rank"),
-                reporter: Term::var("reporter"),
-                created: Term::var("created"),
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?;
+        let layer = concept_client.query();
+        let query = layer.select(Query::<Card> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::var("status"),
+            rank: Term::var("rank"),
+            reporter: Term::var("reporter"),
+            created: Term::var("created"),
+        });
+        let cards: Vec<Card> = query.perform(&operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == expected,
             "concept join should see every card"
@@ -557,23 +653,114 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         .filter(|index| index % 3 == 2)
         .count();
     measured("filtered", &mut phases, async {
-        let cards: Vec<Card> = filtered_client
-            .query()
-            .select(Query::<Card> {
-                this: Term::var("this"),
-                title: Term::var("title"),
-                status: Term::from("closed".to_string()),
-                rank: Term::var("rank"),
-                reporter: Term::var("reporter"),
-                created: Term::var("created"),
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?;
+        let layer = filtered_client.query();
+        let query = layer.select(Query::<Card> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::from("closed".to_string()),
+            rank: Term::var("rank"),
+            reporter: Term::var("reporter"),
+            created: Term::var("created"),
+        });
+        let cards: Vec<Card> = query.perform(&operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == closed,
             "filtered join should see the closed cards"
         );
+        Ok(())
+    })
+    .await?;
+
+    // The UI's actual cold path: a standing query's first poll on a fresh
+    // client. With the ambient queue the subscription's evaluation enqueues
+    // and drives its own hints, so this phase gates bead dialog-db-82's
+    // subscription parity.
+    let subscribe_client =
+        mount_client(&operator, &profile, &server, &address, "soak-subscribe").await?;
+    subscribe_client.pull().perform(&operator).await?;
+    measured("subscribe", &mut phases, async {
+        let mut subscription = subscribe_client.subscribe(Query::<Card> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::var("status"),
+            rank: Term::var("rank"),
+            reporter: Term::var("reporter"),
+            created: Term::var("created"),
+        });
+        let delta = subscription
+            .poll(&operator)
+            .await
+            .map_err(|error| anyhow::anyhow!("first poll failed: {error}"))?;
+        let added = delta.map(|delta| delta.asserted.len()).unwrap_or(0);
+        anyhow::ensure!(
+            added == expected,
+            "the first poll should see every card, saw {added}"
+        );
+        Ok(())
+    })
+    .await?;
+
+    // Two independent concepts, run concurrently on one fresh cold
+    // client, overlapping on three of five attribute ranges. What the
+    // ledger gates: the overlap hydrates ONCE (the env-owned flight and
+    // queue are shared across evaluations, so the unique count reads as
+    // the union of the two footprints and duplicates stay zero), and the
+    // rounds read as overlapped work, not the sum of two sequential runs.
+    let overlap_client =
+        mount_client(&operator, &profile, &server, &address, "soak-overlap").await?;
+    overlap_client.pull().perform(&operator).await?;
+    measured("overlap", &mut phases, async {
+        let board_layer = overlap_client.query();
+        let board = board_layer.select(Query::<Card> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::var("status"),
+            rank: Term::var("rank"),
+            reporter: Term::var("reporter"),
+            created: Term::var("created"),
+        });
+        let list_layer = overlap_client.query();
+        let list = list_layer.select(Query::<Listing> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::var("status"),
+            rank: Term::var("rank"),
+        });
+        let (cards, rows): (Vec<Card>, Vec<Listing>) = futures_util::future::try_join(
+            board.perform(&operator).try_vec(),
+            list.perform(&operator).try_vec(),
+        )
+        .await?;
+        anyhow::ensure!(
+            cards.len() == expected && rows.len() == expected,
+            "both overlapping queries should see every entity"
+        );
+        Ok(())
+    })
+    .await?;
+
+    // A concept that exists only through the seeded rule, on a fresh
+    // cold client: the query must discover the rule (conclusion index
+    // scan), hydrate its body (source fetch), and run the body's join
+    // cold. The general rule-join speculation of bead dialog-db-80 is
+    // measured against this phase.
+    let rule_client = mount_client(&operator, &profile, &server, &address, "soak-rule").await?;
+    rule_client.pull().perform(&operator).await?;
+    let open = (0..scenario.entities)
+        .filter(|index| index % 3 == 0)
+        .count();
+    measured("rule", &mut phases, async {
+        let layer = rule_client.query();
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("title".into(), Term::var("title"));
+        terms.insert("rank".into(), Term::var("rank"));
+        let query = ConceptQuery {
+            predicate: open_card_descriptor()?,
+            terms,
+        };
+        let rows: Vec<ConceptConclusion> = layer.select(query).perform(&operator).try_vec().await?;
+        anyhow::ensure!(rows.len() == open, "the rule should derive every open card");
         Ok(())
     })
     .await?;

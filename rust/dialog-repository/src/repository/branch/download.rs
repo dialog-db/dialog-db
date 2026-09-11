@@ -110,7 +110,9 @@ impl Download<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,
@@ -202,7 +204,9 @@ impl<'a> PullDownload<'a> {
             + Provider<Attest>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
@@ -212,7 +216,9 @@ impl<'a> PullDownload<'a> {
         let from = self.0.source().cloned();
         // Boxed: the prepare future carries the whole pull machinery and
         // trips the large-futures lint inline.
+        dialog_remote_s3::trace_phase("prepare");
         let prepared = Box::pin(self.0.prepare(env)).await?;
+        dialog_remote_s3::trace_phase("download");
         if let Some(revision) = prepared.revision().cloned() {
             Download {
                 branch,
@@ -223,6 +229,7 @@ impl<'a> PullDownload<'a> {
             .perform(env)
             .await?;
         }
+        dialog_remote_s3::trace_phase("commit");
         prepared.commit(env).await
     }
 }

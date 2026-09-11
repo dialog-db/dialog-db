@@ -82,7 +82,7 @@ impl Select<'_> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -158,6 +158,46 @@ impl Select<'_> {
         Ok(tree.scan(store, self.source.spill_cache(), self.selector))
     }
 
+    /// Estimate this selector's range size, picking a store the same way
+    /// [`perform`](Self::perform) does. See [`estimate`](Self::estimate).
+    pub async fn estimate_perform<Env>(self, env: &Env) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let remote = self.source.fallback(env).await;
+        let store = NetworkedIndex::new(env, self.catalog(), remote);
+        self.estimate(store).await
+    }
+
+    /// An advisory upper-bound estimate of how many artifacts this selector's
+    /// range spans, read from the tree root alone (see
+    /// [`ArtifactTreeExt::estimate`](dialog_artifacts::tree::ArtifactTreeExt::estimate)).
+    ///
+    /// One block read rather than a scan, for a planner comparing scan sizes.
+    /// This estimates against the line's tree only; it ignores any pending
+    /// `Changes` overlay, whose in-memory edits are small relative to the tree
+    /// and do not change the order-of-magnitude answer a strategy choice
+    /// needs. Returns `None` for an empty tree.
+    pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let tree_hash = self.tree_hash();
+        if tree_hash == EMPTY_TREE_HASH {
+            return Ok(None);
+        }
+        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), self.source.node_cache());
+        tree.estimate(store, self.selector).await
+    }
+
     /// [`execute`](Self::execute) materializing every row from the scan's
     /// own key parse — the fast path behind [`SelectOwned`], which by
     /// definition materializes everything and would otherwise pay a second
@@ -227,7 +267,7 @@ impl SelectOwned<'_> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
