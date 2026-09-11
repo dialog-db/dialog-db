@@ -38,16 +38,20 @@ pub async fn test_repo(
 /// Fill `branch` with what a tonk profile's account branch carries, at a
 /// scale that makes a cold clone do real work.
 ///
-/// Modelled on what the app actually accumulates there (see
-/// `tonk-account`): retained delegations, each decomposing into facts
-/// PLUS a signed envelope blob, alongside ordinary rows (device links,
-/// space/replica index entries). Committed in several rounds so the tree
-/// has interior structure rather than one wide leaf -- a handful of
-/// blocks could be fetched serially without anyone noticing, which is
-/// exactly the measurement error this fixture exists to avoid.
+/// Modelled on what a real profile carries (see `tonk-account` and
+/// `onboarding.rs`), which is SMALL: a few delegations -- passkey
+/// recovery, account recovery, device grants -- each decomposing into
+/// facts plus a signed envelope blob, alongside a handful of device-link
+/// rows. A profile is not a data store; its branch holds definitions and
+/// authority, not bulk.
 ///
-/// `scale` multiplies both populations. Returns the number of
-/// delegations retained, so a caller can assert the blobs shipped.
+/// `scale` of 1 is that real shape. Larger scales exist only to ask what
+/// changes with volume, and are not what a login pulls: sizing a fixture
+/// up to make a measurement move is how a test stops describing the
+/// system it was written about.
+///
+/// Returns the number of delegations retained, so a caller can assert
+/// the envelope blobs actually shipped.
 #[cfg(test)]
 pub async fn fill_account_branch<Env>(
     branch: &crate::Branch,
@@ -76,7 +80,7 @@ where
     use futures_util::stream;
 
     let space = Ed25519Signer::generate().await?;
-    let delegations = 8 * scale;
+    let delegations = 3 * scale;
     for _ in 0..delegations {
         let holder = Ed25519Signer::generate().await?;
         let delegation = dialog_ucan_core::DelegationBuilder::new()
@@ -95,8 +99,8 @@ where
             .await?;
     }
 
-    for round in 0..(4 * scale) {
-        let rows: Vec<_> = (0..120)
+    for round in 0..scale {
+        let rows: Vec<_> = (0..4)
             .map(|i| {
                 Instruction::Assert(Artifact {
                     the: "device/link".parse().expect("valid attribute"),
