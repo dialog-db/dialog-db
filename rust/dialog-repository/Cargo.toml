@@ -42,6 +42,7 @@ base58 = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
+ipld-core = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

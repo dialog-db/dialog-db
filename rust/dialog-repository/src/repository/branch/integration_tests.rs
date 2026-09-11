@@ -4832,3 +4832,166 @@ async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) ->
 
     Ok(())
 }
+
+/// #492 against the REAL tree: a profile captured from a running app.
+///
+/// Every preceding attempt seeded a synthetic branch, and each one
+/// measured something other than the bug -- a tree too small for overlap
+/// to mean anything, or a differential's fan-out standing in for the
+/// download's. This one imports an actual profile: 83 blocks and 63
+/// blobs exported from a live tonk through the `vnd.dialog.snapshot`
+/// route, whose shape is what the app's own `/diagnose` view reports
+/// (one index node, 68 children, fanout 256).
+///
+/// The blobs matter as much as the blocks. A delegation's envelope is a
+/// blob, and blobs travel their own channel in the snapshot export --
+/// downstream of the block walk, after the tree is already traversed. A
+/// fixture built from a CSV fact export cannot reach that path at all.
+///
+/// The measurement is concurrent ROUND TRIPS (`Hydrate`), never block
+/// reads: reads that hit the local store overlap for free and say
+/// nothing about wall time, which is how earlier versions of this test
+/// reported a healthy peak while every fetch was serial.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_downloads_a_real_profile_without_serializing(ucan: UcanS3Address) -> Result<()> {
+    use crate::helpers::Counting;
+    use crate::repository::snapshot::codec;
+
+    let snapshot = include_bytes!("../../../tests/fixtures/profile-snapshot.bin");
+    let items = codec::decode(snapshot)?;
+    let blobs = items
+        .iter()
+        .filter(|item| matches!(item, Ok(crate::Item::Blob { .. })))
+        .count();
+    let blocks = items.len() - blobs;
+    println!("FIXTURE blocks={blocks} blobs={blobs}");
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    let source_repo = profile
+        .repository(unique_name("real-profile-a"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let chain = source_repo
+        .access()
+        .claim(&source_repo)
+        .delegate(profile.did())
+        .perform(&operator)
+        .await?;
+    profile.access().save(chain).perform(&operator).await?;
+
+    assert!(
+        blocks > 8,
+        "the fixture must carry a real tree (blocks={blocks}, blobs={blobs})"
+    );
+
+    // Seed the source with the captured tree, then publish it.
+    let imported = source_repo
+        .import(stream::iter(codec::decode(snapshot)?))
+        .perform(&operator)
+        .await?;
+    println!("IMPORTED {imported:?}");
+
+    let source_origin = source_repo
+        .remote("origin")
+        .create(site.clone())
+        .perform(&operator)
+        .await?;
+    let source = source_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&operator)
+        .await?;
+    let source_remote = source_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&operator)
+        .await?;
+    source
+        .set_upstream(source_remote)
+        .perform(&operator)
+        .await?;
+
+    let push_env = Counting::new(operator.clone());
+    let pushed = source.push().perform(&push_env).await?;
+    let uploads = push_env.count("fork::Fork");
+    let push_peak = push_env.peak_forks_in_flight();
+    println!("PUSH pushed={pushed:?} uploads={uploads} peak={push_peak}");
+
+    // The recovering device: its OWN profile, with its own account
+    // already created, so the login is a MERGE rather than a bare
+    // adoption -- the app's shape, where a device makes a profile before
+    // it ever signs in.
+    let (device_operator, device_profile) = test_operator_with_profile().await;
+    device_profile
+        .access()
+        .save(
+            source_repo
+                .access()
+                .claim(&source_repo)
+                .delegate(device_profile.did())
+                .perform(&operator)
+                .await?,
+        )
+        .perform(&device_operator)
+        .await?;
+    let device_repo = device_profile
+        .repository(unique_name("real-profile-b"))
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let device_remote = device_repo
+        .remote("account-access")
+        .create(site)
+        .subject(source_repo.did())
+        .perform(&device_operator)
+        .await?;
+    let access = device_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let upstream = device_remote
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    access
+        .set_upstream(upstream)
+        .perform(&device_operator)
+        .await?;
+
+    // The login: adopt, then materialize. Measured together, as the app
+    // runs it.
+    let env = Counting::new(device_operator.clone());
+    access.pull().download().perform(&env).await?;
+
+    let hydrations = env.count("hydrate::Hydrate");
+    let remote_peak = env.peak_forks_in_flight();
+    let reads = env.block_reads();
+    let local_peak = env.peak_block_reads_in_flight();
+    println!(
+        "LOGIN hydrations={hydrations} remote_peak={remote_peak} \
+         reads={reads} local_peak={local_peak}"
+    );
+
+    assert!(
+        hydrations > 8,
+        "the device must pull the profile across the wire for its overlap \
+         to mean anything (hydrations={hydrations}). Effects: {:?}",
+        env.snapshot()
+    );
+    assert!(
+        remote_peak > 1,
+        "downloading a REAL profile ({blocks} blocks, {blobs} blobs) made \
+         {hydrations} remote fetches but never had more than {remote_peak} \
+         open at once, while the push of the same tree reached peak \
+         {push_peak} over {uploads} uploads. One round trip at a time is \
+         the HAR's shape exactly."
+    );
+
+    Ok(())
+}
