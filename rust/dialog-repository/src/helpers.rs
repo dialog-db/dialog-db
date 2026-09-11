@@ -35,6 +35,83 @@ pub async fn test_repo(
         .expect("test_repo: failed to open repository")
 }
 
+/// Fill `branch` with what a tonk profile's account branch carries, at a
+/// scale that makes a cold clone do real work.
+///
+/// Modelled on what the app actually accumulates there (see
+/// `tonk-account`): retained delegations, each decomposing into facts
+/// PLUS a signed envelope blob, alongside ordinary rows (device links,
+/// space/replica index entries). Committed in several rounds so the tree
+/// has interior structure rather than one wide leaf -- a handful of
+/// blocks could be fetched serially without anyone noticing, which is
+/// exactly the measurement error this fixture exists to avoid.
+///
+/// `scale` multiplies both populations. Returns the number of
+/// delegations retained, so a caller can assert the blobs shipped.
+#[cfg(test)]
+pub async fn fill_account_branch<Env>(
+    branch: &crate::Branch,
+    scale: usize,
+    env: &Env,
+) -> anyhow::Result<usize>
+where
+    Env: dialog_capability::Provider<dialog_effects::archive::Get>
+        + dialog_capability::Provider<dialog_effects::archive::Put>
+        + dialog_capability::Provider<dialog_effects::memory::Resolve>
+        + dialog_capability::Provider<dialog_effects::memory::Publish>
+        + dialog_capability::Provider<dialog_effects::authority::Identify>
+        + dialog_capability::Provider<dialog_effects::authority::Attest>
+        + dialog_capability::Provider<dialog_effects::archive::Import>
+        + dialog_capability::Provider<dialog_effects::blob::Write>
+        + dialog_capability::Provider<crate::Hydrate>
+        + dialog_capability::Provider<
+            dialog_capability::Fork<dialog_network::Network, dialog_effects::memory::Resolve>,
+        >
+        + ConditionalSync
+        + 'static,
+{
+    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_credentials::Ed25519Signer;
+    use dialog_varsig::Principal as _;
+    use futures_util::stream;
+
+    let space = Ed25519Signer::generate().await?;
+    let delegations = 8 * scale;
+    for _ in 0..delegations {
+        let holder = Ed25519Signer::generate().await?;
+        let delegation = dialog_ucan_core::DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&holder.did())
+            .subject(dialog_ucan_core::subject::Subject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await?;
+        branch
+            .delegations()
+            .retain(dialog_ucan::UcanDelegation::new(
+                dialog_ucan_core::DelegationChain::new(delegation),
+            ))
+            .perform(env)
+            .await?;
+    }
+
+    for round in 0..(4 * scale) {
+        let rows: Vec<_> = (0..120)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "device/link".parse().expect("valid attribute"),
+                    of: format!("device:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("device-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        branch.commit(stream::iter(rows)).perform(env).await?;
+    }
+
+    Ok(delegations)
+}
+
 /// The volatile space type test operators run over.
 #[cfg(test)]
 use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;
