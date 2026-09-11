@@ -167,15 +167,16 @@ where
         let name = type_name::<C>();
         *self.counts.lock().entry(name).or_insert(0) += 1;
 
-        // Block reads and writes are timed: they are the effects that
-        // cost a network round trip apiece over a remote archive. The
-        // write side is what makes the push usable as a control for the
-        // read side.
+        // A remote effect arrives as `Fork<RemoteSite, Fx>`, whose type
+        // name carries BOTH `fork::Fork` and the inner effect, so the
+        // tests are matched in that order: a fork is a round trip (the
+        // quantity the HAR reports), and a bare `archive::Get`/`Put` is
+        // the local store, whose overlap is free and proves nothing.
         let gauge = if name.contains("fork::Fork") {
             &self.forks
         } else if name.contains("archive::Get") {
             &self.reads
-        } else if name.contains("archive::Put") {
+        } else if name.contains("archive::Put") || name.contains("archive::Import") {
             &self.writes
         } else {
             return self.inner.execute(input).await;

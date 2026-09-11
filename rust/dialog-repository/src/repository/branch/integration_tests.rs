@@ -4265,8 +4265,8 @@ async fn it_downloads_serially_while_pushing_concurrently(
     // remote, the same authorization, going the other way.
     let push_env = Counting::new(operator.clone());
     assert!(source.push().perform(&push_env).await?.is_some());
-    let writes = push_env.count("archive::Put");
-    let push_peak = push_env.peak_block_writes_in_flight();
+    let writes = push_env.count("fork::Fork");
+    let push_peak = push_env.peak_forks_in_flight();
 
     // A cold replica on a SECOND operator, hence a second local archive.
     //

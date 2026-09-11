@@ -205,33 +205,13 @@ where
                 // `buffered`, not `buffer_unordered`: the whole level's
                 // reads go in flight together, but a node that lands early
                 // still waits its turn, so the walk yields in level order.
+                // The stream stays streaming — the first node is yielded
+                // as soon as IT is ready, never after the level's slowest
+                // — while the reads behind it keep running.
                 .buffered(FETCH_CONCURRENCY);
 
-                // Drain the level to completion BEFORE yielding any of it.
-                //
-                // This is a generator: every `yield` below suspends it
-                // until the consumer polls again, and a suspended
-                // generator polls nothing. Yielding from inside the read
-                // loop therefore parked the remaining reads at each item,
-                // so the fan-out never accumulated and each block cost its
-                // own round trip -- measured over a throttled link as 20
-                // block GETs at peak 1 in flight, strictly alternating,
-                // while a push of the same tree reached peak 15. The push
-                // is the shape to copy: it drains a materialized wave with
-                // a terminal `try_collect` (`Upload::perform`), which
-                // keeps every request polled until all of them finish.
-                //
-                // Collecting a level first costs one level of nodes in
-                // memory -- bounded by the tree's branching factor, the
-                // same working set the level-order walk already implies --
-                // and is what makes the concurrency real.
-                let mut landed = Vec::new();
-                while let Some(item) = reads.next().await {
-                    landed.push(item);
-                }
-
                 let mut next = Vec::new();
-                for (hash, bytes) in landed {
+                while let Some((hash, bytes)) = reads.next().await {
                     let Some(bytes) = bytes? else {
                         yield Visit::Absent(hash);
                         continue;
