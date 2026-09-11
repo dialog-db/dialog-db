@@ -226,6 +226,17 @@ fn take_varint(bytes: &[u8], at: &mut usize) -> Result<u64, CodecError> {
 /// code is checked as a cheap guard against reading a CAR this format did
 /// not write.
 pub fn decode(bytes: &[u8]) -> Result<Vec<Result<Item, SnapshotError>>, CodecError> {
+    decode_with_roots(bytes).map(|(items, _)| items)
+}
+
+/// [`decode`], also returning what the CAR names as its roots.
+///
+/// A snapshot's root is the revision's tree, so a caller importing the
+/// content needs it to say WHAT was imported -- without it the blocks
+/// land in the archive reachable from nothing.
+pub fn decode_with_roots(
+    bytes: &[u8],
+) -> Result<(Vec<Result<Item, SnapshotError>>, Vec<Blake3Hash>), CodecError> {
     let mut at = 0usize;
 
     let header_len = take_varint(bytes, &mut at)? as usize;
@@ -241,6 +252,12 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Result<Item, SnapshotError>>, CodecErr
             header.version
         )));
     }
+
+    let roots = header
+        .roots
+        .iter()
+        .filter_map(|cid| Blake3Hash::try_from(cid.hash().digest().to_vec()).ok())
+        .collect();
 
     let mut items = Vec::new();
     while at < bytes.len() {
@@ -277,5 +294,5 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Result<Item, SnapshotError>>, CodecErr
         }));
     }
 
-    Ok(items)
+    Ok((items, roots))
 }
