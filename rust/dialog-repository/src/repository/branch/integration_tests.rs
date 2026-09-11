@@ -4678,7 +4678,6 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
 #[dialog_common::test]
 async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) -> Result<()> {
     use crate::helpers::Counting;
-    use dialog_credentials::Ed25519Signer;
 
     let (account_operator, account_profile) = test_operator_with_profile().await;
     let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
@@ -4721,40 +4720,13 @@ async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) ->
         .perform(&account_operator)
         .await?;
 
-    let space = Ed25519Signer::generate().await?;
-    for _ in 0..24 {
-        let holder = Ed25519Signer::generate().await?;
-        let delegation = dialog_ucan_core::DelegationBuilder::new()
-            .issuer(dialog_credentials::Signer::from(space.clone()))
-            .audience(&dialog_varsig::Principal::did(&holder))
-            .subject(dialog_ucan_core::subject::Subject::Specific(
-                dialog_varsig::Principal::did(&space),
-            ))
-            .command(vec!["storage".to_string()])
-            .try_build()
-            .await?;
-        account
-            .delegations()
-            .retain(dialog_ucan::UcanDelegation::new(
-                dialog_ucan_core::DelegationChain::new(delegation),
-            ))
-            .perform(&account_operator)
-            .await?;
-    }
-    let rows: Vec<_> = (0..200)
-        .map(|i| {
-            Instruction::Assert(Artifact {
-                the: "device/link".parse().expect("valid attribute"),
-                of: format!("device:{i}").parse().expect("valid entity"),
-                is: Value::String(format!("device-{i}").repeat(24)),
-                cause: None,
-            })
-        })
-        .collect();
-    account
-        .commit(stream::iter(rows))
-        .perform(&account_operator)
-        .await?;
+    // The account branch's content, from the shared fixture: delegations
+    // (facts + envelope blobs) and device rows, over several commits so
+    // the tree has interior structure. Scaled up until a cold clone has
+    // to make enough fetches for their overlap to mean something.
+    let delegations =
+        crate::helpers::fill_account_branch(&account, 3, &account_operator).await?;
+
 
     // The push is the control: the same tree, the same remote, the other
     // direction, measured the same way.
@@ -4822,7 +4794,8 @@ async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) ->
     // the test fails, so the numbers have to ride an assertion.
     assert!(
         hydrations > 8 && remote_peak > 1,
-        "LOGIN MEASURED hydrations={hydrations} remote_peak={remote_peak} \
+        "LOGIN MEASURED delegations={delegations} \
+         hydrations={hydrations} remote_peak={remote_peak} \
          reads={reads} local_peak={local_peak} uploads={uploads} \
          push_peak={push_peak}. Effects: {:?}",
         env.snapshot()
