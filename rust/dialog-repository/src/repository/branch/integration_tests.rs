@@ -4851,7 +4851,6 @@ async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) ->
 /// The measurement is concurrent ROUND TRIPS (`Hydrate` for a download's
 /// block fetches, forked effects for a push's uploads) -- never block
 /// reads, which hit the local store and overlap for free.
-#[cfg(not(feature = "web-integration-tests"))]
 #[dialog_common::test]
 async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result<()> {
     use crate::helpers::Counting;
