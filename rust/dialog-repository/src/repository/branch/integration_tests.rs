@@ -4833,114 +4833,114 @@ async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) ->
     Ok(())
 }
 
-/// #492 against the REAL tree: a profile captured from a running app.
+/// #492, the scenario the HAR traces: a SECOND DEVICE joining an account.
 ///
-/// Every preceding attempt seeded a synthetic branch, and each one
-/// measured something other than the bug -- a tree too small for overlap
-/// to mean anything, or a differential's fan-out standing in for the
-/// download's. This one imports an actual profile: 83 blocks and 63
-/// blobs exported from a live tonk as a CARv1, whose shape is what the
-/// app's own `/diagnose` view reports (one index node, 68 children,
-/// fanout 256).
+/// Both sides are seeded, and that is the whole point. A device's first
+/// load creates its own profile with the shipped defaults -- concept
+/// definitions, rules, views, a starter space -- before it has ever seen
+/// an account. Signing in then points that already-populated branch at
+/// the account's remote and pulls, so the pull is a MERGE of two
+/// independently seeded trees, not the adoption of an empty one.
 ///
-/// The blobs matter as much as the blocks. A delegation's envelope is a
-/// blob, and blobs travel their own channel in the snapshot export --
-/// downstream of the block walk, after the tree is already traversed. A
-/// fixture built from a CSV fact export cannot reach that path at all.
+/// Every earlier version of this test got that wrong in one of two ways:
+/// a replica with nothing local (the merge has no base, so its
+/// differential fetches nothing and a download finds the tree already
+/// there), or a replica sharing the source's storage (every read local,
+/// nothing measured). Both passed while the app crawled.
 ///
-/// The measurement is concurrent ROUND TRIPS (`Hydrate`), never block
-/// reads: reads that hit the local store overlap for free and say
-/// nothing about wall time, which is how earlier versions of this test
-/// reported a healthy peak while every fetch was serial.
+/// The measurement is concurrent ROUND TRIPS (`Hydrate` for a download's
+/// block fetches, forked effects for a push's uploads) -- never block
+/// reads, which hit the local store and overlap for free.
 #[cfg(not(feature = "web-integration-tests"))]
 #[dialog_common::test]
-async fn it_downloads_a_real_profile_without_serializing(ucan: UcanS3Address) -> Result<()> {
+async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result<()> {
     use crate::helpers::Counting;
     use crate::repository::snapshot::codec;
 
-    // The fixture is a real CAR, stored zstd-compressed: 820 KiB of tree
-    // shrinks to 54, which is the difference between a fixture that
-    // belongs in the tree and one that does not. `ruzstd` is pure Rust,
-    // so this decompresses in the browser as well as natively.
+    // The fixture is a real CAR captured from a running tonk profile,
+    // stored zstd-compressed: 820 KiB of tree becomes 54. `ruzstd` is
+    // pure Rust, so it decompresses in the browser as well as natively.
     let compressed = include_bytes!("../../../tests/fixtures/profile.car.zst");
     let mut snapshot = Vec::new();
     std::io::copy(
         &mut ruzstd::decoding::StreamingDecoder::new(&compressed[..])?,
         &mut snapshot,
     )?;
-    let items = codec::decode(&snapshot)?;
+    let (items, roots) = codec::decode_with_roots(&snapshot)?;
     let blobs = items
         .iter()
         .filter(|item| matches!(item, Ok(crate::Item::Blob { .. })))
         .count();
-    let blocks = items.len() - blobs;
-    println!("FIXTURE blocks={blocks} blobs={blobs}");
+    println!(
+        "FIXTURE blocks={} blobs={blobs} roots={roots:?}",
+        items.len() - blobs
+    );
+    assert!(
+        !roots.is_empty(),
+        "the CAR must name its tree root, or the imported blocks are \
+         reachable from nothing"
+    );
 
     let (operator, profile) = test_operator_with_profile().await;
     let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
 
-    let source_repo = profile
-        .repository(unique_name("real-profile-a"))
+    // Device 1: the account. Seed it the way a first load seeds a profile,
+    // then publish it.
+    let account_repo = profile
+        .repository(unique_name("join-account"))
         .create()
         .perform(&operator)
         .await?;
-    let chain = source_repo
+    let chain = account_repo
         .access()
-        .claim(&source_repo)
+        .claim(&account_repo)
         .delegate(profile.did())
         .perform(&operator)
         .await?;
     profile.access().save(chain).perform(&operator).await?;
-
-    assert!(
-        blocks > 8,
-        "the fixture must carry a real tree (blocks={blocks}, blobs={blobs})"
-    );
-
-    // Seed the source with the captured tree, then publish it.
-    let imported = source_repo
-        .import(stream::iter(codec::decode(&snapshot)?))
-        .perform(&operator)
-        .await?;
-    println!("IMPORTED {imported:?}");
-
-    let source_origin = source_repo
+    let account_origin = account_repo
         .remote("origin")
         .create(site.clone())
         .perform(&operator)
         .await?;
-    let source = source_repo
+    let account = account_repo
         .branch(crate::ACCESS_BRANCH)
         .open()
         .perform(&operator)
         .await?;
-    let source_remote = source_origin
-        .branch(crate::ACCESS_BRANCH)
-        .open()
+    account
+        .set_upstream(account_origin.branch(crate::ACCESS_BRANCH).open().perform(&operator).await?)
         .perform(&operator)
         .await?;
-    source
-        .set_upstream(source_remote)
+    // The account's content is the REAL captured tree, imported blocks and
+    // blobs alike -- not a synthetic stand-in. Importing puts the content
+    // in the archive; committing the facts is what gives the branch a head
+    // that references it, which is what a push has to ship and a join has
+    // to pull.
+    let imported = account_repo
+        .import(stream::iter(items))
         .perform(&operator)
         .await?;
+    println!("IMPORTED {imported:?}");
+    let delegations = crate::helpers::fill_account_branch(&account, 2, &operator).await?;
 
+    // The push is the control: same tree, same remote, other direction.
     let push_env = Counting::new(operator.clone());
-    let pushed = source.push().perform(&push_env).await?;
+    let pushed = account.push().perform(&push_env).await?;
     let uploads = push_env.count("fork::Fork");
     let push_peak = push_env.peak_forks_in_flight();
-    println!("PUSH pushed={pushed:?} uploads={uploads} peak={push_peak}");
+    println!("PUSH pushed={} uploads={uploads} peak={push_peak}", pushed.is_some());
 
-    // The recovering device: its OWN profile, with its own account
-    // already created, so the login is a MERGE rather than a bare
-    // adoption -- the app's shape, where a device makes a profile before
-    // it ever signs in.
+    // Device 2: its own profile, its own storage, SEEDED with defaults of
+    // its own before it ever sees the account -- the state a first load
+    // leaves behind.
     let (device_operator, device_profile) = test_operator_with_profile().await;
     device_profile
         .access()
         .save(
-            source_repo
+            account_repo
                 .access()
-                .claim(&source_repo)
+                .claim(&account_repo)
                 .delegate(device_profile.did())
                 .perform(&operator)
                 .await?,
@@ -4948,58 +4948,64 @@ async fn it_downloads_a_real_profile_without_serializing(ucan: UcanS3Address) ->
         .perform(&device_operator)
         .await?;
     let device_repo = device_profile
-        .repository(unique_name("real-profile-b"))
+        .repository(unique_name("join-device"))
         .open()
         .perform(&device_operator)
         .await?;
+    let device = device_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    crate::helpers::fill_account_branch(&device, 1, &device_operator).await?;
+
+    // Sign in: point the seeded branch at the account and pull.
     let device_remote = device_repo
         .remote("account-access")
         .create(site)
-        .subject(source_repo.did())
+        .subject(account_repo.did())
         .perform(&device_operator)
         .await?;
-    let access = device_repo
-        .branch(crate::ACCESS_BRANCH)
-        .open()
-        .perform(&device_operator)
-        .await?;
-    let upstream = device_remote
-        .branch(crate::ACCESS_BRANCH)
-        .open()
-        .perform(&device_operator)
-        .await?;
-    access
-        .set_upstream(upstream)
+    device
+        .set_upstream(
+            device_remote
+                .branch(crate::ACCESS_BRANCH)
+                .open()
+                .perform(&device_operator)
+                .await?,
+        )
         .perform(&device_operator)
         .await?;
 
-    // The login: adopt, then materialize. Measured together, as the app
-    // runs it.
     let env = Counting::new(device_operator.clone());
-    access.pull().download().perform(&env).await?;
+    device.pull().download().perform(&env).await?;
 
     let hydrations = env.count("hydrate::Hydrate");
     let remote_peak = env.peak_forks_in_flight();
     let reads = env.block_reads();
     let local_peak = env.peak_block_reads_in_flight();
     println!(
-        "LOGIN hydrations={hydrations} remote_peak={remote_peak} \
-         reads={reads} local_peak={local_peak}"
+        "JOIN delegations={delegations} hydrations={hydrations} \
+         remote_peak={remote_peak} reads={reads} local_peak={local_peak}"
     );
 
     assert!(
         hydrations > 8,
-        "the device must pull the profile across the wire for its overlap \
-         to mean anything (hydrations={hydrations}). Effects: {:?}",
+        "the joining device must pull the account across the wire for its \
+         overlap to mean anything (hydrations={hydrations}). Effects: {:?}",
         env.snapshot()
     );
     assert!(
+        push_peak > 1,
+        "the push is the control and must fan out: {uploads} uploads \
+         reached peak {push_peak}"
+    );
+    assert!(
         remote_peak > 1,
-        "downloading a REAL profile ({blocks} blocks, {blobs} blobs) made \
-         {hydrations} remote fetches but never had more than {remote_peak} \
-         open at once, while the push of the same tree reached peak \
-         {push_peak} over {uploads} uploads. One round trip at a time is \
-         the HAR's shape exactly."
+        "a device joining the account made {hydrations} remote fetches but \
+         never had more than {remote_peak} open at once, while the push of \
+         the same tree reached peak {push_peak} over {uploads} uploads. One \
+         round trip at a time is the HAR's shape exactly."
     );
 
     Ok(())
