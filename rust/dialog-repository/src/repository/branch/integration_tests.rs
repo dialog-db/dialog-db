@@ -4871,9 +4871,23 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
         .iter()
         .filter(|item| matches!(item, Ok(crate::Item::Blob { .. })))
         .count();
+
+    // The joining device's OWN content, captured from a real first load
+    // before it had ever seen an account: definitions, rules, views, a
+    // starter space. This is what makes the pull a merge -- a device with
+    // nothing local gives the differential no base to diff, so it fetches
+    // nothing and the download that follows finds the tree already there.
+    let device_compressed = include_bytes!("../../../tests/fixtures/device.car.zst");
+    let mut device_snapshot = Vec::new();
+    std::io::copy(
+        &mut ruzstd::decoding::StreamingDecoder::new(&device_compressed[..])?,
+        &mut device_snapshot,
+    )?;
+    let device_items = codec::decode(&device_snapshot)?;
     println!(
-        "FIXTURE blocks={} blobs={blobs} roots={roots:?}",
-        items.len() - blobs
+        "FIXTURE account: blocks={} blobs={blobs} roots={roots:?} | device: {} items",
+        items.len() - blobs,
+        device_items.len()
     );
     assert!(
         !roots.is_empty(),
@@ -4957,6 +4971,11 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
         .open()
         .perform(&device_operator)
         .await?;
+    let device_imported = device_repo
+        .import(stream::iter(device_items))
+        .perform(&device_operator)
+        .await?;
+    println!("DEVICE IMPORTED {device_imported:?}");
     crate::helpers::fill_account_branch(&device, 1, &device_operator).await?;
 
     // Sign in: point the seeded branch at the account and pull.
