@@ -4,7 +4,7 @@ use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Preload, PreloadRequest, Select, SortKey, Statement,
+    DialogArtifactsError, Entity, Estimate, Preload, PreloadRequest, Select, SortKey, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -539,6 +539,42 @@ where
         }
 
         Ok(merge_grouped(streams))
+    }
+}
+
+// A range-size estimate for the planner's merge-versus-fold choice:
+// one root read per line, summed. The `Changes` overlay is not
+// consulted (small, and irrelevant to the order-of-magnitude answer a
+// strategy heuristic needs). Summing lines is an upper bound — a fact
+// on two lines counts twice — which is the safe direction for a "how
+// broad is this range" question. `None` from every line (all empty)
+// yields `None`.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env> Provider<Estimate> for QueryEnv<'_, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(
+        &self,
+        input: ArtifactSelector<Constrained>,
+    ) -> Result<Option<u64>, DialogArtifactsError> {
+        let mut total: Option<u64> = None;
+        for source in &self.sources {
+            let select = crate::Select::from_source(source.as_ref(), input.clone());
+            let remote = source.as_ref().fallback(self.env).await;
+            let store = NetworkedIndex::new(self.env, select.catalog(), remote);
+            if let Some(estimate) = select.estimate(store).await? {
+                total = Some(total.unwrap_or(0).saturating_add(estimate));
+            }
+        }
+        Ok(total)
     }
 }
 

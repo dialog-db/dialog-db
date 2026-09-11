@@ -10,7 +10,7 @@
 //! evaluation signatures stay stable as effects are added.
 
 use dialog_artifacts::inspect::Load;
-use dialog_artifacts::{Preload, Select};
+use dialog_artifacts::{Estimate, Preload, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 
@@ -19,7 +19,12 @@ use crate::source::SelectRules;
 /// The full provider bundle premise evaluation requires. Blanket
 /// implemented: any environment providing the effects is a `Scope`.
 pub trait Scope<'a>:
-    Provider<Select<'a>> + Provider<SelectRules> + Provider<Load> + Provider<Preload> + ConditionalSync
+    Provider<Select<'a>>
+    + Provider<SelectRules>
+    + Provider<Load>
+    + Provider<Preload>
+    + Provider<Estimate>
+    + ConditionalSync
 {
 }
 
@@ -28,6 +33,7 @@ impl<'a, T> Scope<'a> for T where
         + Provider<SelectRules>
         + Provider<Load>
         + Provider<Preload>
+        + Provider<Estimate>
         + ConditionalSync
 {
 }

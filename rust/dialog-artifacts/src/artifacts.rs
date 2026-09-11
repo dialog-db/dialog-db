@@ -13,6 +13,9 @@ pub use instruction::*;
 pub mod selector;
 pub use selector::{ArtifactSelector, ValueBound};
 
+mod estimate;
+pub use estimate::Estimate;
+
 mod query;
 pub use query::{ArtifactStream, Likelihood, Preload, PreloadRequest, Select};
 

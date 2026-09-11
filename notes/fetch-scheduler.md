@@ -125,3 +125,29 @@ Two designs died on the way, both worth remembering:
 - **`QueryEnv` cannot hold the flight.** Interior mutability over `'env`-borrowing futures makes the holder invariant, and `QueryEnv`'s covariance in its lifetime is load-bearing for the `Provider<Select>` lifetime unification (the strict-impl dance its comments document). The flight therefore hangs off `Driven`, whose lifetime nothing shrinks. Demand reads stay outside it, protected by the local re-check and the transport flight; the measured residual is ~2 duplicate fetches per cold join, versus 449 at budget 512 before.
 
 Post-fix sweep (broadband, 4k entities): budget 512 gives 1.18s / 14.8 rounds / zero duplicates; the shipping default moves to 256/16 (1.65s / 20.6 rounds), at which the cold lazy join beats eagerly downloading the entire space (2.4s / 30 rounds) while transferring 3.5x less — the campaign's thesis, landed: from 8.4s / 105 rounds pre-M3, a 5x cut at defaults and 7x at full throttle, with M2 (range-granular preload) and M4 (merge over AEV ranges) still ahead.
+
+## M2 landed: range-granular job executor (2026-09-10)
+
+Preload jobs now execute as scoped level-parallel traversals (`warm_source` in `repository/fetch.rs`): the selector's exact key range (`selector_range` under the tree's manifest) scopes `traverse_available_within`, so each depth's whole frontier fetches concurrently and a cold range costs tree-depth round trips, not block-count round trips. Reads run through the line's shared node cache in front of the hydrating networked index (`CacheThrough`), so jobs share spines with one another and with the demand reads that follow, and every fetched block still hydrates the local archive under the hydration flight. Compared to the select-and-drain executor this drops per-row parsing and spilled-value fetches for rows nobody reads.
+
+One deliberate scope trim against the original sketch: no spine-versus-leaf rank split and no `range_scale` block budget inside the job. Point probes (today's only hints) make both moot, and M4's merge-path ranges are wanted in full once promoted; the budget returns with M6's speculative unbounded ranges if measurements ask for it.
+
+Measured: rounds unchanged at the defaults (20.6), as predicted — the executor is substrate; moving rounds further belongs to range-shaped hints, which arrive with M4's merge over AEV ranges.
+
+## M4 landed: concept joins evaluate as an N-way merge (2026-09-10)
+
+The merge-join stack from `notes/set-at-a-time-joins.md` (branches `feat/merge-join-operator` + `spike/merge-join-planner`), ported onto current main and the preload substrate. Four pieces:
+
+- **The operator** (`merge_join`, `multi_merge_join` in `dialog-query/src/merge_join.rs`): sorted-cursor intersection generic over an `Ord` key with a caller-supplied extractor (index encoding stays in the scan layer), plus `Match::combine`/`value_of`. Ported near-verbatim; the oracle suite (nested-loop equivalence over 350 random shapes, N-way included) passes unchanged on current `Match` internals.
+- **The `Estimate` capability**: one root read summing per-child `Scale`s over a selector's range (`PersistentTree::range_estimate` → `ArtifactTreeExt::estimate` → `Select::estimate` → `Provider<Estimate>` on `QueryEnv`, lines summed). The spike's wide bound-threading collapsed to one addition on `Scope` — the alias absorbed the whole motion, macros included.
+- **The planner**: a conjunction whose every step is a positive attribute scan sorted on one shared variable (`sort_order_of`, now cardinality-independent) is structurally merge-eligible; `scans_balanced_for` resolves each scan against the first row and takes the merge only when the widest range estimate is within 3x of the narrowest, so a pinned selective value keeps the nested-loop fold (pinned by a test against real tree estimates). Optional (left-join) fields are excluded structurally — an `OptionalScan` step disqualifies the merge, so set-widening semantics never route through the inner intersection; only the lockstep N-way was ported (the spike's cascade variant measured identical and was dropped).
+- **The preload wiring**: on the merge path every input range is committed work, so each scan's resolved selector is hinted `Likely` before the streams open; the driven plan warms the ranges level-parallel (M2's executor) while the merge consumes them.
+
+Measured (cold 5-attribute concept join, 4k entities; campaign start 8.4s / 105 rounds / 5.5MB):
+
+| profile | rounds | modeled time | blocks |
+|---|---|---|---|
+| broadband | **6.2** | **498ms** | 69 / 3.0MB |
+| mobile | 9.3 | 1.86s | 69 |
+
+**17x faster than the campaign start on broadband, 15x on mobile, 5x faster than downloading the entire space — and strictly fewer blocks than the fold (69 vs 110), because the merge consumes the three AEV ranges and never touches the EAV probe region.** The original rejection (merge reads more blocks) is fully dissolved for the balanced case: fewer rounds AND fewer blocks. `filtered` (status pinned) correctly folds at the 3x balance threshold and keeps the pipelined-fold profile (~20 rounds); tuning that guard against latency-weighted cost rather than block estimates is future work, as is bead 79 (locality) and 80 (rule-join speculation).
