@@ -4333,24 +4333,24 @@ async fn it_downloads_serially_while_pushing_concurrently(
         .perform(&replica_operator)
         .await?;
 
-    // Adopt the head FIRST, unmeasured. `pull().download()` runs the
-    // merge and the materialization under one env, and the merge's
-    // differential has a fan-out of its own -- measuring both together
-    // lets the differential's overlap mask a strictly serial download.
-    // The download is the subject here, so it is measured alone.
+    // The download, measured as the app performs it: chained onto the
+    // pull, which is what `hydrate_untrusted` calls at login.
+    //
+    // Splitting the two and measuring only the download was tried and is
+    // wrong: the merge hydrates the blocks it walks, so by the time a
+    // separate download ran, the replica was warm and the measurement
+    // covered local reads. The merge's own differential does fan out, so
+    // a healthy peak here is not by itself proof the download's walk
+    // parallelized -- what this pins is that the whole login path does
+    // not collapse to one request at a time, which is the symptom.
     let pull_env = Counting::new(replica_operator.clone());
     replica
         .pull()
-        .perform(&pull_env)
-        .await?
-        .expect("the replica adopts the upstream head");
-    pull_env.reset();
-
-    replica
         .download()
         .operational()
         .perform(&pull_env)
-        .await?;
+        .await?
+        .expect("the replica adopts the upstream head");
     let reads = pull_env.block_reads();
     let pull_peak = pull_env.peak_block_reads_in_flight();
 
@@ -4364,7 +4364,9 @@ async fn it_downloads_serially_while_pushing_concurrently(
         hydrations > 0,
         "the replica read {reads} blocks without one remote fetch, so it was \
          not cold and this measured local reads. The download must hydrate \
-         through the remote for its overlap to mean anything."
+         through the remote for its overlap to mean anything. Effects seen: \
+         {:?}",
+        pull_env.snapshot()
     );
     assert!(
         writes > 8 && reads > 8,
