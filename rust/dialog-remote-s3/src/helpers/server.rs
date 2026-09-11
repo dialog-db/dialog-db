@@ -38,6 +38,54 @@ pub struct LocalS3 {
     /// The endpoint URL where the server is listening
     pub endpoint: String,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    connections: Arc<Connections>,
+}
+
+/// How many connections the server is serving now, and the most it ever
+/// served at once.
+///
+/// A client can believe it issued n concurrent reads and still reach the
+/// network one at a time — a shared cache, a flight, or a transport that
+/// serializes will each hide behind a client-side counter. This counts
+/// what actually arrived, which is the same quantity a browser's network
+/// panel reports, so a test can assert on the wire rather than on intent.
+#[derive(Default)]
+pub struct Connections {
+    live: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+}
+
+impl Connections {
+    fn enter(&self) {
+        use std::sync::atomic::Ordering;
+        let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(live, Ordering::SeqCst);
+    }
+
+    fn leave(&self) {
+        use std::sync::atomic::Ordering;
+        self.live.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// The greatest number of connections ever served at once.
+    pub fn peak(&self) -> usize {
+        self.peak.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Forget the peak, keeping the live count.
+    pub fn reset_peak(&self) {
+        self.peak.store(
+            self.live.load(std::sync::atomic::Ordering::SeqCst),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
+impl LocalS3 {
+    /// The server's connection concurrency, shared with the server task.
+    pub fn connections(&self) -> Arc<Connections> {
+        self.connections.clone()
+    }
 }
 
 impl LocalS3 {
@@ -97,6 +145,8 @@ impl LocalS3 {
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
+        let connections = Arc::new(Connections::default());
+        let counted = connections.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -104,10 +154,13 @@ impl LocalS3 {
                     result = listener.accept() => {
                         if let Ok((stream, _)) = result {
                             let hyper_service = TowerToHyperService::new(service.clone());
+                            let counted = counted.clone();
+                            counted.enter();
                             tokio::spawn(async move {
                                 let _ = http1::Builder::new()
                                     .serve_connection(TokioIo::new(stream), hyper_service)
                                     .await;
+                                counted.leave();
                             });
                         }
                     }
@@ -118,6 +171,7 @@ impl LocalS3 {
         Ok(LocalS3 {
             endpoint,
             shutdown_tx,
+            connections,
         })
     }
 }
