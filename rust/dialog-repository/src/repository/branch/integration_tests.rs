@@ -4720,12 +4720,12 @@ async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) ->
         .perform(&account_operator)
         .await?;
 
-    // The account branch's content, from the shared fixture: delegations
-    // (facts + envelope blobs) and device rows, over several commits so
-    // the tree has interior structure. Scaled up until a cold clone has
-    // to make enough fetches for their overlap to mean something.
+    // The account branch's real content: a few delegations (passkey
+    // recovery, account recovery, device grants) plus a few device rows.
+    // Scale 1 deliberately -- this is what a login actually pulls, and a
+    // fixture inflated past it would measure a different system.
     let delegations =
-        crate::helpers::fill_account_branch(&account, 3, &account_operator).await?;
+        crate::helpers::fill_account_branch(&account, 1, &account_operator).await?;
 
 
     // The push is the control: the same tree, the same remote, the other
