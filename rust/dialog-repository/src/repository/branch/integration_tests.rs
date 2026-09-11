@@ -4268,32 +4268,73 @@ async fn it_downloads_serially_while_pushing_concurrently(
     let writes = push_env.count("archive::Put");
     let push_peak = push_env.peak_block_writes_in_flight();
 
-    // A cold replica that holds none of those blocks, reaching the source
-    // through the UCAN remote, so every read below is a true hydration.
-    let replica_repo = profile
+    // A cold replica on a SECOND operator, hence a second local archive.
+    //
+    // This is load-bearing and easy to get wrong: two repositories opened
+    // on one operator share its storage, so a "replica" built that way
+    // already holds every block the push just wrote. Its download then
+    // reads locally, issues no remote hydration at all, and reports a
+    // healthy peak while measuring nothing. The `fork::Fork` assertion
+    // below is what keeps that mistake from passing silently.
+    let (replica_operator, replica_profile) = test_operator_with_profile().await;
+    replica_profile
+        .access()
+        .save(
+            source_repo
+                .access()
+                .claim(&source_repo)
+                .delegate(replica_profile.did())
+                .perform(&operator)
+                .await?,
+        )
+        .perform(&replica_operator)
+        .await?;
+    let replica_repo = replica_profile
         .repository(unique_name("serial-get-b"))
         .open()
-        .perform(&operator)
+        .perform(&replica_operator)
         .await?;
     let origin = replica_repo
         .remote("origin")
         .create(site)
         .subject(source_repo.did())
-        .perform(&operator)
+        .perform(&replica_operator)
         .await?;
     let replica = replica_repo
         .branch("main")
         .open()
-        .perform(&operator)
+        .perform(&replica_operator)
         .await?;
-    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    // Facts of its own BEFORE it ever syncs, so the pull is a real merge
+    // rather than a bare adoption -- the app's shape, where a profile has
+    // local state before joining a space.
+    let local: Vec<_> = (0..80)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "post/title".parse().expect("valid attribute"),
+                of: format!("post:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("ours-{i}").repeat(24)),
+                cause: None,
+            })
+        })
+        .collect();
+    replica
+        .commit(stream::iter(local))
+        .perform(&replica_operator)
+        .await?;
+
+    let remote_branch = origin
+        .branch("main")
+        .open()
+        .perform(&replica_operator)
+        .await?;
     replica
         .set_upstream(remote_branch)
-        .perform(&operator)
+        .perform(&replica_operator)
         .await?;
 
     // The download, measured the same way.
-    let pull_env = Counting::new(operator.clone());
+    let pull_env = Counting::new(replica_operator.clone());
     replica
         .pull()
         .download()
@@ -4304,10 +4345,18 @@ async fn it_downloads_serially_while_pushing_concurrently(
     let reads = pull_env.block_reads();
     let pull_peak = pull_env.peak_block_reads_in_flight();
 
+    let hydrations = pull_env.count("fork::Fork");
     println!(
-        "PUSH writes={writes} peak={push_peak} | PULL reads={reads} peak={pull_peak}"
+        "PUSH writes={writes} peak={push_peak} | \
+         PULL reads={reads} peak={pull_peak} forks={hydrations}"
     );
 
+    assert!(
+        hydrations > 0,
+        "the replica read {reads} blocks without one remote fetch, so it was \
+         not cold and this measured local reads. The download must hydrate \
+         through the remote for its overlap to mean anything."
+    );
     assert!(
         writes > 8 && reads > 8,
         "both directions must move a real tree to compare them \
