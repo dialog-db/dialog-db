@@ -115,12 +115,13 @@ impl<P> Counting<P> {
         self.writes.lock().peak
     }
 
-    /// The most REMOTE effects ever in flight at once.
+    /// The most REMOTE fetches ever in flight at once: `Hydrate` (a block
+    /// read that missed locally and went to the remote) and forked
+    /// effects (a push's uploads).
     ///
     /// A local read is cheap and its overlap does not matter; what decides
-    /// wall time is how many round trips are open together. Counting forks
-    /// measures exactly those, so a phase reading mostly-local blocks
-    /// cannot inflate it.
+    /// wall time is how many round trips are open together, so this is the
+    /// quantity a HAR reports and the one an assertion should use.
     pub fn peak_forks_in_flight(&self) -> usize {
         self.forks.lock().peak
     }
@@ -167,12 +168,19 @@ where
         let name = type_name::<C>();
         *self.counts.lock().entry(name).or_insert(0) += 1;
 
-        // A remote effect arrives as `Fork<RemoteSite, Fx>`, whose type
-        // name carries BOTH `fork::Fork` and the inner effect, so the
-        // tests are matched in that order: a fork is a round trip (the
-        // quantity the HAR reports), and a bare `archive::Get`/`Put` is
-        // the local store, whose overlap is free and proves nothing.
-        let gauge = if name.contains("fork::Fork") {
+        // What costs a round trip, and what does not.
+        //
+        // A block read that misses locally becomes a `Hydrate` -- that
+        // effect IS the remote fetch (it resolves the route, fetches, and
+        // writes back), so it is the download's round trip. A push's
+        // uploads cross as `Fork<RemoteSite, Put>`. A bare `archive::Get`
+        // is the local store: those overlap for free and say nothing
+        // about wall time, which is why an earlier peak taken over all
+        // block reads read healthy while every fetch was serial.
+        //
+        // Both remote forms feed one gauge, so the two directions report
+        // the same quantity the HAR does: fetches open at once.
+        let gauge = if name.contains("hydrate::Hydrate") || name.contains("fork::Fork") {
             &self.forks
         } else if name.contains("archive::Get") {
             &self.reads
