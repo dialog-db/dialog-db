@@ -192,6 +192,10 @@ where
 
             while !frontier.is_empty() {
                 let level = std::mem::take(&mut frontier);
+                // TEMPORARY (#492): how wide is each level? `buffered(16)`
+                // can only batch what a level actually holds.
+                #[cfg(target_arch = "wasm32")]
+                dialog_common::trace_level(level.len());
                 let mut reads = futures_util::stream::iter(level.into_iter().map(
                     |hash| async move {
                         // `retrieve` verifies stored bytes against the
