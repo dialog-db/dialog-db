@@ -4358,7 +4358,7 @@ async fn it_downloads_serially_while_pushing_concurrently(
     // nothing about wall time.
     let remote_peak = pull_env.peak_forks_in_flight();
 
-    let hydrations = pull_env.count("fork::Fork");
+    let hydrations = pull_env.count("hydrate::Hydrate");
     println!(
         "PUSH writes={writes} peak={push_peak} | \
          PULL reads={reads} peak={pull_peak} forks={hydrations} \
@@ -4582,7 +4582,7 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
 
     let reads = env.block_reads();
     let peak = env.peak_block_reads_in_flight();
-    let hydrations = env.count("fork::Fork");
+    let hydrations = env.count("hydrate::Hydrate");
     let blob_reads = env.count("blob::Read");
     let remote_peak = env.peak_forks_in_flight();
     println!(
