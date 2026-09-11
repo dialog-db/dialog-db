@@ -59,6 +59,7 @@ pub struct Counting<P> {
     inner: P,
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
     reads: Arc<Mutex<InFlight>>,
+    writes: Arc<Mutex<InFlight>>,
 }
 
 /// How many reads are open now, and the most that were ever open at once.
@@ -91,6 +92,7 @@ impl<P> Counting<P> {
             inner,
             counts: Arc::new(Mutex::new(BTreeMap::new())),
             reads: Arc::new(Mutex::new(InFlight::default())),
+            writes: Arc::new(Mutex::new(InFlight::default())),
         }
     }
 
@@ -101,6 +103,14 @@ impl<P> Counting<P> {
     /// issued, so over a remote archive each cost its own round trip.
     pub fn peak_block_reads_in_flight(&self) -> usize {
         self.reads.lock().peak
+    }
+
+    /// The most block WRITES ever in flight at once: the same measure as
+    /// [`peak_block_reads_in_flight`](Self::peak_block_reads_in_flight),
+    /// for the upload direction. The push is the control the download is
+    /// compared against, so its overlap has to be observable too.
+    pub fn peak_block_writes_in_flight(&self) -> usize {
+        self.writes.lock().peak
     }
 
     /// Total executions of effects whose type name contains `needle`
@@ -123,6 +133,7 @@ impl<P> Counting<P> {
     pub fn reset(&self) {
         self.counts.lock().clear();
         *self.reads.lock() = InFlight::default();
+        *self.writes.lock() = InFlight::default();
     }
 
     /// The full tally, keyed by effect type name.
@@ -143,16 +154,22 @@ where
         let name = type_name::<C>();
         *self.counts.lock().entry(name).or_insert(0) += 1;
 
-        // Only block reads are timed: they are the effects that cost a
-        // network round trip apiece over a remote archive.
-        if !name.contains("archive::Get") {
+        // Block reads and writes are timed: they are the effects that
+        // cost a network round trip apiece over a remote archive. The
+        // write side is what makes the push usable as a control for the
+        // read side.
+        let gauge = if name.contains("archive::Get") {
+            &self.reads
+        } else if name.contains("archive::Put") {
+            &self.writes
+        } else {
             return self.inner.execute(input).await;
-        }
+        };
 
         {
-            let mut reads = self.reads.lock();
-            reads.current += 1;
-            reads.peak = reads.peak.max(reads.current);
+            let mut open = gauge.lock();
+            open.current += 1;
+            open.peak = open.peak.max(open.current);
         }
         // Yield before answering, so a read issued by work polled
         // alongside this one is in flight together with it. Without this
@@ -160,7 +177,7 @@ where
         // and genuinely concurrent work would measure as serial.
         yield_once().await;
         let output = self.inner.execute(input).await;
-        self.reads.lock().current -= 1;
+        gauge.lock().current -= 1;
 
         output
     }
