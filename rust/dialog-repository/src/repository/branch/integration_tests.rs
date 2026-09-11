@@ -4776,9 +4776,24 @@ async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) ->
         .perform(&device_operator)
         .await?;
 
-    // `adopt_account_upstream`, verbatim: pull and materialize.
     let env = Counting::new(device_operator.clone());
-    access.pull().download().perform(&env).await?;
+
+    // Adopt the head BY REFERENCE first, unmeasured.
+    //
+    // This is the state a login actually downloads from, and the reason
+    // an earlier version of this test measured nothing. `pull()` on a
+    // branch with no local base runs its differentials with
+    // `Prefetch::Eager`, which fetches the blocks it walks -- so a
+    // download chained straight onto it finds the tree already local and
+    // issues almost no remote reads. The app hits the serial path
+    // because the head it adopts is by reference and `download()` is
+    // what walks it; that walk is `traverse`, which the differential
+    // never touches.
+    access.pull().perform(&env).await?;
+    env.reset();
+
+    // The walk under test: materialize a by-reference head.
+    access.download().perform(&env).await?;
 
     let hydrations = env.count("hydrate::Hydrate");
     let remote_peak = env.peak_forks_in_flight();
