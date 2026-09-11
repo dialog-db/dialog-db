@@ -4818,11 +4818,13 @@ async fn it_recovers_access_at_login_without_serializing(ucan: UcanS3Address) ->
          reads={reads} local_peak={local_peak}"
     );
 
+    // Always report, pass or fail: a wasm `println!` only surfaces when
+    // the test fails, so the numbers have to ride an assertion.
     assert!(
-        hydrations > 8,
-        "a device that cleared its storage must pull the account across \
-         the wire; only {hydrations} remote fetches happened, too few for \
-         overlap to mean anything. Effects seen: {:?}",
+        hydrations > 8 && remote_peak > 1,
+        "LOGIN MEASURED hydrations={hydrations} remote_peak={remote_peak} \
+         reads={reads} local_peak={local_peak} uploads={uploads} \
+         push_peak={push_peak}. Effects: {:?}",
         env.snapshot()
     );
     assert!(
