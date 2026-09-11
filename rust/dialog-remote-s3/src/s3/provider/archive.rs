@@ -29,6 +29,25 @@ fn request_tag() -> usize {
 /// / end 0 / end 1` means they were genuinely in flight together. Unlike
 /// a counter this cannot be inflated by joiners on a shared flight, and
 /// it reads the same on native and in a service worker.
+/// TEMPORARY (#492): the Rust call site that asked for the current read.
+///
+/// The socket probe sees every fetch but not who asked, and four fixes
+/// aimed at plausible loops have now failed to move the serial run. A
+/// caller sets this before awaiting a read; the probe prints it.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    pub static READ_SITE: std::cell::RefCell<&'static str> = const { std::cell::RefCell::new("?") };
+}
+
+/// Label the reads issued while the returned guard is alive.
+#[cfg(target_arch = "wasm32")]
+pub fn label_reads(site: &'static str) {
+    READ_SITE.with(|s| *s.borrow_mut() = site);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn label_reads(_site: &'static str) {}
+
 /// TEMPORARY (#492): mark a phase boundary in the request trace.
 ///
 /// The socket probe sees every fetch but not who asked for it, and the
@@ -126,6 +145,13 @@ impl Provider<S3Invocation<Get>> for S3 {
                     .chars()
                     .take(12)
                     .collect::<String>();
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let site = READ_SITE.with(|s| *s.borrow());
+                    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+                        "[site #{tag}] {site}"
+                    )));
+                }
                 trace_request("start", tag, &block);
                 let response = match permit.send().await {
                     Ok(response) => response,

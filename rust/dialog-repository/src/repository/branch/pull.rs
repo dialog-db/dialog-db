@@ -794,6 +794,7 @@ impl<'a> Pull<'a> {
         // fetches each frontier level in one network round trip instead
         // of one per block (the serial chain a fresh clone otherwise
         // degenerates into).
+        dialog_remote_s3::label_reads("differential");
         let history_changes = base_tree.differentiate_within_with(
             &upstream_tree,
             &history_scope,
@@ -823,6 +824,7 @@ impl<'a> Pull<'a> {
         let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
         let mut delta = Delta::zero();
+        dialog_remote_s3::label_reads("integrate");
         merged = Box::pin(merged.edit().integrate(screened, &tree_store))
             .await?
             .persist(&mut delta)?;
