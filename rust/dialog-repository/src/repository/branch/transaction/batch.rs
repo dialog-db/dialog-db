@@ -280,6 +280,8 @@ impl TransactionPublish<&Branch> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -302,6 +304,8 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -340,6 +344,8 @@ impl TransactionCommit<&Branch> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -434,6 +440,8 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -502,6 +510,8 @@ where
         + Provider<Identify>
         + Provider<Attest>
         + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,

@@ -111,6 +111,8 @@ impl Download<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,
@@ -203,6 +205,8 @@ impl<'a> PullDownload<'a> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
