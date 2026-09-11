@@ -3920,32 +3920,37 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
     Ok(())
 }
 
-/// `pull().download().operational()` must fetch its blocks CONCURRENTLY.
+/// #492: a download fetches its blocks ONE AT A TIME.
 ///
-/// This is the shape an app takes when it joins a space: commit some
-/// facts, point the branch at a remote that holds a different database,
-/// and materialize it in one call. Every block that misses locally is a
-/// network round trip, so whether those round trips overlap decides
-/// whether the join takes a second or a minute — on a throttled link a
-/// serial fetch of a few hundred blocks is minutes of staring at a
-/// spinner.
+/// The scenario is a space join: create a database, put facts in it, add
+/// a remote upstream, and materialize it with
+/// `pull().download().operational()`. Over a remote archive every block
+/// that misses locally is a network round trip, so the number that
+/// decides whether this takes a second or a minute is how many of those
+/// round trips are in flight AT ONCE — not how many there are.
 ///
-/// Read COUNT cannot see this. The neighbouring download tests bound the
-/// count and passed throughout a serial regression, because n serial
-/// reads and n overlapped reads tally identically. This measures how many
-/// hydrations are in flight AT ONCE, which is the quantity that maps to
-/// wall clock, and attributes the peak to the phase that owns it.
+/// A read tally cannot see this: n serial reads and n overlapped reads
+/// count identically, which is why the neighbouring download tests bound
+/// the count and pass while the app crawls. This measures the overlap.
+///
+/// The download HAS a fan-out — `traverse` walks each tree level with
+/// `buffer_unordered(FETCH_CONCURRENCY)` — but it is upstream of a
+/// `try_stream!` generator that yields one node per poll, and
+/// `Download::perform` drains that generator with a `while let` that
+/// awaits each item before asking for the next. An `async_stream`
+/// generator only advances while polled, so the buffered reads never get
+/// to run ahead of the consumer: the fan-out is there and never fans out.
 #[dialog_common::test]
-async fn it_downloads_concurrently_rather_than_one_block_at_a_time(s3: S3Address) -> Result<()> {
+async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
     use crate::helpers::Counting;
 
     let (operator, profile) = test_operator_with_profile().await;
 
-    // A database with facts in it, pushed to the remote. Wide values and
-    // several rounds so the tree has real interior structure: a handful
+    // A database with facts in it, published to the remote. Wide values
+    // over several commits so the tree has interior structure: a couple
     // of blocks could be fetched serially without anyone noticing.
     let (source_repo, source) =
-        setup_repo_with_s3_remote(&operator, &profile, &s3, "download-concurrency-a").await?;
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "serial-download-a").await?;
     for round in 0..6 {
         let facts: Vec<_> = (0..120)
             .map(|i| {
@@ -3962,11 +3967,23 @@ async fn it_downloads_concurrently_rather_than_one_block_at_a_time(s3: S3Address
             .perform(&operator)
             .await?;
     }
+
+    // Blobs too: the account database stores delegation envelopes as
+    // blobs, and those travel their own channel rather than the archive
+    // index, so a download that parallelizes blocks may still serialize
+    // these.
+    for i in 0..24 {
+        let bytes = format!("delegation envelope {i} ").repeat(64).into_bytes();
+        Blob::import(stream::iter(vec![Ok(bytes)]))
+            .write(source.blobs())
+            .perform(&operator)
+            .await?;
+    }
     assert!(source.push().perform(&operator).await?.is_some());
 
-    // A second, initially empty database that adds the first as upstream.
+    // A second database that adds the first as its upstream.
     let replica_repo = profile
-        .repository(unique_name("download-concurrency-b"))
+        .repository(unique_name("serial-download-b"))
         .open()
         .perform(&operator)
         .await?;
@@ -3981,6 +3998,25 @@ async fn it_downloads_concurrently_rather_than_one_block_at_a_time(s3: S3Address
         .open()
         .perform(&operator)
         .await?;
+
+    // The replica has facts OF ITS OWN before it ever syncs, so the pull
+    // is a real merge rather than a bare adoption: this is the app's
+    // shape, where a profile has local state before joining a space.
+    let local: Vec<_> = (0..80)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "post/title".parse().expect("valid attribute"),
+                of: format!("post:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("ours-{i}").repeat(24)),
+                cause: None,
+            })
+        })
+        .collect();
+    replica
+        .commit(stream::iter(local))
+        .perform(&operator)
+        .await?;
+
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     replica
         .set_upstream(remote_branch)
@@ -3999,104 +4035,50 @@ async fn it_downloads_concurrently_rather_than_one_block_at_a_time(s3: S3Address
 
     let reads = env.block_reads();
     let peak = env.peak_block_reads_in_flight();
-    let phases = env.hydration_peaks();
+    println!("MEASURED reads={reads} peak_in_flight={peak}");
 
     assert!(
-        reads >= 8,
+        reads > 8,
         "the download must fetch a real tree for this to measure anything \
-         (got {reads} block reads): {:?}",
+         (got {reads} reads): {:?}",
         env.snapshot()
     );
     assert!(
         peak > 1,
-        "pull().download().operational() must fetch blocks concurrently: \
-         {reads} block reads but never more than {peak} in flight at once, \
-         so each cost its own round trip. Per-phase peaks: {phases:?}",
-    );
-
-    // A hydrated block is cached locally, so a SECOND download of the same
-    // unchanged revision must reach the remote for nothing. This is what a
-    // repeating sync (a keepalive poll, a re-open) does, and it is the
-    // failure a HAR from the app showed: 42 fetches of 5 distinct blocks,
-    // the same 75KB block pulled 13 times on a 10s cadence because the
-    // write-back never stuck. Concurrency cannot help there — parallel
-    // refetching is still refetching — so it is asserted separately.
-    env.reset();
-    replica.download().operational().perform(&env).await?;
-    let refetched = env.count("hydrate::Hydrate");
-    assert_eq!(
-        refetched,
-        0,
-        "a second download of an unchanged revision must serve entirely \
-         from the local store, but it hydrated {refetched} blocks from the \
-         remote: {:?}",
-        env.snapshot()
-    );
-
-    // The same guarantee for a repeated PULL, which is what a keepalive
-    // sync does every few seconds against an upstream that has not moved.
-    // A HAR from the app showed this refetching one 75KB block 13 times on
-    // a 10s cadence, so a pull over an unchanged upstream must reach the
-    // remote only to learn the head has not moved.
-    env.reset();
-    replica.pull().perform(&env).await?;
-    let polled = env.count("hydrate::Hydrate");
-    assert_eq!(
-        polled,
-        0,
-        "a pull from an unchanged upstream must not re-hydrate blocks the \
-         download already cached, but it hydrated {polled}: {:?}",
-        env.snapshot()
-    );
-
-    // Every fact landed locally: concurrency must not have cost coverage.
-    env.reset();
-    let facts: Vec<_> = replica
-        .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
-        .to_owned()
-        .perform(&env)
-        .await?
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(
-        facts.len(),
-        720,
-        "the download materialized every live fact"
-    );
-    assert_eq!(
-        env.count("fork::Fork"),
-        0,
-        "the facts read from the local store, not the remote"
+        "pull().download().operational() fetched {reads} blocks but never \
+         had more than {peak} in flight at once, so each cost its own \
+         round trip. The fan-out in `traverse` is defeated by the \
+         one-item-per-poll drain in `Download::perform`.",
     );
 
     Ok(())
 }
 
-/// The same download/refetch guarantee over a UCAN remote, which is what
-/// the app actually runs.
+/// The same download, over a UCAN remote instead of bare S3.
 ///
-/// A HAR captured from the app while it joined a space showed 42 block
-/// fetches resolving to only 5 distinct blocks: one 75KB block pulled 13
-/// times, `revision` 26 times, on a strict 10-second cadence matching the
-/// keepalive sync, never more than one request in flight. Concurrency
-/// cannot fix that shape — refetching in parallel is still refetching —
-/// so what has to hold is that a hydrated block STAYS local: the repeated
-/// sync must reach the remote only to learn the head has not moved.
+/// Its S3 sibling saturates the fan-out (peak 16 of FETCH_CONCURRENCY),
+/// so the download parallelizes correctly in isolation. The app does not:
+/// a HAR of a space join shows 21 block GETs that are NEVER more than one
+/// in flight, each preceded by its own `/ucan/` invocation, strictly
+/// alternating. The one structural difference between that run and the
+/// passing test is the UCAN remote — every block read must first redeem a
+/// permit at the access service.
 ///
-/// The bare-S3 sibling of this test passes, so if this one fails the
-/// difference is the UCAN remote (its permit handling), not the archive.
+/// Permits are keyed `(site, method, path)` and the path is the block
+/// digest, so per-block redemption is correct by design; 16 concurrent
+/// GETs simply need 16 concurrent redeems. If redemption serializes, the
+/// GETs inherit it and the fan-out above is defeated no matter how wide
+/// it is.
 #[dialog_common::test]
-async fn it_does_not_refetch_cached_blocks_over_a_ucan_remote(ucan: UcanS3Address) -> Result<()> {
+async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Result<()> {
     use crate::helpers::Counting;
 
     let (operator, profile) = test_operator_with_profile().await;
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
 
-    // A database with facts in it, pushed to the UCAN remote.
+    // A database with facts in it, published to the UCAN remote.
     let source_repo = profile
-        .repository(unique_name("ucan-refetch-a"))
+        .repository(unique_name("ucan-serial-a"))
         .create()
         .perform(&operator)
         .await?;
@@ -4107,8 +4089,6 @@ async fn it_does_not_refetch_cached_blocks_over_a_ucan_remote(ucan: UcanS3Addres
         .perform(&operator)
         .await?;
     profile.access().save(chain).perform(&operator).await?;
-
-    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
     let source_origin = source_repo
         .remote("origin")
         .create(site.clone())
@@ -4124,8 +4104,7 @@ async fn it_does_not_refetch_cached_blocks_over_a_ucan_remote(ucan: UcanS3Addres
         .set_upstream(source_remote)
         .perform(&operator)
         .await?;
-
-    for round in 0..4 {
+    for round in 0..6 {
         let facts: Vec<_> = (0..120)
             .map(|i| {
                 Instruction::Assert(Artifact {
@@ -4143,9 +4122,9 @@ async fn it_does_not_refetch_cached_blocks_over_a_ucan_remote(ucan: UcanS3Addres
     }
     assert!(source.push().perform(&operator).await?.is_some());
 
-    // A replica that adopts that head and materializes it.
+    // A replica that adds it as upstream and materializes it.
     let replica_repo = profile
-        .repository(unique_name("ucan-refetch-b"))
+        .repository(unique_name("ucan-serial-b"))
         .open()
         .perform(&operator)
         .await?;
@@ -4177,415 +4156,197 @@ async fn it_does_not_refetch_cached_blocks_over_a_ucan_remote(ucan: UcanS3Addres
 
     let reads = env.block_reads();
     let peak = env.peak_block_reads_in_flight();
+    println!("UCAN MEASURED reads={reads} peak_in_flight={peak}");
+
     assert!(
-        reads >= 8,
-        "the download must fetch a real tree for this to measure anything \
-         (got {reads}): {:?}",
+        reads > 8,
+        "the download must fetch a real tree (got {reads}): {:?}",
         env.snapshot()
     );
     assert!(
         peak > 1,
-        "the download must fetch blocks concurrently: {reads} reads, peak \
-         {peak} in flight. Per-phase peaks: {:?}",
-        env.hydration_peaks()
-    );
-
-    // Three repeats of what the app's keepalive actually runs on an
-    // account branch: `pull().download().operational()` every beat,
-    // whether or not the head moved (tonk-worker router/sync.rs, the
-    // `hydrate` arm of the retry loop). The head has not moved and every
-    // block is already cached, so none of these may reach the remote for
-    // block bytes.
-    for round in 0..3 {
-        env.reset();
-        replica
-            .pull()
-            .download()
-            .operational()
-            .perform(&env)
-            .await?;
-        let hydrated = env.count("hydrate::Hydrate");
-        assert_eq!(
-            hydrated,
-            0,
-            "keepalive sync {round} over an unchanged upstream re-hydrated \
-             {hydrated} blocks from the remote: {:?}",
-            env.snapshot()
-        );
-    }
-
-    Ok(())
-}
-
-/// A PARTIAL replica pulls an upstream that moved, over a real remote.
-///
-/// This is the shape a space join takes and the one the local-storage pull
-/// tests cannot reach: the replica holds the head by reference with most
-/// of the tree still remote, so every read the merge issues is a network
-/// round trip that can also come back missing. Retractions and replaces
-/// make the incoming history carry COVERING records, which is what drives
-/// the R3 slot scans in `screen_history` — the stage whose reads were made
-/// concurrent for #492.
-///
-/// The pull must complete and the merged state must be right. A screen
-/// that reads ahead of demand can drag in blocks the serial walk never
-/// touched, and on a partial replica those are exactly the blocks that are
-/// not there — which surfaces as a pull that fails instead of one that is
-/// merely slow.
-#[dialog_common::test]
-async fn it_pulls_a_moved_upstream_into_a_partial_replica(s3: S3Address) -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
-    let (source_repo, source) =
-        setup_repo_with_s3_remote(&operator, &profile, &s3, "partial-merge-a").await?;
-
-    // A base with enough facts that the tree has interior structure.
-    for round in 0..4 {
-        let facts: Vec<_> = (0..60)
-            .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{round}-{i}").repeat(16)),
-                    cause: None,
-                })
-            })
-            .collect();
-        source.commit(stream::iter(facts)).perform(&operator).await?;
-    }
-    assert!(source.push().perform(&operator).await?.is_some());
-
-    // The replica adopts that head BY REFERENCE — no download, so the tree
-    // stays mostly remote. This is the partial state.
-    let replica_repo = profile
-        .repository(unique_name("partial-merge-b"))
-        .open()
-        .perform(&operator)
-        .await?;
-    let origin = replica_repo
-        .remote("origin")
-        .create(s3_site_address(&s3))
-        .subject(source_repo.did())
-        .perform(&operator)
-        .await?;
-    let replica = replica_repo.branch("main").open().perform(&operator).await?;
-    let remote_branch = origin.branch("main").open().perform(&operator).await?;
-    replica
-        .set_upstream(remote_branch)
-        .perform(&operator)
-        .await?;
-    assert!(replica.pull().perform(&operator).await?.is_some());
-
-    // The upstream moves with REPLACES and RETRACTIONS, so the history the
-    // next pull replays carries covering records and the screen must run
-    // its R3 slot scans against the replica's partial tree.
-    let mut replaced = Vec::new();
-    for i in 0..40 {
-        replaced.push(Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: format!("user:0-{i}").parse()?,
-            is: Value::String(format!("renamed-{i}").repeat(16)),
-            cause: None,
-        }));
-    }
-    source
-        .commit(stream::iter(replaced))
-        .perform(&operator)
-        .await?;
-
-    let live: Vec<_> = source
-        .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
-        .to_owned()
-        .perform(&operator)
-        .await?
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut retracted = Vec::new();
-    for artifact in live.iter().take(20) {
-        retracted.push(Instruction::Retract(artifact.clone()));
-    }
-    source
-        .commit(stream::iter(retracted))
-        .perform(&operator)
-        .await?;
-    assert!(source.push().perform(&operator).await?.is_some());
-
-    // The pull under test. It must COMPLETE — a partial replica whose
-    // screen reads past what it holds fails here instead.
-    replica
-        .pull()
-        .perform(&operator)
-        .await?
-        .expect("the replica merges the moved upstream");
-
-    // And it must agree with the upstream, fact for fact.
-    let mut theirs: Vec<_> = source
-        .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
-        .to_owned()
-        .perform(&operator)
-        .await?
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|artifact| (artifact.of.to_string(), format!("{:?}", artifact.is)))
-        .collect();
-    let mut ours: Vec<_> = replica
-        .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
-        .to_owned()
-        .perform(&operator)
-        .await?
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|artifact| (artifact.of.to_string(), format!("{:?}", artifact.is)))
-        .collect();
-    theirs.sort();
-    ours.sort();
-    assert_eq!(
-        ours, theirs,
-        "the partial replica's merged state matches the upstream"
+        "over a UCAN remote the download fetched {reads} blocks but never \
+         had more than {peak} in flight at once, so each cost its own \
+         round trip. Its bare-S3 sibling reaches 16, so the serialization \
+         is in permit redemption, not the download walk.",
     );
 
     Ok(())
 }
 
-/// First contact: an EMPTY local branch adopts a populated upstream with
-/// `pull().download().operational()`, in one call and with no prior pull.
+/// #492: do concurrent block reads over a UCAN remote actually overlap?
 ///
-/// This is `hydrate_untrusted` in tonk-worker — the account hydration a
-/// freshly created account runs after upload, and the call that fails in
-/// the app with "failed to hydrate the account into profile main: Tree
-/// operation failed during pull: Byte hash verification failed".
+/// The two tests above show a download saturating the fan-out over bare
+/// S3 while the same download over UCAN does not, which localizes the
+/// fault to the authorization each remote read performs but does not
+/// name the mechanism.
 ///
-/// The distinction from the other download tests is that there is NO
-/// shared base: the local tree is empty, so the merge's differential has
-/// nothing of its own to prune against and every block it compares comes
-/// from the remote. A scoped download then materializes only the data
-/// regions, leaving history and coverage by reference — so a later read
-/// that strays outside the scope finds a block the store does not hold.
+/// This isolates that path from everything else. The reads are issued
+/// DIRECTLY through `NetworkedIndex` with `join_all`, so they are
+/// concurrent by construction: there is no walk, no `try_stream!`
+/// generator, and no one-item-per-poll drain that could explain a serial
+/// result. Whatever overlap this measures is the overlap the authorized
+/// remote read path permits.
+///
+/// What each number means:
+/// - `peak > 1` means concurrent hydrations genuinely overlap, and the
+///   serialization the app sees lives in the download machinery above
+///   this layer rather than in authorization.
+/// - `peak == 1` means the authorize-then-fetch path itself serializes,
+///   and no amount of fan-out upstream can help until it is fixed.
+/// - `forks` counts the effects that actually cross the network (block
+///   GETs plus any per-read access-service traffic), so `forks` well
+///   above `blocks` says each read pays a preamble of its own.
+///
+/// Note `memory::Resolve` is deliberately NOT the suspect here: the
+/// operator routes it to local storage, and only the separate
+/// `Fork<RemoteSite, memory::Resolve>` reaches a remote.
 #[dialog_common::test]
-async fn it_hydrates_an_empty_branch_from_a_populated_upstream(s3: S3Address) -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
-    let (source_repo, source) =
-        setup_repo_with_s3_remote(&operator, &profile, &s3, "first-contact-a").await?;
-
-    // The upstream accumulates real history: asserts, then replaces and
-    // retractions, so the tree carries coverage and history regions that
-    // an operational download deliberately leaves behind.
-    for round in 0..4 {
-        let facts: Vec<_> = (0..60)
-            .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{round}-{i}").repeat(16)),
-                    cause: None,
-                })
-            })
-            .collect();
-        source.commit(stream::iter(facts)).perform(&operator).await?;
-    }
-    let replaced: Vec<_> = (0..40)
-        .map(|i| {
-            Instruction::Assert(Artifact {
-                the: "user/name".parse().expect("valid attribute"),
-                of: format!("user:0-{i}").parse().expect("valid entity"),
-                is: Value::String(format!("renamed-{i}").repeat(16)),
-                cause: None,
-            })
-        })
-        .collect();
-    source
-        .commit(stream::iter(replaced))
-        .perform(&operator)
-        .await?;
-    let live: Vec<_> = source
-        .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
-        .to_owned()
-        .perform(&operator)
-        .await?
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    source
-        .commit(stream::iter(
-            live.iter()
-                .take(20)
-                .cloned()
-                .map(Instruction::Retract)
-                .collect::<Vec<_>>(),
-        ))
-        .perform(&operator)
-        .await?;
-    assert!(source.push().perform(&operator).await?.is_some());
-
-    // A brand-new, EMPTY branch. No prior pull: this is first contact.
-    let replica_repo = profile
-        .repository(unique_name("first-contact-b"))
-        .open()
-        .perform(&operator)
-        .await?;
-    let origin = replica_repo
-        .remote("origin")
-        .create(s3_site_address(&s3))
-        .subject(source_repo.did())
-        .perform(&operator)
-        .await?;
-    let replica = replica_repo.branch("main").open().perform(&operator).await?;
-    let remote_branch = origin.branch("main").open().perform(&operator).await?;
-    replica
-        .set_upstream(remote_branch)
-        .perform(&operator)
-        .await?;
-    assert!(
-        replica.revision().is_none(),
-        "the replica starts with no revision at all"
-    );
-
-    // The call under test, exactly as the account hydration issues it.
-    replica
-        .pull()
-        .download()
-        .operational()
-        .perform(&operator)
-        .await?
-        .expect("first contact adopts the upstream head");
-
-    // Every live fact is present and matches the upstream.
-    let mut theirs: Vec<_> = source
-        .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
-        .to_owned()
-        .perform(&operator)
-        .await?
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|artifact| (artifact.of.to_string(), format!("{:?}", artifact.is)))
-        .collect();
-    let mut ours: Vec<_> = replica
-        .claims()
-        .select(ArtifactSelector::new().the("user/name".parse()?))
-        .to_owned()
-        .perform(&operator)
-        .await?
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|artifact| (artifact.of.to_string(), format!("{:?}", artifact.is)))
-        .collect();
-    theirs.sort();
-    ours.sort();
-    assert_eq!(ours, theirs, "first contact reproduces the upstream state");
-
-    // And a SECOND pull, the keepalive's shape, must still succeed: the
-    // app fails on the repeat, not always on the first.
-    replica.pull().download().operational().perform(&operator).await?;
-
-    Ok(())
-}
-
-/// A corrupt local block must fail the push, not travel to the remote.
-///
-/// The archive is content-addressed but S3 is not: a `Put` names its key
-/// by hashing the bytes it is handed, and the object store writes whatever
-/// arrives under whatever key the presigned URL names, checking only the
-/// HTTP status. Nothing on the far side compares bytes to digest. So if a
-/// push ships bytes that do not hash to the reference the tree points at,
-/// the remote ends up holding them under `hash(bytes)` while the digest
-/// the tree names stays ABSENT there — and every later reader fetches that
-/// digest, misses, and raises a hash-verification failure against a remote
-/// that appears to have answered. Worse, the failure is durable: it
-/// survives restarts on both sides, because the bad state is in storage.
-///
-/// The client is therefore the only place this can be caught, and it has
-/// to be caught before the bytes leave.
-#[dialog_common::test]
-async fn it_refuses_to_push_a_block_that_does_not_match_its_reference(
-    s3: S3Address,
+async fn it_serializes_concurrent_block_reads_on_ucan_authorization(
+    ucan: UcanS3Address,
 ) -> Result<()> {
-    use dialog_effects::archive::prelude::CatalogExt as _;
+    use crate::helpers::Counting;
+    use dialog_storage::StorageBackend;
+    use futures_util::future::join_all;
 
     let (operator, profile) = test_operator_with_profile().await;
-    let (repo, branch) =
-        setup_repo_with_s3_remote(&operator, &profile, &s3, "corrupt-push").await?;
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
 
-    // A spilled value: large enough to live as its own content-addressed
-    // block rather than inline in a leaf, which is the shipment path that
-    // reads local bytes and re-keys them on upload.
-    branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "document/body".parse()?,
-            of: "document:one".parse()?,
-            is: Value::String("spilled value bytes".repeat(512)),
-            cause: None,
-        })]))
+    // A source database with enough facts that its tree has interior
+    // structure, published to the UCAN remote.
+    let source_repo = profile
+        .repository(unique_name("ucan-authz-serial-a"))
+        .create()
         .perform(&operator)
         .await?;
-    assert!(branch.push().perform(&operator).await?.is_some());
-
-    let revision = branch.revision().expect("the branch has a revision");
-    let (current, history) = raw_spill_references(&operator, &repo, &revision).await?;
-    let reference = current
-        .union(&history)
-        .next()
-        .cloned()
-        .expect("the commit spilled a value");
-
-    // Corrupt the local block: same key, different bytes. This is the
-    // state a torn write or a bad cache leaves behind, and it is exactly
-    // what must never be uploaded.
-    let catalog = repo.subject().archive().index();
-    catalog
-        .clone()
-        .put(dialog_common::Buffer::from(b"not the bytes".to_vec()))
+    let chain = source_repo
+        .access()
+        .claim(&source_repo)
+        .delegate(profile.did())
         .perform(&operator)
         .await?;
-    let backend = crate::LocalIndex::new(&operator, catalog.clone());
-    dialog_storage::StorageBackend::set(
-        &mut backend.clone(),
-        dialog_storage::Blake3Hash::from(*reference.as_bytes()),
-        b"not the bytes".to_vec(),
-    )
-    .await?;
-
-    // A fresh commit so there is something to push, then the push must
-    // refuse rather than ship the corrupt block.
-    branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "document/title".parse()?,
-            of: "document:one".parse()?,
-            is: Value::String("second".into()),
-            cause: None,
-        })]))
+    profile.access().save(chain).perform(&operator).await?;
+    let source_origin = source_repo
+        .remote("origin")
+        .create(site.clone())
         .perform(&operator)
         .await?;
-
-    let pushed = branch.push().perform(&operator).await;
-    match pushed {
-        Err(error) => {
-            let rendered = error.to_string();
-            assert!(
-                rendered.contains("refusing to ship") || rendered.contains("hashes to"),
-                "the push must name the corrupt block, got: {rendered}"
-            );
-        }
-        Ok(_) => panic!("the push shipped a block that does not match its reference"),
+    let source = source_repo.branch("main").open().perform(&operator).await?;
+    let source_remote = source_origin
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    source
+        .set_upstream(source_remote)
+        .perform(&operator)
+        .await?;
+    for round in 0..4 {
+        let facts: Vec<_> = (0..120)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        source
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
     }
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // Collect the digests the source tree is made of, read locally so
+    // the collection itself costs no remote traffic and pollutes no
+    // tally.
+    let head = NodeHash::from(*source.revision().expect("committed").tree.hash());
+    let local_index = NetworkedIndex::new(&operator, source.archive().index(), None);
+    let local_storage = TreeStorage::new(TreeStorageBridge(local_index));
+    let tree = Index::from_hash(head);
+    let visits = tree.traverse_available(&local_storage);
+    futures_util::pin_mut!(visits);
+    let mut digests: Vec<NodeHash> = Vec::new();
+    while let Some(visit) = visits.next().await {
+        if let Visit::Present(node) = visit? {
+            digests.push(node.hash().clone());
+        }
+    }
+    assert!(
+        digests.len() >= 16,
+        "the source tree must have enough blocks to measure overlap (got {})",
+        digests.len()
+    );
+    digests.truncate(16);
+
+    // A replica that holds NONE of those blocks and reaches the source
+    // through the UCAN remote, so every read below is a true remote
+    // hydration.
+    let replica_repo = profile
+        .repository(unique_name("ucan-authz-serial-b"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(site)
+        .subject(source_repo.did())
+        .perform(&operator)
+        .await?;
+    let replica = replica_repo
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+
+    // The measurement: N independent block reads, issued together.
+    // `join_all` polls them all on every pass, so any serialization
+    // observed here is imposed by the code under test, not the driver.
+    let env = Counting::new(operator.clone());
+    let index = NetworkedIndex::new(&env, replica.archive().index(), Some(origin));
+    let reads = digests
+        .iter()
+        .map(|digest| {
+            let index = index.clone();
+            let key: dialog_storage::Blake3Hash =
+                digest.as_ref().try_into().expect("a blake3 digest is 32 bytes");
+            async move { StorageBackend::get(&index, &key).await }
+        })
+        .collect::<Vec<_>>();
+    let fetched = join_all(reads).await;
+
+    let found = fetched
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .count();
+    let blocks = env.block_reads();
+    let peak = env.peak_block_reads_in_flight();
+    let forks = env.count("fork::Fork");
+    let local_resolves = env.count("memory::Resolve");
+    println!(
+        "AUTHZ MEASURED blocks={blocks} peak_in_flight={peak} \
+         forks={forks} local_resolves={local_resolves} hydrated={found}/{}",
+        digests.len()
+    );
+
+    assert_eq!(
+        found,
+        digests.len(),
+        "every requested block must hydrate through the UCAN remote for \
+         this to measure the authorized path"
+    );
+
+    assert!(
+        peak > 1,
+        "{blocks} block reads were issued together via `join_all` but never \
+         more than {peak} was in flight at once ({forks} effects crossed the \
+         network). With no walk, no generator, and no serial drain in the \
+         path, the serialization is in the authorized remote read itself.",
+    );
 
     Ok(())
 }

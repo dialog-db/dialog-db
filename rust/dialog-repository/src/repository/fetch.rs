@@ -96,11 +96,6 @@ where
         env: &'a Env,
         queue: Arc<PreloadQueue>,
     ) -> Self {
-        dialog_common::probe(&format!(
-            "Driven::new budget={:?} pending={}",
-            queue.budget(),
-            queue.pending()
-        ));
         Self {
             inner: stream,
             budget: queue.budget(),
@@ -129,7 +124,6 @@ where
                 Likelihood::Likely => self.likely_inflight += 1,
                 Likelihood::Maybe => self.maybe_inflight += 1,
             }
-            dialog_common::probe("Driven start job");
             let sources = self.sources.clone();
             let env = self.env;
             let future = async move {
@@ -237,13 +231,9 @@ where
     let range = selector_range(selector, &manifest);
     let scope = [range.start().as_ref().to_vec()..=range.end().as_ref().to_vec()];
 
-    let mut warmed = 0usize;
     let visits = tree.traverse_available_within(&storage, &scope);
     futures_util::pin_mut!(visits);
     while let Some(visit) = visits.next().await {
-        if visit.is_ok() {
-            warmed += 1;
-        }
         // A present node has landed in the caches, which is the whole
         // point; an absent block is a partial region (nothing to warm);
         // an error ends the walk, owned by whichever demand read hits it.
@@ -251,7 +241,6 @@ where
             break;
         }
     }
-    dialog_common::probe(&format!("warm_source done warmed={warmed}"));
     Ok(())
 }
 

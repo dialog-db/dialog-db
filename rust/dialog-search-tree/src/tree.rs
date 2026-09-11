@@ -18,8 +18,8 @@ use rkyv::{
 
 use crate::{
     Accessor, Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, Key, Manifest, PersistentNode, SearchOptions, SearchResult,
-    TreeDifference, TreeWalker, Value, into_owned,
+    Distribution, Entry, Geometric, Key, Manifest, PersistentNode, Prefetch, SearchOptions,
+    SearchResult, TreeDifference, TreeWalker, Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -374,34 +374,22 @@ where
         Value: PartialEq + ConditionalSync,
         D: ConditionalSync,
     {
-        async_stream::try_stream! {
-            let difference =
-                TreeDifference::compute_within(self, other, self_storage, other_storage, scope)
-                    .await?;
-            for await change in difference.changes_within(scope) {
-                yield change?;
-            }
-        }
+        self.differentiate_within_with(other, scope, self_storage, other_storage, Prefetch::Lazy)
     }
 
-    /// [`differentiate_within`](Self::differentiate_within) that preloads:
-    /// each surviving frontier level is fetched concurrently instead of
-    /// node by node, one round trip per tree level rather than one per
-    /// block.
-    ///
-    /// The changes are identical to the lazy walk's — preloading is a
-    /// scheduling choice, not a semantic one. It reads a bounded number of
-    /// blocks the lazy walk would have skipped (a shared node whose twin
-    /// has not surfaced yet), which is why it is a separate method rather
-    /// than the default: a consumer that streams the whole difference over
-    /// a high-latency backend wants it, and novelty computation over a
-    /// partial replica does not.
-    pub fn differentiate_within_preloading<'a, Backend>(
+    /// [`differentiate_within`](Self::differentiate_within), with an
+    /// explicit [`Prefetch`] choice. [`Prefetch::Eager`] fetches each
+    /// surviving frontier level concurrently instead of node by node, at
+    /// the price of a bounded number of reads the lazy walk would skip;
+    /// it is for consumers that stream the whole difference over a
+    /// high-latency backend (see [`Prefetch`]).
+    pub fn differentiate_within_with<'a, Backend>(
         &'a self,
         other: &'a Self,
         scope: &'a [core::ops::RangeInclusive<Key>],
         self_storage: &'a ContentAddressedStorage<Backend>,
         other_storage: &'a ContentAddressedStorage<Backend>,
+        prefetch: Prefetch,
     ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -411,12 +399,13 @@ where
         D: ConditionalSync,
     {
         async_stream::try_stream! {
-            let difference = TreeDifference::compute_within_preloading(
+            let difference = TreeDifference::compute_within_with(
                 self,
                 other,
                 self_storage,
                 other_storage,
                 scope,
+                prefetch,
             )
             .await?;
             for await change in difference.changes_within(scope) {

@@ -1,10 +1,9 @@
-use std::any::{Any, type_name};
+use std::any::type_name;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dialog_capability::{Command, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_network::HydrationRequest;
 use parking_lot::Mutex;
 
 // Operator-dependent helpers (test_operator, unique_name, ...) live in
@@ -45,21 +44,14 @@ use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;
 /// dispatches rather than wall time. Archive `Get` carries one digest
 /// per call, so its tally is exactly the number of block reads.
 ///
-/// It also measures how many block reads are in flight AT ONCE, which is
-/// what decides whether a phase costs one round trip per block or one for
-/// the whole batch. Every read yields to the executor before it is
-/// answered, so reads issued by concurrently polled work genuinely overlap
-/// and show up in [`peak_block_reads_in_flight`](Self::peak_block_reads_in_flight).
-/// A phase that awaits each read before issuing the next pins that peak at
-/// 1 no matter how many reads it does.
-///
-/// The same overlap is tracked PER PHASE for hydrations, keyed by the
-/// label the reading store was tagged with
-/// ([`peak_hydrations_in_flight`](Self::peak_hydrations_in_flight)). A
-/// pull reads through several phases at once, so one global peak can be
-/// high while an individual phase is strictly serial — which is exactly
-/// the failure being chased. Hydration is the effect that costs a network
-/// round trip, so its per-label peak is the number that matters.
+/// It also measures how many block reads are in flight AT ONCE. That is
+/// the quantity that decides wall time over a remote archive: n reads
+/// awaited one after another cost n round trips, while n overlapped reads
+/// cost one. A tally cannot tell those apart — both count n — so
+/// [`peak_block_reads_in_flight`](Self::peak_block_reads_in_flight)
+/// reports the overlap directly. Every read yields once before it is
+/// answered, so reads issued by concurrently polled work are genuinely in
+/// flight together.
 ///
 /// Clones share the tally.
 #[derive(Debug, Clone)]
@@ -67,33 +59,19 @@ pub struct Counting<P> {
     inner: P,
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
     reads: Arc<Mutex<InFlight>>,
-    hydrations: Arc<Mutex<BTreeMap<&'static str, InFlight>>>,
 }
 
-/// Concurrency of a set of reads: how many are open now, and the most
-/// that were ever open at once.
-#[derive(Debug, Default, Clone)]
+/// How many reads are open now, and the most that were ever open at once.
+#[derive(Debug, Default)]
 struct InFlight {
     current: usize,
     peak: usize,
 }
 
-impl InFlight {
-    fn enter(&mut self) {
-        self.current += 1;
-        self.peak = self.peak.max(self.current);
-    }
-
-    fn leave(&mut self) {
-        self.current -= 1;
-    }
-}
-
-/// Yields to the executor exactly once, giving work polled alongside the
-/// caller a chance to run before the caller resumes.
+/// Yields to the executor exactly once, so work polled alongside the
+/// caller gets a chance to run before the caller resumes.
 async fn yield_once() {
     let mut yielded = false;
-
     std::future::poll_fn(move |context| {
         if yielded {
             std::task::Poll::Ready(())
@@ -113,40 +91,16 @@ impl<P> Counting<P> {
             inner,
             counts: Arc::new(Mutex::new(BTreeMap::new())),
             reads: Arc::new(Mutex::new(InFlight::default())),
-            hydrations: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
-    /// The greatest number of block reads ever in flight at once since the
-    /// last [`reset`](Self::reset).
+    /// The greatest number of block reads ever in flight at once since
+    /// the last [`reset`](Self::reset).
     ///
-    /// 1 means the reads were strictly serial: each was awaited before the
-    /// next was issued, so over a remote archive each costs its own round
-    /// trip. Greater than 1 means that many round trips overlapped.
+    /// 1 means strictly serial: each read was awaited before the next was
+    /// issued, so over a remote archive each cost its own round trip.
     pub fn peak_block_reads_in_flight(&self) -> usize {
         self.reads.lock().peak
-    }
-
-    /// The greatest number of hydrations ever in flight at once for the
-    /// phase tagged `label`, since the last [`reset`](Self::reset).
-    ///
-    /// `None` when that phase hydrated nothing — which is itself worth
-    /// asserting on, since a phase that never reaches the remote cannot be
-    /// the one costing round trips.
-    pub fn peak_hydrations_in_flight(&self, label: &str) -> Option<usize> {
-        self.hydrations
-            .lock()
-            .get(label)
-            .map(|in_flight| in_flight.peak)
-    }
-
-    /// Every phase that hydrated, with its peak overlap, keyed by label.
-    pub fn hydration_peaks(&self) -> BTreeMap<&'static str, usize> {
-        self.hydrations
-            .lock()
-            .iter()
-            .map(|(label, in_flight)| (*label, in_flight.peak))
-            .collect()
     }
 
     /// Total executions of effects whose type name contains `needle`
@@ -169,7 +123,6 @@ impl<P> Counting<P> {
     pub fn reset(&self) {
         self.counts.lock().clear();
         *self.reads.lock() = InFlight::default();
-        self.hydrations.lock().clear();
     }
 
     /// The full tally, keyed by effect type name.
@@ -190,38 +143,24 @@ where
         let name = type_name::<C>();
         *self.counts.lock().entry(name).or_insert(0) += 1;
 
-        // Only the reads that cost a network round trip are timed for
-        // overlap: archive `Get` (one digest per call) and `Hydrate` (one
-        // block fetched from the remote). A hydration also carries the
-        // label of the phase that asked for it, so its overlap is tracked
-        // per phase as well as globally.
-        let hydration = (&input as &dyn Any)
-            .downcast_ref::<HydrationRequest>()
-            .and_then(|request| request.label);
-        let timed = hydration.is_some() || name.contains("archive::Get");
-
-        if !timed {
+        // Only block reads are timed: they are the effects that cost a
+        // network round trip apiece over a remote archive.
+        if !name.contains("archive::Get") {
             return self.inner.execute(input).await;
         }
 
-        self.reads.lock().enter();
-        if let Some(label) = hydration {
-            self.hydrations.lock().entry(label).or_default().enter();
+        {
+            let mut reads = self.reads.lock();
+            reads.current += 1;
+            reads.peak = reads.peak.max(reads.current);
         }
-
-        // Yield before answering, so reads issued by work polled alongside
-        // this one are in flight together and their overlap is observable.
-        // Without this a same-tick read could complete before its sibling
-        // is ever polled, and a concurrent phase would read as serial.
+        // Yield before answering, so a read issued by work polled
+        // alongside this one is in flight together with it. Without this
+        // a same-tick read could complete before its sibling is polled,
+        // and genuinely concurrent work would measure as serial.
         yield_once().await;
         let output = self.inner.execute(input).await;
-
-        self.reads.lock().leave();
-        if let Some(label) = hydration {
-            if let Some(in_flight) = self.hydrations.lock().get_mut(label) {
-                in_flight.leave();
-            }
-        }
+        self.reads.lock().current -= 1;
 
         output
     }

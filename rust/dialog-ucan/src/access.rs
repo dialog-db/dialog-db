@@ -94,7 +94,7 @@ impl Certificate for UcanCertificate {
 ///
 /// Built incrementally: create with `new(scope)`, push proofs
 /// as the chain is walked, then `claim(signer)` to authorize.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct UcanProof {
     /// The collected proofs (individual delegations).
     pub proofs: Vec<UcanCertificate>,

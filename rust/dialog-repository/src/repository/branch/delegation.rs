@@ -43,7 +43,7 @@
 //! #         + Provider<Identify>
 //! #         + Provider<Attest>
 //! #         + Provider<BlobWrite>
-//! #         + Provider<dialog_repository::Hydrate>
+//! #         + Provider<crate::Hydrate>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + dialog_common::ConditionalSync
 //! #         + 'static,
