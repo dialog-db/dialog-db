@@ -4207,9 +4207,7 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
 /// overlap). It must run on wasm as well as native -- the browser is
 /// where the symptom was observed.
 #[dialog_common::test]
-async fn it_downloads_serially_while_pushing_concurrently(
-    ucan: UcanS3Address,
-) -> Result<()> {
+async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -> Result<()> {
     use crate::helpers::Counting;
 
     let (operator, profile) = test_operator_with_profile().await;
@@ -4536,10 +4534,7 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
             })
         })
         .collect();
-    source
-        .commit(stream::iter(rows))
-        .perform(&operator)
-        .await?;
+    source.commit(stream::iter(rows)).perform(&operator).await?;
     assert!(source.push().perform(&operator).await?.is_some());
 
     // A cold replica on its own profile, operator and space: two repos on
@@ -4648,7 +4643,6 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     Ok(())
 }
 
-
 /// #492, the scenario the HAR traces: a SECOND DEVICE joining an account.
 ///
 /// Both sides are seeded, and that is the whole point. A device's first
@@ -4667,6 +4661,14 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
 /// The measurement is concurrent ROUND TRIPS (`Hydrate` for a download's
 /// block fetches, forked effects for a push's uploads) -- never block
 /// reads, which hit the local store and overlap for free.
+///
+/// What it caught, once it reproduced: the serial run belonged to the
+/// MERGE, not the download. Read-site labels attributed all ~30 serial
+/// fetches to `TransientTree::integrate`, which awaited one change's
+/// resolving lookup before pulling the next, so every change cost its own
+/// round trip while the download's traversal overlapped 6-16 at a time in
+/// the same run. It reproduces identically on native, which is what ruled
+/// out the single-threaded-wasm theory the earlier passes chased.
 #[dialog_common::test]
 async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result<()> {
     use crate::helpers::Counting;
@@ -4738,7 +4740,13 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
         .perform(&operator)
         .await?;
     account
-        .set_upstream(account_origin.branch(crate::ACCESS_BRANCH).open().perform(&operator).await?)
+        .set_upstream(
+            account_origin
+                .branch(crate::ACCESS_BRANCH)
+                .open()
+                .perform(&operator)
+                .await?,
+        )
         .perform(&operator)
         .await?;
     // The account's content is the REAL captured tree, imported blocks and
@@ -4758,7 +4766,10 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
     let pushed = account.push().perform(&push_env).await?;
     let uploads = push_env.count("fork::Fork");
     let push_peak = push_env.peak_forks_in_flight();
-    println!("PUSH pushed={} uploads={uploads} peak={push_peak}", pushed.is_some());
+    println!(
+        "PUSH pushed={} uploads={uploads} peak={push_peak}",
+        pushed.is_some()
+    );
 
     // Device 2: its own profile, its own storage, SEEDED with defaults of
     // its own before it ever sees the account -- the state a first load
@@ -4833,15 +4844,23 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
     );
     // The serial RUN, not the peak. A peak over the whole pull can read
     // healthy while a long prefix of it is strictly one-at-a-time, which
-    // is what let this bug hide: natively the run is 0, in the browser it
-    // is 30 -- same code, same fixtures, same test.
+    // is what let this bug hide: the download's traversal overlapped 6-16
+    // at a time and pulled the peak up, while the merge ahead of it fetched
+    // ~30 blocks strictly one after another.
+    //
+    // The bound is generous on purpose. A few solo reads are inherent --
+    // the pull's first read has nothing to overlap with, and a window whose
+    // keys all resolve from cache leaves its one miss alone -- and the
+    // measured floor is 4 on most runs and has been seen at 7 and 11. The
+    // bug this pins was 32 on EVERY run, on both targets, so the bound sits
+    // well above the observed drift and still far below the regression.
     assert!(
-        serial_run < 4,
+        serial_run < 20,
         "a device joining the account made {hydrations} remote fetches, and \
          {serial_run} of them ran back-to-back with nothing else in flight \
          (peak {remote_peak} over the whole pull). One round trip at a time \
-         is the HAR's shape exactly. Natively this same test serializes \
-         none, so a failure here is the wasm runtime, not the walk."
+         is the HAR's shape exactly. This reproduces on BOTH native and \
+         wasm, so a failure here is the merge's read shape, not the runtime."
     );
 
     Ok(())

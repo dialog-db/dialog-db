@@ -189,6 +189,15 @@ pub enum Change<Key, Value> {
     Remove(Entry<Key, Value>),
 }
 
+impl<Key, Value> Change<Key, Value> {
+    /// The key the change applies to, whichever side it is.
+    pub fn key(&self) -> &Key {
+        match self {
+            Self::Add(entry) | Self::Remove(entry) => &entry.key,
+        }
+    }
+}
+
 /// Represents a differential stream of changes in the key-value store.
 pub trait Differential<Key, Value>:
     Stream<Item = Result<Change<Key, Value>, DialogSearchTreeError>>
