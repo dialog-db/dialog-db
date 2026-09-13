@@ -652,16 +652,20 @@ where
                 let base: PersistentTree<Key, Value, D> =
                     PersistentTree::seal(root.clone(), self.cache.clone());
                 let base = &base;
-                let mut warming = futures_util::stream::iter(window.iter().map(|change| {
+                // `FuturesUnordered` rather than `buffer_unordered`: the
+                // combinator's higher-ranked bound cannot see that these
+                // borrows outlive the set, and the resulting
+                // "implementation of Send is not general enough" lands on
+                // every caller. Pushing into the set expresses the same
+                // concurrency with ordinary lifetimes.
+                let mut warming = futures_util::stream::FuturesUnordered::new();
+                for change in window.iter() {
                     let key = match change {
                         Change::Add(entry) => entry.key.clone(),
                         Change::Remove(entry) => entry.key.clone(),
                     };
-                    async move {
-                        let _ = base.get(&key, storage).await;
-                    }
-                }))
-                .buffer_unordered(INTEGRATE_LOOKAHEAD);
+                    warming.push(async move { base.get(&key, storage).await });
+                }
                 while warming.next().await.is_some() {}
             }
 
