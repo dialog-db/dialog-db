@@ -198,6 +198,12 @@ where
                 dialog_common::trace_level(level.len());
                 let mut reads = futures_util::stream::iter(level.into_iter().map(
                     |hash| async move {
+                        // TEMPORARY (#492): count reads as they are POLLED.
+                        // `buffered(16)` should poll 16 before the first
+                        // completes; if the trace shows them one at a time,
+                        // this says whether the walk even offered 16.
+                        #[cfg(target_arch = "wasm32")]
+                        dialog_common::trace_level(usize::MAX);
                         // `retrieve` verifies stored bytes against the
                         // hash it was asked for, so `None` here is
                         // genuinely "not stored" -- a corrupt block

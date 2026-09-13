@@ -40,6 +40,15 @@ use std::{
     ops::{Bound, RangeBounds, RangeInclusive},
 };
 
+/// How many changes [`TransientTree::integrate`] warms before applying.
+///
+/// Integration is ordered, so this never changes WHAT happens -- only how
+/// many of the next descents are fetched together. Matched to the walk's
+/// own `FETCH_CONCURRENCY`; a browser will not exceed six per origin
+/// regardless, and native saturates well below this.
+const INTEGRATE_LOOKAHEAD: usize = 16;
+
+
 /// The root of a [`TransientTree`].
 ///
 /// An unedited root is just that hash (possibly `NULL_BLAKE3_HASH` for an
@@ -594,8 +603,94 @@ where
         Value: PartialEq,
     {
         futures_util::pin_mut!(changes);
-        while let Some(change) = changes.next().await {
-            match change? {
+
+        // Integration is strictly ordered -- each change resolves against
+        // the batch's own in-flight writes -- so the WRITES cannot be
+        // reordered or overlapped. The READS can.
+        //
+        // Left alone, this loop pays a root-to-leaf descent per change with
+        // nothing else in flight: pull a change, walk it down one block at a
+        // time, write, pull the next. Over a real link that is one round trip
+        // per level per change, which is the serialization a browser sees as
+        // strictly alternating block GETs (measured at ~30 back to back, on
+        // native and wasm alike; native only hides it because a local round
+        // trip is a millisecond).
+        //
+        // So the stream is consumed in windows: take up to
+        // `INTEGRATE_LOOKAHEAD` changes, warm every key's search path
+        // concurrently, then apply them in the original order against a
+        // cache that now answers locally. Ordering is untouched -- the
+        // windowing only decides when blocks are FETCHED, never when they
+        // are applied.
+        let mut window: Vec<Change<Key, Value>> = Vec::with_capacity(INTEGRATE_LOOKAHEAD);
+        let mut drained = false;
+        loop {
+            while window.len() < INTEGRATE_LOOKAHEAD {
+                match changes.next().await {
+                    Some(change) => window.push(change?),
+                    None => {
+                        drained = true;
+                        break;
+                    }
+                }
+            }
+            if window.is_empty() {
+                break;
+            }
+
+            // Warm the window's descents together. Failures are ignored:
+            // this only populates the cache, and the ordered pass below
+            // still owns every read, every error and every decision.
+            // Warmed against the batch's PERSISTENT base, not through
+            // `self`: the ordered pass consumes `self` by value, and a
+            // warming read needs none of the batch's in-flight state. It
+            // only has to pull the blocks a descent will touch into the
+            // shared node cache, which is where the ordered read then
+            // finds them. A batch whose root is already loaded in memory
+            // has nothing to fetch, so it skips this entirely.
+            if let TransientRoot::Unloaded(root) = &self.root {
+                let base: PersistentTree<Key, Value, D> =
+                    PersistentTree::seal(root.clone(), self.cache.clone());
+                let base = &base;
+                let mut warming = futures_util::stream::iter(window.iter().map(|change| {
+                    let key = match change {
+                        Change::Add(entry) => entry.key.clone(),
+                        Change::Remove(entry) => entry.key.clone(),
+                    };
+                    async move {
+                        let _ = base.get(&key, storage).await;
+                    }
+                }))
+                .buffer_unordered(INTEGRATE_LOOKAHEAD);
+                while warming.next().await.is_some() {}
+            }
+
+            for change in window.drain(..) {
+                self = self.apply(change, storage).await?;
+            }
+
+            if drained {
+                break;
+            }
+        }
+        return Ok(self);
+    }
+
+    /// Applies one change, resolving it against the batch's own in-flight
+    /// writes. Split out of [`integrate`](Self::integrate) so the ordered
+    /// pass stays a plain loop over a warmed window.
+    async fn apply<Backend>(
+        mut self,
+        change: Change<Key, Value>,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Value: PartialEq,
+    {
+        {
+            match change {
                 Change::Add(entry) => match self.get(&entry.key, storage).await? {
                     None => {
                         self = self.insert(entry.key, entry.value, storage).await?;
