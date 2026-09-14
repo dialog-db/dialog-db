@@ -46,7 +46,7 @@ use crate::{
     AttributeKeyPart, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart,
     Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, SelectorMatch, State, VALUE_KEY_TAG,
     Value, ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
-    key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
+    key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     match_selector_and_key_ref,
     selector::Constrained,
@@ -764,11 +764,12 @@ pub trait ArtifactTreeExt {
             + 's;
 
     /// An advisory upper-bound estimate of how many artifacts the `selector`'s
-    /// key range spans, read from the tree root alone (see
+    /// key range spans, read from the range's edge paths (see
     /// `PersistentTree::range_estimate`).
     ///
-    /// Reads one block instead of scanning, so a planner can compare the range
-    /// sizes of independent scans cheaply. Returns `None` for an empty tree.
+    /// Reads at most two blocks per level instead of scanning, so a planner
+    /// can compare the range sizes of independent scans cheaply. Returns
+    /// `None` for an empty tree.
     async fn estimate<S>(
         self,
         store: S,
@@ -1033,14 +1034,17 @@ impl ArtifactTreeExt for ArtifactTree {
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
-            tokio::pin!(stream);
-            for await item in stream {
+            // Stage one, synchronous per entry: parse the key ONCE into
+            // borrowed components for matching and spill resolution, and
+            // finish every inline-valued row on the spot. Nothing else is
+            // materialized: the entry's key and payload travel into the
+            // yielded view as-is, and the consumer decides per row whether
+            // to borrow a field or reconstruct the whole fact. A row whose
+            // value spilled is handed on with its block reference, so the
+            // fetch it needs runs alongside its neighbours' (stage two)
+            // instead of holding the scan for one round trip per row.
+            let staged = stream.map(|item| -> Result<Staged<_, ArtifactView>, DialogArtifactsError> {
                 let raw = item?;
-                // Parse each entry's key ONCE into borrowed components for
-                // matching and spill resolution. Nothing else is materialized
-                // here: the entry's key and payload travel into the yielded
-                // view as-is, and the consumer decides per row whether to
-                // borrow a field or reconstruct the whole fact.
                 // A key that does not parse is corruption; dropping it
                 // silently would make the corrupt entry vanish from results
                 // with no signal.
@@ -1050,35 +1054,72 @@ impl ArtifactTreeExt for ArtifactTree {
                     )
                 })?;
                 let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
-                if verdict == SelectorMatch::Excluded {
-                    continue;
+                if verdict == SelectorMatch::Excluded || !matches!(raw.value, State::Added(_)) {
+                    return Ok(Staged::Skip);
                 }
-                if !matches!(raw.value, State::Added(_)) {
-                    continue;
+                if let ValueRef::Spilled { hash, .. } = &parts.value {
+                    let hash = hash.to_vec();
+                    return Ok(Staged::Spilled { raw, verdict, hash });
                 }
-                let spilled = match &parts.value {
-                    ValueRef::Spilled { hash, .. } => {
-                        Some(fetch_spilled_reference(&raw_store, &cache, hash).await?)
-                    }
-                    ValueRef::Inline(_) => None,
-                };
                 // A NeedsValue verdict means some value predicate's answer
-                // lies beyond the spilled value's in-key prefix; the block is
-                // in hand now (it was fetched for the view anyway), so
-                // re-check semantically before yielding. Only the value is
-                // decoded for the check — not the entity or attribute.
+                // lies beyond what the key decides; re-check semantically
+                // before yielding. Only the value is decoded for the check,
+                // not the entity or attribute.
                 if verdict == SelectorMatch::NeedsValue
-                    && !value_predicates_admit(
-                        &selector,
-                        &decode_value_parts(&parts, spilled.clone())?,
-                    )
+                    && !value_predicates_admit(&selector, &decode_value_parts(&parts, None)?)
                 {
-                    continue;
+                    return Ok(Staged::Skip);
                 }
                 let State::Added(datum) = raw.value else {
                     unreachable!("Added state checked above")
                 };
-                yield ArtifactView::new(raw.key, datum, spilled);
+                Ok(Staged::Ready(ArtifactView::new(raw.key, datum, None)))
+            });
+            // Stage two: the spilled rows' block fetches, SPILL_LOOKAHEAD in
+            // flight, in row order.
+            let fetched = staged
+                .map(|staged| {
+                    let raw_store = &raw_store;
+                    let cache = &cache;
+                    let selector = &selector;
+                    async move {
+                        let (raw, verdict, hash) = match staged? {
+                            Staged::Spilled { raw, verdict, hash } => (raw, verdict, hash),
+                            finished => return Ok(staged_ready(finished)),
+                        };
+                        let spilled = fetch_spilled_reference(raw_store, cache, &hash).await?;
+                        // The block is in hand now (it was fetched for the
+                        // view anyway), so the value predicates can be
+                        // answered past the in-key prefix.
+                        if verdict == SelectorMatch::NeedsValue {
+                            let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                                DialogArtifactsError::InvalidKey(
+                                    "scanned entry's key does not parse".to_string(),
+                                )
+                            })?;
+                            if !value_predicates_admit(
+                                selector,
+                                &decode_value_parts(&parts, Some(spilled.clone()))?,
+                            ) {
+                                return Ok(None);
+                            }
+                        }
+                        let State::Added(datum) = raw.value else {
+                            unreachable!("Added state checked above")
+                        };
+                        Ok::<_, DialogArtifactsError>(Some(ArtifactView::new(
+                            raw.key,
+                            datum,
+                            Some(spilled),
+                        )))
+                    }
+                })
+                .buffered(SPILL_LOOKAHEAD);
+            tokio::pin!(fetched);
+            for await item in fetched {
+                if let Some(view) = item? {
+                    yield view;
+                }
             }
         }
     }
@@ -1107,14 +1148,12 @@ impl ArtifactTreeExt for ArtifactTree {
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
-            tokio::pin!(stream);
-            for await item in stream {
+            // The two stages of `scan`, reconstructing whole facts: an
+            // inline-valued row is parsed once and materialized here; a
+            // spilled row is parsed again once its block has landed, which
+            // it pays a round trip for anyway.
+            let staged = stream.map(|item| -> Result<Staged<_, Artifact>, DialogArtifactsError> {
                 let raw = item?;
-                // Parse each entry's key ONCE into borrowed components, and
-                // reuse that single parse for matching, spill resolution,
-                // AND reconstruction — this path materializes every
-                // surviving row, so deferring the reconstruction to a view
-                // would only buy a second key walk.
                 let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
                     DialogArtifactsError::InvalidKey(
                         "scanned entry's key does not parse".to_string(),
@@ -1122,44 +1161,107 @@ impl ArtifactTreeExt for ArtifactTree {
                 })?;
                 let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
                 if verdict == SelectorMatch::Excluded {
-                    continue;
+                    return Ok(Staged::Skip);
                 }
                 let State::Added(datum) = &raw.value else {
-                    continue;
+                    return Ok(Staged::Skip);
                 };
-                let spilled = match &parts.value {
-                    ValueRef::Spilled { hash, .. } => {
-                        Some(fetch_spilled_reference(&raw_store, &cache, hash).await?)
-                    }
-                    ValueRef::Inline(_) => None,
-                };
-                // A row whose stored bytes fail read-side validation (a
-                // non-canonical entity, a broken attribute — `CorruptEntry`)
-                // is a corrupt or foreign-written entry: skip it with a
-                // warning rather than failing the whole query. Structural
-                // key corruption (the parse above) stays loud — see the
-                // comment there.
-                let artifact = match Artifact::from_key_ref_datum_value(&parts, datum, spilled) {
-                    Ok(artifact) => artifact,
-                    Err(DialogArtifactsError::CorruptEntry(reason)) => {
-                        tracing::warn!(%reason, "ignoring corrupt stored row in scan");
-                        continue;
-                    }
-                    Err(error) => Err(error)?,
-                };
-                // A NeedsValue verdict means some value predicate's answer
-                // lies beyond the spilled value's in-key prefix; the value
-                // is materialized now, so re-check semantically before
-                // yielding.
-                if verdict == SelectorMatch::NeedsValue
-                    && !value_predicates_admit(&selector, &artifact.is)
-                {
-                    continue;
+                if let ValueRef::Spilled { hash, .. } = &parts.value {
+                    let hash = hash.to_vec();
+                    return Ok(Staged::Spilled { raw, verdict, hash });
                 }
-                yield artifact;
+                Ok(match reconstruct(&selector, &parts, datum, None, verdict)? {
+                    Some(artifact) => Staged::Ready(artifact),
+                    None => Staged::Skip,
+                })
+            });
+            let fetched = staged
+                .map(|staged| {
+                    let raw_store = &raw_store;
+                    let cache = &cache;
+                    let selector = &selector;
+                    async move {
+                        let (raw, verdict, hash) = match staged? {
+                            Staged::Spilled { raw, verdict, hash } => (raw, verdict, hash),
+                            finished => return Ok(staged_ready(finished)),
+                        };
+                        let spilled = fetch_spilled_reference(raw_store, cache, &hash).await?;
+                        let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                            DialogArtifactsError::InvalidKey(
+                                "scanned entry's key does not parse".to_string(),
+                            )
+                        })?;
+                        let State::Added(datum) = &raw.value else {
+                            unreachable!("Added state checked above")
+                        };
+                        reconstruct(selector, &parts, datum, Some(spilled), verdict)
+                    }
+                })
+                .buffered(SPILL_LOOKAHEAD);
+            tokio::pin!(fetched);
+            for await item in fetched {
+                if let Some(artifact) = item? {
+                    yield artifact;
+                }
             }
         }
     }
+}
+
+/// How many spilled value blocks a scan keeps in flight ahead of the row
+/// it is yielding. A spilled value is its own block, so over a hydrating
+/// store every spilled row is a round trip; fetched one row at a time a
+/// scan of large values would cost one round trip per row.
+const SPILL_LOOKAHEAD: usize = 16;
+
+/// A scanned entry between the scan's two stages: finished from its key
+/// alone, waiting on its spilled value block, or filtered out.
+enum Staged<Raw, Ready> {
+    Ready(Ready),
+    Spilled {
+        raw: Raw,
+        verdict: SelectorMatch,
+        hash: Vec<u8>,
+    },
+    Skip,
+}
+
+/// The finished row of a stage-one entry, if any. Only called for entries
+/// that are not [`Staged::Spilled`].
+fn staged_ready<Raw, Ready>(staged: Staged<Raw, Ready>) -> Option<Ready> {
+    match staged {
+        Staged::Ready(ready) => Some(ready),
+        Staged::Skip | Staged::Spilled { .. } => None,
+    }
+}
+
+/// Reconstruct a scanned row as a whole fact, applying the value
+/// predicates a `NeedsValue` verdict deferred to the materialized value.
+///
+/// A row whose stored bytes fail read-side validation (a non-canonical
+/// entity, a broken attribute — `CorruptEntry`) is a corrupt or
+/// foreign-written entry: skipped with a warning rather than failing the
+/// whole query. Structural key corruption (the parse before this) stays
+/// loud.
+fn reconstruct(
+    selector: &ArtifactSelector<Constrained>,
+    parts: &KeyRef<'_>,
+    datum: &Datum,
+    spilled: Option<Vec<u8>>,
+    verdict: SelectorMatch,
+) -> Result<Option<Artifact>, DialogArtifactsError> {
+    let artifact = match Artifact::from_key_ref_datum_value(parts, datum, spilled) {
+        Ok(artifact) => artifact,
+        Err(DialogArtifactsError::CorruptEntry(reason)) => {
+            tracing::warn!(%reason, "ignoring corrupt stored row in scan");
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if verdict == SelectorMatch::NeedsValue && !value_predicates_admit(selector, &artifact.is) {
+        return Ok(None);
+    }
+    Ok(Some(artifact))
 }
 
 /// The inclusive key range a selector's scan reads.
@@ -1671,6 +1773,126 @@ mod spill_cache_tests {
     use dialog_search_tree::Delta;
     use dialog_storage::{Blake3Hash, MeasuredStorage, MemoryStorageBackend, StorageBackend};
     use futures_util::stream;
+
+    /// A scan over spilled values fetches their blocks concurrently: each
+    /// spilled row is its own block, and over a hydrating store that block
+    /// is a round trip, so a scan that fetched them one row at a time would
+    /// cost one round trip per row. Both scan shapes, and the rows come out
+    /// complete and in order.
+    #[dialog_common::test]
+    async fn it_fetches_spilled_values_concurrently_in_scans() -> anyhow::Result<()> {
+        use crate::ArtifactSelector;
+        use dialog_storage::DialogStorageError;
+        use futures_util::TryStreamExt as _;
+        use std::future::poll_fn;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        /// Counts reads in flight; every read parks once so concurrently
+        /// polled reads overlap.
+        #[derive(Clone)]
+        struct Gauge {
+            inner: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+            in_flight: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        impl StorageBackend for Gauge {
+            type Key = Blake3Hash;
+            type Value = Vec<u8>;
+            type Error = DialogStorageError;
+
+            async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+                self.inner.set(key, value).await
+            }
+
+            async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                let mut yielded = false;
+                poll_fn(|context| {
+                    if yielded {
+                        Poll::Ready(())
+                    } else {
+                        yielded = true;
+                        context.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                let value = self.inner.get(key).await;
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                value
+            }
+        }
+
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let mut store = Gauge {
+            inner: MemoryStorageBackend::default(),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        };
+        let facts: Vec<Artifact> = (0..24)
+            .map(|index| Artifact {
+                the: "doc/body".parse().unwrap(),
+                of: format!("doc:{index}").parse().unwrap(),
+                is: Value::String(format!("{index}:").repeat(inline_n + 1)),
+                cause: None,
+            })
+            .collect();
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty();
+        tree.apply(
+            &mut store,
+            &mut delta,
+            stream::iter(facts.iter().cloned().map(Instruction::Assert)),
+        )
+        .await?;
+        for (_, buffer) in delta.flush() {
+            store
+                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                .await?;
+        }
+        let selector = ArtifactSelector::new().the("doc/body".parse()?);
+
+        for owned in [false, true] {
+            // A fresh spill cache and node cache: every spilled block reads.
+            let cold = ArtifactTree::from_hash(tree.root().clone());
+            store.peak.store(0, Ordering::SeqCst);
+            let values: Vec<Value> = if owned {
+                cold.scan_owned(store.clone(), spill_cache(), selector.clone())
+                    .map_ok(|artifact| artifact.is)
+                    .try_collect()
+                    .await?
+            } else {
+                cold.scan(store.clone(), spill_cache(), selector.clone())
+                    .map_ok(|view| view.value())
+                    .try_collect::<Vec<_>>()
+                    .await?
+                    .into_iter()
+                    .collect::<Result<Vec<Value>, _>>()?
+            };
+            let mut values: Vec<String> = values
+                .into_iter()
+                .map(|value| format!("{value:?}"))
+                .collect();
+            values.sort();
+            let mut expected: Vec<String> =
+                facts.iter().map(|fact| format!("{:?}", fact.is)).collect();
+            expected.sort();
+            assert_eq!(values, expected, "every spilled value comes out whole");
+            let peak = store.peak.load(Ordering::SeqCst);
+            assert!(
+                peak > 1,
+                "the scan (owned: {owned}) must fetch spilled blocks together, \
+                 but only {peak} read was ever in flight"
+            );
+        }
+        Ok(())
+    }
 
     /// The spill cache is bounded by TOTAL BYTES: inserting past the budget
     /// evicts the oldest blocks, and a block larger than the whole budget is

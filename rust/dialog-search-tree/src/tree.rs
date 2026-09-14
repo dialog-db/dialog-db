@@ -22,6 +22,10 @@ use crate::{
     SearchResult, TreeDifference, TreeWalker, Value, into_owned,
 };
 
+/// A node on a range estimate's edge path, with the range's bound on each
+/// side it cuts through (`None` where the range runs past the node's edge).
+type Cut<'a> = (Blake3Hash, Option<&'a [u8]>, Option<&'a [u8]>);
+
 /// A key-value store backed by a ranked prolly tree with content-addressed
 /// storage.
 ///
@@ -226,24 +230,19 @@ where
     }
 
     /// An advisory upper-bound estimate of how many entries fall in the key
-    /// range `[lower, upper)`, read from the root path alone.
+    /// range `[lower, upper)`, read from the range's two edge paths.
     ///
-    /// Descends while the range lies within a single child: a node whose
-    /// spanning-children count is one says nothing about the range (every
-    /// range inside that child would report the child's whole subtree, so
-    /// two very different ranges would compare equal — near a height
-    /// boundary the root routinely has few children and every range falls
-    /// into one of them). The estimate is taken at the first level where
-    /// the range spans siblings, via
-    /// [`range_scale`](crate::node::archive::ArchivedIndex::range_scale);
-    /// a leaf reports its own entry count. At most one cached block per
-    /// tree level is read. Returns `None` for an empty tree.
+    /// Children the range covers whole contribute their
+    /// [`Scale`](crate::Scale) without being read; the child holding each
+    /// edge of the range is descended, so a range narrower than a child
+    /// is never rounded up to that child (a point range in one leaf counts
+    /// as one). At most two blocks per level are read, and they are the
+    /// blocks a scan of the range reads first and last anyway; a leaf is
+    /// counted exactly. Returns `None` for an empty tree.
     ///
-    /// The estimate is a [`Scale`](crate::Scale) upper bound and is
-    /// edge-inflated: a range narrower than one child at the measuring
-    /// level counts that whole child's subtree. It answers "is this range
-    /// large or small" cheaply, not "exactly how many", which is what a
-    /// planner comparing scan sizes needs.
+    /// Interior scales are estimates, so the whole is an upper bound, not
+    /// an exact count: it answers "is this range large or small" for a
+    /// planner comparing scan sizes.
     pub async fn range_estimate<Backend>(
         &self,
         lower: &[u8],
@@ -258,22 +257,53 @@ where
             return Ok(None);
         }
         let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
-        let mut hash = self.root.clone();
-        loop {
+        // Each pending node is bounded on the sides the range cuts through
+        // it: `None` on a side means the range runs past that side, so the
+        // node's whole extent on it counts.
+        let mut pending: Vec<Cut<'_>> = vec![(self.root.clone(), Some(lower), Some(upper))];
+        let mut total = 0u64;
+        while let Some((hash, lower, upper)) = pending.pop() {
             let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
             let index = match node.as_index() {
                 Ok(index) => index,
-                // A leaf holds every entry the range narrowed down to;
-                // the whole-node scale is its count.
-                Err(_) => return Ok(Some(node.scale().estimate())),
+                Err(_) => {
+                    let segment = node.as_segment()?;
+                    let mut keys = segment.keys::<Key>()?;
+                    while let Some((_, key)) = keys.next_key()? {
+                        if upper.is_some_and(|upper| key >= upper) {
+                            break;
+                        }
+                        if lower.is_none_or(|lower| key >= lower) {
+                            total += 1;
+                        }
+                    }
+                    continue;
+                }
             };
-            let children = index.children_spanning(lower, upper)?;
-            if children.len() == 1 {
-                hash = index.hash_at(children.start)?.clone();
+            let start = index.route(lower.unwrap_or(&[]))?;
+            let end = match upper {
+                Some(upper) => index.children_spanning(lower.unwrap_or(&[]), upper)?.end,
+                None => index.len(),
+            };
+            if end <= start {
                 continue;
             }
-            return Ok(Some(index.range_scale(lower, upper)?.estimate()));
+            // Whole children between the edges count by scale; the edge
+            // children carry the cut on their side down a level. A single
+            // spanning child carries both cuts.
+            for at in start..end {
+                let first = at == start;
+                let last = at + 1 == end;
+                let cut_lower = if first { lower } else { None };
+                let cut_upper = if last { upper } else { None };
+                if cut_lower.is_none() && cut_upper.is_none() {
+                    total = total.saturating_add(index.scale_at(at)?.estimate());
+                } else {
+                    pending.push((index.hash_at(at)?.clone(), cut_lower, cut_upper));
+                }
+            }
         }
+        Ok(Some(total))
     }
 
     /// Returns an async stream over entries with keys within the provided
@@ -676,6 +706,29 @@ mod tests {
             narrow.saturating_mul(4) < full,
             "a 20-entry range must not estimate like a {COUNT}-entry one: narrow={narrow} full={full}"
         );
+
+        // A range that narrows into one leaf is counted from the leaf, not
+        // rounded up to it: one key estimates as one, none as none.
+        let point = tree
+            .range_estimate(&1000u32.to_be_bytes(), &1001u32.to_be_bytes(), &storage)
+            .await?
+            .expect("a populated tree estimates");
+        assert_eq!(point, 1, "a point range counts its one entry");
+        let absent = tree
+            .range_estimate(&COUNT.to_be_bytes(), &(COUNT + 1).to_be_bytes(), &storage)
+            .await?
+            .expect("a populated tree estimates");
+        assert_eq!(absent, 0, "an empty range in a leaf counts nothing");
+        // A range that straddles a leaf boundary is counted from both edge
+        // leaves, not rounded up to them: forty keys count as forty wherever
+        // the boundaries fall.
+        for start in (0..COUNT - 40).step_by(97) {
+            let straddling = tree
+                .range_estimate(&start.to_be_bytes(), &(start + 40).to_be_bytes(), &storage)
+                .await?
+                .expect("a populated tree estimates");
+            assert_eq!(straddling, 40, "forty keys from {start} count as forty");
+        }
         Ok(())
     }
 

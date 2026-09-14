@@ -1,6 +1,6 @@
 use dialog_capability::Command;
 use futures_util::Stream;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -132,8 +132,35 @@ const PENDING_LIMIT: usize = 1024;
 #[derive(Debug)]
 struct QueueState {
     budget: FetchBudget,
-    likely: VecDeque<ArtifactSelector<Constrained>>,
-    maybe: VecDeque<ArtifactSelector<Constrained>>,
+    likely: Rank,
+    maybe: Rank,
+}
+
+/// One rank's pending hints, in arrival order, with one entry per
+/// selector: a hint for a range already pending is not a second job.
+#[derive(Debug, Default)]
+struct Rank {
+    order: VecDeque<ArtifactSelector<Constrained>>,
+    pending: HashSet<ArtifactSelector<Constrained>>,
+}
+
+impl Rank {
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Enqueue unless the selector is already pending.
+    fn push(&mut self, selector: ArtifactSelector<Constrained>) {
+        if self.pending.insert(selector.clone()) {
+            self.order.push_back(selector);
+        }
+    }
+
+    fn pop(&mut self) -> Option<ArtifactSelector<Constrained>> {
+        let selector = self.order.pop_front()?;
+        self.pending.remove(&selector);
+        Some(selector)
+    }
 }
 
 /// The env's ambient queue of speculative preloads: pure data (ranked
@@ -163,8 +190,8 @@ impl PreloadQueue {
         Self {
             state: parking_lot::Mutex::new(QueueState {
                 budget,
-                likely: VecDeque::new(),
-                maybe: VecDeque::new(),
+                likely: Rank::default(),
+                maybe: Rank::default(),
             }),
         }
     }
@@ -188,8 +215,9 @@ impl PreloadQueue {
     }
 
     /// Enqueue a hint, returning whether anyone is listening. With a
-    /// zero budget nothing enqueues; past [`PENDING_LIMIT`] the rank's
-    /// oldest pending hint is dropped.
+    /// zero budget nothing enqueues; a selector already pending in the
+    /// rank is not enqueued twice (the same range is one job); past
+    /// [`PENDING_LIMIT`] the rank's oldest pending hint is dropped.
     pub fn preload(&self, request: PreloadRequest) -> bool {
         let mut state = self.state.lock();
         if state.budget.likely == 0 && state.budget.maybe == 0 {
@@ -200,9 +228,9 @@ impl PreloadQueue {
             Likelihood::Maybe => &mut state.maybe,
         };
         if rank.len() >= PENDING_LIMIT {
-            rank.pop_front();
+            rank.pop();
         }
-        rank.push_back(request.selector);
+        rank.push(request.selector);
         true
     }
 
@@ -220,10 +248,10 @@ impl PreloadQueue {
         maybe_spare: bool,
     ) -> Option<(ArtifactSelector<Constrained>, Likelihood)> {
         let mut state = self.state.lock();
-        if likely_spare && let Some(selector) = state.likely.pop_front() {
+        if likely_spare && let Some(selector) = state.likely.pop() {
             return Some((selector, Likelihood::Likely));
         }
-        if maybe_spare && let Some(selector) = state.maybe.pop_front() {
+        if maybe_spare && let Some(selector) = state.maybe.pop() {
             return Some((selector, Likelihood::Maybe));
         }
         None
@@ -283,6 +311,31 @@ mod tests {
         assert_eq!(queue.pending(), 1);
     }
 
+    /// A selector already pending in a rank is one job, however many
+    /// times it is hinted: the merge path hints its ranges per incoming
+    /// row and probe pipelining hints per buffered row, and neither
+    /// should turn into a pile of identical traversals.
+    #[dialog_common::test]
+    fn it_keeps_one_pending_hint_per_selector() {
+        let queue = PreloadQueue::default();
+        for _ in 0..5 {
+            assert!(queue.preload(hint("a/b", Likelihood::Likely)));
+        }
+        assert!(queue.preload(hint("a/b", Likelihood::Maybe)));
+        assert_eq!(queue.pending(), 2, "one per selector per rank");
+
+        let (first, _) = queue.next(true, false).expect("the likely hint");
+        assert_eq!(first, selector("a/b"));
+        assert!(
+            queue.next(true, false).is_none(),
+            "the duplicates never became jobs"
+        );
+        // Once drained the selector may be hinted again: the queue knows
+        // what is pending, not what has run.
+        assert!(queue.preload(hint("a/b", Likelihood::Likely)));
+        assert_eq!(queue.pending(), 2);
+    }
+
     /// Past the pending limit the rank's oldest hint drops: hints
     /// describe what a running evaluation is about to read, so the
     /// freshest are the ones worth keeping.
@@ -290,14 +343,14 @@ mod tests {
     fn it_drops_the_oldest_hint_past_the_pending_limit() {
         let queue = PreloadQueue::default();
         assert!(queue.preload(hint("first/attr", Likelihood::Likely)));
-        for _ in 0..PENDING_LIMIT {
-            assert!(queue.preload(hint("later/attr", Likelihood::Likely)));
+        for index in 0..PENDING_LIMIT {
+            assert!(queue.preload(hint(&format!("later/attr{index}"), Likelihood::Likely)));
         }
         assert_eq!(queue.pending(), PENDING_LIMIT, "the rank stays bounded");
         let (front, _) = queue.next(true, true).expect("hints pending");
         assert_eq!(
-            format!("{front:?}"),
-            format!("{:?}", selector("later/attr")),
+            front,
+            selector("later/attr0"),
             "the oldest hint was the one dropped"
         );
     }
