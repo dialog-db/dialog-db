@@ -186,11 +186,16 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
 /// with 24 spilled values and 4 blobs the run is at least 28; overlapped
 /// shipments leave only the push's inherent head (the upstream resolve
 /// and the differential's first reads).
+// Native only: built on `Storage::temp()` so the real filesystem backend
+// is exercised, not the in-memory one. See the note on
+// `it_ships_blobs_on_push_and_hydrates_on_read` for why the gate is on
+// the feature rather than the target.
+#[cfg(not(feature = "web-integration-tests"))]
 #[dialog_common::test]
 async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -> Result<()> {
     use crate::helpers::Counting;
 
-    let storage = Storage::volatile();
+    let storage = Storage::temp();
     let profile = Profile::open(unique_name("ship-overlap"))
         .perform(&storage)
         .await?;
@@ -247,7 +252,7 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
         let payload: Vec<u8> = (0..20_000u32)
             .map(|j| ((j + i as u32) % 199) as u8)
             .collect();
-        let chunks: Vec<Result<Vec<u8>, _>> =
+        let chunks: Vec<Result<Vec<u8>, BlobError>> =
             payload.chunks(8192).map(|c| Ok(c.to_vec())).collect();
         Blob::import(stream::iter(chunks))
             .write((&branch).into())
