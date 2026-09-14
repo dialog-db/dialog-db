@@ -169,9 +169,3 @@ pub use dialog_macros::test;
 /// See the macro documentation for details.
 #[cfg(feature = "helpers")]
 pub use dialog_macros::provider;
-
-/// TEMPORARY (#492): report a traversal level's width.
-#[cfg(target_arch = "wasm32")]
-pub fn trace_level(width: usize) {
-    web_sys::console::log_1(&web_sys::wasm_bindgen::JsValue::from_str(&format!("[level {width}]")));
-}

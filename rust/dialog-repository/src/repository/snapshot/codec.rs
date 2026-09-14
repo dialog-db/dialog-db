@@ -139,12 +139,11 @@ where
         version: 1,
         roots: roots.iter().map(|hash| cid(hash, CODEC_NODE)).collect(),
     };
-    let header = serde_ipld_dagcbor::to_vec(&header)
-        .map_err(|error| {
-            SnapshotError::Storage(dialog_storage::DialogStorageError::Storage(
-                error.to_string(),
-            ))
-        })?;
+    let header = serde_ipld_dagcbor::to_vec(&header).map_err(|error| {
+        SnapshotError::Storage(dialog_storage::DialogStorageError::Storage(
+            error.to_string(),
+        ))
+    })?;
 
     let mut out = Vec::new();
     put_varint(&mut out, header.len() as u64);
@@ -154,7 +153,11 @@ where
     while let Some(item) = items.next().await {
         match item? {
             Item::Block(block) => {
-                section(&mut out, &cid(&block.digest, CODEC_NODE), block.content.as_ref());
+                section(
+                    &mut out,
+                    &cid(&block.digest, CODEC_NODE),
+                    block.content.as_ref(),
+                );
             }
             Item::Blob {
                 digest, mut chunks, ..
@@ -225,18 +228,19 @@ fn take_varint(bytes: &[u8], at: &mut usize) -> Result<u64, CodecError> {
 /// still says whether a section is a block or a blob, and its multihash
 /// code is checked as a cheap guard against reading a CAR this format did
 /// not write.
-pub fn decode(bytes: &[u8]) -> Result<Vec<Result<Item, SnapshotError>>, CodecError> {
+pub fn decode(bytes: &[u8]) -> Result<Vec<Decoded>, CodecError> {
     decode_with_roots(bytes).map(|(items, _)| items)
 }
+
+/// One decoded section, as the import consumes it.
+pub type Decoded = Result<Item, SnapshotError>;
 
 /// [`decode`], also returning what the CAR names as its roots.
 ///
 /// A snapshot's root is the revision's tree, so a caller importing the
 /// content needs it to say WHAT was imported -- without it the blocks
 /// land in the archive reachable from nothing.
-pub fn decode_with_roots(
-    bytes: &[u8],
-) -> Result<(Vec<Result<Item, SnapshotError>>, Vec<Blake3Hash>), CodecError> {
+pub fn decode_with_roots(bytes: &[u8]) -> Result<(Vec<Decoded>, Vec<Blake3Hash>), CodecError> {
     let mut at = 0usize;
 
     let header_len = take_varint(bytes, &mut at)? as usize;

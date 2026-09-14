@@ -1,6 +1,8 @@
 use std::any::type_name;
 use std::collections::BTreeMap;
+use std::future::poll_fn;
 use std::sync::Arc;
+use std::task::Poll;
 
 use dialog_capability::{Command, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -62,23 +64,22 @@ pub async fn fill_account_branch<Env>(
     env: &Env,
 ) -> anyhow::Result<usize>
 where
-    Env: dialog_capability::Provider<dialog_effects::archive::Get>
-        + dialog_capability::Provider<dialog_effects::archive::Put>
-        + dialog_capability::Provider<dialog_effects::memory::Resolve>
-        + dialog_capability::Provider<dialog_effects::memory::Publish>
-        + dialog_capability::Provider<dialog_effects::authority::Identify>
-        + dialog_capability::Provider<dialog_effects::authority::Attest>
-        + dialog_capability::Provider<dialog_effects::archive::Import>
-        + dialog_capability::Provider<dialog_effects::blob::Write>
-        + dialog_capability::Provider<crate::Hydrate>
-        + dialog_capability::Provider<
-            dialog_capability::Fork<dialog_network::Network, dialog_effects::memory::Resolve>,
-        >
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Publish>
+        + Provider<Identify>
+        + Provider<Attest>
+        + Provider<Import>
+        + Provider<Write>
+        + Provider<crate::Hydrate>
+        + Provider<Fork<Network, Resolve>>
         + ConditionalSync
         + 'static,
 {
     use dialog_artifacts::{Artifact, Instruction, Value};
     use dialog_credentials::Ed25519Signer;
+    use dialog_ucan_core::subject::Subject;
     use dialog_varsig::Principal as _;
     use futures_util::stream;
 
@@ -91,7 +92,7 @@ where
         let delegation = dialog_ucan_core::DelegationBuilder::new()
             .issuer(dialog_credentials::Signer::from(space.clone()))
             .audience(&holder.did())
-            .subject(dialog_ucan_core::subject::Subject::Specific(space.did()))
+            .subject(Subject::Specific(space.did()))
             .command(vec!["storage".to_string()])
             .try_build()
             .await?;
@@ -121,6 +122,18 @@ where
     Ok(delegations)
 }
 
+#[cfg(test)]
+use dialog_capability::Fork;
+#[cfg(test)]
+use dialog_effects::archive::{Get, Import, Put};
+#[cfg(test)]
+use dialog_effects::authority::{Attest, Identify};
+#[cfg(test)]
+use dialog_effects::blob::Write;
+#[cfg(test)]
+use dialog_effects::memory::{Publish, Resolve};
+#[cfg(test)]
+use dialog_network::Network;
 /// The volatile space type test operators run over.
 #[cfg(test)]
 use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;
@@ -145,7 +158,6 @@ pub struct Counting<P> {
     inner: P,
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
     reads: Arc<Mutex<InFlight>>,
-    writes: Arc<Mutex<InFlight>>,
     forks: Arc<Mutex<InFlight>>,
 }
 
@@ -164,13 +176,13 @@ struct InFlight {
 /// caller gets a chance to run before the caller resumes.
 async fn yield_once() {
     let mut yielded = false;
-    std::future::poll_fn(move |context| {
+    poll_fn(move |context| {
         if yielded {
-            std::task::Poll::Ready(())
+            Poll::Ready(())
         } else {
             yielded = true;
             context.waker().wake_by_ref();
-            std::task::Poll::Pending
+            Poll::Pending
         }
     })
     .await
@@ -183,7 +195,6 @@ impl<P> Counting<P> {
             inner,
             counts: Arc::new(Mutex::new(BTreeMap::new())),
             reads: Arc::new(Mutex::new(InFlight::default())),
-            writes: Arc::new(Mutex::new(InFlight::default())),
             forks: Arc::new(Mutex::new(InFlight::default())),
         }
     }
@@ -195,14 +206,6 @@ impl<P> Counting<P> {
     /// issued, so over a remote archive each cost its own round trip.
     pub fn peak_block_reads_in_flight(&self) -> usize {
         self.reads.lock().peak
-    }
-
-    /// The most block WRITES ever in flight at once: the same measure as
-    /// [`peak_block_reads_in_flight`](Self::peak_block_reads_in_flight),
-    /// for the upload direction. The push is the control the download is
-    /// compared against, so its overlap has to be observable too.
-    pub fn peak_block_writes_in_flight(&self) -> usize {
-        self.writes.lock().peak
     }
 
     /// The most REMOTE fetches ever in flight at once: `Hydrate` (a block
@@ -250,7 +253,6 @@ impl<P> Counting<P> {
     pub fn reset(&self) {
         self.counts.lock().clear();
         *self.reads.lock() = InFlight::default();
-        *self.writes.lock() = InFlight::default();
         *self.forks.lock() = InFlight::default();
     }
 
@@ -288,8 +290,6 @@ where
             &self.forks
         } else if name.contains("archive::Get") {
             &self.reads
-        } else if name.contains("archive::Put") || name.contains("archive::Import") {
-            &self.writes
         } else {
             return self.inner.execute(input).await;
         };

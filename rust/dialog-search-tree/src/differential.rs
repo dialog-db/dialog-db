@@ -1422,10 +1422,16 @@ where
             });
         }
 
-        let mut source: SparseTree<'a, Key, Value, Backend> =
-            SparseTree::from_root(source_tree.root(), source_storage, missing.source).await?;
-        let mut target: SparseTree<'a, Key, Value, Backend> =
-            SparseTree::from_root(target_tree.root(), target_storage, missing.target).await?;
+        // The two roots are independent reads, so against a hydrating
+        // backend they cost one round trip together rather than one each.
+        let (mut source, mut target): (
+            SparseTree<'a, Key, Value, Backend>,
+            SparseTree<'a, Key, Value, Backend>,
+        ) = futures_util::future::try_join(
+            SparseTree::from_root(source_tree.root(), source_storage, missing.source),
+            SparseTree::from_root(target_tree.root(), target_storage, missing.target),
+        )
+        .await?;
 
         // Iteratively prune shared nodes and expand differing ones until a
         // fixed point: only differing leaf segments (and unique-range
@@ -2393,10 +2399,13 @@ mod tests {
     }
 
     /// The eager prefetch is a scheduling choice, not a semantic one: the
-    /// streamed changes are identical to the lazy walk's.
+    /// streamed changes are identical to the lazy walk's, and the sweep's
+    /// over-read at the margin stays small against what the lazy walk
+    /// reads anyway.
     #[dialog_common::test]
     async fn it_streams_the_same_changes_eagerly() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let backend = CountingBackend::new();
+        let mut storage = ContentAddressedStorage::new(backend.clone());
         let entries: Vec<(u32, Vec<u8>)> = (0..500u32).map(|i| (i, vec![i as u8])).collect();
         let base = build(entries, &mut storage).await?;
 
@@ -2418,7 +2427,9 @@ mod tests {
         let scope = [[0u8; 4]..=[0xFF; 4]];
         type Fingerprint = Vec<(bool, [u8; 4], Vec<u8>)>;
         let mut collected: Vec<Fingerprint> = Vec::new();
+        let mut reads: Vec<usize> = Vec::new();
         for prefetch in [crate::Prefetch::Lazy, crate::Prefetch::Eager] {
+            backend.reset();
             let stream =
                 base.differentiate_within_with(&modified, &scope, &storage, &storage, prefetch);
             futures_util::pin_mut!(stream);
@@ -2430,12 +2441,27 @@ mod tests {
                 });
             }
             collected.push(changes);
+            reads.push(backend.reads());
         }
 
         let eager = collected.pop().expect("eager run collected");
         let lazy = collected.pop().expect("lazy run collected");
         assert!(!lazy.is_empty(), "the fixture diverges");
         assert_eq!(eager, lazy, "eager and lazy walks must agree");
+
+        // The sweep may read a frontier block the lazy walk would have
+        // settled without reading (a shared node whose twin surfaces a
+        // pass later, a unique-range segment named by hash), but that is
+        // the margin of a level, not a multiple of the difference: the
+        // reads stay proportional to the difference, which is what keeps
+        // a partial replica partial.
+        let (lazy_reads, eager_reads) = (reads[0], reads[1]);
+        assert!(lazy_reads > 0, "the lazy walk reads the differing paths");
+        assert!(
+            eager_reads <= lazy_reads + lazy_reads / 2,
+            "the eager sweep must not amplify reads beyond the margin: \
+             {eager_reads} eager reads against {lazy_reads} lazy"
+        );
 
         Ok(())
     }
@@ -2536,10 +2562,10 @@ mod tests {
 
         max_in_flight.store(0, AtomicOrdering::Relaxed);
         TreeDifference::compute_within(&base, &tree, &storage, &storage, &scope).await?;
-        assert_eq!(
-            max_in_flight.load(AtomicOrdering::Relaxed),
-            1,
-            "the lazy comparison reads one block at a time"
+        assert!(
+            max_in_flight.load(AtomicOrdering::Relaxed) <= 2,
+            "the lazy comparison reads one block at a time past the two \
+             roots, which load together"
         );
 
         max_in_flight.store(0, AtomicOrdering::Relaxed);

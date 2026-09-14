@@ -3920,26 +3920,21 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
     Ok(())
 }
 
-/// #492: a download fetches its blocks ONE AT A TIME.
+/// #492: a download's block reads must overlap.
 ///
 /// The scenario is a space join: create a database, put facts in it, add
 /// a remote upstream, and materialize it with
 /// `pull().download().operational()`. Over a remote archive every block
 /// that misses locally is a network round trip, so the number that
 /// decides whether this takes a second or a minute is how many of those
-/// round trips are in flight AT ONCE — not how many there are.
+/// round trips are in flight AT ONCE, not how many there are.
 ///
 /// A read tally cannot see this: n serial reads and n overlapped reads
 /// count identically, which is why the neighbouring download tests bound
-/// the count and pass while the app crawls. This measures the overlap.
-///
-/// The download HAS a fan-out — `traverse` walks each tree level with
-/// `buffer_unordered(FETCH_CONCURRENCY)` — but it is upstream of a
-/// `try_stream!` generator that yields one node per poll, and
-/// `Download::perform` drains that generator with a `while let` that
-/// awaits each item before asking for the next. An `async_stream`
-/// generator only advances while polled, so the buffered reads never get
-/// to run ahead of the consumer: the fan-out is there and never fans out.
+/// the count and would pass while the app crawled. This measures the
+/// overlap, over bare S3: the download's level-order walk
+/// (`traverse`, `buffer_unordered(FETCH_CONCURRENCY)`) drained one item
+/// per poll by `Download::perform`, which is the shape the app runs.
 #[dialog_common::test]
 async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
     use crate::helpers::Counting;
@@ -4047,8 +4042,7 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
         peak > 1,
         "pull().download().operational() fetched {reads} blocks but never \
          had more than {peak} in flight at once, so each cost its own \
-         round trip. The fan-out in `traverse` is defeated by the \
-         one-item-per-poll drain in `Download::perform`.",
+         round trip.",
     );
 
     Ok(())
@@ -4056,19 +4050,11 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
 
 /// The same download, over a UCAN remote instead of bare S3.
 ///
-/// Its S3 sibling saturates the fan-out (peak 16 of FETCH_CONCURRENCY),
-/// so the download parallelizes correctly in isolation. The app does not:
-/// a HAR of a space join shows 21 block GETs that are NEVER more than one
-/// in flight, each preceded by its own `/ucan/` invocation, strictly
-/// alternating. The one structural difference between that run and the
-/// passing test is the UCAN remote — every block read must first redeem a
-/// permit at the access service.
-///
-/// Permits are keyed `(site, method, path)` and the path is the block
-/// digest, so per-block redemption is correct by design; 16 concurrent
-/// GETs simply need 16 concurrent redeems. If redemption serializes, the
-/// GETs inherit it and the fan-out above is defeated no matter how wide
-/// it is.
+/// Every block read over a UCAN remote first redeems a permit at the
+/// access service. Permits are keyed `(site, method, path)` and the path
+/// is the block digest, so per-block redemption is correct by design; 16
+/// concurrent GETs simply need 16 concurrent redeems, and this pins that
+/// redemption does not serialize them.
 #[dialog_common::test]
 async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Result<()> {
     use crate::helpers::Counting;
@@ -4167,45 +4153,29 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
         peak > 1,
         "over a UCAN remote the download fetched {reads} blocks but never \
          had more than {peak} in flight at once, so each cost its own \
-         round trip. Its bare-S3 sibling reaches 16, so the serialization \
-         is in permit redemption, not the download walk.",
+         round trip.",
     );
 
     Ok(())
 }
 
-/// #492: a download's block GETs are serial, while a push's PUTs of the
-/// same tree are concurrent.
+/// #492: the login path's remote fetches must overlap the way a push's
+/// uploads do.
 ///
-/// THE REPRODUCTION. A throttled HAR of a real space join measured, in
-/// one run, over one link, against one UCAN remote:
+/// A throttled HAR of a real space join measured, in one run, over one
+/// link, against one UCAN remote: PUT (push) 29 requests at peak 15 in
+/// flight; GET (pull) 20 requests at peak 1, in exact lockstep with their
+/// `/ucan` redeems. Both directions share the app, the browser, the link,
+/// the remote, the block `Flight` and the worker, so the push is the
+/// control: whatever serialized the pull was in the pull's own read shape.
+/// (It was the merge's integrate, resolving one change at a time; see
+/// `it_joins_an_account_from_a_seeded_device`.)
 ///
-/// - PUT (push/upload): 29 requests, peak 15 in flight.
-/// - GET (pull/download): 20 requests, peak 1 in flight, in exact
-///   lockstep (`/ucan` 2.0s -> GET 2.0s -> `/ucan` 2.0s -> ...).
-///
-/// Because both paths share the app, the browser, the link, the remote,
-/// the block `Flight`, and the single-threaded worker, none of those can
-/// be the cause: the push has all of them and still fans out. The
-/// difference is the shape of the consumer.
-///
-/// - `Upload::perform` feeds a FULLY MATERIALIZED wave into
-///   `.buffer_unordered(16).try_collect()`. `try_collect` is a TERMINAL
-///   consumer: it polls until everything finishes, so all 16 uploads stay
-///   in flight.
-/// - The download's fan-out is `buffered(16)` inside `try_stream!`
-///   (`traversal.rs`), wrapped by a second `try_stream!` (the snapshot
-///   export), drained by `Download::perform`'s
-///   `while let Some(item) = items.next().await`. An `async_stream`
-///   generator SUSPENDS at every `yield`, so the reads only advance while
-///   the consumer polls; the fan-out is parked after each item and never
-///   accumulates.
-///
-/// This asserts the contrast directly, in one test, so the fix is pinned
-/// by the same comparison that found it: push the tree (measuring PUT
-/// overlap), then download it into a cold replica (measuring GET
-/// overlap). It must run on wasm as well as native -- the browser is
-/// where the symptom was observed.
+/// This asserts the contrast directly, in one test: push the tree
+/// (measuring PUT overlap), then pull it into a cold replica that holds
+/// state of its own (measuring the overlap of the remote fetches). It
+/// runs on wasm as well as native, the browser being where the symptom
+/// was observed.
 #[dialog_common::test]
 async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -> Result<()> {
     use crate::helpers::Counting;
@@ -4423,11 +4393,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
         pull_peak > 1,
         "the push fanned out to peak {push_peak} over {writes} uploads, but \
          the download of the SAME tree over the SAME remote reached only \
-         peak {pull_peak} over {reads} reads. Same app, link, remote, \
-         flight and executor -- so the cause is the consumer shape: \
-         `Upload::perform` drains a materialized wave with a terminal \
-         `try_collect`, while the download's `buffered(16)` sits inside \
-         `try_stream!` generators that suspend at every `yield`."
+         peak {pull_peak} over {reads} reads."
     );
 
     Ok(())
@@ -4466,6 +4432,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
 async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Result<()> {
     use crate::helpers::Counting;
     use dialog_credentials::Ed25519Signer;
+    use dialog_ucan_core::subject::Subject;
 
     let (operator, profile) = test_operator_with_profile().await;
     let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
@@ -4507,9 +4474,7 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
         let delegation = dialog_ucan_core::DelegationBuilder::new()
             .issuer(dialog_credentials::Signer::from(space.clone()))
             .audience(&dialog_varsig::Principal::did(&holder))
-            .subject(dialog_ucan_core::subject::Subject::Specific(
-                dialog_varsig::Principal::did(&space),
-            ))
+            .subject(Subject::Specific(dialog_varsig::Principal::did(&space)))
             .command(vec!["storage".to_string()])
             .try_build()
             .await?;
@@ -4671,18 +4636,17 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
 /// out the single-threaded-wasm theory the earlier passes chased.
 #[dialog_common::test]
 async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result<()> {
-    use crate::helpers::Counting;
+    use crate::helpers::{Counting, fill_account_branch};
     use crate::repository::snapshot::codec;
+    use ruzstd::decoding::StreamingDecoder;
+    use std::io;
 
     // The fixture is a real CAR captured from a running tonk profile,
     // stored zstd-compressed: 820 KiB of tree becomes 54. `ruzstd` is
     // pure Rust, so it decompresses in the browser as well as natively.
     let compressed = include_bytes!("../../../tests/fixtures/profile.car.zst");
     let mut snapshot = Vec::new();
-    std::io::copy(
-        &mut ruzstd::decoding::StreamingDecoder::new(&compressed[..])?,
-        &mut snapshot,
-    )?;
+    io::copy(&mut StreamingDecoder::new(&compressed[..])?, &mut snapshot)?;
     let (items, roots) = codec::decode_with_roots(&snapshot)?;
     let blobs = items
         .iter()
@@ -4696,8 +4660,8 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
     // nothing and the download that follows finds the tree already there.
     let device_compressed = include_bytes!("../../../tests/fixtures/device.car.zst");
     let mut device_snapshot = Vec::new();
-    std::io::copy(
-        &mut ruzstd::decoding::StreamingDecoder::new(&device_compressed[..])?,
+    io::copy(
+        &mut StreamingDecoder::new(&device_compressed[..])?,
         &mut device_snapshot,
     )?;
     let device_items = codec::decode(&device_snapshot)?;
@@ -4759,7 +4723,7 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
         .perform(&operator)
         .await?;
     println!("IMPORTED {imported:?}");
-    let delegations = crate::helpers::fill_account_branch(&account, 2, &operator).await?;
+    let delegations = fill_account_branch(&account, 2, &operator).await?;
 
     // The push is the control: same tree, same remote, other direction.
     let push_env = Counting::new(operator.clone());
@@ -4802,7 +4766,7 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
         .perform(&device_operator)
         .await?;
     println!("DEVICE IMPORTED {device_imported:?}");
-    crate::helpers::fill_account_branch(&device, 1, &device_operator).await?;
+    fill_account_branch(&device, 1, &device_operator).await?;
 
     // Sign in: point the seeded branch at the account and pull.
     let device_remote = device_repo

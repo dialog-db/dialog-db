@@ -192,18 +192,8 @@ where
 
             while !frontier.is_empty() {
                 let level = std::mem::take(&mut frontier);
-                // TEMPORARY (#492): how wide is each level? `buffered(16)`
-                // can only batch what a level actually holds.
-                #[cfg(target_arch = "wasm32")]
-                dialog_common::trace_level(level.len());
                 let mut reads = futures_util::stream::iter(level.into_iter().map(
                     |hash| async move {
-                        // TEMPORARY (#492): count reads as they are POLLED.
-                        // `buffered(16)` should poll 16 before the first
-                        // completes; if the trace shows them one at a time,
-                        // this says whether the walk even offered 16.
-                        #[cfg(target_arch = "wasm32")]
-                        dialog_common::trace_level(usize::MAX);
                         // `retrieve` verifies stored bytes against the
                         // hash it was asked for, so `None` here is
                         // genuinely "not stored" -- a corrupt block
@@ -212,13 +202,7 @@ where
                         (hash, bytes)
                     },
                 ))
-                // `buffered`, not `buffer_unordered`: the whole level's
-                // reads go in flight together, but a node that lands early
-                // still waits its turn, so the walk yields in level order.
-                // The stream stays streaming — the first node is yielded
-                // as soon as IT is ready, never after the level's slowest
-                // — while the reads behind it keep running.
-                .buffered(FETCH_CONCURRENCY);
+                .buffer_unordered(FETCH_CONCURRENCY);
 
                 let mut next = Vec::new();
                 while let Some((hash, bytes)) = reads.next().await {
@@ -623,14 +607,13 @@ mod tests {
     /// The per-level fan-out must survive a consumer that takes ONE item
     /// per poll.
     ///
-    /// That is the service worker's discipline and where #492 bites.
-    /// `buffered` keeps its futures inside whatever task polls it, and a
-    /// `yield` inside this generator suspends the generator until the
-    /// consumer returns — so if the level's remaining reads advance only
-    /// while the generator runs, a one-at-a-time consumer collapses the
-    /// level into one round trip per node. A reactor-backed runtime hides
-    /// this (sockets progress regardless of who polls), which is exactly
-    /// why it has to be ASSERTED rather than eyeballed on native.
+    /// The level's reads live inside this generator, and the generator
+    /// only runs while its consumer polls it. A consumer that awaits each
+    /// visit before asking for the next is the common shape (a download
+    /// draining the walk), so the fan-out has to hold under exactly that
+    /// discipline, and it has to be asserted: a reactor-backed runtime
+    /// would carry the sockets regardless of who polls and hide a walk
+    /// that had quietly gone one read at a time.
     ///
     /// `ObservingBackend` yields once inside every read, so an overlap
     /// here means the reads genuinely coexisted rather than merely
@@ -667,21 +650,16 @@ mod tests {
         Ok(())
     }
 
-    /// The same overlap, but observed THROUGH A NESTED GENERATOR — the
-    /// shape the download actually has.
+    /// The same overlap, observed THROUGH A NESTED GENERATOR, the shape
+    /// the download actually has.
     ///
     /// `snapshot.rs` wraps this walk in its own `try_stream!`: the outer
     /// generator drains `traverse` with a `while let` and yields each
-    /// block onward. This codebase already documents what that costs
-    /// (dialog-db-81, in the scoped-flight commit): "nested generators
-    /// poll only their current await chain". A fan-out living inside the
-    /// inner generator therefore stops advancing whenever the OUTER
-    /// generator is suspended at its own yield — which, under a consumer
-    /// that takes one item per poll, is most of the time.
-    ///
-    /// The direct-consumer sibling of this test passes, so if this one
-    /// reports a lower peak, the nesting is the serializer and the
-    /// download's problem is structural rather than a missing knob.
+    /// block onward, so the level's reads sit two generators deep under a
+    /// one-item-per-poll consumer. The direct-consumer sibling pins the
+    /// fan-out itself; this one pins that relaying it does not lose it.
+    /// (The #492 hunt once suspected exactly this nesting; it was
+    /// measured innocent, and the pin keeps it that way.)
     #[dialog_common::test]
     async fn it_overlaps_a_level_through_a_nested_generator() -> Result<()> {
         use crate::helpers::ObservingBackend;
@@ -701,10 +679,14 @@ mod tests {
                 yield visit;
             }
         };
-        let relayed: std::pin::Pin<
-            Box<dyn futures_core::Stream<Item = Result<Visit<[u8; 5], Vec<u8>>, crate::DialogSearchTreeError>>>,
-        > = Box::pin(relayed);
-        futures_util::pin_mut!(relayed);
+        type Relayed = std::pin::Pin<
+            Box<
+                dyn futures_core::Stream<
+                        Item = Result<Visit<[u8; 5], Vec<u8>>, crate::DialogSearchTreeError>,
+                    >,
+            >,
+        >;
+        let mut relayed: Relayed = Box::pin(relayed);
 
         let mut seen = 0usize;
         while let Some(visit) = relayed.next().await {
@@ -719,9 +701,7 @@ mod tests {
         assert!(
             peak > 1,
             "a level's reads must still overlap when the walk is relayed \
-             through an outer generator: peak was {peak} over {seen} nodes. \
-             The unnested sibling of this test overlaps, so the nesting is \
-             what serializes the download.",
+             through an outer generator: peak was {peak} over {seen} nodes.",
         );
 
         Ok(())

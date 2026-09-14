@@ -13,65 +13,6 @@ use crate::S3Error;
 use crate::flight::Flight;
 use crate::s3::{S3, S3Invocation};
 
-/// TEMPORARY (#492): a serial number per traced request, so a start can
-/// be matched to its end in an interleaved log.
-fn request_tag() -> usize {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-/// TEMPORARY (#492): print one line per request boundary.
-///
-/// The ORDER of these lines is the measurement. `start 0 / end 0 / start
-/// 1 / end 1` is a serial chain: each request was awaited before the next
-/// was issued, so each cost its own round trip. `start 0 / start 1 / ...
-/// / end 0 / end 1` means they were genuinely in flight together. Unlike
-/// a counter this cannot be inflated by joiners on a shared flight, and
-/// it reads the same on native and in a service worker.
-/// TEMPORARY (#492): the Rust call site that asked for the current read.
-///
-/// The socket probe sees every fetch but not who asked, and four fixes
-/// aimed at plausible loops have now failed to move the serial run. A
-/// caller sets this before awaiting a read; the probe prints it.
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    pub static READ_SITE: std::cell::RefCell<&'static str> = const { std::cell::RefCell::new("?") };
-}
-
-/// Label the reads issued while the returned guard is alive.
-#[cfg(target_arch = "wasm32")]
-pub fn label_reads(site: &'static str) {
-    READ_SITE.with(|s| *s.borrow_mut() = site);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn label_reads(_site: &'static str) {}
-
-/// TEMPORARY (#492): mark a phase boundary in the request trace.
-///
-/// The socket probe sees every fetch but not who asked for it, and the
-/// serial run starts at request #0 -- before the download's tree walk
-/// exists. Marking boundaries is what says which phase owns it.
-pub fn trace_phase(phase: &str) {
-    let line = format!("[phase {phase}]");
-    #[cfg(target_arch = "wasm32")]
-    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&line));
-    #[cfg(not(target_arch = "wasm32"))]
-    eprintln!("{line}");
-}
-
-fn trace_request(phase: &str, tag: usize, block: &str) {
-    let line = format!("[s3 {phase} #{tag}] {block}");
-    #[cfg(target_arch = "wasm32")]
-    {
-        // The worker has no stderr; its console is where a probe lands.
-        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&line));
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    eprintln!("{line}");
-}
-
 /// In-flight block GETs, joined by presigned URL.
 ///
 /// A block is immutable content, so every caller holding the same
@@ -128,41 +69,9 @@ impl Provider<S3Invocation<Get>> for S3 {
         let permit = input.permit;
         let (status, bytes) = block_gets()
             .join(key, move || async move {
-                // TEMPORARY (#492): bracket the ACTUAL request so the log
-                // says whether requests interleave. Serial reads print
-                // start/end/start/end; overlapping ones print
-                // start/start/.../end/end. This sits at the last point
-                // before the socket, so unlike a counter over effect
-                // dispatches it cannot be inflated by joiners on a shared
-                // flight or by work the transport later serializes.
-                let tag = request_tag();
-                let block = permit
-                    .url
-                    .path()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(12)
-                    .collect::<String>();
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let site = READ_SITE.with(|s| *s.borrow());
-                    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-                        "[site #{tag}] {site}"
-                    )));
-                }
-                trace_request("start", tag, &block);
-                let response = match permit.send().await {
-                    Ok(response) => response,
-                    Err(error) => {
-                        trace_request("fail", tag, &block);
-                        return Err(error);
-                    }
-                };
+                let response = permit.send().await?;
                 let status = response.status().as_u16();
                 let bytes = response.bytes().await.map_err(S3Error::from)?;
-                trace_request("end", tag, &block);
                 Ok((status, Arc::new(bytes.to_vec())))
             })
             .await?;

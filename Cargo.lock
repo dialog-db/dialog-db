@@ -1486,9 +1486,7 @@ dependencies = [
  "tower",
  "tower-http",
  "url",
- "wasm-bindgen",
  "wasm-bindgen-test",
- "web-sys",
 ]
 
 [[package]]

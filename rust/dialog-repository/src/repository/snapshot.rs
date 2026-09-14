@@ -673,7 +673,6 @@ impl SnapshotExport {
                     tree.traverse_available(&storage),
                 ),
             };
-            dialog_remote_s3::label_reads("traverse");
             futures_util::pin_mut!(visits);
             while let Some(visit) = visits.next().await {
                 let node = match visit? {
@@ -739,7 +738,6 @@ impl SnapshotExport {
             // as they complete — against a downloading reach this
             // overlaps the remote round-trips instead of paying them one
             // after another.
-            dialog_remote_s3::label_reads("spills");
             let mut spill_reads = stream::iter(spills.into_iter().map(
                 |reference| {
                     let storage = &storage;
@@ -770,7 +768,6 @@ impl SnapshotExport {
             // yield as they complete. `None` from a future means the blob
             // is unavailable — no index record, or no bytes anywhere the
             // reach extends — which sparse tolerates and complete refuses.
-            dialog_remote_s3::label_reads("blobs");
             let mut blob_reads = stream::iter(blobs.into_iter().map(|digest| {
                 let tree = &tree;
                 let index = &index;

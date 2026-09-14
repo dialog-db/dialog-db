@@ -27,6 +27,7 @@ use std::cmp::Ordering;
 use std::pin::Pin;
 
 use futures_util::StreamExt;
+use futures_util::future::try_join_all;
 use futures_util::stream::Peekable;
 
 use dialog_common::ConditionalSync;
@@ -284,10 +285,11 @@ where
             return;
         }
 
-        let mut cursors = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            cursors.push(Cursor::new(input, &key).await?);
-        }
+        // Every cursor's first group is independent work, and over a cold
+        // replica each one's first read is a round trip: open them together
+        // rather than paying the round trips one input after another.
+        let mut cursors: Vec<Cursor<S, Key>> =
+            try_join_all(inputs.into_iter().map(|input| Cursor::new(input, &key))).await?;
 
         // Lockstep intersection: repeatedly bring every cursor up to the
         // current maximum key. When they all agree, that key is in every
@@ -315,10 +317,14 @@ where
             }
             let max = max.expect("non-empty, non-exhausted cursors have a max");
 
-            // Pull every cursor up to max.
-            for cursor in &mut cursors {
-                cursor.advance_to(&key, &max).await?;
-            }
+            // Pull every cursor up to max, together: each advance walks its
+            // own range, so the reads they need overlap instead of queuing.
+            try_join_all(
+                cursors
+                    .iter_mut()
+                    .map(|cursor| cursor.advance_to(&key, &max)),
+            )
+            .await?;
 
             // All at max means the key is in every input. If any overshot,
             // restart the round with the new maximum.
@@ -327,10 +333,13 @@ where
                     yield combined;
                 }
                 // Step every cursor to its next group so the next round makes
-                // progress.
-                for cursor in &mut cursors {
-                    cursor.load_next_group(&key).await?;
-                }
+                // progress, again together.
+                try_join_all(
+                    cursors
+                        .iter_mut()
+                        .map(|cursor| cursor.load_next_group(&key)),
+                )
+                .await?;
             }
         }
     }
@@ -735,5 +744,59 @@ mod tests {
         // Only l1 (x=100) unifies with r (x=100); l2 (x=999) is filtered.
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].value_of("x").and_then(as_int), Some(100));
+    }
+    /// Opening the cursors must read every input's first group together:
+    /// each input yields its first row only after parking once, and a
+    /// gauge counts how many inputs are parked at the same time. Opened
+    /// one after another the gauge never passes one, which over a cold
+    /// replica is one round trip per input before the merge can start.
+    #[dialog_common::test]
+    async fn it_opens_every_cursor_concurrently() {
+        use std::future::poll_fn;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        let parked = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let gauged = |rows: Vec<Match>| {
+            let parked = parked.clone();
+            let peak = peak.clone();
+            crate::try_stream! {
+                for row in rows {
+                    let now = parked.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    let mut yielded = false;
+                    poll_fn(|context| {
+                        if yielded {
+                            Poll::Ready(())
+                        } else {
+                            yielded = true;
+                            context.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                    parked.fetch_sub(1, Ordering::SeqCst);
+                    yield row;
+                }
+            }
+        };
+        let inputs = vec![
+            gauged(vec![nrow(1, "a", 1), nrow(2, "a", 2)]),
+            gauged(vec![nrow(1, "b", 1), nrow(2, "b", 2)]),
+            gauged(vec![nrow(1, "c", 1), nrow(2, "c", 2)]),
+        ];
+        let got = multi_merge_join(inputs, key)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(normalize_keys(got), vec![1, 2]);
+        assert!(
+            peak.load(Ordering::SeqCst) > 1,
+            "the cursors must open together: at most {} input was ever \
+             parked on its first read at once",
+            peak.load(Ordering::SeqCst)
+        );
     }
 }
