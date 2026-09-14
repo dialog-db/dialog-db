@@ -702,6 +702,115 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
 // removing the test it launches, and the wrapper then fails finding
 // nothing to run.
 #[cfg(not(feature = "web-integration-tests"))]
+/// The push ships what its nodes reference (blob bytes and spilled value
+/// blocks) BEFORE the nodes, and those shipments must overlap: a push of
+/// a few dozen large values that awaits each shipment in turn costs one
+/// round trip per value, which on the sign-in path measured as the
+/// single largest cost (28 spilled blocks at 4.2 s each over a throttled
+/// link, strictly one after another, while the node upload right after
+/// them fanned out six wide).
+///
+/// The measurement is the longest run of remote forks with nothing else
+/// in flight, on the same `Counting` gauge the login-path tests use. A
+/// serial shipment loop measures one solo fork per shipped block, so
+/// with 24 spilled values and 4 blobs the run is at least 28; overlapped
+/// shipments leave only the push's inherent head (the upstream resolve
+/// and the differential's first reads).
+#[dialog_common::test]
+async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let storage = Storage::temp();
+    let profile = Profile::open(unique_name("ship-overlap"))
+        .perform(&storage)
+        .await?;
+    let operator = profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage)
+        .await?;
+    let repo = profile
+        .repository(unique_name("ship-overlap"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let site = s3_site_address(&s3);
+    profile
+        .credential()
+        .site(&site)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator)
+        .await?;
+    let origin = repo
+        .remote("origin")
+        .create(site)
+        .perform(&operator)
+        .await?;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+
+    // Distinct values past the inline threshold: each spills to its own
+    // block, so the push has SPILLED distinct blocks to ship.
+    const SPILLED: usize = 24;
+    const BLOBS: usize = 4;
+    let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+    let facts: Vec<_> = (0..SPILLED)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "doc/body".parse().expect("valid attribute"),
+                of: format!("doc:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("{i:04}{}", "x".repeat(inline_n))),
+                cause: None,
+            })
+        })
+        .collect();
+    branch
+        .commit(stream::iter(facts))
+        .perform(&operator)
+        .await?;
+    for i in 0..BLOBS {
+        let payload: Vec<u8> = (0..20_000u32)
+            .map(|j| ((j + i as u32) % 199) as u8)
+            .collect();
+        let chunks: Vec<Result<Vec<u8>, BlobError>> =
+            payload.chunks(8192).map(|c| Ok(c.to_vec())).collect();
+        Blob::import(stream::iter(chunks))
+            .write((&branch).into())
+            .perform(&operator)
+            .await?;
+    }
+
+    let env = Counting::new(operator.clone());
+    assert!(branch.push().perform(&env).await?.is_some());
+
+    let forks = env.count("fork::Fork");
+    let peak = env.peak_forks_in_flight();
+    let serial_run = env.longest_serial_fetch_run();
+    println!(
+        "SHIP forks={forks} peak={peak} serial_run={serial_run} effects={:?}",
+        env.longest_serial_fetch_run_effects()
+    );
+    assert!(
+        forks as usize >= SPILLED + BLOBS,
+        "every spilled value and blob must cross the wire (forks={forks})"
+    );
+    // A serial shipment loop measures SPILLED + BLOBS solo forks in a row.
+    // The push's inherent head is a handful (the upstream resolve and
+    // the first dependent reads); 8 leaves room for the gauge's load
+    // sensitivity (see the login-path tests) while staying well under 28.
+    assert!(
+        serial_run < 8,
+        "the push shipped {forks} blocks and {serial_run} of them crossed one at a time \
+         with nothing else in flight (peak {peak}): the shipment loop is serial again"
+    );
+    Ok(())
+}
+
 #[dialog_common::test]
 async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()> {
     // A value comfortably larger than the inline threshold, so its key spills to
