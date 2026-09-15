@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
 
-use dialog_common::ConditionalSend;
+use crate::ConditionalSend;
 use futures_util::FutureExt;
 use futures_util::future::Shared;
 
@@ -139,7 +139,10 @@ where
     }
 }
 
-#[cfg(test)]
+// Gated on `helpers` because `dialog_common::test` (the cross-target
+// async test macro) is only exported there; CI's test archives build the
+// workspace with `--features integration-tests`, which implies it.
+#[cfg(all(test, feature = "helpers"))]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
