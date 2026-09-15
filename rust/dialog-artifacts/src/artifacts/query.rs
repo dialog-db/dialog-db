@@ -59,13 +59,14 @@ pub struct PreloadRequest {
 /// Command hinting that a selector's backing blocks will probably be
 /// needed, so replication may fetch them ahead of demand.
 ///
-/// Purely advisory: a provider may do nothing, and no outcome is
-/// reported (the output is `()`), because a preload that fails must
-/// surface as nothing — the demand read that actually needs the data
-/// owns the error.
+/// Purely advisory: a provider may do nothing, and no fetch outcome is
+/// ever reported, because a preload that fails must surface as nothing
+/// — the demand read that actually needs the data owns the error. The
+/// output says only whether anyone is listening (a plan is attached),
+/// so an evaluator can stop composing hints nobody will act on.
 pub struct Preload;
 
 impl Command for Preload {
     type Input = PreloadRequest;
-    type Output = ();
+    type Output = bool;
 }

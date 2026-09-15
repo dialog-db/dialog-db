@@ -9,8 +9,8 @@
   "entities": 4000,
   "facts": 24011,
   "commits": 33,
-  "vault_files": 381,
-  "vault_bytes": 19303010,
+  "vault_files": 395,
+  "vault_bytes": 19305498,
   "phases": [
     {
       "name": "pull",
@@ -45,11 +45,11 @@
           [
             "archive.get",
             2,
-            160384
+            160336
           ]
         ],
         "requests": 2,
-        "bytes": 160384
+        "bytes": 160336
       }
     },
     {
@@ -84,7 +84,7 @@
           [
             "archive.put",
             1,
-            72088
+            72040
           ],
           [
             "memory.resolve",
@@ -94,11 +94,11 @@
           [
             "memory.publish",
             1,
-            373
+            374
           ]
         ],
         "requests": 4,
-        "bytes": 161627
+        "bytes": 161580
       }
     },
     {
@@ -168,11 +168,11 @@
           [
             "archive.get",
             110,
-            5665464
+            5665824
           ]
         ],
         "requests": 110,
-        "bytes": 5665464
+        "bytes": 5665824
       }
     },
     {
@@ -188,18 +188,18 @@
           [
             "archive.get",
             109,
-            5643904
+            5643848
           ]
         ],
         "requests": 109,
-        "bytes": 5643904
+        "bytes": 5643848
       }
     },
     {
       "name": "download",
       "virtual_ms": 0,
       "rounds": 0.0,
-      "unique_blocks": 379,
+      "unique_blocks": 393,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -207,17 +207,17 @@
         "rows": [
           [
             "archive.get",
-            379,
-            19306944
+            393,
+            19309424
           ],
           [
             "memory.resolve",
             1,
-            373
+            374
           ]
         ],
-        "requests": 380,
-        "bytes": 19307317
+        "requests": 394,
+        "bytes": 19309798
       }
     }
   ]

@@ -9,8 +9,8 @@
   "entities": 4000,
   "facts": 24011,
   "commits": 33,
-  "vault_files": 403,
-  "vault_bytes": 19304749,
+  "vault_files": 402,
+  "vault_bytes": 19309020,
   "phases": [
     {
       "name": "pull",
@@ -25,17 +25,17 @@
           [
             "memory.resolve",
             1,
-            333
+            332
           ]
         ],
         "requests": 1,
-        "bytes": 333
+        "bytes": 332
       }
     },
     {
       "name": "probe",
-      "virtual_ms": 176,
-      "rounds": 2.2,
+      "virtual_ms": 175,
+      "rounds": 2.1875,
       "unique_blocks": 2,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
@@ -45,31 +45,17 @@
           [
             "archive.get",
             2,
-            159804
+            151076
           ]
         ],
         "requests": 2,
-        "bytes": 159804
+        "bytes": 151076
       }
     },
     {
       "name": "roster",
-      "virtual_ms": 0,
-      "rounds": 0.0,
-      "unique_blocks": 0,
-      "duplicate_requests": 0,
-      "duplicate_bytes": 0,
-      "empty_requests": 0,
-      "traffic": {
-        "rows": [],
-        "requests": 0,
-        "bytes": 0
-      }
-    },
-    {
-      "name": "claim",
-      "virtual_ms": 340,
-      "rounds": 4.25,
+      "virtual_ms": 82,
+      "rounds": 1.025,
       "unique_blocks": 1,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
@@ -79,26 +65,46 @@
           [
             "archive.get",
             1,
-            94160
+            12240
+          ]
+        ],
+        "requests": 1,
+        "bytes": 12240
+      }
+    },
+    {
+      "name": "claim",
+      "virtual_ms": 341,
+      "rounds": 4.2625,
+      "unique_blocks": 1,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            1,
+            88832
           ],
           [
             "archive.put",
             1,
-            71084
+            76908
           ],
           [
             "memory.resolve",
             1,
-            333
+            332
           ],
           [
             "memory.publish",
             1,
-            369
+            372
           ]
         ],
         "requests": 4,
-        "bytes": 165946
+        "bytes": 166444
       }
     },
     {
@@ -157,49 +163,49 @@
     },
     {
       "name": "concept",
-      "virtual_ms": 8410,
-      "rounds": 105.125,
+      "virtual_ms": 6930,
+      "rounds": 86.625,
       "unique_blocks": 110,
-      "duplicate_requests": 0,
-      "duplicate_bytes": 0,
+      "duplicate_requests": 1,
+      "duplicate_bytes": 89968,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            111,
+            5679876
+          ]
+        ],
+        "requests": 111,
+        "bytes": 5679876
+      }
+    },
+    {
+      "name": "filtered",
+      "virtual_ms": 6927,
+      "rounds": 86.5875,
+      "unique_blocks": 109,
+      "duplicate_requests": 1,
+      "duplicate_bytes": 89968,
       "empty_requests": 0,
       "traffic": {
         "rows": [
           [
             "archive.get",
             110,
-            5666124
+            5658300
           ]
         ],
         "requests": 110,
-        "bytes": 5666124
-      }
-    },
-    {
-      "name": "filtered",
-      "virtual_ms": 8327,
-      "rounds": 104.0875,
-      "unique_blocks": 109,
-      "duplicate_requests": 0,
-      "duplicate_bytes": 0,
-      "empty_requests": 0,
-      "traffic": {
-        "rows": [
-          [
-            "archive.get",
-            109,
-            5650364
-          ]
-        ],
-        "requests": 109,
-        "bytes": 5650364
+        "bytes": 5658300
       }
     },
     {
       "name": "download",
-      "virtual_ms": 2474,
-      "rounds": 30.925,
-      "unique_blocks": 401,
+      "virtual_ms": 2468,
+      "rounds": 30.85,
+      "unique_blocks": 400,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -207,17 +213,17 @@
         "rows": [
           [
             "archive.get",
-            401,
-            19308260
+            400,
+            19312956
           ],
           [
             "memory.resolve",
             1,
-            369
+            372
           ]
         ],
-        "requests": 402,
-        "bytes": 19308629
+        "requests": 401,
+        "bytes": 19313328
       }
     }
   ]

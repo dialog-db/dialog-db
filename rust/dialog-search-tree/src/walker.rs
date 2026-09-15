@@ -465,7 +465,7 @@ where
             let mut warming = FuturesUnordered::new();
             let mut queued = HashSet::new();
 
-            while let Some((node, maybe_index)) = search_path.pop() {
+            'walk: while let Some((node, maybe_index)) = search_path.pop() {
                 let body = node.body();
                 let is_segment = matches!(body, ArchivedNodeBody::Segment(_));
                 if !is_segment {
@@ -631,7 +631,7 @@ where
                         // walk the rest of the tree, making an empty lookup
                         // cost the size of the database.
                         } else if entered_range || past_end_bytes(&end_bytes, key) {
-                            return;
+                            break 'walk;
                         }
                     }
                 } else {
@@ -675,7 +675,7 @@ where
                         // range matching no stored entry walks the rest of
                         // the tree.
                         } else if entered_range || past_end_bytes(&end_bytes, key) {
-                            return;
+                            break 'walk;
                         }
                     }
                 }
@@ -691,6 +691,15 @@ where
                     }
                 }
             }
+
+            // Drive the remaining read-aheads home before finishing. They
+            // are bounded to this scan's range, so each is a block a
+            // reader of the range legitimately wants — and on a remote
+            // backend the transport may already have served it. Dropping
+            // them here would discard paid-for bytes before they reach
+            // the cache and force the next scan of the range to fetch
+            // them again.
+            while warming.next().await.is_some() {}
         }
     }
 

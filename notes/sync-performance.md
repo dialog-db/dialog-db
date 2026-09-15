@@ -165,6 +165,13 @@ path is still one sequential probe chain — the evaluator awaits one
 Select per outer row. That is issue #492's target; these phases are its
 yardstick, now measuring chain depth rather than bandwidth waste.
 
+**Update (2026-09-09):** probe pipelining (bead dialog-db-77, the first
+`FetchPlan` consumer) moves the yardstick to 87 rounds / 6.9 s at the
+shipping defaults, with 14 rounds / 1.2 s measured behind a budget
+raise that is gated on the post-flight hydration race (bead
+dialog-db-81). The measurement table and the two findings behind it
+live in `notes/fetch-scheduler.md`'s M3 addendum.
+
 ### 5. What the soak gates now
 
 - `pull` staying O(1) requests (adopt-by-root must never regress into a
