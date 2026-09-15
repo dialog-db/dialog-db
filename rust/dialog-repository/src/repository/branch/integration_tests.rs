@@ -27,6 +27,10 @@ use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 // Only the native-only tests below construct one.
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::BlobError;
+// The first-contact rig builds its sites on temp storage; native-only
+// like every test that does.
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_storage::NativeTempSpace;
 // The aborted-push rig and its closure audit are native-only, like the
 // tests that use them.
 #[cfg(not(feature = "web-integration-tests"))]
@@ -4748,6 +4752,197 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
         env.longest_serial_fetch_run_effects()
     );
 
+    Ok(())
+}
+
+/// Replicas that have never observed one another (no origin in common)
+/// integrate each other's changes unscreened on first contact: nothing
+/// either side minted can have been covered or superseded by the other,
+/// so every screen is a no-op, and the history screen in particular
+/// would otherwise scan the upstream tree once per covering record the
+/// small side carries, the first scan a root-to-leaf descent, before
+/// the integrate begins.
+///
+/// Two independently seeded replicas contact the same churning upstream,
+/// one carrying only assertions and one carrying the same assertions plus
+/// their retractions (covering records). Screened, the retractions cost
+/// upstream-tree scans on top of their own integrate; unscreened, the
+/// covering replica reads what its own paths cost and nothing more.
+// Native only: built on `Storage::temp()` so the real filesystem backend
+// is exercised, not the in-memory one. See the note on
+// `it_ships_blobs_on_push_and_hydrates_on_read` for why the gate is on
+// the feature rather than the target.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    async fn site(
+        s3: &S3Address,
+        name: &str,
+    ) -> Result<(
+        Operator<NativeTempSpace>,
+        Profile,
+        crate::Repository<SignerCredential>,
+    )> {
+        let storage = Storage::temp();
+        let profile = Profile::open(unique_name(name)).perform(&storage).await?;
+        let operator = profile
+            .derive(b"test")
+            .allow(Subject::any())
+            .network(Network::default())
+            .build(storage)
+            .await?;
+        let repo = profile
+            .repository(unique_name(name))
+            .create()
+            .perform(&operator)
+            .await?;
+        let site = s3_site_address(s3);
+        profile
+            .credential()
+            .site(&site)
+            .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+            .perform(&operator)
+            .await?;
+        Ok((operator, profile, repo))
+    }
+
+    // The churning upstream, published under its own subject.
+    let (operator_a, _profile_a, repo_a) = site(&s3, "first-contact-upstream").await?;
+    let origin_a = repo_a
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .perform(&operator_a)
+        .await?;
+    let main_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    main_a
+        .set_upstream(origin_a.branch("main").open().perform(&operator_a).await?)
+        .perform(&operator_a)
+        .await?;
+    // Wide enough for a root over many leaves, so a screening scan of
+    // this tree is a root-to-leaf descent, not one read; and in more
+    // commits than either replica below has, so the pull replays the
+    // replica's few revisions onto the adopted upstream tree (the small
+    // side) rather than screening the upstream's delta onto the replica,
+    // which would read the whole upstream regardless of screening.
+    const UPSTREAM_FACTS: usize = 4000;
+    for chunk in (0..UPSTREAM_FACTS).collect::<Vec<_>>().chunks(100) {
+        let facts: Vec<_> = chunk
+            .iter()
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{i:04}").repeat(16)),
+                    cause: None,
+                })
+            })
+            .collect();
+        main_a
+            .commit(stream::iter(facts))
+            .perform(&operator_a)
+            .await?;
+    }
+    assert!(main_a.push().perform(&operator_a).await?.is_some());
+
+    // A small replica seeded apart from the upstream: `covering` retracts
+    // what it asserted, so its history carries covering records.
+    async fn contact(
+        s3: &S3Address,
+        name: &str,
+        upstream: &crate::Repository<SignerCredential>,
+        covering: bool,
+    ) -> Result<(u64, Vec<&'static str>)> {
+        let (operator, _profile, repo) = site(s3, name).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let facts = |i: usize| Artifact {
+            the: "post/title".parse().expect("valid attribute"),
+            of: format!("post:{i}").parse().expect("valid entity"),
+            is: Value::String("ours".into()),
+            cause: None,
+        };
+        const OWN_FACTS: usize = 16;
+        branch
+            .commit(stream::iter(
+                (0..OWN_FACTS).map(|i| Instruction::Assert(facts(i))),
+            ))
+            .perform(&operator)
+            .await?;
+        if covering {
+            // One covering record per retraction: screened, each scans
+            // the upstream tree at the slot it covers.
+            for i in 0..OWN_FACTS {
+                branch
+                    .commit(stream::iter(vec![Instruction::Retract(facts(i))]))
+                    .perform(&operator)
+                    .await?;
+            }
+        }
+        let remote = repo
+            .remote("upstream")
+            .create(s3_site_address(s3))
+            .subject(upstream.did())
+            .perform(&operator)
+            .await?;
+        branch
+            .set_upstream(remote.branch("main").open().perform(&operator).await?)
+            .perform(&operator)
+            .await?;
+
+        let env = Counting::new(operator.clone());
+        branch.pull().perform(&env).await?.expect("merged");
+        let reads = env.block_reads();
+        let run = env.longest_serial_fetch_run_effects();
+
+        let adopted: Vec<_> = branch
+            .claims()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(adopted.len(), 4000, "the upstream's facts are all adopted");
+        let ours: Vec<_> = branch
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            ours.len(),
+            if covering { 0 } else { 16 },
+            "our own facts keep their local state through the merge"
+        );
+        Ok((reads, run))
+    }
+
+    let (plain_reads, plain_run) = contact(&s3, "first-contact-plain", &repo_a, false).await?;
+    let (covering_reads, covering_run) =
+        contact(&s3, "first-contact-covering", &repo_a, true).await?;
+    println!(
+        "FIRST CONTACT plain reads={plain_reads} run={} | covering reads={covering_reads} run={}",
+        plain_run.len(),
+        covering_run.len()
+    );
+    // The sixteen retractions route their tombstones into the same few
+    // leaves as the assertions they retract, so unscreened they add a
+    // handful of reads. Screened, each of the sixteen covering records
+    // also scans the upstream tree at the slot it covers, root to leaf,
+    // through the raw store: two reads per record on top.
+    assert!(
+        covering_reads <= plain_reads + 12,
+        "a first-contact pull carrying covering records must not scan the upstream \
+         tree per record: {covering_reads} reads against {plain_reads} without them \
+         (serial effects: {covering_run:?})"
+    );
     Ok(())
 }
 

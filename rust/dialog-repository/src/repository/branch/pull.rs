@@ -16,6 +16,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
+use futures_util::future::Either;
 
 use crate::{
     Branch, Checkpoint, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError,
@@ -289,6 +290,20 @@ impl<'a> Pull<'a> {
             None => Context::new(),
         };
 
+        // Replicas that have never observed one another (no origin in
+        // common, see `merge::unacquainted`) integrate each other's
+        // changes unscreened: every screen is provably a no-op, and the
+        // history screen in particular would otherwise scan the other
+        // tree once per covering record, the first of them a root-to-
+        // leaf descent, before the integrate can begin. This is the
+        // shape of a device joining an account it was seeded apart
+        // from. Decided from the two watermarks at zero reads; an
+        // upstream that published no watermark is screened as before.
+        let unacquainted = upstream_revision
+            .context
+            .as_ref()
+            .is_some_and(|theirs| merge::unacquainted(&local_context, theirs));
+
         // The upstream published its watermark with its head: two frugal
         // paths can short-circuit the tree merge entirely, both gated on
         // comparing the two contexts (O(#origins), no reads).
@@ -449,7 +464,11 @@ impl<'a> Pull<'a> {
                         &tree_store,
                         dialog_search_tree::Prefetch::Eager,
                     );
-                    let screened = merge::screen_data(changes, screen_context);
+                    let screened = if unacquainted {
+                        Either::Left(changes)
+                    } else {
+                        Either::Right(merge::screen_data(changes, screen_context))
+                    };
                     stitched = Box::pin(stitched.integrate(screened, &tree_store)).await?;
                 }
 
@@ -677,9 +696,20 @@ impl<'a> Pull<'a> {
                     dialog_search_tree::Prefetch::Eager,
                 );
                 let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-                let screened_history =
-                    merge::screen_history(history_changes, upstream_snapshot, screen_store);
-                let screened_data = merge::screen_data(data_changes, theirs.clone());
+                let screened_history = if unacquainted {
+                    Either::Left(history_changes)
+                } else {
+                    Either::Right(merge::screen_history(
+                        history_changes,
+                        upstream_snapshot,
+                        screen_store,
+                    ))
+                };
+                let screened_data = if unacquainted {
+                    Either::Left(data_changes)
+                } else {
+                    Either::Right(merge::screen_data(data_changes, theirs.clone()))
+                };
                 let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
                 let mut delta = Delta::zero();
@@ -808,7 +838,15 @@ impl<'a> Pull<'a> {
             &tree_store,
             dialog_search_tree::Prefetch::Eager,
         );
-        let screened_history = merge::screen_history(history_changes, local_snapshot, screen_store);
+        let screened_history = if unacquainted {
+            Either::Left(history_changes)
+        } else {
+            Either::Right(merge::screen_history(
+                history_changes,
+                local_snapshot,
+                screen_store,
+            ))
+        };
         // Collect the version of every revision record riding the delta
         // into `observed` while the data differential streams anyway.
         // Those records are exactly the upstream-ancestry revisions we
@@ -819,7 +857,11 @@ impl<'a> Pull<'a> {
         // ancestry walk.
         let observed = Arc::new(Mutex::new(BTreeSet::new()));
         let observed_data = merge::observe_revisions(data_changes, observed.clone());
-        let screened_data = merge::screen_data(observed_data, local_context.clone());
+        let screened_data = if unacquainted {
+            Either::Left(observed_data)
+        } else {
+            Either::Right(merge::screen_data(observed_data, local_context.clone()))
+        };
         let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
         let mut delta = Delta::zero();

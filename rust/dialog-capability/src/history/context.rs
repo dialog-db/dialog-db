@@ -97,6 +97,20 @@ impl Context {
             .unwrap_or(false)
     }
 
+    /// Whether this context has observed ANY revision minted by
+    /// `origin`.
+    ///
+    /// This is the one question a screen skip asks of the other side:
+    /// a replica none of whose origins the other has observed has
+    /// never had a claim seen there, so nothing of its can have been
+    /// covered or superseded there. It is deliberately a per-origin
+    /// point query rather than an enumeration, so that a compacted
+    /// context encoding (deltas with backlinks, say) only has to keep
+    /// this lookup cheap, never a full origin listing.
+    pub fn observes_origin(&self, origin: &Origin) -> bool {
+        self.0.contains_key(origin)
+    }
+
     /// Extend the context by one NEWLY MINTED revision: its origin's
     /// watermark rises to its edition and the origin's revision count
     /// grows by one. The version must sit above the origin's current
