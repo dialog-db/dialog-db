@@ -85,6 +85,8 @@ use crate::{
     SnapshotError,
 };
 
+pub mod codec;
+
 #[cfg(test)]
 mod read_tests;
 

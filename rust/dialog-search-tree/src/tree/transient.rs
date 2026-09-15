@@ -36,9 +36,27 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     marker::PhantomData,
     ops::{Bound, RangeBounds, RangeInclusive},
 };
+
+/// How many of [`TransientTree::integrate`]'s changes are held in memory so
+/// the paths still ahead of the applier can be routed. Reads nothing itself.
+const OPEN_LOOKAHEAD: usize = 512;
+
+/// How many nodes [`TransientTree::integrate`] opens at once, in line with
+/// the tree's other fetch-concurrency limits.
+const OPEN_CONCURRENCY: usize = 16;
+
+/// How many levels one opening pass walks before handing back to the
+/// descent. Each level is one concurrent batch, so a deeper descent unlocks
+/// more overlap; the bound keeps a pass from running away on a tall tree.
+const OPEN_LEVELS: usize = 4;
+
+/// Stored nodes an integration has decoded while following its pending
+/// changes' paths, by hash (see [`TransientTree::integrate`]).
+type Opened<Key, Value> = HashMap<Blake3Hash, PersistentNode<Key, Value>>;
 
 /// The root of a [`TransientTree`].
 ///
@@ -594,8 +612,40 @@ where
         Value: PartialEq,
     {
         futures_util::pin_mut!(changes);
-        while let Some(change) = changes.next().await {
-            match change? {
+        let mut pending: VecDeque<Change<Key, Value>> = VecDeque::new();
+        // Stored nodes decoded while following pending paths, by hash.
+        // Nodes are immutable, so a decode (and its validation) is paid
+        // once per node for the whole integration rather than once per
+        // key that routes through it.
+        let mut opened: Opened<Key, Value> = HashMap::new();
+        loop {
+            while pending.len() < OPEN_LOOKAHEAD {
+                match changes.next().await {
+                    Some(change) => pending.push_back(change?),
+                    None => break,
+                }
+            }
+            let Some(change) = pending.pop_front() else {
+                break;
+            };
+
+            // Open ahead only when this change's own descent would read.
+            // A change whose path is already in memory costs no round
+            // trip, and re-following the whole window for it would be
+            // pure CPU. The first change whose path misses is the moment
+            // the window is worth opening: its miss and every other
+            // pending miss go out together, rather than one round trip
+            // at a time as each change reaches its own.
+            if self.unopened_on_path(change.key(), &mut opened).is_some() {
+                self.open_pending(
+                    std::iter::once(&change).chain(pending.iter()),
+                    storage,
+                    &mut opened,
+                )
+                .await;
+            }
+
+            match change {
                 Change::Add(entry) => match self.get(&entry.key, storage).await? {
                     None => {
                         self = self.insert(entry.key, entry.value, storage).await?;
@@ -643,6 +693,169 @@ where
             }
         }
         Ok(self)
+    }
+
+    /// Load the not-yet-in-memory nodes the pending changes will descend
+    /// through, concurrently.
+    ///
+    /// An integration walks its tree in key order, and a change whose next
+    /// node is still held by reference reads it right there -- so a merge
+    /// reads what it needs strictly one at a time, one round trip each, with
+    /// nothing else in flight. That is the serial block loading a first sync
+    /// shows (#492).
+    ///
+    /// Routing is pure (`child_for` and an index's own `route` read no
+    /// storage), so every pending change's path can be followed through
+    /// whatever is already in memory -- the transient spine and the node
+    /// cache alike -- and the node each path stops at is known without
+    /// reading anything. Those are exactly the reads the descents are about
+    /// to make, so they go out together.
+    ///
+    /// The walk is level by level, which is what makes the gain general
+    /// rather than a property of one tree shape. Each pass fetches the
+    /// frontier the paths currently stop at, then re-follows them through
+    /// the nodes it just installed: a wide level contributes its breadth,
+    /// and a deeper descent contributes another level of breadth per pass.
+    /// A narrow tree still gains whatever breadth its levels hold.
+    ///
+    /// It reads nothing a descent would not have read: a node already in
+    /// memory is skipped, a node no pending change routes to is never
+    /// touched, and one named by many changes is read once. The set of
+    /// blocks an integration reads is therefore unchanged -- only when they
+    /// are read -- so partial replication is preserved exactly.
+    ///
+    /// Advisory: the reads go through the accessor's [`warm`](Accessor::warm)
+    /// into the shared node cache, so the `lift` that follows finds them
+    /// there, and anything missing or failing is read again by the descent
+    /// that needs it, which still owns the error and the missing-block
+    /// policy.
+    async fn open_pending<'changes, Backend, Changes>(
+        &self,
+        changes: Changes,
+        storage: &ContentAddressedStorage<Backend>,
+        opened: &mut Opened<Key, Value>,
+    ) where
+        Key: 'changes,
+        Value: 'changes,
+        Changes: Iterator<Item = &'changes Change<Key, Value>>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        let keys: Vec<&Key> = changes.take(OPEN_LOOKAHEAD).map(Change::key).collect();
+        if keys.is_empty() {
+            return;
+        }
+        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+
+        for _ in 0..OPEN_LEVELS {
+            let mut wanted = Vec::new();
+            let mut seen = HashSet::new();
+            for key in &keys {
+                if let Some(hash) = self.unopened_on_path(key, opened)
+                    && seen.insert(hash.clone())
+                {
+                    wanted.push(hash);
+                    if wanted.len() >= OPEN_CONCURRENCY {
+                        break;
+                    }
+                }
+            }
+            if wanted.is_empty() {
+                return;
+            }
+
+            // A single node is the descent's own next read, so fetching it
+            // here moves that round trip rather than removing it; but the
+            // level below it may fan out, and only re-following the paths
+            // through it can show that, so it is read and the pass goes on.
+            //
+            // `buffered` over a stream of futures, so every read is polled
+            // before the first completes: on wasm the request is issued BY
+            // the poll, so a loop awaiting one at a time never gets two on
+            // the wire. `traversal.rs` uses this shape for the same reason.
+            let mut reads =
+                futures_util::stream::iter(wanted.iter().cloned().map(|hash| accessor.warm(hash)))
+                    .buffered(OPEN_CONCURRENCY);
+            while reads.next().await.is_some() {}
+
+            // Nothing landed (missing or failing blocks), so re-following
+            // the paths would name the same nodes again and spin.
+            if wanted
+                .iter()
+                .all(|hash| self.cache.get_cached(hash).is_none())
+            {
+                return;
+            }
+        }
+    }
+
+    /// The first node on `key`'s descent that is not in memory, or `None`
+    /// when the whole path is there (so the descent reads nothing).
+    ///
+    /// Follows exactly the route an edit takes -- the transient spine by
+    /// `child_for`, then stored nodes by their own routing -- and reads no
+    /// storage, so it can never name a node the descent would not read.
+    fn unopened_on_path(&self, key: &Key, opened: &mut Opened<Key, Value>) -> Option<Blake3Hash> {
+        let mut node = match &self.root {
+            TransientRoot::Unloaded(hash) => {
+                return self.unopened_below(hash.clone(), key, opened);
+            }
+            TransientRoot::Loaded(node) => node,
+        };
+
+        loop {
+            match node {
+                TransientNode::Index(index) => {
+                    let at = child_for::<Key, Value>(&index.children, key).ok()?;
+                    match &index.children[at] {
+                        Node::Persistent(link) => {
+                            return self.unopened_below(link.node.clone(), key, opened);
+                        }
+                        Node::Transient(child) => node = child,
+                    }
+                }
+                // An in-memory leaf: the edit descends no further.
+                TransientNode::Segment(_) => return None,
+            }
+        }
+    }
+
+    /// Walk the STORED path from `hash` as far as the node cache covers,
+    /// returning the first node it does not hold. `None` when the path is
+    /// cached through to its leaf.
+    ///
+    /// Presence is the cache's word (a node the cache dropped is a node the
+    /// descent reads again); decoding is memoized in `opened`, so a node
+    /// that many keys route through is validated once.
+    fn unopened_below(
+        &self,
+        hash: Blake3Hash,
+        key: &Key,
+        opened: &mut Opened<Key, Value>,
+    ) -> Option<Blake3Hash> {
+        let mut hash = hash;
+        loop {
+            let Some(buffer) = self.cache.get_cached(&hash) else {
+                return Some(hash);
+            };
+            let node = match opened.entry(hash.clone()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let Ok(node) = PersistentNode::<Key, Value>::try_from(buffer) else {
+                        return Some(hash);
+                    };
+                    entry.insert(node)
+                }
+            };
+            match node.body() {
+                crate::ArchivedNodeBody::Index(index) => {
+                    let at = index.route(key.as_ref()).ok()?;
+                    hash = index.hash_at(at).ok()?.clone();
+                }
+                // The leaf is cached, so this path reads nothing.
+                crate::ArchivedNodeBody::Segment(_) => return None,
+            }
+        }
     }
 
     /// Builds a tree whose content is the concatenation of `pieces`, reusing
@@ -8936,6 +9149,145 @@ mod buffer_edit_interaction_tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Integrating must open the nodes its changes descend through
+    /// concurrently, and must not read anything it would not have read.
+    ///
+    /// This is the shape behind the serial first sync (#492): a merge walks
+    /// its tree in key order and reads each node it needs right where it
+    /// needs it, so the reads go out one at a time with nothing else in
+    /// flight. Routing is pure, so the nodes a run of pending changes will
+    /// reach are known without reading anything, and can go in flight
+    /// together.
+    ///
+    /// Run over the DEEP tree the paced manifest builds, which is the harder
+    /// case: a flat wide tree offers a whole level of breadth at the root,
+    /// while a narrow one has to gain its overlap by walking down. Both must
+    /// work.
+    ///
+    /// The no-amplification half matters as much as the overlap: a
+    /// read-ahead that guessed would look fast while pulling tree the merge
+    /// never needed, quietly destroying partial replication.
+    #[dialog_common::test]
+    async fn it_opens_pending_nodes_concurrently() -> Result<()> {
+        // Build the base on the observing backend itself; the counter is
+        // reset before the integration, so only its reads are measured.
+        let observing = crate::helpers::ObservingBackend::new();
+        let mut observed: ContentAddressedStorage<crate::helpers::ObservingBackend> =
+            ContentAddressedStorage::new(observing.clone());
+        let manifest = paced_manifest();
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in (0..1200u32).step_by(2) {
+            base = TransientTree::with_manifest(base.root().clone(), base.node_cache(), manifest)
+                .insert(i.to_be_bytes(), vec![i as u8], &observed)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                observed
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        // Changes spread across the key space, so they descend into many
+        // different subtrees rather than all into one. They are keys the
+        // base does NOT hold (600..), so each is an unambiguous insert:
+        // a contested key would be resolved by value-hash last-write-wins,
+        // which is not what this test is about.
+        let changes: Vec<u32> = (1..1200u32).step_by(14).collect();
+        let stream = futures_util::stream::iter(changes.iter().map(|key| {
+            Ok(Change::Add(Entry {
+                key: key.to_be_bytes(),
+                value: vec![9],
+            }))
+        }));
+
+        // A cold node cache, so the descents must really read.
+        observing.reset();
+        let mut delta = Delta::zero();
+        let merged: Tree =
+            TransientTree::with_manifest(base.root().clone(), Default::default(), paced_manifest())
+                .integrate(stream, &observed)
+                .await?
+                .persist(&mut delta)?;
+        let peak = observing.peak_reads_in_flight();
+        let log = observing.read_log();
+        for (_, buffer) in delta.flush() {
+            observed
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        assert!(
+            peak > 1,
+            "integrate must open the nodes it descends through together, \
+             but only {peak} read was ever in flight -- one round trip per \
+             node is the serial shape this fixes"
+        );
+
+        // Every change applied, in order, against the tree the earlier ones
+        // left: the concurrency is in the FETCHING only.
+        for key in &changes {
+            assert_eq!(
+                merged.get(&key.to_be_bytes(), &observed).await?,
+                Some(vec![9]),
+                "integrate must apply the change at key {key}"
+            );
+        }
+        for i in (0..1200u32).step_by(2) {
+            assert_eq!(
+                merged.get(&i.to_be_bytes(), &observed).await?,
+                Some(vec![i as u8]),
+                "integrate must leave the base key {i} alone"
+            );
+        }
+
+        // No amplification: opening ahead names only nodes a pending change
+        // routes to and skips whatever the cache already holds, so no node
+        // is read twice ...
+        let distinct: std::collections::HashSet<_> = log.iter().collect();
+        assert_eq!(
+            log.len(),
+            distinct.len(),
+            "opening ahead must not re-read a node it already holds: \
+             {} reads for {} distinct nodes",
+            log.len(),
+            distinct.len()
+        );
+        // ... and the set of nodes read is exactly what applying the same
+        // changes one at a time reads. The baseline below is `integrate`'s
+        // own step (a resolving lookup, then the insert) run by hand over
+        // a fresh cache, so the only difference is the opening pass: it
+        // may move reads earlier, never add one.
+        let mut serial: std::collections::HashSet<Blake3Hash> = std::collections::HashSet::new();
+        observing.reset();
+        let mut tree: TransientTree<[u8; 4], Vec<u8>, crate::Geometric> =
+            TransientTree::with_manifest(base.root().clone(), Default::default(), paced_manifest());
+        for key in &changes {
+            assert_eq!(tree.get(&key.to_be_bytes(), &observed).await?, None);
+            tree = tree.insert(key.to_be_bytes(), vec![9], &observed).await?;
+        }
+        serial.extend(observing.read_log());
+        assert_eq!(
+            distinct.len(),
+            serial.len(),
+            "opening ahead must read exactly the nodes the one-at-a-time \
+             integration reads: {} distinct nodes against {} serially",
+            distinct.len(),
+            serial.len()
+        );
+        let strays: Vec<_> = log.iter().filter(|hash| !serial.contains(hash)).collect();
+        assert!(
+            strays.is_empty(),
+            "opening ahead must read only nodes the one-at-a-time integration \
+             reads, but {} of {} reads were not among them: a read-ahead that \
+             guesses replicates tree the merge never needed",
+            strays.len(),
+            log.len()
+        );
         Ok(())
     }
 

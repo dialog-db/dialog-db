@@ -184,12 +184,24 @@ pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTree
     Ok(start..=end)
 }
 
+/// How many records [`screen_history`] screens ahead of the one it is
+/// emitting. Each covering record's slot scan is a read of the receiver's
+/// tree, which over a partial replica is a round trip; screened one at a
+/// time they would cost one round trip each, in a row.
+const SCREEN_LOOKAHEAD: usize = 16;
+
 /// Screen the **history-region** slice of an incoming merge
 /// differential: every record appends (history keys are unique and
 /// immutable — never contested), and each *covering* record (a
 /// retraction, or a replace with a non-empty supersedes set) emits
 /// guarded removes for the covered claims still live in the receiver's
 /// snapshot (R3). Run — and integrate — before the data pass.
+///
+/// Records are screened [`SCREEN_LOOKAHEAD`] ahead: each one's slot scan
+/// is independent of the others', so they run concurrently, while the
+/// screened changes are emitted in the records' own order (a record's
+/// append precedes the removes it causes, and records keep their stream
+/// order), which is what the integrate that follows relies on.
 pub fn screen_history<'a, Backend, C>(
     changes: C,
     local: ArtifactTree,
@@ -202,93 +214,105 @@ where
         + 'a,
     C: Differential<Key, State<Datum>> + 'a,
 {
-    async_stream::try_stream! {
-        futures_util::pin_mut!(changes);
-        while let Some(change) = futures_util::StreamExt::next(&mut changes).await {
-            match change? {
-                Change::Add(entry) => {
-                    // A record covers claims iff its supersedes set is
-                    // non-empty (a retraction's cause and a replace's
-                    // superseded priors both land there — see
-                    // `Record::into_entry`). A genesis retraction covers
-                    // nothing and needs no scan.
-                    // The slot a record covers is named by its KEY (entity
-                    // and attribute live there now), so carry the key.
-                    let covering = match &entry.value {
-                        State::Added(datum)
-                            if entry.key.as_ref().first() == Some(&HISTORY_KEY_TAG)
-                                && !datum.supersedes.is_empty() =>
-                        {
-                            Some((entry.key.clone(), datum.supersedes.clone()))
-                        }
-                        _ => None,
-                    };
-                    yield Change::Add(entry);
+    use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
-                    // R3: the record covers claims — retire any still
-                    // live locally in the record's (entity, attribute)
-                    // slot. Covered claims are matched by version: a
-                    // replace supersedes claims of *other* values, which
-                    // live at other keys (keys embed the value hash), so
-                    // the scan walks the whole slot rather than probing
-                    // the record's own keys. The emitted removes are
-                    // guarded (byte-exact), so a claim the record never
-                    // observed (e.g. a later re-assert standing at the
-                    // same key) is untouched.
-                    if let Some((record_key, superseded)) = covering {
-                        let candidates =
-                            local.stream_range(coverage_range(&record_key)?, &storage);
-                        futures_util::pin_mut!(candidates);
-                        while let Some(candidate) =
-                            futures_util::StreamExt::next(&mut candidates).await
-                        {
-                            let candidate = candidate?;
-                            let State::Added(datum) = &candidate.value else {
-                                continue;
-                            };
-                            if !datum
-                                .versions()
-                                .any(|version| superseded.contains(version))
-                            {
-                                continue;
-                            }
-                            // The entry may collapse several same-value
-                            // claims; the record retires exactly the ones
-                            // it names. Full coverage removes the entry
-                            // (guarded, so a claim the record never
-                            // observed is untouched); partial coverage
-                            // replaces it with the entry standing on its
-                            // surviving claims, at all three orderings.
-                            let surviving = datum.retire_covered(&superseded);
-                            let entity_key = EntityKey(candidate.key);
-                            let attribute_key = AttributeKey::from_key(&entity_key);
-                            let value_key = ValueKey::from_key(&entity_key);
-                            for key in [
-                                entity_key.into_key(),
-                                attribute_key.into_key(),
-                                value_key.into_key(),
-                            ] {
-                                yield Change::Remove(Entry {
-                                    key: key.clone(),
-                                    value: candidate.value.clone(),
-                                });
-                                if let Some(surviving) = &surviving {
-                                    yield Change::Add(Entry {
-                                        key,
-                                        value: State::Added(surviving.clone()),
-                                    });
-                                }
-                            }
-                        }
-                    }
+    changes
+        .map(move |change| {
+            let local = local.clone();
+            let storage = storage.clone();
+            async move { screen_record(change?, &local, &storage).await }
+        })
+        .buffered(SCREEN_LOOKAHEAD)
+        .map_ok(|screened| stream::iter(screened.into_iter().map(Ok)))
+        .try_flatten()
+}
+
+/// One record's screening: the record itself, followed by the guarded
+/// removes (and surviving-claim re-adds) for every claim it covers that is
+/// still live in `local`. Self-contained, so [`screen_history`] can run
+/// several at once.
+async fn screen_record<Backend>(
+    change: Change<Key, State<Datum>>,
+    local: &ArtifactTree,
+    storage: &ContentAddressedStorage<Backend>,
+) -> Result<Vec<Change<Key, State<Datum>>>, DialogSearchTreeError>
+where
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + Clone
+        + dialog_common::ConditionalSync,
+{
+    let entry = match change {
+        Change::Add(entry) => entry,
+        // A history key vanishing from the upstream would mean history
+        // was rewritten; the guarded remove makes it a no-op unless our
+        // copy matches theirs byte for byte.
+        remove @ Change::Remove(_) => return Ok(vec![remove]),
+    };
+
+    // A record covers claims iff its supersedes set is non-empty (a
+    // retraction's cause and a replace's superseded priors both land
+    // there — see `Record::into_entry`). A genesis retraction covers
+    // nothing and needs no scan. The slot a record covers is named by
+    // its KEY (entity and attribute live there now), so carry the key.
+    let covering = match &entry.value {
+        State::Added(datum)
+            if entry.key.as_ref().first() == Some(&HISTORY_KEY_TAG)
+                && !datum.supersedes.is_empty() =>
+        {
+            Some((entry.key.clone(), datum.supersedes.clone()))
+        }
+        _ => None,
+    };
+    let mut screened = vec![Change::Add(entry)];
+
+    // R3: the record covers claims — retire any still live locally in
+    // the record's (entity, attribute) slot. Covered claims are matched
+    // by version: a replace supersedes claims of *other* values, which
+    // live at other keys (keys embed the value hash), so the scan walks
+    // the whole slot rather than probing the record's own keys. The
+    // emitted removes are guarded (byte-exact), so a claim the record
+    // never observed (e.g. a later re-assert standing at the same key)
+    // is untouched.
+    if let Some((record_key, superseded)) = covering {
+        let candidates = local.stream_range(coverage_range(&record_key)?, storage);
+        futures_util::pin_mut!(candidates);
+        while let Some(candidate) = futures_util::StreamExt::next(&mut candidates).await {
+            let candidate = candidate?;
+            let State::Added(datum) = &candidate.value else {
+                continue;
+            };
+            if !datum.versions().any(|version| superseded.contains(version)) {
+                continue;
+            }
+            // The entry may collapse several same-value claims; the
+            // record retires exactly the ones it names. Full coverage
+            // removes the entry (guarded, so a claim the record never
+            // observed is untouched); partial coverage replaces it with
+            // the entry standing on its surviving claims, at all three
+            // orderings.
+            let surviving = datum.retire_covered(&superseded);
+            let entity_key = EntityKey(candidate.key);
+            let attribute_key = AttributeKey::from_key(&entity_key);
+            let value_key = ValueKey::from_key(&entity_key);
+            for key in [
+                entity_key.into_key(),
+                attribute_key.into_key(),
+                value_key.into_key(),
+            ] {
+                screened.push(Change::Remove(Entry {
+                    key: key.clone(),
+                    value: candidate.value.clone(),
+                }));
+                if let Some(surviving) = &surviving {
+                    screened.push(Change::Add(Entry {
+                        key,
+                        value: State::Added(surviving.clone()),
+                    }));
                 }
-                // A history key vanishing from the upstream would mean
-                // history was rewritten; the guarded remove makes it a
-                // no-op unless our copy matches theirs byte for byte.
-                remove @ Change::Remove(_) => yield remove,
             }
         }
     }
+    Ok(screened)
 }
 
 /// Screen the **data-region** slice of an incoming merge differential
@@ -738,5 +762,163 @@ mod span_tests {
         for window in pieces.windows(2) {
             assert_ne!(window[0].1, window[1].1, "adjacent pieces coalesce");
         }
+    }
+}
+
+#[cfg(test)]
+mod screen_tests {
+    use super::*;
+    use crate::history::{Edition, Origin, Version};
+    use crate::tree::ArtifactTreeExt as _;
+    use crate::{Artifact, Attribute, Entity, Instruction, Value};
+    use anyhow::Result;
+    use dialog_search_tree::Delta;
+    use dialog_search_tree::helpers::ObservingBackend;
+    use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage};
+    use futures_util::{StreamExt as _, stream};
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// Screening covering records must scan their slots concurrently, and
+    /// must emit exactly what screening them one at a time emits, in the
+    /// same order.
+    ///
+    /// Each covering record costs one scan of the receiver's tree, and on
+    /// a partial replica that scan is a round trip. A pull whose upstream
+    /// retracted many facts used to pay those round trips one after
+    /// another, ahead of the integrate the screened stream feeds. The
+    /// order pins what the integrate relies on: a record's append precedes
+    /// the removes it causes, and records keep their stream order.
+    #[dialog_common::test]
+    async fn it_screens_covering_records_concurrently_and_in_order() -> Result<()> {
+        // Built through the tree's own store, mirrored block for block into
+        // the observing backend the screen reads through.
+        let mut observing = ObservingBackend::new();
+        let mut store = Storage {
+            encoder: CborEncoder,
+            backend: MemoryStorageBackend::default(),
+        };
+        let the: Attribute = "task/label".parse()?;
+        let writer = Version::new(Origin::from([1u8; 32]), Edition::new(0));
+        let retractor = Version::new(Origin::from([2u8; 32]), Edition::new(1));
+
+        // The receiver holds one fact per entity ...
+        let facts: Vec<Artifact> = (0..24u32)
+            .map(|index| {
+                Ok(Artifact {
+                    the: the.clone(),
+                    of: Entity::new()?,
+                    is: Value::String(format!("label {index}")),
+                    cause: None,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let mut local = ArtifactTree::empty();
+        let mut delta = Delta::zero();
+        local
+            .apply_versioned(
+                &mut store,
+                &mut delta,
+                Some(writer),
+                stream::iter(facts.iter().cloned().map(Instruction::Assert)),
+            )
+            .await?;
+        for (digest, buffer) in delta.flush() {
+            store
+                .set(*digest.as_bytes(), buffer.as_ref().to_vec())
+                .await?;
+            observing.set(digest, buffer.into_vec()).await?;
+        }
+
+        // ... and the upstream retracted every one of them, so its history
+        // delta is a run of covering records.
+        let mut upstream = local.clone();
+        let mut delta = Delta::zero();
+        upstream
+            .apply_versioned(
+                &mut store,
+                &mut delta,
+                Some(retractor),
+                stream::iter(facts.iter().cloned().map(Instruction::Retract)),
+            )
+            .await?;
+        for (digest, buffer) in delta.flush() {
+            store
+                .set(*digest.as_bytes(), buffer.as_ref().to_vec())
+                .await?;
+            observing.set(digest, buffer.into_vec()).await?;
+        }
+
+        let storage = ContentAddressedStorage::new(observing.clone());
+        let scope = history_scope();
+        let incoming = local
+            .differentiate_within(&upstream, &scope, &storage, &storage)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let records: Vec<Key> = incoming
+            .iter()
+            .filter_map(|change| match change {
+                Change::Add(entry) if entry.key.as_ref().first() == Some(&HISTORY_KEY_TAG) => {
+                    Some(entry.key.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            records.len(),
+            facts.len(),
+            "one covering record per retraction"
+        );
+
+        // Screen against a COLD copy of the receiver's tree, so every slot
+        // scan has to read.
+        let cold = ArtifactTree::from_hash(local.root().clone());
+        observing.reset();
+        let screened = screen_history(
+            stream::iter(incoming.into_iter().map(Ok)),
+            cold,
+            storage.clone(),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+        let peak = observing.peak_reads_in_flight();
+        assert!(
+            peak > 1,
+            "the covering records' slot scans must overlap, but only {peak} \
+             read was ever in flight: one round trip per record"
+        );
+
+        // The records come out in their stream order, each ahead of the
+        // removes it causes, and every retraction retires its fact at all
+        // three orderings.
+        let mut order = Vec::new();
+        let mut removes = 0usize;
+        let mut pending_record = false;
+        for change in &screened {
+            match change {
+                Change::Add(entry) if entry.key.as_ref().first() == Some(&HISTORY_KEY_TAG) => {
+                    order.push(entry.key.clone());
+                    pending_record = true;
+                }
+                Change::Remove(_) => {
+                    assert!(pending_record, "a remove follows the record that causes it");
+                    removes += 1;
+                }
+                Change::Add(_) => {}
+            }
+        }
+        assert_eq!(order, records, "records keep their stream order");
+        assert_eq!(
+            removes,
+            facts.len() * 3,
+            "each fact is retired at EAV, AEV and VAE"
+        );
+        Ok(())
     }
 }

@@ -42,6 +42,7 @@ base58 = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
+ipld-core = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -56,6 +57,10 @@ dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
+# Test fixtures are real CAR captures; zstd keeps them small enough to
+# live in the tree. Pure Rust, so it decompresses in the browser too --
+# a C-backed zstd would not build for wasm.
+ruzstd = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
