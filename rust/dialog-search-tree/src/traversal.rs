@@ -21,6 +21,7 @@ use async_stream::try_stream;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
+use futures_util::stream::FuturesUnordered;
 use rkyv::{
     Deserialize, Serialize,
     bytecheck::CheckBytes,
@@ -30,19 +31,20 @@ use rkyv::{
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
+use std::collections::VecDeque;
 
 use crate::{
     ArchivedNodeBody, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key,
     PersistentNode, PersistentTree, Value,
 };
 
-/// How many block reads one traversal level issues concurrently.
+/// How many block reads a traversal keeps in flight at once.
 ///
-/// A level's reads are independent and every one of them is committed
+/// The queued reads are independent and every one of them is committed
 /// work: the walk has already decided it needs these nodes, and the set
 /// is bounded by the tree's fanout and by the caller's scope. So there is
 /// nothing to gain by metering them out, and a cap costs a round trip per
-/// wave -- a 70-wide level under a cap of 16 pays four waves where it
+/// wave -- 70 queued reads under a cap of 16 pay four waves where they
 /// could pay one.
 ///
 /// Measured on the soak's download phase (median of three runs per
@@ -202,97 +204,102 @@ where
 
     try_stream! {
         if &root != NULL_BLAKE3_HASH {
-            // Level order with the whole frontier fetched concurrently:
-            // a level's reads are independent, so against a backend
-            // that reaches a remote on a miss the wall clock is depth
-            // round-trips, not node-count round-trips.
-            let mut frontier = vec![root];
-
-            while !frontier.is_empty() {
-                let level = std::mem::take(&mut frontier);
-                let mut reads = futures_util::stream::iter(level.into_iter().map(
-                    |hash| async move {
+            // A continuation queue rather than levels: the root goes out,
+            // and every node that lands queues its children behind
+            // whatever is already waiting, up to `FETCH_CONCURRENCY` in
+            // flight at once. Against a backend that reaches a remote on a
+            // miss the wall clock is still depth round-trips, but no read
+            // waits for its slowest sibling before its own children go
+            // out -- a level walk paid that barrier once per level, a round
+            // trip of idle transport slots each time. Reads are polled BY
+            // this generator, so on wasm (where the poll issues the
+            // request) every queued read is on the wire together.
+            let mut queue: VecDeque<Blake3Hash> = VecDeque::from([root]);
+            let mut reads = FuturesUnordered::new();
+            loop {
+                while reads.len() < FETCH_CONCURRENCY {
+                    let Some(hash) = queue.pop_front() else {
+                        break;
+                    };
+                    reads.push(async move {
                         // `retrieve` verifies stored bytes against the
                         // hash it was asked for, so `None` here is
                         // genuinely "not stored" -- a corrupt block
                         // raises instead, and still fails the walk.
                         let bytes = storage.retrieve(&hash).await;
                         (hash, bytes)
-                    },
-                ))
-                .buffer_unordered(FETCH_CONCURRENCY);
+                    });
+                }
+                let Some((hash, bytes)) = reads.next().await else {
+                    break;
+                };
+                let Some(bytes) = bytes? else {
+                    yield Visit::Absent(hash);
+                    continue;
+                };
+                let node: PersistentNode<Key, Value> =
+                    PersistentNode::try_from(Buffer::from(bytes))?;
 
-                let mut next = Vec::new();
-                while let Some((hash, bytes)) = reads.next().await {
-                    let Some(bytes) = bytes? else {
-                        yield Visit::Absent(hash);
-                        continue;
-                    };
-                    let node: PersistentNode<Key, Value> =
-                        PersistentNode::try_from(Buffer::from(bytes))?;
-
-                    if let ArchivedNodeBody::Index(index) = node.body() {
-                        let links = index.links()?;
-                        match scope {
-                            None => {
-                                for link in links {
-                                    next.push(link.node);
-                                }
+                if let ArchivedNodeBody::Index(index) = node.body() {
+                    let links = index.links()?;
+                    match scope {
+                        None => {
+                            for link in links {
+                                queue.push_back(link.node);
                             }
-                            Some(scope) => {
-                                // A node's separator describes its STORED
-                                // content only: it is also the node's routing
-                                // key and the input to its rank, so a
-                                // buffered op may sit outside the span its
-                                // own node advertises (see
-                                // `ArchivedIndex::upper_bound`). Span alone
-                                // therefore cannot decide relevance.
-                                //
-                                // The buffers settle it exactly, with no
-                                // derivation: an op routes to exactly one
-                                // link and is stored in THAT link's buffer
-                                // (`link_novelty`), so asking each link's own
-                                // buffer says precisely which children carry
-                                // in-scope novelty. Re-deriving the routing
-                                // from separators would not agree with
-                                // `route`, which sends a key below the first
-                                // separator to child 0 rather than to no
-                                // child, and a walk that credited such a key
-                                // to nobody would drop content the scope
-                                // needs.
-                                //
-                                // A buffer that fails to decode cannot prove
-                                // itself out of scope, so its node's children
-                                // are all kept: over-retaining is safe,
-                                // over-dropping loses content.
-                                let in_scope = |key: &[u8]| {
-                                    scope.iter().any(|range| {
-                                        key >= range.start().as_slice()
-                                            && key <= range.end().as_slice()
-                                    })
+                        }
+                        Some(scope) => {
+                            // A node's separator describes its STORED
+                            // content only: it is also the node's routing
+                            // key and the input to its rank, so a
+                            // buffered op may sit outside the span its
+                            // own node advertises (see
+                            // `ArchivedIndex::upper_bound`). Span alone
+                            // therefore cannot decide relevance.
+                            //
+                            // The buffers settle it exactly, with no
+                            // derivation: an op routes to exactly one
+                            // link and is stored in THAT link's buffer
+                            // (`link_novelty`), so asking each link's own
+                            // buffer says precisely which children carry
+                            // in-scope novelty. Re-deriving the routing
+                            // from separators would not agree with
+                            // `route`, which sends a key below the first
+                            // separator to child 0 rather than to no
+                            // child, and a walk that credited such a key
+                            // to nobody would drop content the scope
+                            // needs.
+                            //
+                            // A buffer that fails to decode cannot prove
+                            // itself out of scope, so its node's children
+                            // are all kept: over-retaining is safe,
+                            // over-dropping loses content.
+                            let in_scope = |key: &[u8]| {
+                                scope.iter().any(|range| {
+                                    key >= range.start().as_slice()
+                                        && key <= range.end().as_slice()
+                                })
+                            };
+                            for (at, link) in links.iter().enumerate() {
+                                let upper =
+                                    links.get(at + 1).map(|next| next.separator.as_slice());
+                                let buffered = match index.buffer_for(at) {
+                                    Some(buffer) => buffer
+                                        .any_key::<Key>(&in_scope)
+                                        .unwrap_or(true),
+                                    None => false,
                                 };
-                                for (at, link) in links.iter().enumerate() {
-                                    let upper =
-                                        links.get(at + 1).map(|next| next.separator.as_slice());
-                                    let buffered = match index.buffer_for(at) {
-                                        Some(buffer) => buffer
-                                            .any_key::<Key>(&in_scope)
-                                            .unwrap_or(true),
-                                        None => false,
-                                    };
-                                    if buffered
-                                        || span_intersects(&link.separator, upper, scope)
-                                    {
-                                        next.push(link.node.clone());
-                                    }
+                                if buffered
+                                    || span_intersects(&link.separator, upper, scope)
+                                {
+                                    queue.push_back(link.node.clone());
                                 }
                             }
                         }
                     }
-
-                    yield Visit::Present(node);
                 }
-                frontier = next;
+
+                yield Visit::Present(node);
             }
         }
     }
@@ -374,6 +381,46 @@ mod tests {
                         .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                         .await?;
                 }
+            }
+        }
+        Ok(tree)
+    }
+
+    /// A deep, narrow tree: a segment target small enough that a thousand
+    /// tiny entries branch several levels deep, so a walk that pays a
+    /// barrier per level pays several.
+    async fn paced_tree_over<B>(
+        storage: &mut ContentAddressedStorage<B>,
+        keys: core::ops::Range<u32>,
+    ) -> Result<PersistentTree<[u8; 4], Vec<u8>>>
+    where
+        B: dialog_storage::StorageBackend<
+                Key = Blake3Hash,
+                Value = Vec<u8>,
+                Error = dialog_storage::DialogStorageError,
+            > + dialog_common::ConditionalSend
+            + dialog_common::ConditionalSync,
+    {
+        let manifest = crate::Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..crate::Manifest::default()
+        };
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+        let mut delta = Delta::zero();
+        for i in keys {
+            tree = crate::TransientTree::with_manifest(
+                tree.root().clone(),
+                tree.node_cache(),
+                manifest,
+            )
+            .insert(i.to_be_bytes(), vec![i as u8], storage)
+            .await?
+            .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
         }
         Ok(tree)
@@ -636,6 +683,59 @@ mod tests {
     /// `ObservingBackend` yields once inside every read, so an overlap
     /// here means the reads genuinely coexisted rather than merely
     /// completing back to back.
+    /// The walk is a continuation queue, not a level walk: a node's
+    /// children are queued the moment it lands, so under a connection
+    /// cap a child is requested while its parent's siblings
+    /// are still in flight. A level walk drains a level before opening
+    /// the next -- every read of the level awaited before the next
+    /// level's first goes out -- which over a capped transport is a
+    /// round trip of idle slots per level; on a deep tree that is most
+    /// of the walk.
+    #[dialog_common::test]
+    async fn it_walks_without_level_barriers() -> Result<()> {
+        use crate::helpers::ObservingBackend;
+
+        // Two slots, like a browser holding few connections to a host:
+        // the cap is what makes the reader's shape visible in the order
+        // reads start and complete (see `ObservingBackend::with_capacity`).
+        let backend = ObservingBackend::with_capacity(2);
+        let mut storage = ContentAddressedStorage::new(backend.clone());
+        let tree = paced_tree_over(&mut storage, 0..1200).await?;
+        let levels = backend
+            .levels_of::<[u8; 4], Vec<u8>>(tree.root().clone())
+            .await?;
+        assert!(
+            levels.len() >= 3,
+            "the fixture must be deep (got {} levels)",
+            levels.len()
+        );
+
+        backend.reset();
+        let visits = tree.traverse_available(&storage);
+        futures_util::pin_mut!(visits);
+        let mut seen = 0usize;
+        while let Some(visit) = visits.next().await {
+            match visit? {
+                Visit::Present(_) => seen += 1,
+                Visit::Absent(hash) => panic!("a complete tree has no absent node: {hash}"),
+            }
+        }
+        assert!(seen > 8, "the walk must visit a real tree (saw {seen})");
+
+        let overlapped = levels
+            .windows(2)
+            .filter(|pair| pair[0].len() > 1)
+            .any(|pair| backend.requested_before_level_completed(&pair[0], &pair[1]));
+        assert!(
+            overlapped,
+            "no child read was requested while its parent's level was still in flight, \
+             over {} levels: the walk waits for the slowest read of each level \
+             before it opens the next",
+            levels.len()
+        );
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_overlaps_a_level_under_a_one_item_consumer() -> Result<()> {
         use crate::helpers::ObservingBackend;

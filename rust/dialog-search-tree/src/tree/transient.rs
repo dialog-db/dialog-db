@@ -26,6 +26,7 @@ use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HA
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use rkyv::{
     Deserialize, Serialize,
     bytecheck::CheckBytes,
@@ -36,7 +37,7 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     marker::PhantomData,
     ops::{Bound, RangeBounds, RangeInclusive},
 };
@@ -45,9 +46,21 @@ use std::{
 /// the paths still ahead of the applier can be routed. Reads nothing itself.
 const OPEN_LOOKAHEAD: usize = 512;
 
-/// How many nodes [`TransientTree::integrate`] opens at once, in line with
-/// the tree's other fetch-concurrency limits.
-const OPEN_CONCURRENCY: usize = 16;
+/// How many of the nodes [`TransientTree::integrate`]'s opening pass has
+/// queued are in flight at once.
+///
+/// Unbounded, for the reason `traversal::FETCH_CONCURRENCY` is: every
+/// queued node is one a pending change's descent is about to read, so
+/// the set is bounded by the changes in the lookahead and by the tree's
+/// fanout, and how many of them may cross the wire together is the
+/// transport's limit to impose (the browser's per-host cap, the client's
+/// pool), not a tree constant's. A cap here costs a round trip per wave
+/// on a level wider than it, and with the queue it also hides the walk's
+/// shape: a level walk under a cap smaller than a level takes the level
+/// in slices, and a slice of the next level goes out while the tail of
+/// this one is still queued, which looks like the continuation queue
+/// without being it.
+const OPEN_CONCURRENCY: usize = usize::MAX;
 
 /// How many levels one opening pass walks before handing back to the
 /// descent. Each level is one concurrent batch, so a deeper descent unlocks
@@ -729,6 +742,45 @@ where
     /// there, and anything missing or failing is read again by the descent
     /// that needs it, which still owns the error and the missing-block
     /// policy.
+    /// Open the nodes the pending changes' descents are about to read,
+    /// each as soon as the read that names it lands.
+    ///
+    /// An integration walks its tree in key order, and a change whose next
+    /// node is still held by reference reads it right there -- so a merge
+    /// reads what it needs strictly one at a time, one round trip each, with
+    /// nothing else in flight. That is the serial block loading a first sync
+    /// shows (#492).
+    ///
+    /// Routing is pure (`child_for` and an index's own `route` read no
+    /// storage), so every pending change's path can be followed through
+    /// whatever is already in memory -- the transient spine and the node
+    /// cache alike -- and the node each path stops at is known without
+    /// reading anything. Those are exactly the reads the descents are about
+    /// to make, so they go out together.
+    ///
+    /// The reads form a continuation queue rather than levels: the node
+    /// each path stops at is queued in change order, up to
+    /// `OPEN_CONCURRENCY` are in flight at once, and when one lands the
+    /// paths that stopped at it are re-followed through it and their next
+    /// nodes queued behind whatever is already waiting. A path drills down
+    /// as fast as its own reads return; it never waits for a sibling's. A
+    /// level-by-level walk paid a barrier per level -- the whole level's
+    /// slowest read before any path could take its next step -- which over
+    /// a capped transport is a round trip of idle slots per level.
+    ///
+    /// It reads nothing a descent would not have read: a node already in
+    /// memory is skipped, a node no pending change routes to is never
+    /// touched, and one named by many changes is read once. The set of
+    /// blocks an integration reads is therefore unchanged -- only when they
+    /// are read -- so partial replication is preserved exactly. Each path
+    /// is followed at most `OPEN_LEVELS` nodes deep per opening, the same
+    /// bound the level walk had.
+    ///
+    /// Advisory: the reads go through the accessor's [`warm`](Accessor::warm)
+    /// into the shared node cache, so the `lift` that follows finds them
+    /// there, and anything missing or failing is read again by the descent
+    /// that needs it, which still owns the error and the missing-block
+    /// policy. A path whose read did not land stops opening there.
     async fn open_pending<'changes, Backend, Changes>(
         &self,
         changes: Changes,
@@ -747,44 +799,61 @@ where
         }
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
 
-        for _ in 0..OPEN_LEVELS {
-            let mut wanted = Vec::new();
-            let mut seen = HashSet::new();
-            for key in &keys {
-                if let Some(hash) = self.unopened_on_path(key, opened)
-                    && seen.insert(hash.clone())
-                {
-                    wanted.push(hash);
-                    if wanted.len() >= OPEN_CONCURRENCY {
-                        break;
-                    }
+        // The paths (by position in `keys`) stopped at each node not yet
+        // read, and the nodes waiting for a slot, in the order the paths
+        // asked for them. A node is queued once however many paths stop
+        // at it; the entry outlives the read so a path arriving while it
+        // is in flight joins it instead of queueing it again.
+        let mut stopped: HashMap<Blake3Hash, Vec<usize>> = HashMap::new();
+        let mut queue: VecDeque<Blake3Hash> = VecDeque::new();
+        let mut depth = vec![0usize; keys.len()];
+        let stop_at = |at: usize,
+                       hash: Blake3Hash,
+                       stopped: &mut HashMap<Blake3Hash, Vec<usize>>,
+                       queue: &mut VecDeque<Blake3Hash>| {
+            let waiting = stopped.entry(hash.clone()).or_default();
+            if waiting.is_empty() {
+                queue.push_back(hash);
+            }
+            waiting.push(at);
+        };
+        for (at, key) in keys.iter().enumerate() {
+            if let Some(hash) = self.unopened_on_path(key, opened) {
+                stop_at(at, hash, &mut stopped, &mut queue);
+            }
+        }
+
+        // `FuturesUnordered` polls every read it holds when it is polled,
+        // so on wasm -- where the request is issued BY the poll -- every
+        // queued read is on the wire at once, never one at a time.
+        let mut reads = FuturesUnordered::new();
+        loop {
+            while reads.len() < OPEN_CONCURRENCY {
+                let Some(hash) = queue.pop_front() else {
+                    break;
+                };
+                reads.push(accessor.warm(hash));
+            }
+            let Some(hash) = reads.next().await else {
+                break;
+            };
+            let Some(paths) = stopped.remove(&hash) else {
+                continue;
+            };
+            // Nothing landed (missing or failing block): the paths that
+            // stopped here stop for good, and their descents will report
+            // it. Re-following them would name this node again and spin.
+            if self.cache.get_cached(&hash).is_none() {
+                continue;
+            }
+            for at in paths {
+                depth[at] += 1;
+                if depth[at] >= OPEN_LEVELS {
+                    continue;
                 }
-            }
-            if wanted.is_empty() {
-                return;
-            }
-
-            // A single node is the descent's own next read, so fetching it
-            // here moves that round trip rather than removing it; but the
-            // level below it may fan out, and only re-following the paths
-            // through it can show that, so it is read and the pass goes on.
-            //
-            // `buffered` over a stream of futures, so every read is polled
-            // before the first completes: on wasm the request is issued BY
-            // the poll, so a loop awaiting one at a time never gets two on
-            // the wire. `traversal.rs` uses this shape for the same reason.
-            let mut reads =
-                futures_util::stream::iter(wanted.iter().cloned().map(|hash| accessor.warm(hash)))
-                    .buffered(OPEN_CONCURRENCY);
-            while reads.next().await.is_some() {}
-
-            // Nothing landed (missing or failing blocks), so re-following
-            // the paths would name the same nodes again and spin.
-            if wanted
-                .iter()
-                .all(|hash| self.cache.get_cached(hash).is_none())
-            {
-                return;
+                if let Some(next) = self.unopened_on_path(keys[at], opened) {
+                    stop_at(at, next, &mut stopped, &mut queue);
+                }
             }
         }
     }
@@ -9170,6 +9239,114 @@ mod buffer_edit_interaction_tests {
     /// The no-amplification half matters as much as the overlap: a
     /// read-ahead that guessed would look fast while pulling tree the merge
     /// never needed, quietly destroying partial replication.
+    /// The opening pass is a continuation queue: a path takes its next
+    /// step the moment its own read lands, so under a connection cap a
+    /// path's next node is requested while other paths'
+    /// reads on the level above are still in flight. A level-by-level
+    /// pass drained a level before re-following any path, each drain a
+    /// round trip of idle transport while the slowest read of the level
+    /// held every other path back.
+    #[dialog_common::test]
+    async fn it_opens_pending_nodes_without_level_barriers() -> Result<()> {
+        // Two slots, like a browser holding few connections to a host:
+        // the cap is what makes the opening's shape visible in the order
+        // reads start and complete (see `ObservingBackend::with_capacity`).
+        // The base is a deep paced tree with a level wider than the cap: a
+        // path's next step is only seen to overlap another path's read on
+        // a level where some read is still waiting for a slot when the
+        // first child is queued. A level no wider than the cap has all its
+        // reads admitted together, and a level of one node has nothing to
+        // overlap at all.
+        let observing = crate::helpers::ObservingBackend::with_capacity(2);
+        let mut observed: ContentAddressedStorage<crate::helpers::ObservingBackend> =
+            ContentAddressedStorage::new(observing.clone());
+        let manifest = paced_manifest();
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in (0..2400u32).step_by(2) {
+            base = TransientTree::with_manifest(base.root().clone(), base.node_cache(), manifest)
+                .insert(i.to_be_bytes(), vec![i as u8], &observed)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                observed
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+        let levels = observing
+            .levels_of::<[u8; 4], Vec<u8>>(base.root().clone())
+            .await?;
+        assert!(
+            levels.iter().any(|level| level.len() > 2),
+            "the fixture must have a level wider than the cap (widths {:?})",
+            levels.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+
+        let changes: Vec<u32> = (1..2400u32).step_by(14).collect();
+        let stream = futures_util::stream::iter(changes.iter().map(|key| {
+            Ok(Change::Add(Entry {
+                key: key.to_be_bytes(),
+                value: vec![9],
+            }))
+        }));
+
+        observing.reset();
+        let mut delta = Delta::zero();
+        let merged: Tree =
+            TransientTree::with_manifest(base.root().clone(), Default::default(), paced_manifest())
+                .integrate(stream, &observed)
+                .await?
+                .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            observed
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let overlapped = levels
+            .windows(2)
+            .filter(|pair| pair[0].len() > 1)
+            .any(|pair| observing.requested_before_level_completed(&pair[0], &pair[1]));
+        if !overlapped {
+            // Which level each read belongs to, in event order: R requests,
+            // C completes, so a level walk reads as runs of one level.
+            let level_of = |hash: &Blake3Hash| {
+                levels
+                    .iter()
+                    .position(|level| level.contains(hash))
+                    .map(|at| at.to_string())
+                    .unwrap_or_else(|| "?".to_string())
+            };
+            let trace: Vec<String> = observing
+                .events()
+                .iter()
+                .map(|(hash, event)| {
+                    let kind = match event {
+                        crate::helpers::ReadEvent::Requested => "R",
+                        crate::helpers::ReadEvent::Completed => "C",
+                    };
+                    format!("{}{kind}", level_of(hash))
+                })
+                .collect();
+            panic!(
+                "no path's next node was requested while the level above was still in \
+                 flight: the opening waits for the slowest read of each level \
+                 before any path takes its next step. widths {:?}, events {}",
+                levels.iter().map(Vec::len).collect::<Vec<_>>(),
+                trace.join(" ")
+            );
+        }
+        for key in &changes {
+            assert_eq!(
+                merged.get(&key.to_be_bytes(), &observed).await?,
+                Some(vec![9]),
+                "integrate must apply the change at key {key}"
+            );
+        }
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_opens_pending_nodes_concurrently() -> Result<()> {
         // Build the base on the observing backend itself; the counter is

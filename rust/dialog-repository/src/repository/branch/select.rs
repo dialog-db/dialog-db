@@ -143,7 +143,7 @@ impl Select<'_> {
                 .await?
                 .ok_or_else(|| {
                     DialogSearchTreeError::Node(format!(
-                        "Blob not found in storage: {}",
+                        "Block not found in storage: {}",
                         tree_hash.to_base58(),
                     ))
                 })?;
@@ -230,7 +230,7 @@ impl Select<'_> {
                 .await?
                 .ok_or_else(|| {
                     DialogSearchTreeError::Node(format!(
-                        "Blob not found in storage: {}",
+                        "Block not found in storage: {}",
                         tree_hash.to_base58(),
                     ))
                 })?;
