@@ -4,8 +4,8 @@ use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Estimate, Preload, PreloadRequest, Select, SortKey, Speculation,
-    Statement,
+    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey,
+    Speculation, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -23,6 +23,7 @@ use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::Buffer;
 use dialog_storage::{Blake3Hash, StorageBackend};
+use futures_util::future::try_join_all;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
@@ -30,8 +31,8 @@ use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
-    assemble, builtin, conclusion_selector, hydrate, overlay_rules, rule_entities, source_bytes,
-    source_selector,
+    assemble, builtin, conclusion_attr, conclusion_selector, hydrate, overlay_rules, rule_entities,
+    source_attr, source_bytes, source_selector,
 };
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
 use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snapshot};
@@ -597,6 +598,7 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
+        + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -644,6 +646,27 @@ where
         let rule_entities = match head.as_ref().and_then(|h| cache.discovered(concept, h)) {
             Some(entities) => entities,
             None => {
+                // The moment any resolution scans cold, the whole
+                // `dialog.rule/*` region is committed work: this
+                // concept's rules read it now, and every concept its
+                // rule bodies reference reads it next (rule premises
+                // recurse). The region is small — rules, not facts —
+                // so hint both spans whole and let the ambient driver
+                // replicate them level-parallel while this walk
+                // demand-reads; closure depth then finds it local.
+                for attribute in [conclusion_attr(), source_attr()] {
+                    let listening = Provider::<Preload>::execute(
+                        self,
+                        PreloadRequest {
+                            selector: ArtifactSelector::new().the(attribute),
+                            likelihood: Likelihood::Likely,
+                        },
+                    )
+                    .await;
+                    if !listening {
+                        break;
+                    }
+                }
                 let claims = self
                     .select_tree(source, conclusion_selector(concept))
                     .await
@@ -658,26 +681,30 @@ where
             }
         };
 
-        // Hydration: reuse cached bodies (content-addressed, never stale),
-        // fetch + compile the rest from each rule's `dialog.rule/source`.
-        let mut rules = Vec::with_capacity(rule_entities.len());
-        for rule_entity in rule_entities {
+        // Hydration: reuse cached bodies (content-addressed, never
+        // stale) and fetch + compile the rest from each rule's
+        // `dialog.rule/source` — concurrently, because the fetches are
+        // independent point selects and a head move with N installed
+        // rules must not pay N sequential round trips (blocks already
+        // in flight join through the env's `Hydrate` flight).
+        let cache = &cache;
+        let rules = try_join_all(rule_entities.into_iter().map(|rule_entity| async move {
             if let Some(body) = cache.body(&rule_entity) {
-                rules.push(body);
-                continue;
+                return Ok::<_, EvaluationError>(Some(body));
             }
             let source_claims = self
                 .select_tree(source, source_selector(&rule_entity))
                 .await
                 .map_err(|e| EvaluationError::Store(format!("rule source lookup: {e:?}")))?;
-            let Some(source) = source_bytes(source_claims) else {
-                continue;
+            let Some(bytes) = source_bytes(source_claims) else {
+                return Ok(None);
             };
-            let body = hydrate(&source)?;
+            let body = hydrate(&bytes)?;
             cache.record_body(rule_entity, body.clone());
-            rules.push(body);
-        }
-        Ok(rules)
+            Ok(Some(body))
+        }))
+        .await?;
+        Ok(rules.into_iter().flatten().collect())
     }
 }
 
@@ -689,6 +716,7 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
+        + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -757,6 +785,7 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
+        + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -797,19 +826,34 @@ where
         referenced(root_bundle, &mut queue);
         entries.push((root.this(), root_bundle.clone()));
 
-        while let Some(descriptor) = queue.pop() {
-            let entity = descriptor.this();
-            if !seen.insert(entity.clone()) {
-                continue;
+        // Level by level: everything a frontier references is known
+        // needed, so each level's concepts resolve their rules
+        // concurrently instead of paying one round trip per concept.
+        // Only closure depth remains a sequential cost, and the span
+        // hints `durable_rules` emits usually make deeper levels local.
+        while !queue.is_empty() {
+            let mut frontier = Vec::new();
+            while let Some(descriptor) = queue.pop() {
+                let entity = descriptor.this();
+                if seen.insert(entity.clone()) {
+                    frontier.push((entity, descriptor));
+                }
             }
-            let mut rules: Vec<DeductiveRule> = builtin(&entity);
-            for source in &self.sources {
-                rules.extend(self.durable_rules(source, &entity).await?);
+            let resolved =
+                try_join_all(frontier.into_iter().map(|(entity, descriptor)| async move {
+                    let mut rules: Vec<DeductiveRule> = builtin(&entity);
+                    for source in &self.sources {
+                        rules.extend(self.durable_rules(source, &entity).await?);
+                    }
+                    rules.extend(overlay_rules(&self.changes, &entity));
+                    let bundle = assemble(&descriptor, rules, PlanCache::default());
+                    Ok::<_, EvaluationError>((entity, bundle))
+                }))
+                .await?;
+            for (entity, bundle) in resolved {
+                referenced(&bundle, &mut queue);
+                entries.push((entity, bundle));
             }
-            rules.extend(overlay_rules(&self.changes, &entity));
-            let bundle = assemble(&descriptor, rules, PlanCache::default());
-            referenced(&bundle, &mut queue);
-            entries.push((entity, bundle));
         }
 
         Ok(Arc::new(ProgramAnalysis::analyze(
@@ -849,7 +893,7 @@ mod rule_tests {
 
     use super::*;
     use crate::Branch;
-    use crate::helpers::test_repo;
+    use crate::helpers::{Counting, test_repo};
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
@@ -944,6 +988,46 @@ mod rule_tests {
 
         let employees = query_employees(&branch, &operator).await?;
         assert!(employees.contains(&alice), "committed rule must resolve");
+        Ok(())
+    }
+
+    /// Resolving a concept's rules cold hints the whole `dialog.rule/*`
+    /// region (conclusion and source spans) into the env's ambient
+    /// queue: the region is committed work the moment any resolution
+    /// scans it, and warming it whole makes every deeper closure
+    /// level's discovery and hydration local. The query's own driven
+    /// stream executes the hints, leaving nothing pending.
+    #[dialog_common::test]
+    async fn it_hints_the_rule_region_when_resolving_cold() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let env = Counting::new(operator);
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(employee_from_person())
+            .commit()
+            .publish()
+            .perform(&env)
+            .await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        env.reset();
+        let employees = query_employees(&branch, &env).await?;
+        assert!(employees.contains(&alice), "committed rule must resolve");
+        assert!(
+            env.count("Preload") >= 2,
+            "cold rule resolution hints the conclusion and source spans"
+        );
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the query's own stream drove the hints");
         Ok(())
     }
 
