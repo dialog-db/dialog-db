@@ -315,6 +315,29 @@ where
     Ok(screened)
 }
 
+/// Whether two replicas have never observed one another: no origin
+/// `ours` has seen has been observed by `theirs`.
+///
+/// Shared ancestry shows up as a shared origin in BOTH contexts (a
+/// claim observed on either side carries its origin into that side's
+/// watermark), so enumerating our origins alone settles disjointness;
+/// the other side is only asked the per-origin point query
+/// [`Context::observes_origin`]. Pass the small side as `ours`.
+///
+/// Under it every screen is provably a no-op. A covering record
+/// supersedes only versions its side has observed, so nothing of ours
+/// can retire a claim of theirs (R3) and nothing of theirs can retire
+/// one of ours; and the context screens (R1) drop only copies the other
+/// side has seen superseded, which with no shared origin is nothing.
+/// A pull between such replicas can integrate both sides' changes
+/// unscreened: that is what makes a first contact between
+/// independently seeded replicas cost the integrate's reads and no
+/// screening scans of the other tree.
+pub fn unacquainted(ours: &Context, theirs: &Context) -> bool {
+    ours.iter()
+        .all(|(origin, _)| !theirs.observes_origin(origin))
+}
+
 /// Screen the **data-region** slice of an incoming merge differential
 /// by the receiver's causal context (R1); incoming guarded removes pass
 /// through (R2). Run — and integrate — after [`screen_history`]'s pass,
