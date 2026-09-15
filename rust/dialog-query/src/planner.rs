@@ -57,7 +57,7 @@ impl Planner {
         let mut bound = scope.clone();
         let mut remaining: Vec<Premise> = mem::take(&mut self.premises);
         let mut steps = vec![];
-        let mut cost = 0;
+        let mut cost: usize = 0;
 
         while !remaining.is_empty() {
             // Pick the cheapest feasible premise under the current
@@ -86,7 +86,14 @@ impl Planner {
             // The variables already bound when this step runs, before
             // it contributes its own binds.
             let step_env = bound.clone();
-            cost += step_cost;
+            // Saturating: a premise with no estimate costs `usize::MAX`
+            // (a resolver whose reference no other premise binds, say),
+            // and a plain `+=` overflowed on it — a rule an author can
+            // write by leaving one input unnamed panicked the analyzer
+            // in debug rather than being reported as the unplannable
+            // rule it is. Saturation keeps it the most expensive plan
+            // there is, which is what the number is for.
+            cost = cost.saturating_add(step_cost);
             bound.extend(&binds);
             steps.push(Plan::lower(
                 premise,
@@ -219,6 +226,47 @@ mod tests {
         assert!(plan.binds.contains("person"), "Should bind person variable");
         assert!(plan.binds.contains("name"), "Should bind name variable");
         assert!(plan.binds.contains("age"), "Should bind age variable");
+    }
+
+    /// A resolver whose reference nothing binds has no estimate, so it
+    /// plans at `usize::MAX`. Summing that into the running total used to
+    /// overflow — a rule an author can write by leaving one input unnamed
+    /// panicked the planner in debug instead of being reported as the
+    /// unplannable rule it is.
+    #[dialog_common::test]
+    fn it_does_not_overflow_on_an_unestimatable_premise() {
+        use crate::resolver::{ResolverQuery, TreeKeyQuery};
+
+        // `of` blank: the node reference is never bound, so `estimate`
+        // declines and the premise costs `usize::MAX`.
+        let unbound = ResolverQuery::TreeKey(TreeKeyQuery {
+            this: Term::var("this"),
+            of: Term::<crate::types::Any>::blank(),
+            at: Term::var("at"),
+            key: Term::var("key"),
+            rank: Term::var("rank"),
+        });
+        let name = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::var("person"),
+            Term::var("name"),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Resolver(unbound)),
+            Premise::Assert(Proposition::Attribute(Box::new(name))),
+        ])
+        .plan(&Environment::new())
+        .expect("an unestimatable premise still plans");
+
+        assert_eq!(plan.steps.len(), 2, "both premises are planned");
+        assert_eq!(
+            plan.cost,
+            usize::MAX,
+            "the plan costs the most there is, rather than wrapping"
+        );
     }
 
     #[dialog_common::test]
