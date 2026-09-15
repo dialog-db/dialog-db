@@ -176,10 +176,11 @@ impl Select<'_> {
     }
 
     /// An advisory upper-bound estimate of how many artifacts this selector's
-    /// range spans, read from the tree root alone (see
+    /// range spans, read from the range's edge paths (see
     /// [`ArtifactTreeExt::estimate`](dialog_artifacts::tree::ArtifactTreeExt::estimate)).
     ///
-    /// One block read rather than a scan, for a planner comparing scan sizes.
+    /// A couple of blocks per level rather than a scan, for a planner
+    /// comparing scan sizes.
     /// This estimates against the line's tree only; it ignores any pending
     /// `Changes` overlay, whose in-memory edits are small relative to the tree
     /// and do not change the order-of-magnitude answer a strategy choice

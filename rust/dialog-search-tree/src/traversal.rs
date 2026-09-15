@@ -38,10 +38,28 @@ use crate::{
 
 /// How many block reads one traversal level issues concurrently.
 ///
-/// Sized for a backend that reaches a remote on a miss: enough in flight
-/// to hide round-trips, small enough not to swamp a local store or a
-/// remote's connection limits.
-const FETCH_CONCURRENCY: usize = 16;
+/// A level's reads are independent and every one of them is committed
+/// work: the walk has already decided it needs these nodes, and the set
+/// is bounded by the tree's fanout and by the caller's scope. So there is
+/// nothing to gain by metering them out, and a cap costs a round trip per
+/// wave -- a 70-wide level under a cap of 16 pays four waves where it
+/// could pay one.
+///
+/// Measured on the soak's download phase (median of three runs per
+/// profile, capped at 16 versus uncapped): intercontinental 28.6 -> 9.2
+/// rounds, broadband 31.7 -> 23.4, mobile 42.6 -> 41.7 (mobile is
+/// bandwidth-bound at 20 Mbps, so round trips are not its constraint).
+/// Query phases were unchanged within run-to-run variance, and duplicate
+/// fetches stayed at zero throughout, so partial replication is
+/// unaffected -- lifting the cap changes WHEN blocks are fetched, never
+/// WHICH.
+///
+/// The transport is the right place for any remaining limit: a browser
+/// caps connections per origin on its own, and a priority queue at the
+/// hydration flight is what would keep one big walk from starving a
+/// concurrent demand read (bead dialog-db-88). A constant here cannot
+/// express either.
+const FETCH_CONCURRENCY: usize = usize::MAX;
 
 /// What a gap-tolerant traversal found at one position in the tree.
 #[derive(Debug, Clone)]

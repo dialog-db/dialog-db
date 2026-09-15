@@ -166,10 +166,10 @@ pub struct Counting<P> {
 struct InFlight {
     current: usize,
     peak: usize,
-    /// Consecutive opens that were alone in flight, and the longest such
-    /// run seen. See [`Counting::longest_serial_fetch_run`].
-    alone: usize,
-    longest_alone: usize,
+    /// The effects of the consecutive opens that were alone in flight, and
+    /// the longest such run seen. See [`Counting::longest_serial_fetch_run`].
+    alone: Vec<&'static str>,
+    longest_alone: Vec<&'static str>,
 }
 
 /// Yields to the executor exactly once, so work polled alongside the
@@ -230,7 +230,14 @@ impl<P> Counting<P> {
     /// This counts the serialization directly: how many fetches in a row
     /// had no company.
     pub fn longest_serial_fetch_run(&self) -> usize {
-        self.forks.lock().longest_alone
+        self.forks.lock().longest_alone.len()
+    }
+
+    /// The effects that made up the longest serial run, in order: which
+    /// reader issued each solo fetch, so a run can be attributed to the
+    /// loop that owns it rather than guessed at.
+    pub fn longest_serial_fetch_run_effects(&self) -> Vec<&'static str> {
+        self.forks.lock().longest_alone.clone()
     }
 
     /// Total executions of effects whose type name contains `needle`
@@ -299,10 +306,12 @@ where
             open.current += 1;
             open.peak = open.peak.max(open.current);
             if open.current == 1 {
-                open.alone += 1;
-                open.longest_alone = open.longest_alone.max(open.alone);
+                open.alone.push(name);
+                if open.alone.len() > open.longest_alone.len() {
+                    open.longest_alone = open.alone.clone();
+                }
             } else {
-                open.alone = 0;
+                open.alone.clear();
             }
         }
         // Yield before answering, so a read issued by work polled

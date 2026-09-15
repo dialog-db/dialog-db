@@ -17,11 +17,11 @@ use dialog_search_tree::{
     NoveltyOp, PersistentNode, TreeDifference, into_owned,
 };
 use dialog_storage::StorageBackend as _;
-use futures_util::{StreamExt as _, stream};
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use crate::{
-    Branch, Index, LocalIndex, PublishError, PushError, RemoteRepository, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
+    Branch, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex, RemoteRepository,
+    RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -308,93 +308,31 @@ impl Push<'_> {
                 // or an aborted push leaves probe-trustable residue that a
                 // later pusher prunes against — publishing a head whose
                 // blobs the remote does not hold.
+                // Shipments are independent of one another, so they cross
+                // together: SHIPMENT_CONCURRENCY at a time, the whole set
+                // awaited before anything that references them lands. On
+                // the sign-in path this loop awaited each shipment in turn
+                // and measured as the single largest cost of the push (one
+                // round trip per spilled value, one after another).
                 let blob_store = LocalIndex::new(env, index.clone());
-                let address = remote.address();
-                let mut refs = std::pin::pin!(shipment_refs(&difference));
-                while let Some(shipment) = refs.next().await {
-                    match shipment? {
-                        // Removals ship nothing; the remote keeps its bytes.
-                        ShipmentRef::BlobRemoved(_) => {}
-                        // The size rides on the ref (from the index record the
-                        // differential already read), so shipping needs no
-                        // point read of the current tree — such a read would
-                        // descend by-reference regions the novelty walk is
-                        // careful never to require.
-                        ShipmentRef::BlobAdded { hash, size } => {
-                            let digest = dialog_common::Blake3Hash::from(hash);
-                            // Local bytes -> remote import sink. Mirrors the
-                            // remote `Read` fork in `branch/blob.rs` and
-                            // `RemotePut`'s `Put` fork in `remote/archive.rs`,
-                            // substituting the blob `Import` effect
-                            // (single-part on the current providers).
-                            let source = branch
-                                .archive()
-                                .blob()
-                                .read(digest.clone())
-                                .perform(env)
-                                .await;
-                            let mut source = match source {
-                                Ok(source) => source,
-                                // Bytes this replica never held: the record
-                                // rode into the head by reference. Sole
-                                // remote → the target stores them by
-                                // attribution; otherwise adjudicate — probe
-                                // the target, forward from a source remote
-                                // only on a miss.
-                                Err(BlobError::NotFound(_)) => {
-                                    if !sole_remote {
-                                        ensure_blob_on_target(
-                                            digest, size, branch, &remote, &sources, env,
-                                        )
-                                        .await?;
-                                    }
-                                    continue;
-                                }
-                                Err(error) => return Err(error.into()),
-                            };
-                            let mut sink = address
-                                .subject
-                                .clone()
-                                .archive()
-                                .blob()
-                                .import(digest.clone(), size)
-                                .fork(address.site())
-                                .perform(env)
-                                .await?;
-                            while let Some(chunk) = source.next().await? {
-                                sink.write_all(&chunk).await?;
-                            }
-                            sink.finish().await?;
-                        }
-                        // A value larger than the inline threshold lives as a
-                        // content-addressed block (addressed by its 32-byte
-                        // value reference) in the same store as the tree
-                        // nodes. Local bytes -> remote block put, mirroring
-                        // the novel node upload.
-                        ShipmentRef::SpilledValue(reference) => {
-                            let bytes = match blob_store.get(&reference).await? {
-                                Some(bytes) => bytes,
-                                // Held by reference: not this replica's to
-                                // ship. Sole remote → the target has it by
-                                // attribution; otherwise adjudicate.
-                                None => {
-                                    if !sole_remote {
-                                        ensure_block_on_target(
-                                            NodeHash::from(reference),
-                                            branch,
-                                            &remote,
-                                            &sources,
-                                            env,
-                                        )
-                                        .await?;
-                                    }
-                                    continue;
-                                }
-                            };
-                            remote_index.put(Buffer::from(bytes)).perform(env).await?;
-                        }
-                    }
-                }
+                let shipments = shipment_refs(&difference)
+                    .map(|shipment| {
+                        ship(
+                            shipment,
+                            branch,
+                            &remote,
+                            &remote_index,
+                            &blob_store,
+                            &sources,
+                            sole_remote,
+                            env,
+                        )
+                    })
+                    .buffer_unordered(SHIPMENT_CONCURRENCY)
+                    .try_collect::<()>();
+                // Boxed like the node upload below: the stream carries the
+                // differential and produces a large future.
+                Box::pin(shipments).await?;
 
                 // Adjudicate the by-reference frontier: subtree roots the
                 // novelty walk could not enter. These land BEFORE the held
@@ -620,6 +558,120 @@ where
         }
     }
     sources
+}
+
+/// How many shipments (blob bytes, spilled value blocks) a push has in
+/// flight at once. The same width as the node upload that follows them
+/// (`UPLOAD_CONCURRENCY` in `remote/archive.rs`): the two phases are the
+/// same traffic, content-addressed puts to one remote.
+const SHIPMENT_CONCURRENCY: usize = 16;
+
+/// Ship one thing a node references, ahead of the node: a blob's bytes
+/// through the remote import sink, or a spilled value block through a
+/// block put. Content this replica holds only by reference is not its
+/// to ship: with the target the sole remote it has the bytes by
+/// attribution, otherwise `ensure_*` adjudicates with one probe.
+#[allow(clippy::too_many_arguments)]
+async fn ship<Env>(
+    shipment: Result<ShipmentRef, dialog_artifacts::DialogArtifactsError>,
+    branch: &Branch,
+    remote: &RemoteRepository,
+    remote_index: &RemoteArchiveIndex<'_>,
+    blob_store: &LocalIndex<'_, Env>,
+    sources: &[RemoteRepository],
+    sole_remote: bool,
+    env: &Env,
+) -> Result<(), PushError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<BlobRead>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<Fork<RemoteSite, Put>>
+        + Provider<Fork<RemoteSite, BlobImport>>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
+{
+    let address = remote.address();
+    match shipment? {
+        // Removals ship nothing; the remote keeps its bytes.
+        ShipmentRef::BlobRemoved(_) => Ok(()),
+        // The size rides on the ref (from the index record the
+        // differential already read), so shipping needs no point read of
+        // the current tree — such a read would descend by-reference
+        // regions the novelty walk is careful never to require.
+        ShipmentRef::BlobAdded { hash, size } => {
+            let digest = dialog_common::Blake3Hash::from(hash);
+            // Local bytes -> remote import sink. Mirrors the remote `Read`
+            // fork in `branch/blob.rs` and `RemotePut`'s `Put` fork in
+            // `remote/archive.rs`, substituting the blob `Import` effect
+            // (single-part on the current providers).
+            let source = branch
+                .archive()
+                .blob()
+                .read(digest.clone())
+                .perform(env)
+                .await;
+            let mut source = match source {
+                Ok(source) => source,
+                // Bytes this replica never held: the record rode into the
+                // head by reference. Sole remote -> the target stores them
+                // by attribution; otherwise adjudicate — probe the target,
+                // forward from a source remote only on a miss.
+                Err(BlobError::NotFound(_)) => {
+                    if !sole_remote {
+                        ensure_blob_on_target(digest, size, branch, remote, sources, env).await?;
+                    }
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let mut sink = address
+                .subject
+                .clone()
+                .archive()
+                .blob()
+                .import(digest.clone(), size)
+                .fork(address.site())
+                .perform(env)
+                .await?;
+            while let Some(chunk) = source.next().await? {
+                sink.write_all(&chunk).await?;
+            }
+            sink.finish().await?;
+            Ok(())
+        }
+        // A value larger than the inline threshold lives as a
+        // content-addressed block (addressed by its 32-byte value
+        // reference) in the same store as the tree nodes. Local bytes ->
+        // remote block put, mirroring the novel node upload.
+        ShipmentRef::SpilledValue(reference) => {
+            let bytes = match blob_store.get(&reference).await? {
+                Some(bytes) => bytes,
+                // Held by reference: not this replica's to ship. Sole
+                // remote -> the target has it by attribution; otherwise
+                // adjudicate.
+                None => {
+                    if !sole_remote {
+                        ensure_block_on_target(
+                            NodeHash::from(reference),
+                            branch,
+                            remote,
+                            sources,
+                            env,
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
+            };
+            remote_index.put(Buffer::from(bytes)).perform(env).await?;
+            Ok(())
+        }
+    }
 }
 
 /// One request answering "does `remote` hold this block": a forked
@@ -909,26 +961,36 @@ where
                         }
                     }
                 }
+                let mut references = Vec::new();
                 for (key, value) in entries {
-                    match shipment_ref(&key, &value, false)? {
-                        Some(ShipmentRef::BlobAdded { hash, size }) => {
-                            let digest = dialog_common::Blake3Hash::from(hash);
-                            ensure_blob_on_target(digest, size, branch, target, sources, env)
-                                .await?;
-                        }
-                        Some(ShipmentRef::SpilledValue(reference)) => {
-                            ensure_block_on_target(
-                                NodeHash::from(reference),
-                                branch,
-                                target,
-                                sources,
-                                env,
-                            )
-                            .await?;
-                        }
-                        _ => {}
+                    if let Some(reference) = shipment_ref(&key, &value, false)? {
+                        references.push(reference);
                     }
                 }
+                stream::iter(references)
+                    .map(|reference| async move {
+                        match reference {
+                            ShipmentRef::BlobAdded { hash, size } => {
+                                let digest = dialog_common::Blake3Hash::from(hash);
+                                ensure_blob_on_target(digest, size, branch, target, sources, env)
+                                    .await
+                            }
+                            ShipmentRef::SpilledValue(reference) => {
+                                ensure_block_on_target(
+                                    NodeHash::from(reference),
+                                    branch,
+                                    target,
+                                    sources,
+                                    env,
+                                )
+                                .await
+                            }
+                            ShipmentRef::BlobRemoved(_) => Ok(()),
+                        }
+                    })
+                    .buffer_unordered(SHIPMENT_CONCURRENCY)
+                    .try_collect::<()>()
+                    .await?;
 
                 // The node's own upload waits for its children: Emit sits
                 // beneath the child frames on the stack, so it pops only

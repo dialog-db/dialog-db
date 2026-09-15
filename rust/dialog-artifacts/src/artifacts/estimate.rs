@@ -6,9 +6,10 @@ use crate::{ArtifactSelector, DialogArtifactsError};
 /// Command for estimating how many artifacts a selector's key range spans,
 /// without scanning them.
 ///
-/// Answered by reading a single shallow index node (the tree root) and summing
-/// the [`Scale`](dialog_search_tree::Scale)s of the children the selector's
-/// range touches, so the cost is one block read rather than a full scan. The
+/// Answered from the range's two edge paths: children the range covers
+/// whole contribute their [`Scale`](dialog_search_tree::Scale) unread, the
+/// edge children are descended (at most two blocks per level, the blocks a
+/// scan reads first and last anyway), and a leaf is counted exactly. The
 /// result is an advisory upper bound on the entry count, suitable for a
 /// planner choosing between join strategies, not an exact count.
 ///

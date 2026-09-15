@@ -172,6 +172,120 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
+/// The push ships what its nodes reference (blob bytes and spilled value
+/// blocks) BEFORE the nodes, and those shipments must overlap: a push of
+/// a few dozen large values that awaits each shipment in turn costs one
+/// round trip per value, which on the sign-in path measured as the
+/// single largest cost (28 spilled blocks at 4.2 s each over a throttled
+/// link, strictly one after another, while the node upload right after
+/// them fanned out six wide).
+///
+/// The measurement is the longest run of remote forks with nothing else
+/// in flight, on the same `Counting` gauge the login-path tests use. A
+/// serial shipment loop measures one solo fork per shipped block, so
+/// with 24 spilled values and 4 blobs the run is at least 28; overlapped
+/// shipments leave only the push's inherent head (the upstream resolve
+/// and the differential's first reads).
+// Native only: built on `Storage::temp()` so the real filesystem backend
+// is exercised, not the in-memory one. See the note on
+// `it_ships_blobs_on_push_and_hydrates_on_read` for why the gate is on
+// the feature rather than the target.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let storage = Storage::temp();
+    let profile = Profile::open(unique_name("ship-overlap"))
+        .perform(&storage)
+        .await?;
+    let operator = profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage)
+        .await?;
+    let repo = profile
+        .repository(unique_name("ship-overlap"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let site = s3_site_address(&s3);
+    profile
+        .credential()
+        .site(&site)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator)
+        .await?;
+    let origin = repo
+        .remote("origin")
+        .create(site)
+        .perform(&operator)
+        .await?;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+
+    // Distinct values past the inline threshold: each spills to its own
+    // block, so the push has SPILLED distinct blocks to ship.
+    const SPILLED: usize = 24;
+    const BLOBS: usize = 4;
+    let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+    let facts: Vec<_> = (0..SPILLED)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "doc/body".parse().expect("valid attribute"),
+                of: format!("doc:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("{i:04}{}", "x".repeat(inline_n))),
+                cause: None,
+            })
+        })
+        .collect();
+    branch
+        .commit(stream::iter(facts))
+        .perform(&operator)
+        .await?;
+    for i in 0..BLOBS {
+        let payload: Vec<u8> = (0..20_000u32)
+            .map(|j| ((j + i as u32) % 199) as u8)
+            .collect();
+        let chunks: Vec<Result<Vec<u8>, BlobError>> =
+            payload.chunks(8192).map(|c| Ok(c.to_vec())).collect();
+        Blob::import(stream::iter(chunks))
+            .write((&branch).into())
+            .perform(&operator)
+            .await?;
+    }
+
+    let env = Counting::new(operator.clone());
+    assert!(branch.push().perform(&env).await?.is_some());
+
+    let forks = env.count("fork::Fork");
+    let peak = env.peak_forks_in_flight();
+    let serial_run = env.longest_serial_fetch_run();
+    println!(
+        "SHIP forks={forks} peak={peak} serial_run={serial_run} effects={:?}",
+        env.longest_serial_fetch_run_effects()
+    );
+    assert!(
+        forks as usize >= SPILLED + BLOBS,
+        "every spilled value and blob must cross the wire (forks={forks})"
+    );
+    // A serial shipment loop measures SPILLED + BLOBS solo forks in a row.
+    // The push's inherent head is a handful (the upstream resolve and
+    // the first dependent reads); 8 leaves room for the gauge's load
+    // sensitivity (see the login-path tests) while staying well under 28.
+    assert!(
+        serial_run < 8,
+        "the push shipped {forks} blocks and {serial_run} of them crossed one at a time \
+         with nothing else in flight (peak {peak}): the shipment loop is serial again"
+    );
+    Ok(())
+}
+
 /// Push ships newly-referenced blob bytes to the remote before publishing, so a
 /// second site sharing the remote can pull the revision and read a blob it never
 /// wrote — exercising the push blob-upload hook and Task 4's remote-hydration
@@ -4349,10 +4463,13 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
         }
     }
 
+    let serial_run = pull_env.longest_serial_fetch_run();
     println!(
         "PUSH writes={writes} peak={push_peak} | \
          PULL reads={reads} peak={pull_peak} hydrations={hydrations} \
-         remote_peak={remote_peak} depth={depth}"
+         remote_peak={remote_peak} depth={depth} serial_run={serial_run} \
+         serial_effects={:?}",
+        pull_env.longest_serial_fetch_run_effects()
     );
 
     assert!(
@@ -4394,6 +4511,17 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
         "the push fanned out to peak {push_peak} over {writes} uploads, but \
          the download of the SAME tree over the SAME remote reached only \
          peak {pull_peak} over {reads} reads."
+    );
+    // And no stretch of the pull went one fetch at a time: the floor is
+    // the head chain (the resolve and the dependent reads it names),
+    // measured at 3. The same 12 as the account join, for the same
+    // load-sensitivity reason recorded there.
+    assert!(
+        serial_run < 12,
+        "the pull made {serial_run} remote fetches in a row with nothing \
+         else in flight: some reader went back to one round trip at a \
+         time ({:?})",
+        pull_env.longest_serial_fetch_run_effects()
     );
 
     Ok(())
@@ -4567,9 +4695,12 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     let hydrations = env.count("hydrate::Hydrate");
     let blob_reads = env.count("blob::Read");
     let remote_peak = env.peak_forks_in_flight();
+    let serial_run = env.longest_serial_fetch_run();
     println!(
         "PROFILE reads={reads} peak={peak} forks={hydrations} \
-         blob_reads={blob_reads} remote_peak={remote_peak}"
+         blob_reads={blob_reads} remote_peak={remote_peak} \
+         serial_run={serial_run} serial_effects={:?}",
+        env.longest_serial_fetch_run_effects()
     );
 
     assert!(
@@ -4603,6 +4734,18 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
          each cost its own round trip. Blobs travel their own channel in \
          the snapshot export, downstream of the block walk, so a fan-out \
          restored in the traversal alone does not cover them."
+    );
+    // The guard a peak cannot give: no phase of the login path is allowed
+    // to fall back to one fetch at a time. The floor is the head chain
+    // (the resolve and the dependent reads it names), measured at 3. The
+    // bound is loose because the gauge is load-sensitive, and is the
+    // account join's 12 -- see its note there, and bead dialog-db-88.
+    assert!(
+        serial_run < 12,
+        "the login path made {serial_run} remote fetches in a row with \
+         nothing else in flight: some reader went back to one round trip \
+         at a time ({:?})",
+        env.longest_serial_fetch_run_effects()
     );
 
     Ok(())
@@ -4797,7 +4940,9 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
     println!(
         "JOIN delegations={delegations} hydrations={hydrations} \
          remote_peak={remote_peak} serial_run={serial_run} \
-         reads={reads} local_peak={local_peak}"
+         reads={reads} local_peak={local_peak} \
+         serial_effects={:?}",
+        env.longest_serial_fetch_run_effects()
     );
 
     assert!(
@@ -4812,14 +4957,26 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
     // at a time and pulled the peak up, while the merge ahead of it fetched
     // ~30 blocks strictly one after another.
     //
-    // The bound is generous on purpose. A few solo reads are inherent --
-    // the pull's first read has nothing to overlap with, and a window whose
-    // keys all resolve from cache leaves its one miss alone -- and the
-    // measured floor is 4 on most runs and has been seen at 7 and 11. The
-    // bug this pins was 32 on EVERY run, on both targets, so the bound sits
-    // well above the observed drift and still far below the regression.
+    // The floor is the head chain, and it is inherently serial: the
+    // upstream head resolve, then the revision, root and first frontier
+    // reads it names, each dependent on the one before (the run's effects,
+    // printed above, are always one Resolve followed by Hydrates).
+    //
+    // The bound is loose because the gauge is load-sensitive. "Alone in
+    // flight" is decided by whether two fetches overlap in wall time, so
+    // on a saturated machine sibling fetches drift apart and a run that
+    // measures 4 in isolation measures more -- the same chain, spread
+    // thinner. Measured: 4 on eight consecutive solo runs, 4/5/4 under a
+    // parallel package run, 8 once during a full suite.
+    //
+    // So 12: three times the chain, half again the worst reading seen,
+    // and under half the 29-to-32 this pins. It is derived from those
+    // three numbers and nothing else -- in particular it is NOT the
+    // fetch-concurrency 16 the read paths use, which is a width of
+    // parallel fetches and says nothing about how many may run in a row.
+    // Making the gauge load-independent is bead dialog-db-88.
     assert!(
-        serial_run < 20,
+        serial_run < 12,
         "a device joining the account made {hydrations} remote fetches, and \
          {serial_run} of them ran back-to-back with nothing else in flight \
          (peak {remote_peak} over the whole pull). One round trip at a time \

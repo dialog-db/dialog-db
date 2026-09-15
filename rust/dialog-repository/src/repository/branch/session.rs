@@ -493,7 +493,7 @@ where
 }
 
 // A range-size estimate for the planner's merge-versus-fold choice:
-// one root read per line, summed. The `Changes` overlay is not
+// the range's edge paths per line, summed. The `Changes` overlay is not
 // consulted (small, and irrelevant to the order-of-magnitude answer a
 // strategy heuristic needs). Summing lines is an upper bound — a fact
 // on two lines counts twice — which is the safe direction for a "how

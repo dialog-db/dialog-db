@@ -3,10 +3,14 @@ use crate::attribute::query::DynamicAttributeQuery;
 use crate::selection::{Match, Selection};
 use crate::{Environment, SortOrder, multi_merge_join};
 use core::pin::Pin;
-use dialog_artifacts::{Estimate, Likelihood, Preload, PreloadRequest, encode_value_owned};
+use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::{
+    ArtifactSelector, Estimate, Likelihood, Preload, PreloadRequest, encode_value_owned,
+};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream};
+use std::collections::HashSet;
 
 /// Largest ratio of the widest to narrowest scan range estimate that still
 /// takes the merge path. Above it, one scan is selective enough that a nested
@@ -14,7 +18,8 @@ use futures_util::StreamExt;
 /// in full.
 ///
 /// The estimates come from the tree (per-child
-/// [`Scale`](dialog_search_tree::Scale) sums, one root read per scan), so an
+/// [`Scale`](dialog_search_tree::Scale) sums with exact edges, a couple of
+/// blocks per level per scan), so an
 /// all-broad concept join — every attribute a full entity range — has a ratio
 /// near 1, while pinning one attribute to a value collapses that scan's range
 /// to a narrow band and pushes the ratio well past this threshold.
@@ -140,8 +145,9 @@ impl Conjunction {
     /// when one scan is far more selective than the rest, the loop touches
     /// far fewer blocks. Each scan is resolved against `base` (binding any
     /// value the caller pinned) and its range size estimated via
-    /// [`Estimate`] — one root-node read per scan, an advisory upper bound
-    /// from the tree's per-child [`Scale`](dialog_search_tree::Scale)s. The
+    /// [`Estimate`] — the range's edge paths per scan, an advisory upper
+    /// bound from the tree's per-child [`Scale`](dialog_search_tree::Scale)s
+    /// with the edges counted exactly. The
     /// merge is taken only when the widest scan's estimate is within a small
     /// multiple of the narrowest; a scan a caller pinned to a value estimates
     /// far narrower and pushes the ratio past the threshold, so the query
@@ -181,14 +187,15 @@ impl Conjunction {
     /// between the N-way merge and the nested-loop fold by the incoming
     /// rows' selectivity.
     ///
-    /// Every match in a selection shares one binding pattern (only the
-    /// values differ), so the merge-versus-fold choice is uniform across the
-    /// stream. This peeks the first row, decides once via
-    /// [`scans_balanced_for`](Self::scans_balanced_for), and runs the chosen
-    /// strategy over the whole selection (the peeked row put back at the
-    /// head). An empty selection yields nothing either way. On the merge
-    /// path, each scan is resolved against the incoming row (binding any
-    /// variables the caller already supplied), evaluated independently, and
+    /// Every match in a selection shares one binding pattern, but the bound
+    /// values differ, and a value decides how wide a scan's range is: so the
+    /// choice is made per distinct set of resolved ranges via
+    /// [`scans_balanced_for`](Self::scans_balanced_for), and consecutive rows
+    /// resolving to the same ranges run under one decision (a fold run keeps
+    /// its probe pipelining). An empty selection yields nothing either way.
+    /// On the merge path, each scan is resolved against the incoming row
+    /// (binding any variables the caller already supplied), evaluated
+    /// independently, and
     /// the sorted outputs are intersected on `variable`'s encoded value via
     /// [`multi_merge_join`]; the incoming row's own bindings are folded back
     /// in, preserving the caller's context exactly as the fold would.
@@ -204,86 +211,126 @@ impl Conjunction {
         Box::pin(crate::try_stream! {
             let mut selection = Box::pin(selection.peekable());
 
-            // Decide from the first row's bindings; nothing to do if empty.
-            let balanced = match selection.as_mut().peek().await {
-                Some(Ok(first)) => {
-                    let first = first.clone();
-                    self.scans_balanced_for(&first, env).await
-                }
-                // Empty, or a pending error surfaced on the next poll below.
-                _ => true,
-            };
-
-            if !balanced {
-                // A selective attribute is pinned: the nested-loop fold reads
-                // fewer blocks by driving from the narrow scan.
-                for await row in self.into_fold(selection, env) {
-                    yield row?;
-                }
-                return;
-            }
-
             let scans: Vec<DynamicAttributeQuery> = self
                 .steps
-                .into_iter()
+                .iter()
                 .map(|step| match step {
-                    Plan::Scan(_, query) => *query,
+                    Plan::Scan(_, query) => (**query).clone(),
                     // merge_variable already proved every step is a Scan.
                     _ => unreachable!("merge eligibility guarantees every step is a Scan"),
                 })
                 .collect();
 
-            let mut listening = true;
-            for await incoming in selection {
-                let base = incoming?;
+            // What each scan will read given a row's bindings. Every row of
+            // a selection shares one binding PATTERN, but the bound VALUES
+            // can differ from row to row, and a value is what decides how
+            // wide a scan's range is: so the merge-versus-fold choice is
+            // made once per distinct set of resolved ranges, and the
+            // consecutive rows that share one are evaluated as a run (the
+            // fold keeps its probe pipelining across the run's rows).
+            let fingerprint = |row: &Match| -> Vec<Option<ArtifactSelector<Constrained>>> {
+                scans.iter().map(|scan| scan.resolved_selector(row).ok()).collect()
+            };
+            let mut decided: Option<(Vec<Option<ArtifactSelector<Constrained>>>, bool)> = None;
 
-                // The merge will read every input range in full, so each
-                // range is committed work: hint it Likely, and a driven
-                // plan replicates it level-parallel while the merge's own
-                // streams consume — the demand reads join the in-flight
-                // hydrations or find the blocks local. Hinting stops on
-                // the env's first refusal, exactly as probe pipelining
-                // does.
-                if listening {
-                    for scan in &scans {
-                        let Ok(selector) = scan.resolved_selector(&base) else {
-                            continue;
-                        };
-                        listening = Provider::<Preload>::execute(
-                            env,
-                            PreloadRequest {
-                                selector,
-                                likelihood: Likelihood::Likely,
-                            },
-                        )
-                        .await;
-                        if !listening {
-                            break;
+            let mut listening = true;
+            let mut hinted: HashSet<ArtifactSelector<Constrained>> = HashSet::new();
+            loop {
+                let Some(first) = selection.next().await else {
+                    break;
+                };
+                let first = first?;
+                let shape = fingerprint(&first);
+                let balanced = match &decided {
+                    Some((known, balanced)) if *known == shape => *balanced,
+                    _ => {
+                        let balanced = self.scans_balanced_for(&first, env).await;
+                        decided = Some((shape.clone(), balanced));
+                        balanced
+                    }
+                };
+                let mut run = vec![first];
+                loop {
+                    let same = match selection.as_mut().peek().await {
+                        Some(Ok(next)) => fingerprint(next) == shape,
+                        // The end, or an error the next pull surfaces.
+                        _ => false,
+                    };
+                    if !same {
+                        break;
+                    }
+                    let Some(next) = selection.next().await else {
+                        break;
+                    };
+                    run.push(next?);
+                }
+
+                if !balanced {
+                    // A selective attribute is pinned: the nested-loop fold
+                    // reads fewer blocks by driving from the narrow scan.
+                    let run = stream::iter(run.into_iter().map(Ok));
+                    for await row in self.clone().into_fold(run, env) {
+                        yield row?;
+                    }
+                    continue;
+                }
+
+                for base in run {
+                    // The merge will read every input range in full, so each
+                    // range is committed work: hint it Likely, and a driven
+                    // plan replicates it level-parallel while the merge's own
+                    // streams consume — the demand reads join the in-flight
+                    // hydrations or find the blocks local. Hinting stops on
+                    // the env's first refusal, exactly as probe pipelining
+                    // does, and a range this merge already hinted (rows that
+                    // bind nothing the scans resolve against all name the
+                    // same ranges) is not hinted again.
+                    if listening {
+                        for scan in &scans {
+                            let Ok(selector) = scan.resolved_selector(&base) else {
+                                continue;
+                            };
+                            if !hinted.insert(selector.clone()) {
+                                continue;
+                            }
+                            listening = Provider::<Preload>::execute(
+                                env,
+                                PreloadRequest {
+                                    selector,
+                                    likelihood: Likelihood::Likely,
+                                },
+                            )
+                            .await;
+                            if !listening {
+                                break;
+                            }
                         }
                     }
-                }
 
-                // Each scan seeded from the incoming row so any
-                // caller-supplied bindings resolve into the scan's constants;
-                // the shared join variable stays free and drives the merge.
-                let mut inputs: Vec<Pin<Box<dyn Selection + 'a>>> =
-                    Vec::with_capacity(scans.len());
-                for scan in &scans {
-                    let seeded = base.clone().seed();
-                    inputs.push(Box::pin(scan.clone().evaluate(env, seeded)));
-                }
+                    // Each scan seeded from the incoming row so any
+                    // caller-supplied bindings resolve into the scan's
+                    // constants; the shared join variable stays free and
+                    // drives the merge.
+                    let mut inputs: Vec<Pin<Box<dyn Selection + 'a>>> =
+                        Vec::with_capacity(scans.len());
+                    for scan in &scans {
+                        let seeded = base.clone().seed();
+                        inputs.push(Box::pin(scan.clone().evaluate(env, seeded)));
+                    }
 
-                let variable = variable.clone();
-                let key = move |m: &Match| -> Option<Vec<u8>> {
-                    m.value_of(&variable).map(encode_value_owned)
-                };
+                    let variable = variable.clone();
+                    let key = move |m: &Match| -> Option<Vec<u8>> {
+                        m.value_of(&variable).map(encode_value_owned)
+                    };
 
-                for await row in multi_merge_join(inputs, key) {
-                    let row = row?;
-                    // Fold the joined bindings back onto the incoming row so
-                    // the caller's context (and provenance) is preserved.
-                    if let Some(merged) = base.clone().combine(&row) {
-                        yield merged;
+                    for await row in multi_merge_join(inputs, key) {
+                        let row = row?;
+                        // Fold the joined bindings back onto the incoming row
+                        // so the caller's context (and provenance) is
+                        // preserved.
+                        if let Some(merged) = base.clone().combine(&row) {
+                            yield merged;
+                        }
                     }
                 }
             }
@@ -323,7 +370,7 @@ mod tests {
     };
     use dialog_artifacts::Entity;
     use dialog_operator::helpers::{test_operator_with_profile, test_repo};
-    use futures_util::TryStreamExt;
+    use futures_util::{TryStreamExt, stream};
 
     /// A two-attribute conjunction over a shared entity is structurally merge
     /// eligible, and the tree-derived balance check picks merge only when
@@ -340,9 +387,11 @@ mod tests {
         // Seed a spread of entities, each with a name and a role, so the two
         // attribute ranges are broad and comparably sized, while any single
         // value ("name-7") is selective.
+        // Deterministic entities, so the tree's shape (and with it the
+        // estimates the guard compares) is the same on every run.
         let mut tx = branch.transaction();
         for i in 0..2000 {
-            let entity = Entity::new()?;
+            let entity: Entity = format!("id:thing-{i}").parse()?;
             tx = tx
                 .assert(
                     the!("thing/name")
@@ -404,6 +453,102 @@ mod tests {
             "with the name value pinned the name scan is selective and should fold"
         );
 
+        Ok(())
+    }
+
+    /// The merge-versus-fold choice follows the rows' bound VALUES, not
+    /// just the first row: a run of rows pinning a broad value merges, a
+    /// run pinning a rare one folds, and either way every row's rows come
+    /// out exactly as the fold alone produces them.
+    #[dialog_common::test]
+    async fn it_decides_merge_or_fold_per_run_of_bindings() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Names unique per entity; half the roles share one broad value,
+        // the other half are unique to their entity (a unique value makes
+        // the ratio unambiguous; a merely rare one sits near the guard once
+        // the estimate's edge inflation is counted).
+        let mut tx = branch.transaction();
+        for i in 0..1200 {
+            let entity: Entity = format!("id:thing-{i}").parse()?;
+            let role = if i % 2 == 0 {
+                "even".to_string()
+            } else {
+                format!("solo-{i}")
+            };
+            tx = tx
+                .assert(
+                    the!("thing/name")
+                        .of(entity.clone())
+                        .is(format!("name-{i}")),
+                )
+                .assert(the!("thing/role").of(entity).is(role));
+        }
+        tx.commit().publish().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let env = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+                Term::from(the!("thing/name")),
+                Term::<Entity>::var("this"),
+                Term::<Any>::var("name"),
+                Term::var("c1"),
+                Some(Cardinality::One),
+            )))),
+            Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+                Term::from(the!("thing/role")),
+                Term::<Entity>::var("this"),
+                Term::<Any>::var("role"),
+                Term::var("c2"),
+                Some(Cardinality::One),
+            )))),
+        ])
+        .plan(&Environment::new())?;
+
+        let pinned = |role: &str| -> anyhow::Result<Match> {
+            let mut row = Match::new();
+            row.bind(&Term::<Any>::var("role"), Value::String(role.to_string()))?;
+            Ok(row)
+        };
+        // A broad value merges, a unique one folds: the runs below are
+        // decided differently.
+        assert!(plan.scans_balanced_for(&pinned("even")?, &env).await);
+        assert!(!plan.scans_balanced_for(&pinned("solo-7")?, &env).await);
+
+        let rows = vec![
+            pinned("even")?,
+            pinned("even")?,
+            pinned("solo-7")?,
+            pinned("even")?,
+        ];
+        let normalize = |rows: Vec<Match>| {
+            let mut keyed: Vec<(String, String, String)> = rows
+                .into_iter()
+                .map(|row| {
+                    (
+                        format!("{:?}", row.value_of("this")),
+                        format!("{:?}", row.value_of("name")),
+                        format!("{:?}", row.value_of("role")),
+                    )
+                })
+                .collect();
+            keyed.sort();
+            keyed
+        };
+        let chosen = plan
+            .clone()
+            .evaluate(stream::iter(rows.clone().into_iter().map(Ok)), &env)
+            .try_collect::<Vec<_>>()
+            .await?;
+        let oracle = plan
+            .into_fold(stream::iter(rows.into_iter().map(Ok)), &env)
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(chosen.len(), 600 * 3 + 1, "every row's matches");
+        assert_eq!(normalize(chosen), normalize(oracle));
         Ok(())
     }
 
