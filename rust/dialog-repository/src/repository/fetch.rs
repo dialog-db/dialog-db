@@ -34,10 +34,18 @@ use dialog_effects::memory::Resolve;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
-use crate::RemoteSite;
+use async_trait::async_trait;
+use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
+use dialog_common::Blake3Hash as NodeHash;
+use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_search_tree::{
+    Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Traversable as _,
+};
+use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+
 use crate::repository::archive::networked::HydrationFlight;
-use crate::repository::branch::select_from_source;
 use crate::repository::source::Source;
+use crate::{EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
@@ -294,19 +302,10 @@ where
             let hydration = self.hydration.clone();
             let future = async move {
                 for source in sources {
-                    let mut scan = select_from_source(
-                        source,
-                        env,
-                        job.selector.clone(),
-                        Some(hydration.clone()),
-                    );
-                    // Drain: rows are discarded, blocks land in the
-                    // caches. An error ends this source's scan silently.
-                    while let Some(row) = scan.next().await {
-                        if row.is_err() {
-                            break;
-                        }
-                    }
+                    // Warming is advisory: an error ends this source's
+                    // walk silently, and the demand read that actually
+                    // needs the data owns the failure.
+                    let _ = warm_source(source, env, &job.selector, hydration.clone()).await;
                 }
                 likelihood
             };
@@ -355,6 +354,114 @@ where
             this.reap(context);
         }
         polled
+    }
+}
+
+/// Replicate every block `selector`'s range can touch on `source`, level
+/// by level: each depth's whole frontier fetches concurrently, so a cold
+/// range costs tree-depth round trips instead of block-count round trips
+/// (the level-parallel walk `traverse_available_within` already gives
+/// downloads). This is the range-granular job executor of bead
+/// dialog-db-76, replacing the select-and-drain executor, which paid row
+/// parsing and spilled-value fetches for rows nobody read and fetched
+/// leaf by leaf.
+///
+/// Reads go through the line's shared node cache (so a later demand read
+/// is free) and the networked index (so every fetched block hydrates the
+/// local archive), sharing in-flight hydrations through `flight`. The
+/// scope is the selector's exact key range; a subtree the range cannot
+/// touch is never fetched, and warming a conservative superset at the
+/// edges is harmless.
+async fn warm_source<'a, Env>(
+    source: Source,
+    env: &'a Env,
+    selector: &ArtifactSelector<Constrained>,
+    flight: Arc<HydrationFlight<'a>>,
+) -> Result<(), DialogSearchTreeError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    let root = source.as_ref().root();
+    if root == EMPTY_TREE_HASH {
+        return Ok(());
+    }
+    let remote = source.as_ref().fallback(env).await;
+    let catalog = source.as_ref().subject().archive().index();
+    let store = NetworkedIndex::new(env, catalog, remote).with_flight(flight);
+    let store = CacheThrough {
+        cache: source.as_ref().node_cache(),
+        store,
+    };
+    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let tree = Index::from_hash(NodeHash::from(root));
+
+    let manifest = tree.manifest(&storage).await?;
+    let range = selector_range(selector, &manifest);
+    let scope = [range.start().as_ref().to_vec()..=range.end().as_ref().to_vec()];
+
+    let visits = tree.traverse_available_within(&storage, &scope);
+    futures_util::pin_mut!(visits);
+    while let Some(visit) = visits.next().await {
+        // A present node has landed in the caches, which is the whole
+        // point; an absent block is a partial region (nothing to warm);
+        // an error ends the walk, owned by whichever demand read hits it.
+        if visit.is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The node cache in front of a hydrating store, as a raw block backend:
+/// the traversal's reads hit the line's shared cache first (a job whose
+/// spine a peer already warmed re-reads nothing), and every miss lands
+/// in it, so the demand read that follows a warm is served from memory.
+struct CacheThrough<'a, Env> {
+    cache: Cache<NodeHash, Buffer>,
+    store: NetworkedIndex<'a, Env>,
+}
+
+impl<Env> Clone for CacheThrough<'_, Env> {
+    fn clone(&self) -> Self {
+        Self {
+            cache: self.cache.clone(),
+            store: self.store.clone(),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> StorageBackend for CacheThrough<'_, Env>
+where
+    Env:
+        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+{
+    type Key = Blake3Hash;
+    type Value = Vec<u8>;
+    type Error = DialogStorageError;
+
+    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        StorageBackend::set(&mut self.store, key, value).await
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        let buffer = self
+            .cache
+            .get_or_fetch(&NodeHash::from(*key), async |hash| {
+                self.store
+                    .get(hash.as_bytes())
+                    .await
+                    .map(|bytes| bytes.map(Buffer::from))
+            })
+            .await?;
+        Ok(buffer.map(|buffer| buffer.as_ref().to_vec()))
     }
 }
 

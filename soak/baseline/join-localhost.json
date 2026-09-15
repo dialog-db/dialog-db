@@ -9,8 +9,8 @@
   "entities": 4000,
   "facts": 24011,
   "commits": 33,
-  "vault_files": 396,
-  "vault_bytes": 19308418,
+  "vault_files": 395,
+  "vault_bytes": 19306597,
   "phases": [
     {
       "name": "pull",
@@ -25,11 +25,11 @@
           [
             "memory.resolve",
             1,
-            334
+            333
           ]
         ],
         "requests": 1,
-        "bytes": 334
+        "bytes": 333
       }
     },
     {
@@ -45,25 +45,31 @@
           [
             "archive.get",
             2,
-            163224
+            143900
           ]
         ],
         "requests": 2,
-        "bytes": 163224
+        "bytes": 143900
       }
     },
     {
       "name": "roster",
-      "virtual_ms": 0,
-      "rounds": 0.0,
-      "unique_blocks": 0,
+      "virtual_ms": 2,
+      "rounds": 2.5,
+      "unique_blocks": 1,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
       "traffic": {
-        "rows": [],
-        "requests": 0,
-        "bytes": 0
+        "rows": [
+          [
+            "archive.get",
+            1,
+            16248
+          ]
+        ],
+        "requests": 1,
+        "bytes": 16248
       }
     },
     {
@@ -79,26 +85,26 @@
           [
             "archive.get",
             1,
-            88832
+            97568
           ],
           [
             "archive.put",
             1,
-            74936
+            72024
           ],
           [
             "memory.resolve",
             1,
-            334
+            333
           ],
           [
             "memory.publish",
             1,
-            373
+            369
           ]
         ],
         "requests": 4,
-        "bytes": 164475
+        "bytes": 170294
       }
     },
     {
@@ -157,9 +163,9 @@
     },
     {
       "name": "concept",
-      "virtual_ms": 54,
-      "rounds": 67.5,
-      "unique_blocks": 110,
+      "virtual_ms": 30,
+      "rounds": 37.5,
+      "unique_blocks": 70,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -167,18 +173,18 @@
         "rows": [
           [
             "archive.get",
-            110,
-            5668416
+            70,
+            3155376
           ]
         ],
-        "requests": 110,
-        "bytes": 5668416
+        "requests": 70,
+        "bytes": 3155376
       }
     },
     {
       "name": "filtered",
-      "virtual_ms": 53,
-      "rounds": 66.25,
+      "virtual_ms": 52,
+      "rounds": 65.0,
       "unique_blocks": 109,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
@@ -188,18 +194,18 @@
           [
             "archive.get",
             109,
-            5646752
+            5579104
           ]
         ],
         "requests": 109,
-        "bytes": 5646752
+        "bytes": 5579104
       }
     },
     {
       "name": "download",
       "virtual_ms": 159,
       "rounds": 198.75,
-      "unique_blocks": 394,
+      "unique_blocks": 393,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -207,17 +213,17 @@
         "rows": [
           [
             "archive.get",
-            394,
-            19312360
+            393,
+            19309872
           ],
           [
             "memory.resolve",
             1,
-            373
+            369
           ]
         ],
-        "requests": 395,
-        "bytes": 19312733
+        "requests": 394,
+        "bytes": 19310241
       }
     }
   ]

@@ -225,6 +225,42 @@ where
         self.stream_range(.., storage)
     }
 
+    /// An advisory upper-bound estimate of how many entries fall in the key
+    /// range `[lower, upper)`, read from the root node alone.
+    ///
+    /// Reads one block (the root, already the hottest and usually cached) and,
+    /// if it is an index, sums the [`Scale`](crate::Scale)s of the children the
+    /// range touches via [`range_scale`](crate::node::archive::ArchivedIndex::range_scale). A
+    /// root that is itself a leaf reports its own entry count. Returns `None`
+    /// for an empty tree.
+    ///
+    /// The estimate is a [`Scale`](crate::Scale) upper bound and is
+    /// edge-inflated: a range narrower than one child counts that whole
+    /// child's subtree. It answers "is this range large or small" cheaply, not
+    /// "exactly how many", which is what a planner comparing scan sizes needs.
+    pub async fn range_estimate<Backend>(
+        &self,
+        lower: &[u8],
+        upper: &[u8],
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Option<u64>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        if &self.root == NULL_BLAKE3_HASH {
+            return Ok(None);
+        }
+        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let node: PersistentNode<Key, Value> = accessor.get_node(&self.root).await?;
+        let estimate = match node.as_index() {
+            Ok(index) => index.range_scale(lower, upper)?.estimate(),
+            // A root leaf holds every entry; the whole-node scale is its count.
+            Err(_) => node.scale().estimate(),
+        };
+        Ok(Some(estimate))
+    }
+
     /// Returns an async stream over entries with keys within the provided
     /// range.
     ///
