@@ -1704,6 +1704,7 @@ mod resolver_tests {
     /// `tree/node` with every output free, over a constant reference.
     fn tree_node(reference: &str) -> ResolverQuery {
         ResolverQuery::TreeNode(TreeNodeQuery {
+            this: Term::var("this"),
             of: Term::from(Value::String(reference.into())).into(),
             kind: Term::var("kind"),
             size: Term::var("size"),
@@ -1715,6 +1716,7 @@ mod resolver_tests {
 
     fn tree_span(reference: &str) -> ResolverQuery {
         ResolverQuery::TreeSpan(TreeSpanQuery {
+            this: Term::var("this"),
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
             node: Term::var("node"),
@@ -1728,6 +1730,7 @@ mod resolver_tests {
 
     fn tree_entry(reference: &str) -> ResolverQuery {
         ResolverQuery::TreeEntry(TreeEntryQuery {
+            this: Term::var("this"),
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
             key: Term::var("key"),
@@ -1744,6 +1747,7 @@ mod resolver_tests {
 
     fn tree_value(reference: &str) -> ResolverQuery {
         ResolverQuery::TreeValue(TreeValueQuery {
+            this: Term::var("this"),
             of: Term::from(Value::String(reference.into())).into(),
             size: Term::var("size"),
             bytes: Term::var("bytes"),
@@ -1752,11 +1756,20 @@ mod resolver_tests {
 
     fn tree_key(reference: &str) -> ResolverQuery {
         ResolverQuery::TreeKey(TreeKeyQuery {
+            this: Term::var("this"),
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
             key: Term::var("key"),
             rank: Term::var("rank"),
         })
+    }
+
+    /// The entity a row named itself with.
+    fn subject(row: &ResolverConclusion, slot: &str) -> Entity {
+        match row.get(slot) {
+            Some(Value::Entity(entity)) => entity.clone(),
+            other => panic!("expected entity `{slot}`, got {other:?}"),
+        }
     }
 
     fn unsigned(row: &ResolverConclusion, slot: &str) -> u128 {
@@ -1811,6 +1824,7 @@ mod resolver_tests {
         let rows: Vec<ResolverConclusion> = branch
             .query()
             .select(ResolverQuery::TreeNode(TreeNodeQuery {
+                this: Term::var("this"),
                 of: Term::<Value>::blank().into(),
                 kind: Term::var("kind"),
                 size: Term::var("size"),
@@ -2006,6 +2020,110 @@ mod resolver_tests {
         assert!(kind == "index" || kind == "segment", "kind set: {row:?}");
         assert!(unsigned(row, "size") > 0, "node has a byte size");
         assert!(unsigned(row, "count") > 0, "node has slots");
+        Ok(())
+    }
+
+    /// Every resolver row NAMES ITSELF, and that name is the reference
+    /// with a scheme on it: `tree/node`'s subject feeds straight back into
+    /// another resolver's `of`, with no conversion between the two.
+    ///
+    /// This is what lets a rule conclude a fact from a resolver row. A row
+    /// is otherwise a bag of slots with no subject, and a fact must have
+    /// one — so without a subject the tree is queryable but not
+    /// *derivable*, and nothing declarative can be built on it.
+    #[dialog_common::test]
+    async fn it_names_every_row_with_an_entity_that_chains() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let rows: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_node(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let subject = subject(&rows[0], "this");
+        assert_eq!(
+            subject.as_str(),
+            format!("tree:{root}"),
+            "the node's subject is its reference under the `tree:` scheme"
+        );
+
+        // The subject goes back in where the reference went in, and
+        // answers with the same row.
+        let again: Vec<ResolverConclusion> = branch
+            .query()
+            .select(ResolverQuery::TreeNode(TreeNodeQuery {
+                this: Term::var("this"),
+                of: Term::from(Value::Entity(subject.clone())).into(),
+                kind: Term::var("kind"),
+                size: Term::var("size"),
+                count: Term::var("count"),
+                scale: Term::var("scale"),
+                novelty: Term::var("novelty"),
+            }))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(again.len(), 1, "the subject resolves as a reference");
+        assert_eq!(
+            text(&again[0], "kind"),
+            text(&rows[0], "kind"),
+            "and describes the same node"
+        );
+        Ok(())
+    }
+
+    /// A row about a POSITION inside a node names the position, not the
+    /// node — so two spans of one index are two subjects (each is what the
+    /// parent says about one range, distinct from what the child is), and
+    /// an entry's key half and claim half share one.
+    #[dialog_common::test]
+    async fn it_names_positions_apart_from_their_node() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_wide_branch(&repo, &operator, 64).await?;
+
+        let spans: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_span(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(spans.len() > 1, "a wide branch has an index root");
+        let subjects: std::collections::BTreeSet<Entity> =
+            spans.iter().map(|row| subject(row, "this")).collect();
+        assert_eq!(subjects.len(), spans.len(), "each span is its own subject");
+        for row in &spans {
+            assert_eq!(
+                subject(row, "this").node_hash(),
+                None,
+                "a position is not itself a node reference"
+            );
+        }
+
+        // Descend to a segment and check the two views of one entry agree.
+        let child = text(&spans[0], "node");
+        let keys: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_key(&child))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let entries: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_entry(&child))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        if !keys.is_empty() {
+            assert_eq!(
+                subject(&keys[0], "this"),
+                subject(&entries[0], "this"),
+                "the key and claim halves of one entry share a subject"
+            );
+        }
         Ok(())
     }
 

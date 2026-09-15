@@ -51,6 +51,7 @@ use std::fmt::{self, Display};
 use std::sync::LazyLock;
 
 use base58::{FromBase58, ToBase58};
+use dialog_artifacts::Entity;
 use dialog_artifacts::inspect::{self, Load};
 use dialog_capability::Provider;
 use serde::{Deserialize, Serialize};
@@ -75,17 +76,31 @@ fn blank() -> Term<Any> {
     Term::blank()
 }
 
-/// The kind of a block-reference input cell: base58 `String` or raw
-/// 32-byte `Bytes` — the union the evaluator's `node_reference`
-/// actually accepts, so rule type inference admits chaining a
-/// decomposition formula's bytes output straight into a resolver.
+/// The kind of a block-reference input cell: base58 `String`, raw
+/// 32-byte `Bytes`, or a `tree:<base58>` `Entity` — the union the
+/// evaluator's `node_reference` actually accepts, so rule type inference
+/// admits chaining a decomposition formula's bytes output, or another
+/// resolver row's own subject, straight into a resolver.
 fn reference_kind() -> Kind {
-    Kind::from(ValueType::String).union(&Kind::from(ValueType::Bytes))
+    Kind::from(ValueType::String)
+        .union(&Kind::from(ValueType::Bytes))
+        .union(&Kind::from(ValueType::Entity))
+}
+
+/// The kind of a row's `this` cell: the [`Entity`](dialog_artifacts::Entity)
+/// naming what the row describes.
+fn subject_kind() -> Kind {
+    Kind::from(ValueType::Entity)
 }
 
 /// The `tree/node` resolver: describe the node behind a reference.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeNodeQuery {
+    /// The node this row describes, as the entity `tree:<base58>` — the
+    /// reference with a scheme on it. Feeds a rule's conclusion, and chains
+    /// back into any resolver's `of`.
+    #[serde(default = "blank")]
+    pub this: Term<Any>,
     /// Node reference (base58 of the node's content hash) — required.
     #[serde(default = "blank")]
     pub of: Term<Any>,
@@ -111,6 +126,13 @@ pub struct TreeNodeQuery {
 /// with everything pending against it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeSpanQuery {
+    /// The span this row describes, as the entity `tree:<base58>/<at>` —
+    /// the POSITION in the parent, not the child it delegates to. A span
+    /// is what the parent says about a range (separator, seam rank, the
+    /// ops buffered for it); what the child IS has its own row under the
+    /// child's own name.
+    #[serde(default = "blank")]
+    pub this: Term<Any>,
     /// Node reference of the index node — required.
     #[serde(default = "blank")]
     pub of: Term<Any>,
@@ -144,6 +166,11 @@ pub struct TreeSpanQuery {
 /// The `tree/key` resolver: one row per entry of a segment node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeKeyQuery {
+    /// The entry this row describes, as the entity `tree:<base58>/<at>`.
+    /// The same subject `tree/entry` and `tree/blob` give position `at` of
+    /// this segment: one entry, three views of it.
+    #[serde(default = "blank")]
+    pub this: Term<Any>,
     /// Node reference of the segment node — required.
     #[serde(default = "blank")]
     pub of: Term<Any>,
@@ -166,6 +193,11 @@ pub struct TreeKeyQuery {
 /// regions legible: versions, causes, and coverage ride here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeEntryQuery {
+    /// The entry this row describes, as the entity `tree:<base58>/<at>` —
+    /// the same subject `tree/key` gives the same position, so the key and
+    /// claim halves of one entry join on it.
+    #[serde(default = "blank")]
+    pub this: Term<Any>,
     /// Node reference of the segment node — required.
     #[serde(default = "blank")]
     pub of: Term<Any>,
@@ -209,6 +241,9 @@ pub struct TreeEntryQuery {
 /// key (`dialog/key-part`'s `vtype` component).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeValueQuery {
+    /// The value block this row describes, as the entity `tree:<base58>`.
+    #[serde(default = "blank")]
+    pub this: Term<Any>,
     /// The spilled value's 32-byte block reference — required.
     #[serde(default = "blank")]
     pub of: Term<Any>,
@@ -227,6 +262,11 @@ pub struct TreeValueQuery {
 /// inspector reason with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeBlobQuery {
+    /// The blob-index entry this row describes, as the entity
+    /// `tree:<base58>/<at>` — the same subject `tree/entry` gives that
+    /// position, so a blob row joins its claim metadata.
+    #[serde(default = "blank")]
+    pub this: Term<Any>,
     /// Node reference of the segment node — required.
     #[serde(default = "blank")]
     pub of: Term<Any>,
@@ -249,6 +289,11 @@ pub struct TreeBlobQuery {
 /// self-describing and mixed-format trees are visible per node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeManifestQuery {
+    /// The node whose manifest this is, as the entity `tree:<base58>` —
+    /// the same subject `tree/node` gives, since a manifest describes the
+    /// node rather than being a thing beside it.
+    #[serde(default = "blank")]
+    pub this: Term<Any>,
     /// Node reference — required.
     #[serde(default = "blank")]
     pub of: Term<Any>,
@@ -317,6 +362,9 @@ pub enum ResolverQuery {
 static TREE_NODE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
+            .cell("this", Some(subject_kind()))
+            .the("The node itself, as the entity `tree:<base58>`.");
+        builder
             .cell("of", Some(reference_kind()))
             .the("Node reference: base58 of the node's content hash.")
             .required();
@@ -340,6 +388,9 @@ static TREE_NODE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 
 static TREE_SPAN_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
+        builder
+            .cell("this", Some(subject_kind()))
+            .the("The span, as the entity `tree:<base58>/<at>`.");
         builder
             .cell("of", Some(reference_kind()))
             .the("Node reference of the index node.")
@@ -371,6 +422,9 @@ static TREE_SPAN_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 static TREE_KEY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
+            .cell("this", Some(subject_kind()))
+            .the("The entry, as the entity `tree:<base58>/<at>`.");
+        builder
             .cell("of", Some(reference_kind()))
             .the("Node reference of the segment node.")
             .required();
@@ -388,6 +442,9 @@ static TREE_KEY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 
 static TREE_ENTRY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
+        builder
+            .cell("this", Some(subject_kind()))
+            .the("The entry, as the entity `tree:<base58>/<at>`.");
         builder
             .cell("of", Some(reference_kind()))
             .the("Node reference of the segment node.")
@@ -428,6 +485,9 @@ static TREE_ENTRY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 static TREE_VALUE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
+            .cell("this", Some(subject_kind()))
+            .the("The value block, as the entity `tree:<base58>`.");
+        builder
             .cell("of", Some(reference_kind()))
             .the("The spilled value's 32-byte block reference.")
             .required();
@@ -442,6 +502,9 @@ static TREE_VALUE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 
 static TREE_BLOB_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
+        builder
+            .cell("this", Some(subject_kind()))
+            .the("The blob-index entry, as the entity `tree:<base58>/<at>`.");
         builder
             .cell("of", Some(reference_kind()))
             .the("Node reference of the segment node.")
@@ -463,6 +526,9 @@ static TREE_BLOB_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 
 static TREE_MANIFEST_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
+        builder
+            .cell("this", Some(subject_kind()))
+            .the("The node the manifest describes, as the entity `tree:<base58>`.");
         builder
             .cell("of", Some(reference_kind()))
             .the("Node reference.")
@@ -560,6 +626,7 @@ impl ResolverQuery {
         let mut params = Parameters::new();
         match self {
             Self::TreeNode(query) => {
+                params.insert("this".into(), query.this.clone());
                 params.insert("of".into(), query.of.clone());
                 params.insert("kind".into(), query.kind.clone());
                 params.insert("size".into(), query.size.clone());
@@ -568,6 +635,7 @@ impl ResolverQuery {
                 params.insert("novelty".into(), query.novelty.clone());
             }
             Self::TreeSpan(query) => {
+                params.insert("this".into(), query.this.clone());
                 params.insert("of".into(), query.of.clone());
                 params.insert("at".into(), query.at.clone());
                 params.insert("node".into(), query.node.clone());
@@ -578,12 +646,14 @@ impl ResolverQuery {
                 params.insert("novelty".into(), query.novelty.clone());
             }
             Self::TreeKey(query) => {
+                params.insert("this".into(), query.this.clone());
                 params.insert("of".into(), query.of.clone());
                 params.insert("at".into(), query.at.clone());
                 params.insert("key".into(), query.key.clone());
                 params.insert("rank".into(), query.rank.clone());
             }
             Self::TreeEntry(query) => {
+                params.insert("this".into(), query.this.clone());
                 params.insert("of".into(), query.of.clone());
                 params.insert("at".into(), query.at.clone());
                 params.insert("key".into(), query.key.clone());
@@ -597,11 +667,13 @@ impl ResolverQuery {
                 params.insert("spill".into(), query.spill.clone());
             }
             Self::TreeValue(query) => {
+                params.insert("this".into(), query.this.clone());
                 params.insert("of".into(), query.of.clone());
                 params.insert("size".into(), query.size.clone());
                 params.insert("bytes".into(), query.bytes.clone());
             }
             Self::TreeBlob(query) => {
+                params.insert("this".into(), query.this.clone());
                 params.insert("of".into(), query.of.clone());
                 params.insert("at".into(), query.at.clone());
                 params.insert("blob".into(), query.blob.clone());
@@ -609,6 +681,7 @@ impl ResolverQuery {
                 params.insert("size".into(), query.size.clone());
             }
             Self::TreeManifest(query) => {
+                params.insert("this".into(), query.this.clone());
                 params.insert("of".into(), query.of.clone());
                 params.insert("version".into(), query.version.clone());
                 params.insert("fanout_n".into(), query.fanout_n.clone());
@@ -646,6 +719,12 @@ impl ResolverQuery {
             // Raw 32-byte references chain too (e.g. straight from a
             // decomposition formula's bytes output).
             Value::Bytes(bytes) => <[u8; 32]>::try_from(bytes).ok(),
+            // A node's own subject chains back in: `tree:<base58>` is the
+            // reference with a scheme on it, so a row's `this` feeds the
+            // next resolver's `of` with no conversion between them. A
+            // POSITION subject (`tree:<base58>/<at>`) names a place inside
+            // a node rather than a node, and does not resolve.
+            Value::Entity(entity) => entity.node_hash(),
             _ => None,
         }
     }
@@ -677,12 +756,22 @@ impl ResolverQuery {
                 let Some(bytes) = Provider::<Load>::execute(env, reference).await? else {
                     continue;
                 };
+                // What the row is ABOUT, as an entity. A resolver row is
+                // otherwise a bag of slots with no subject, which a rule
+                // cannot conclude a fact from — every fact has one. The
+                // node's is its reference with a scheme on it; a row about
+                // a position inside the node names that position.
+                let Ok(node_subject) = Entity::from_node(&reference) else {
+                    continue;
+                };
+                let position = |at: u64| Entity::from_node_position(&reference, at).ok();
                 match &resolver {
                     ResolverQuery::TreeNode(query) => {
                         let Ok(node) = inspect::inspect_node(bytes) else {
                             continue;
                         };
                         let row = project(&base, &[
+                            (&query.this, Value::Entity(node_subject.clone())),
                             (&query.kind, Value::String(node.kind.into())),
                             (&query.size, Value::UnsignedInt(node.size.into())),
                             (&query.count, Value::UnsignedInt(node.count.into())),
@@ -698,7 +787,11 @@ impl ResolverQuery {
                             continue;
                         };
                         for span in spans {
+                            let Some(subject) = position(span.at) else {
+                                continue;
+                            };
                             let row = project(&base, &[
+                                (&query.this, Value::Entity(subject)),
                                 (&query.at, Value::UnsignedInt(span.at.into())),
                                 (&query.node, Value::String(span.node.to_base58())),
                                 (&query.separator, Value::Bytes(span.separator)),
@@ -717,7 +810,11 @@ impl ResolverQuery {
                             continue;
                         };
                         for (at, entry) in keys.into_iter().enumerate() {
+                            let Some(subject) = position(at as u64) else {
+                                continue;
+                            };
                             let row = project(&base, &[
+                                (&query.this, Value::Entity(subject)),
                                 (&query.at, Value::UnsignedInt(at as u128)),
                                 (&query.key, Value::Bytes(entry.key)),
                                 (&query.rank, Value::UnsignedInt(entry.rank.into())),
@@ -736,7 +833,11 @@ impl ResolverQuery {
                                 .spill
                                 .map(|reference| reference.to_base58())
                                 .unwrap_or_default();
+                            let Some(subject) = position(entry.at) else {
+                                continue;
+                            };
                             let row = project(&base, &[
+                                (&query.this, Value::Entity(subject)),
                                 (&query.at, Value::UnsignedInt(entry.at.into())),
                                 (&query.key, Value::Bytes(entry.key)),
                                 (&query.state, Value::String(entry.state.into())),
@@ -761,6 +862,7 @@ impl ResolverQuery {
                         // node decode. Type information lives in the
                         // key the reference came from.
                         let row = project(&base, &[
+                            (&query.this, Value::Entity(node_subject.clone())),
                             (&query.size, Value::UnsignedInt(bytes.len() as u128)),
                             (&query.bytes, Value::Bytes(bytes)),
                         ])?;
@@ -773,7 +875,11 @@ impl ResolverQuery {
                             continue;
                         };
                         for record in records {
+                            let Some(subject) = position(record.at) else {
+                                continue;
+                            };
                             let row = project(&base, &[
+                                (&query.this, Value::Entity(subject)),
                                 (&query.at, Value::UnsignedInt(record.at.into())),
                                 (&query.blob, Value::Bytes(record.blob)),
                                 (&query.version, Value::UnsignedInt(record.version.into())),
@@ -789,6 +895,7 @@ impl ResolverQuery {
                             continue;
                         };
                         let row = project(&base, &[
+                            (&query.this, Value::Entity(node_subject.clone())),
                             (&query.version, Value::UnsignedInt(manifest.version.into())),
                             (&query.fanout_n, Value::UnsignedInt(manifest.fanout_n.into())),
                             (
