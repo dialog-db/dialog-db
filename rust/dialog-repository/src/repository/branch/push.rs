@@ -102,6 +102,7 @@ impl Push<'_> {
             + Provider<Publish>
             + Provider<BlobRead>
             + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Put>>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, Publish>>
@@ -714,6 +715,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Put>>
         + ConditionalSync
         + 'static,
@@ -855,6 +857,7 @@ where
         + Provider<Resolve>
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Put>>
         + Provider<Fork<RemoteSite, BlobRead>>
         + Provider<Fork<RemoteSite, BlobImport>>

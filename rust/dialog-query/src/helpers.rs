@@ -417,7 +417,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<dialog_repository::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -449,7 +449,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<dialog_repository::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -487,7 +487,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<dialog_repository::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -603,7 +603,7 @@ where
         + Provider<Attest>
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<dialog_repository::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -1714,7 +1714,7 @@ mod test {
             + Provider<Attest>
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<dialog_repository::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -1832,7 +1832,7 @@ mod test {
             + Provider<Attest>
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<dialog_repository::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -1959,7 +1959,7 @@ mod test {
             + Provider<Attest>
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<dialog_repository::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

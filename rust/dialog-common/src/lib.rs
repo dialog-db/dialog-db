@@ -56,7 +56,7 @@ mod impossible;
 pub use impossible::*;
 
 pub mod flight;
-pub use flight::{Flight, ScopedFlight};
+pub use flight::{Flight, WeakFlight};
 
 #[cfg(feature = "helpers")]
 pub mod helpers;

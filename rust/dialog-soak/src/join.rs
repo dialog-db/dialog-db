@@ -21,7 +21,11 @@
 //!    status pinned: the selective shape where a value-bound scan turns the
 //!    other premises into entity probes (the block-count-versus-rounds
 //!    tradeoff recorded in `notes/set-at-a-time-joins.md`).
-//! 10. **download** — a second fresh client materializes the entire space
+//! 10. **subscribe** — a fresh cold client registers the same concept as a
+//!     standing query and pays its first poll: the exact path a UI drives,
+//!     which the per-query preload machinery does not reach (bead
+//!     dialog-db-82).
+//! 11. **download** — a second fresh client materializes the entire space
 //!     (`pull().download()`): the eager-replication cost the lazy join
 //!     avoids up front but pays incrementally.
 
@@ -583,6 +587,35 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         anyhow::ensure!(
             cards.len() == closed,
             "filtered join should see the closed cards"
+        );
+        Ok(())
+    })
+    .await?;
+
+    // The UI's actual cold path: a standing query's first poll on a fresh
+    // client. Subscriptions build their own evaluation envs, which the
+    // per-query preload staging does not reach, so this phase measures the
+    // gap bead dialog-db-82 exists to close.
+    let subscribe_client =
+        mount_client(&operator, &profile, &server, &address, "soak-subscribe").await?;
+    subscribe_client.pull().perform(&operator).await?;
+    measured("subscribe", &mut phases, async {
+        let mut subscription = subscribe_client.subscribe(Query::<Card> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::var("status"),
+            rank: Term::var("rank"),
+            reporter: Term::var("reporter"),
+            created: Term::var("created"),
+        });
+        let delta = subscription
+            .poll(&operator)
+            .await
+            .map_err(|error| anyhow::anyhow!("first poll failed: {error}"))?;
+        let added = delta.map(|delta| delta.asserted.len()).unwrap_or(0);
+        anyhow::ensure!(
+            added == expected,
+            "the first poll should see every card, saw {added}"
         );
         Ok(())
     })

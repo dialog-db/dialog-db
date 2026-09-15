@@ -82,7 +82,7 @@ impl Select<'_> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -165,7 +165,7 @@ impl Select<'_> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -267,7 +267,7 @@ impl SelectOwned<'_> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

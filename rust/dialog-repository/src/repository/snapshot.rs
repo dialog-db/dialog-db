@@ -392,7 +392,7 @@ impl Snapshot {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<memory::Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -410,7 +410,7 @@ impl Snapshot {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<memory::Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -620,7 +620,7 @@ impl SnapshotExport {
             + Provider<Put>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,

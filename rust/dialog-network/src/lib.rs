@@ -18,6 +18,9 @@
 //! are generated from the struct fields by `#[derive(Site)]` in
 //! `dialog-capability`.
 
+mod hydrate;
+pub use hydrate::{Hydrate, HydrationFlight, HydrationRequest};
+
 use dialog_capability::Site;
 use dialog_remote_fs::Fs;
 use dialog_remote_s3::S3;

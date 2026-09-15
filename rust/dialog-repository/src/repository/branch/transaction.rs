@@ -235,7 +235,7 @@ impl TransactionCommit<&Snapshot> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -329,7 +329,7 @@ impl Branch {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

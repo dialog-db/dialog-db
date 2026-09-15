@@ -78,7 +78,7 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -388,7 +388,7 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -444,7 +444,7 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -496,7 +496,7 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -561,7 +561,7 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -598,7 +598,7 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -643,7 +643,7 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -679,7 +679,7 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -721,7 +721,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -828,7 +828,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -853,7 +853,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -882,7 +882,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -940,7 +940,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -1057,7 +1057,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -1158,7 +1158,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -1203,7 +1203,7 @@ mod tests {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -2698,7 +2698,7 @@ mod tests {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

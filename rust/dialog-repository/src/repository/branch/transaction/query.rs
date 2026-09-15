@@ -122,7 +122,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
