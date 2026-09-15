@@ -421,7 +421,7 @@ where
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         Self::try_load(storage, hash).await?.ok_or_else(|| {
-            DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}"))
+            DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
         })
     }
 
@@ -549,7 +549,7 @@ where
                     None => {
                         let hash = &self.nodes[offset].hash();
                         return Err(DialogSearchTreeError::Node(format!(
-                            "Blob not found in storage: {hash}"
+                            "Block not found in storage: {hash}"
                         )));
                     }
                 }
@@ -988,7 +988,7 @@ where
                             None => {
                                 let hash = &link.node;
                                 Err(DialogSearchTreeError::Node(format!(
-                                    "Blob not found in storage: {hash}"
+                                    "Block not found in storage: {hash}"
                                 )))?;
                                 unreachable!("propagated above")
                             }
@@ -1058,7 +1058,7 @@ where
                                     None => {
                                         let hash = index.hash_at(at)?;
                                         Err(DialogSearchTreeError::Node(format!(
-                                            "Blob not found in storage: {hash}"
+                                            "Block not found in storage: {hash}"
                                         )))?;
                                         unreachable!("propagated above")
                                     }
@@ -1805,7 +1805,7 @@ where
                             None => {
                                 let hash = &link.node;
                                 Err(DialogSearchTreeError::Node(format!(
-                                    "Blob not found in storage: {hash}"
+                                    "Block not found in storage: {hash}"
                                 )))?;
                                 unreachable!("propagated above")
                             }

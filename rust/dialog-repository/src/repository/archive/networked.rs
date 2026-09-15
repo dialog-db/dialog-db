@@ -22,7 +22,7 @@ use crate::RemoteRepository;
 /// regions hydrate on demand through the tracked remote. That makes the
 /// *unavailability* of the tracked remote a load-bearing fact: a caller
 /// that swallows a failed remote load and quietly falls back to
-/// local-only turns every by-reference read into a bare "Blob not found"
+/// local-only turns every by-reference read into a bare "Block not found"
 /// with the actual cause (the remote could not be loaded, and why)
 /// erased. [`Unavailable`](RemoteFallback::Unavailable) keeps that cause
 /// attached: reads that the local archive can satisfy still succeed, and
@@ -147,7 +147,7 @@ where
             // The block is not local and the tracked remote — the only
             // place it could hydrate from — could not be loaded. Failing
             // here, with the cause, is the contract: silently returning
-            // `None` would surface downstream as a bare "Blob not found"
+            // `None` would surface downstream as a bare "Block not found"
             // that reads like data loss instead of what it is.
             RemoteFallback::Unavailable { remote, reason } => {
                 let key = dialog_common::Blake3Hash::from(*key);
@@ -288,7 +288,7 @@ mod tests {
     /// succeeds — a full replica keeps working offline — but a miss is
     /// the exact case that needed the remote, and it must fail carrying
     /// the load failure as its cause, not surface downstream as a bare
-    /// "Blob not found" with the cause erased.
+    /// "Block not found" with the cause erased.
     #[dialog_common::test]
     async fn it_fails_a_miss_loudly_when_the_tracked_remote_is_unavailable() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
