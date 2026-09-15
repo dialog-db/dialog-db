@@ -17,7 +17,6 @@ dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-ucan = { workspace = true }
 dialog-ucan-core = { workspace = true }
-dialog-varsig = { workspace = true }
 ipld-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
@@ -25,7 +24,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
-
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
