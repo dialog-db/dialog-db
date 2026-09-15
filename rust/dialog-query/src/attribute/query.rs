@@ -28,7 +28,7 @@ use crate::selection::{Match, Selection};
 /// probing, so the probes those rows will issue can replicate while the
 /// current probe is awaited. Sixteen matches the read-ahead widths the
 /// tree layer already uses.
-pub(crate) const PROBE_LOOKAHEAD: usize = 64;
+pub(crate) const PROBE_LOOKAHEAD: usize = 256;
 
 /// Wrap a premise's upstream selection with probe pipelining: rows are
 /// buffered up to [`PROBE_LOOKAHEAD`] ahead, and each newly buffered

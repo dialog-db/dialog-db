@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use crate::RemoteSite;
 use async_trait::async_trait;
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Provider};
-use dialog_common::{Buffer, ConditionalSync};
+use dialog_common::{Buffer, ConditionalSync, ScopedFlight};
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
@@ -11,6 +13,34 @@ use std::fmt::{Debug, Display};
 
 use super::local::LocalIndex;
 use crate::RemoteRepository;
+
+/// In-flight remote hydrations, joined by digest, scoped to the driven
+/// preload jobs of one query evaluation.
+///
+/// This closes the re-download window of bead dialog-db-81 for the case
+/// that produced it: a burst of preload jobs racing one another to cold
+/// blocks, where a job that passed its local check before a peer's
+/// hydration landed re-downloaded bytes the archive already held. The
+/// shared future carries the fetch AND the local write-back, so a
+/// joiner can never observe "fetched but not yet hydrated" — and every
+/// joiner polls the shared work itself, so nothing waits on progress it
+/// cannot drive (a leader parked in some other scan's unpolled
+/// read-ahead set deadlocks any design that waits on notifications
+/// instead of co-driving; this one was tried and reverted).
+///
+/// The futures borrow the evaluation's env for `'a`: nothing owns the
+/// env, and the holder becomes invariant in `'a` — which is why this
+/// hangs off [`Driven`](crate::repository::fetch) (whose lifetime
+/// nothing shrinks) and deliberately NOT off `QueryEnv`, whose
+/// covariance in `'a` is load-bearing for the `Provider<Select>`
+/// lifetime unification. Demand reads therefore do not join this
+/// flight; they are protected by the local re-check below and the
+/// transport's own `'static` flight.
+///
+/// Errors are shared as their rendering; nothing is cached, so retry
+/// semantics are unchanged, and hydration is content-addressed so every
+/// joiner's answer is identical.
+pub type HydrationFlight<'a> = ScopedFlight<'a, Blake3Hash, Result<Option<Arc<Vec<u8>>>, String>>;
 
 /// The remote half of a [`NetworkedIndex`]: what a local read miss means.
 ///
@@ -87,6 +117,7 @@ impl From<RemoteRepository> for RemoteFallback {
 pub struct NetworkedIndex<'a, Env> {
     local: LocalIndex<'a, Env>,
     remote: RemoteFallback,
+    flight: Option<Arc<HydrationFlight<'a>>>,
 }
 
 impl<Env> Clone for NetworkedIndex<'_, Env> {
@@ -94,6 +125,7 @@ impl<Env> Clone for NetworkedIndex<'_, Env> {
         Self {
             local: self.local.clone(),
             remote: self.remote.clone(),
+            flight: self.flight.clone(),
         }
     }
 }
@@ -110,7 +142,19 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
         Self {
             local: LocalIndex::new(env, index),
             remote: remote.into(),
+            flight: None,
         }
+    }
+
+    /// Join this index's remote hydrations through `flight`: concurrent
+    /// readers of one digest share a single fetch-and-write-back, so a
+    /// reader can never re-download a block a peer's completed fetch
+    /// already hydrated. Indexes serving one query evaluation should
+    /// share one flight (the [`HydrationFlight`] docs carry the race
+    /// this closes).
+    pub fn with_flight(mut self, flight: Arc<HydrationFlight<'a>>) -> Self {
+        self.flight = Some(flight);
+        self
     }
 }
 
@@ -157,62 +201,95 @@ where
         };
 
         let address = remote.address();
-        let remote_catalog = address.subject.clone().archive().catalog("index");
 
         // Re-check local before paying the remote round trip: between the
         // miss above and this point, a concurrent reader of the same block
-        // may have completed its fetch, hydrated, and closed its transport
-        // flight — a window in which joining is no longer possible and a
-        // naive fetch re-downloads bytes the archive already holds. The
-        // recheck costs one local read on genuine cold misses and turns
-        // the sequential half of that race into a hit; the overlapping
-        // half is joined at the transport as before.
+        // may have completed its fetch, hydrated, and moved on — a window
+        // in which a naive fetch re-downloads bytes the archive already
+        // holds. The recheck costs one local read on genuine cold misses;
+        // the overlapping remainder of the race is closed by the
+        // hydration flight below (and, without one, narrowed at the
+        // transport's own flight).
         if let Some(bytes) = StorageBackend::get(&self.local, key).await? {
             return Ok(Some(bytes));
         }
 
         let env = self.local.env();
-        let remote_result = remote_catalog
-            .clone()
-            .get(*key)
-            .fork(&address.address)
-            .perform(env)
-            .await
-            .map_err(DialogStorageError::from)?;
+        let local_catalog = self.local.catalog().clone();
 
-        match remote_result {
-            Some(bytes) => {
-                // Every hydration is one remote round trip (two, behind a
-                // UCAN remote whose permit was not cached); this event is
-                // what lets a slow first read be attributed to on-demand
-                // replication rather than local work.
+        match &self.flight {
+            // Concurrent readers of one digest share one
+            // fetch-and-hydrate: nobody can observe "fetched but not
+            // yet written back", which is the re-download window this
+            // flight exists to close (see [`HydrationFlight`]).
+            Some(flight) => {
+                let digest = *key;
+                let outcome = flight
+                    .join(digest, move || async move {
+                        match hydrate(env, &address, local_catalog, digest).await {
+                            Ok(bytes) => Ok(bytes.map(Arc::new)),
+                            Err(error) => Err(error.to_string()),
+                        }
+                    })
+                    .await;
+                match outcome {
+                    Ok(bytes) => Ok(bytes.map(|bytes| bytes.as_ref().clone())),
+                    Err(message) => Err(DialogStorageError::Storage(message)),
+                }
+            }
+            None => hydrate(env, &address, local_catalog, *key).await,
+        }
+    }
+}
+
+/// Fetch one block from the tracked remote and write it back into the
+/// local archive before returning it — hydration is part of the read, so
+/// a caller that observes the bytes can rely on the next local read
+/// hitting.
+async fn hydrate<Env>(
+    env: &Env,
+    address: &crate::RemoteAddress,
+    local_catalog: Capability<Catalog>,
+    key: Blake3Hash,
+) -> Result<Option<Vec<u8>>, DialogStorageError>
+where
+    Env: Provider<Fork<RemoteSite, Get>> + Provider<Put> + ConditionalSync + 'static,
+{
+    let remote_catalog = address.subject.clone().archive().catalog("index");
+    let remote_result = remote_catalog
+        .get(key)
+        .fork(&address.address)
+        .perform(env)
+        .await
+        .map_err(DialogStorageError::from)?;
+
+    match remote_result {
+        Some(bytes) => {
+            // Every hydration is one remote round trip (two, behind a
+            // UCAN remote whose permit was not cached); this event is
+            // what lets a slow first read be attributed to on-demand
+            // replication rather than local work.
+            tracing::debug!(
+                target: "dialog::sync::hydrate",
+                block = %dialog_common::Blake3Hash::from(key),
+                bytes = bytes.len(),
+                "hydrated block from remote"
+            );
+            let cache = local_catalog.put(Buffer::from(bytes.as_slice()));
+            // A failed write-back is not a failed read, but it silently
+            // turns every future read of this block into another remote
+            // round trip — worth a trace, never worth failing the read.
+            if let Err(error) = cache.perform(env).await {
                 tracing::debug!(
                     target: "dialog::sync::hydrate",
-                    block = %dialog_common::Blake3Hash::from(*key),
-                    bytes = bytes.len(),
-                    "hydrated block from remote"
+                    block = %dialog_common::Blake3Hash::from(key),
+                    %error,
+                    "failed to cache hydrated block locally"
                 );
-                // Cache locally
-                let cache = self
-                    .local
-                    .catalog()
-                    .clone()
-                    .put(Buffer::from(bytes.as_slice()));
-                // A failed write-back is not a failed read, but it silently
-                // turns every future read of this block into another remote
-                // round trip — worth a trace, never worth failing the read.
-                if let Err(error) = cache.perform(self.local.env()).await {
-                    tracing::debug!(
-                        target: "dialog::sync::hydrate",
-                        block = %dialog_common::Blake3Hash::from(*key),
-                        %error,
-                        "failed to cache hydrated block locally"
-                    );
-                }
-                Ok(Some(bytes))
             }
-            None => Ok(None),
+            Ok(Some(bytes))
         }
+        None => Ok(None),
     }
 }
 

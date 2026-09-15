@@ -26,6 +26,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::repository::archive::networked::HydrationFlight;
 use crate::repository::fetch::FetchPlan;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
@@ -310,10 +311,11 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             let results = Box::pin(query.perform(&query_env));
             match preload {
                 // The query's own stream drives the plan's speculative
-                // fetches: they borrow this same env and end with the
-                // stream. See `crate::repository::fetch`.
+                // fetches: they borrow this same env, share the demand
+                // reads' hydration flight, and end with the stream. See
+                // `crate::repository::fetch`.
                 Some(plan) => {
-                    let driven = plan.drive(results, sources, env);
+                    let driven = plan.drive(results, sources, env, Arc::default());
                     for await result in driven {
                         yield result?;
                     }
@@ -451,6 +453,7 @@ pub(crate) fn select_from_source<'a, Env>(
     source: Source,
     env: &'a Env,
     input: ArtifactSelector<Constrained>,
+    flight: Option<Arc<HydrationFlight<'a>>>,
 ) -> ArtifactStream<'a>
 where
     Env: Provider<Get>
@@ -465,6 +468,12 @@ where
         let select = crate::Select::from_source(source.as_ref(), input);
         let remote = source.as_ref().fallback(env).await;
         let store = NetworkedIndex::new(env, select.catalog(), remote);
+        // Concurrent reads within one evaluation share fetch-and-hydrate
+        // through the query's hydration flight (see `HydrationFlight`).
+        let store = match flight {
+            Some(flight) => store.with_flight(flight),
+            None => store,
+        };
         let stream = select.execute(store).await?;
         for await artifact in stream {
             yield artifact?;
@@ -509,7 +518,7 @@ where
         // retract in `with(..)`) suppresses matching source facts. Each
         // owns its line clone and borrows only `self.env`.
         for source in &self.sources {
-            let raw = select_from_source(source.clone(), self.env, input.clone());
+            let raw = select_from_source(source.clone(), self.env, input.clone(), None);
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
@@ -632,7 +641,7 @@ where
         }
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
-        select_from_source(source.clone(), self.env, selector)
+        select_from_source(source.clone(), self.env, selector, None)
             .owned()
             .try_collect()
             .await

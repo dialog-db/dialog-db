@@ -9,8 +9,8 @@
   "entities": 4000,
   "facts": 24011,
   "commits": 33,
-  "vault_files": 402,
-  "vault_bytes": 19309020,
+  "vault_files": 396,
+  "vault_bytes": 19303711,
   "phases": [
     {
       "name": "pull",
@@ -25,17 +25,17 @@
           [
             "memory.resolve",
             1,
-            332
+            335
           ]
         ],
         "requests": 1,
-        "bytes": 332
+        "bytes": 335
       }
     },
     {
       "name": "probe",
-      "virtual_ms": 175,
-      "rounds": 2.1875,
+      "virtual_ms": 174,
+      "rounds": 2.175,
       "unique_blocks": 2,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
@@ -45,11 +45,11 @@
           [
             "archive.get",
             2,
-            151076
+            140348
           ]
         ],
         "requests": 2,
-        "bytes": 151076
+        "bytes": 140348
       }
     },
     {
@@ -65,17 +65,17 @@
           [
             "archive.get",
             1,
-            12240
+            10440
           ]
         ],
         "requests": 1,
-        "bytes": 12240
+        "bytes": 10440
       }
     },
     {
       "name": "claim",
-      "virtual_ms": 341,
-      "rounds": 4.2625,
+      "virtual_ms": 340,
+      "rounds": 4.25,
       "unique_blocks": 1,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
@@ -90,12 +90,12 @@
           [
             "archive.put",
             1,
-            76908
+            74312
           ],
           [
             "memory.resolve",
             1,
-            332
+            335
           ],
           [
             "memory.publish",
@@ -104,7 +104,7 @@
           ]
         ],
         "requests": 4,
-        "bytes": 166444
+        "bytes": 163851
       }
     },
     {
@@ -163,49 +163,9 @@
     },
     {
       "name": "concept",
-      "virtual_ms": 6930,
-      "rounds": 86.625,
+      "virtual_ms": 1647,
+      "rounds": 20.5875,
       "unique_blocks": 110,
-      "duplicate_requests": 1,
-      "duplicate_bytes": 89968,
-      "empty_requests": 0,
-      "traffic": {
-        "rows": [
-          [
-            "archive.get",
-            111,
-            5679876
-          ]
-        ],
-        "requests": 111,
-        "bytes": 5679876
-      }
-    },
-    {
-      "name": "filtered",
-      "virtual_ms": 6927,
-      "rounds": 86.5875,
-      "unique_blocks": 109,
-      "duplicate_requests": 1,
-      "duplicate_bytes": 89968,
-      "empty_requests": 0,
-      "traffic": {
-        "rows": [
-          [
-            "archive.get",
-            110,
-            5658300
-          ]
-        ],
-        "requests": 110,
-        "bytes": 5658300
-      }
-    },
-    {
-      "name": "download",
-      "virtual_ms": 2468,
-      "rounds": 30.85,
-      "unique_blocks": 400,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -213,8 +173,48 @@
         "rows": [
           [
             "archive.get",
-            400,
-            19312956
+            110,
+            5584696
+          ]
+        ],
+        "requests": 110,
+        "bytes": 5584696
+      }
+    },
+    {
+      "name": "filtered",
+      "virtual_ms": 1572,
+      "rounds": 19.65,
+      "unique_blocks": 109,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            109,
+            5566072
+          ]
+        ],
+        "requests": 109,
+        "bytes": 5566072
+      }
+    },
+    {
+      "name": "download",
+      "virtual_ms": 2432,
+      "rounds": 30.4,
+      "unique_blocks": 394,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            394,
+            19307408
           ],
           [
             "memory.resolve",
@@ -222,8 +222,8 @@
             372
           ]
         ],
-        "requests": 401,
-        "bytes": 19313328
+        "requests": 395,
+        "bytes": 19307780
       }
     }
   ]
