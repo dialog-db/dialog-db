@@ -1,32 +1,35 @@
-//! Speculative replication for queries: a plan of ranges worth fetching
-//! ahead of demand, driven by the query's own evaluation.
+//! Speculative replication for evaluations: the env's ambient
+//! [`PreloadQueue`] of ranges worth fetching ahead of demand, driven by
+//! whatever evaluation is currently polling.
 //!
-//! Design: `notes/fetch-scheduler.md` (bead dialog-db-75). The load-bearing
-//! constraints, restated:
+//! Design: `notes/fetch-scheduler.md` (beads dialog-db-75/82). The
+//! load-bearing constraints, restated:
 //!
-//! - **The env is never owned.** A [`FetchPlan`] holds descriptions only —
-//!   selectors and ranks, no futures, no env. Work materializes into fetch
-//!   futures exclusively inside [`FetchPlan::drive`], borrowing the same
-//!   env the wrapped query stream already borrows, and lives exactly as
-//!   long as that stream.
+//! - **The env is never owned.** The queue holds descriptions only —
+//!   selectors and ranks, no futures, no env. Work materializes into
+//!   fetch futures exclusively inside a [`Driven`] stream, borrowing the
+//!   same env the wrapped evaluation already borrows, and lives exactly
+//!   as long as that stream.
 //! - **Demand is never behind speculation.** Demand reads keep their
 //!   existing path untouched; when a preload's fetch for the same object
-//!   is in flight, the transport's `Flight` joins them. A queued-but-
+//!   is in flight, the env's `Hydrate` flight joins them. A queued-but-
 //!   unstarted item is simply ignored by demand, and hydration makes it a
 //!   local no-op when the driver later reaches it.
-//! - **The driver is the query.** Progress happens whenever the consumer
-//!   polls the driven stream — on any executor, wasm included, with
-//!   nothing detached. A plan nobody drives holds no resources.
+//! - **The driver is the evaluation.** Progress happens whenever a
+//!   consumer polls a driven stream — on any executor, wasm included,
+//!   with nothing detached. A queue nobody drives holds no resources.
+//!   The queue being ambient (an operator field, reached by the
+//!   [`Speculation`](dialog_artifacts::Speculation) command) is what
+//!   lets one evaluation's polling execute another's hints: queries,
+//!   subscriptions, and transaction queries all enqueue and all drive.
 
-use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use parking_lot::{Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, Likelihood};
+use dialog_artifacts::{ArtifactSelector, FetchBudget, Likelihood, PreloadQueue};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
@@ -53,213 +56,18 @@ type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + 'a>>;
 
-/// How many speculative fetch jobs may run concurrently, per rank.
+/// A stream that also drives the env's [`PreloadQueue`]: polling it
+/// executes queued preload hints, borrowing `env` for exactly the
+/// stream's lifetime.
 ///
-/// A budget is per driven stream, not global: two queries each drive
-/// their own plan under their own budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FetchBudget {
-    /// Concurrent jobs for [`Likelihood::Likely`] work.
-    pub likely: usize,
-    /// Concurrent jobs for [`Likelihood::Maybe`] work.
-    pub maybe: usize,
-}
-
-impl Default for FetchBudget {
-    /// Sized from the soak's cold-join budget sweep (see
-    /// `notes/fetch-scheduler.md`): rounds shrink with budget up to a
-    /// knee near 256 once hydration is single-flighted; `Maybe` work
-    /// stays narrow until something promotes it.
-    fn default() -> Self {
-        Self {
-            likely: 256,
-            maybe: 16,
-        }
-    }
-}
-
-/// One enqueued preload: a selector to replicate, tagged by the handle
-/// that owns it so the handle can abort or promote it while it is still
-/// pending.
-#[derive(Debug, Clone)]
-struct Job {
-    handle: u64,
-    selector: ArtifactSelector<Constrained>,
-}
-
-#[derive(Debug, Default)]
-struct State {
-    likely: VecDeque<Job>,
-    maybe: VecDeque<Job>,
-    next_handle: u64,
-}
-
-/// A plan of speculative fetches: pure data, shared by clone, carrying
-/// the budget it is driven under.
-///
-/// [`preload`](Self::preload) enqueues; [`drive`](Self::drive) executes
-/// against a borrowed env. See the module docs for the ownership rules.
-#[derive(Debug, Clone, Default)]
-pub struct FetchPlan {
-    budget: FetchBudget,
-    state: Arc<Mutex<State>>,
-}
-
-/// A bare budget is a fresh plan driven under it, so a query can stage
-/// speculation without naming the plan: `.preload(FetchBudget::default())`.
-impl From<FetchBudget> for FetchPlan {
-    fn from(budget: FetchBudget) -> Self {
-        Self::new().with_budget(budget)
-    }
-}
-
-impl FetchPlan {
-    /// A fresh, empty plan under the default budget.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// This plan under `budget`: how many of its jobs may run
-    /// concurrently, per rank, when a query drives it. Clones made
-    /// before or after carry their own copy; the one handed to
-    /// `.preload(..)` is the one whose budget the driven stream honors.
-    pub fn with_budget(mut self, budget: FetchBudget) -> Self {
-        self.budget = budget;
-        self
-    }
-
-    fn lock(&self) -> MutexGuard<'_, State> {
-        // Never held across an await.
-        self.state.lock()
-    }
-
-    /// Enqueue a selector's backing blocks for speculative replication.
-    ///
-    /// Returns a handle that can [`abort`](PreloadHandle::abort) or
-    /// [`promote`](PreloadHandle::promote) the work while it is still
-    /// pending; dropping the handle changes nothing.
-    pub fn preload(
-        &self,
-        selector: ArtifactSelector<Constrained>,
-        likelihood: Likelihood,
-    ) -> PreloadHandle {
-        let mut state = self.lock();
-        state.next_handle += 1;
-        let handle = state.next_handle;
-        let job = Job { handle, selector };
-        match likelihood {
-            Likelihood::Likely => state.likely.push_back(job),
-            Likelihood::Maybe => state.maybe.push_back(job),
-        }
-        PreloadHandle {
-            id: handle,
-            state: self.state.clone(),
-        }
-    }
-
-    /// Pending jobs, for tests and introspection.
-    pub fn pending(&self) -> usize {
-        let state = self.lock();
-        state.likely.len() + state.maybe.len()
-    }
-
-    /// Dequeue the next job whose rank has spare capacity: `Likely`
-    /// drains before `Maybe`.
-    fn next(&self, likely_spare: bool, maybe_spare: bool) -> Option<(Job, Likelihood)> {
-        let mut state = self.lock();
-        if likely_spare && let Some(job) = state.likely.pop_front() {
-            return Some((job, Likelihood::Likely));
-        }
-        if maybe_spare && let Some(job) = state.maybe.pop_front() {
-            return Some((job, Likelihood::Maybe));
-        }
-        None
-    }
-
-    /// Wrap `stream` so that polling it also executes this plan's jobs,
-    /// borrowing `env` for exactly the stream's lifetime.
-    ///
-    /// Each job replicates its selector by running the ordinary line
-    /// select against every source and draining it: every block the scan
-    /// touches lands in the line's node cache and, through the networked
-    /// index, the local archive — so the later demand read is local. Job
-    /// errors surface as nothing (a preload that fails must stay
-    /// invisible; the demand read owns the error).
-    pub(crate) fn drive<'a, S, Env>(
-        &self,
-        stream: S,
-        sources: Vec<Source>,
-        env: &'a Env,
-    ) -> Driven<'a, S, Env>
-    where
-        S: Stream + Unpin + 'a,
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Hydrate>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + ConditionalSync
-            + 'static,
-    {
-        Driven {
-            inner: stream,
-            plan: self.clone(),
-            sources,
-            env,
-            budget: self.budget,
-            likely_inflight: 0,
-            maybe_inflight: 0,
-            inflight: FuturesUnordered::new(),
-        }
-    }
-}
-
-/// A pending preload's handle: cheap queue surgery on work that has not
-/// started yet. In-flight and completed work is unaffected.
-#[derive(Debug, Clone)]
-pub struct PreloadHandle {
-    id: u64,
-    state: Arc<Mutex<State>>,
-}
-
-impl PreloadHandle {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock()
-    }
-
-    /// Drop this handle's still-pending jobs. Work already in flight
-    /// completes (and hydrates) regardless: started fetches are paid
-    /// for, and throwing paid-for bytes away is the pre-#495 bug this
-    /// module exists to prevent.
-    pub fn abort(&self) {
-        let mut state = self.lock();
-        let id = self.id;
-        state.likely.retain(|job| job.handle != id);
-        state.maybe.retain(|job| job.handle != id);
-    }
-
-    /// Move this handle's still-pending `Maybe` jobs to the `Likely`
-    /// rank: the decision point ahead of them has committed.
-    pub fn promote(&self) {
-        let mut state = self.lock();
-        let id = self.id;
-        let mut promoted = VecDeque::new();
-        state.maybe.retain(|job| {
-            if job.handle == id {
-                promoted.push_back(job.clone());
-                false
-            } else {
-                true
-            }
-        });
-        state.likely.extend(promoted);
-    }
-}
-
-/// A stream that also drives a [`FetchPlan`]: see [`FetchPlan::drive`].
+/// Each job replicates its selector against every source in `sources`:
+/// every block the walk touches lands in the line's node cache and,
+/// through the networked index, the local archive — so the later demand
+/// read is local. Job errors surface as nothing (a preload that fails
+/// must stay invisible; the demand read owns the error).
 pub(crate) struct Driven<'a, S, Env> {
     inner: S,
-    plan: FetchPlan,
+    queue: Arc<PreloadQueue>,
     sources: Vec<Source>,
     env: &'a Env,
     budget: FetchBudget,
@@ -279,6 +87,27 @@ where
         + ConditionalSync
         + 'static,
 {
+    /// Wrap `stream` so that polling it also drives the env's queue.
+    /// The budget is read once: a per-driver cap, so concurrent driven
+    /// streams each bound their own in-flight work.
+    pub(crate) fn new(
+        stream: S,
+        sources: Vec<Source>,
+        env: &'a Env,
+        queue: Arc<PreloadQueue>,
+    ) -> Self {
+        Self {
+            inner: stream,
+            budget: queue.budget(),
+            queue,
+            sources,
+            env,
+            likely_inflight: 0,
+            maybe_inflight: 0,
+            inflight: FuturesUnordered::new(),
+        }
+    }
+
     /// Start pending jobs up to the budget. Returns whether any started.
     fn start_jobs(&mut self) -> bool {
         let mut started = false;
@@ -288,7 +117,7 @@ where
             if !likely_spare && !maybe_spare {
                 return started;
             }
-            let Some((job, likelihood)) = self.plan.next(likely_spare, maybe_spare) else {
+            let Some((selector, likelihood)) = self.queue.next(likely_spare, maybe_spare) else {
                 return started;
             };
             match likelihood {
@@ -302,7 +131,7 @@ where
                     // Warming is advisory: an error ends this source's
                     // walk silently, and the demand read that actually
                     // needs the data owns the failure.
-                    let _ = warm_source(source, env, &job.selector).await;
+                    let _ = warm_source(source, env, &selector).await;
                 }
                 likelihood
             };
@@ -470,6 +299,7 @@ mod tests {
     use super::*;
     use crate::RepositoryExt as _;
     use crate::helpers::Counting;
+    use dialog_artifacts::{Preload, PreloadRequest, Speculation};
     use dialog_query::query::Output as _;
 
     #[cfg(target_arch = "wasm32")]
@@ -479,52 +309,16 @@ mod tests {
         ArtifactSelector::new().the(attribute.parse().expect("a valid attribute"))
     }
 
-    /// `Likely` work drains before `Maybe` work regardless of enqueue
-    /// order, and a rank without spare capacity is skipped.
+    /// A zero budget turns speculation off without touching demand:
+    /// hints are refused (so evaluators stop composing them, keeping
+    /// the deterministic soak profile's demand shape exact) and the
+    /// query's rows flow as if the machinery did not exist.
     #[dialog_common::test]
-    fn it_drains_likely_before_maybe_within_capacity() {
-        let plan = FetchPlan::new();
-        plan.preload(selector("a/b"), Likelihood::Maybe);
-        plan.preload(selector("c/d"), Likelihood::Likely);
-
-        let (_, rank) = plan.next(true, true).expect("two jobs pending");
-        assert_eq!(rank, Likelihood::Likely, "likely rank drains first");
-        assert!(plan.next(false, false).is_none(), "no capacity, no dequeue");
-        let (_, rank) = plan.next(true, true).expect("one job pending");
-        assert_eq!(rank, Likelihood::Maybe);
-        assert!(plan.next(true, true).is_none());
-    }
-
-    /// A handle's abort drops only its own pending jobs; promote moves
-    /// them to the likely rank without touching other handles' work.
-    #[dialog_common::test]
-    fn it_aborts_and_promotes_by_handle() {
-        let plan = FetchPlan::new();
-        let doomed = plan.preload(selector("a/b"), Likelihood::Maybe);
-        let kept = plan.preload(selector("c/d"), Likelihood::Maybe);
-
-        doomed.abort();
-        assert_eq!(plan.pending(), 1, "only the aborted handle's job left");
-
-        kept.promote();
-        let (_, rank) = plan.next(true, false).expect("promoted job pending");
-        assert_eq!(
-            rank,
-            Likelihood::Likely,
-            "a promoted job dequeues at the likely rank"
-        );
-        assert_eq!(plan.pending(), 0);
-    }
-
-    /// A zero budget never blocks the demand query: the plan's jobs
-    /// simply stay pending. The driver is an accelerator, not a
-    /// dependency.
-    #[dialog_common::test]
-    async fn it_never_blocks_demand_on_an_undriven_plan() -> Result<()> {
+    async fn it_refuses_hints_and_flows_demand_with_a_zero_budget() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("preload-starved"))
+            .repository(unique_name("preload-off"))
             .create()
             .perform(&env)
             .await?;
@@ -542,11 +336,19 @@ mod tests {
             .await?;
         let branch = repo.branch("main").open().perform(&env).await?;
 
-        let plan = FetchPlan::new().with_budget(FetchBudget {
-            likely: 0,
-            maybe: 0,
-        });
-        plan.preload(selector("right/name"), Likelihood::Likely);
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
+
+        let listening = Provider::<Preload>::execute(
+            &env,
+            PreloadRequest {
+                selector: selector("right/name"),
+                likelihood: Likelihood::Likely,
+            },
+        )
+        .await;
+        assert!(!listening, "a zero budget refuses hints");
+        assert_eq!(queue.pending(), 0, "a refused hint enqueues nothing");
 
         let rows = branch
             .query()
@@ -557,21 +359,20 @@ mod tests {
                 Term::blank(),
                 None,
             ))
-            .preload(plan.clone())
             .perform(&env)
             .try_vec()
             .await?;
-        assert_eq!(rows.len(), 1, "demand rows flow with a starved plan");
-        assert_eq!(plan.pending(), 1, "the starved plan holds its job");
+        assert_eq!(rows.len(), 1, "demand rows flow with speculation off");
         Ok(())
     }
 
-    /// A query staged with a plan replicates the plan's ranges while it
-    /// runs: after the driven query drains, the preloaded attribute's
-    /// blocks are already local (its own select then reads nothing from
-    /// the backend), and the plan is empty.
+    /// A hint enqueued through the env's ambient queue is executed by
+    /// whatever evaluation polls next — here a query that never asked
+    /// for it — and the hinted range is local afterwards: its own
+    /// select then reads nothing from the backend. This is the
+    /// cross-evaluation sharing the ambient design exists for.
     #[dialog_common::test]
-    async fn it_replicates_preloaded_ranges_while_the_query_runs() -> Result<()> {
+    async fn it_replicates_hinted_ranges_while_any_query_runs() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let env = Counting::new(operator);
         let repo = profile
@@ -596,8 +397,15 @@ mod tests {
         // Reopen so the durable layer reads the published head.
         let branch = repo.branch("main").open().perform(&env).await?;
 
-        let plan = FetchPlan::new();
-        plan.preload(selector("right/name"), Likelihood::Likely);
+        let listening = Provider::<Preload>::execute(
+            &env,
+            PreloadRequest {
+                selector: selector("right/name"),
+                likelihood: Likelihood::Likely,
+            },
+        )
+        .await;
+        assert!(listening, "the default budget accepts hints");
 
         let left = AttributeQuery::new(
             Term::from(the!("left/name")),
@@ -606,17 +414,13 @@ mod tests {
             Term::blank(),
             None,
         );
-        let rows = branch
-            .query()
-            .select(left)
-            .preload(plan.clone())
-            .perform(&env)
-            .try_vec()
-            .await?;
+        let rows = branch.query().select(left).perform(&env).try_vec().await?;
         assert_eq!(rows.len(), 40, "the demand query yields its rows");
-        assert_eq!(plan.pending(), 0, "the driven stream executed the plan");
 
-        // The preloaded range is now local: reading it touches the
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the driven stream executed the hint");
+
+        // The hinted range is now local: reading it touches the
         // backend not at all (every node is in the line's shared cache).
         let before = env.count("archive::Get");
         let right = AttributeQuery::new(
@@ -631,7 +435,7 @@ mod tests {
         assert_eq!(
             env.count("archive::Get") - before,
             0,
-            "a preloaded range reads nothing from the backend"
+            "a hinted range reads nothing from the backend"
         );
         Ok(())
     }

@@ -393,6 +393,8 @@ impl Snapshot {
             + Provider<Put>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + ConditionalSync
             + 'static,
     {
@@ -411,6 +413,8 @@ impl Snapshot {
             + Provider<Put>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + ConditionalSync
             + 'static,
     {
@@ -621,6 +625,8 @@ impl SnapshotExport {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,

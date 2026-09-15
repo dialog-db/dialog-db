@@ -17,7 +17,10 @@ mod estimate;
 pub use estimate::Estimate;
 
 mod query;
-pub use query::{ArtifactStream, Likelihood, Preload, PreloadRequest, Select};
+pub use query::{
+    ArtifactStream, FetchBudget, Likelihood, Preload, PreloadQueue, PreloadRequest, Select,
+    Speculation,
+};
 
 mod store;
 pub use store::*;

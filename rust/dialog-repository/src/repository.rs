@@ -29,7 +29,6 @@ mod error;
 pub use error::*;
 
 mod fetch;
-pub use fetch::*;
 
 mod load;
 pub use load::*;

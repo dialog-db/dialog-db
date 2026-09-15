@@ -33,6 +33,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -61,6 +63,8 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -89,6 +93,8 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,

@@ -23,9 +23,14 @@
 //!    tradeoff recorded in `notes/set-at-a-time-joins.md`).
 //! 10. **subscribe** — a fresh cold client registers the same concept as a
 //!     standing query and pays its first poll: the exact path a UI drives,
-//!     which the per-query preload machinery does not reach (bead
-//!     dialog-db-82).
-//! 11. **download** — a second fresh client materializes the entire space
+//!     preloading through the same ambient queue every evaluation shares
+//!     (bead dialog-db-82).
+//! 11. **overlap** — a fresh cold client runs two independent concepts
+//!     concurrently (the full board and a compact listing sharing three of
+//!     its five attribute ranges): the everyday two-views-of-one-space
+//!     shape, gating that overlapping evaluations hydrate shared ranges
+//!     once through the env-owned flight and queue.
+//! 12. **download** — a second fresh client materializes the entire space
 //!     (`pull().download()`): the eager-replication cost the lazy join
 //!     avoids up front but pays incrementally.
 
@@ -41,7 +46,7 @@ use dialog_operator::{Operator, Profile};
 use dialog_query::{Concept, Entity, Output as _, Query, Term};
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::simulation::{self, NetworkShape};
-use dialog_repository::{Branch, FetchBudget, Repository, RepositoryExt as _, SiteAddress};
+use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource as _;
@@ -120,6 +125,23 @@ pub struct Card {
     pub reporter: card::Reporter,
     /// When it was filed.
     pub created: card::Created,
+}
+
+/// A compact list view beside the full board: the same entities through
+/// a second, independent concept that shares three of [`Card`]'s five
+/// attribute ranges (title, status, rank). Two apps rendering different
+/// views of one space is the everyday shape of concurrent overlapping
+/// queries.
+#[derive(Clone, Debug, PartialEq, Concept)]
+pub struct Listing {
+    /// The bug entity the row lists.
+    pub this: Entity,
+    /// Its title.
+    pub title: card::Title,
+    /// Its status.
+    pub status: card::Status,
+    /// Its ordering key.
+    pub rank: card::Rank,
 }
 
 /// Build one entity's facts: sizes chosen to look like an issue-tracker
@@ -351,6 +373,15 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     simulation::reset_tally();
 
     let (operator, profile) = test_operator_with_profile().await;
+    // Speculative preloading is ambient (the operator's queue, hints
+    // default-on). The unshaped profile turns it off: its job is to pin
+    // the engine's deterministic demand shape, and replication overlap
+    // is a latency behavior only the shaped profiles measure.
+    if scenario.network.is_none() {
+        use dialog_capability::Provider;
+        let queue = Provider::<dialog_artifacts::Speculation>::execute(&operator, ()).await;
+        queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
+    }
     let server = profile
         .repository(unique_name("soak-server"))
         .create()
@@ -528,12 +559,6 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     let concept_client =
         mount_client(&operator, &profile, &server, &address, "soak-concept").await?;
     concept_client.pull().perform(&operator).await?;
-    // Preload staging is measured on shaped profiles only: replication
-    // overlap is a latency behavior, and the unshaped profile's job is to
-    // pin the engine's deterministic demand shape. (An instant link also
-    // exposes a known post-flight hydration race that re-fetches a
-    // handful of blocks; see the fetch-plan bead trail.)
-    let preload = scenario.network.is_some();
     measured("concept", &mut phases, async {
         let layer = concept_client.query();
         let query = layer.select(Query::<Card> {
@@ -544,11 +569,6 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             reporter: Term::var("reporter"),
             created: Term::var("created"),
         });
-        let query = if preload {
-            query.preload(FetchBudget::default())
-        } else {
-            query
-        };
         let cards: Vec<Card> = query.perform(&operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == expected,
@@ -578,11 +598,6 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             reporter: Term::var("reporter"),
             created: Term::var("created"),
         });
-        let query = if preload {
-            query.preload(FetchBudget::default())
-        } else {
-            query
-        };
         let cards: Vec<Card> = query.perform(&operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == closed,
@@ -593,9 +608,9 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     .await?;
 
     // The UI's actual cold path: a standing query's first poll on a fresh
-    // client. Subscriptions build their own evaluation envs, which the
-    // per-query preload staging does not reach, so this phase measures the
-    // gap bead dialog-db-82 exists to close.
+    // client. With the ambient queue the subscription's evaluation enqueues
+    // and drives its own hints, so this phase gates bead dialog-db-82's
+    // subscription parity.
     let subscribe_client =
         mount_client(&operator, &profile, &server, &address, "soak-subscribe").await?;
     subscribe_client.pull().perform(&operator).await?;
@@ -616,6 +631,45 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         anyhow::ensure!(
             added == expected,
             "the first poll should see every card, saw {added}"
+        );
+        Ok(())
+    })
+    .await?;
+
+    // Two independent concepts, run concurrently on one fresh cold
+    // client, overlapping on three of five attribute ranges. What the
+    // ledger gates: the overlap hydrates ONCE (the env-owned flight and
+    // queue are shared across evaluations, so the unique count reads as
+    // the union of the two footprints and duplicates stay zero), and the
+    // rounds read as overlapped work, not the sum of two sequential runs.
+    let overlap_client =
+        mount_client(&operator, &profile, &server, &address, "soak-overlap").await?;
+    overlap_client.pull().perform(&operator).await?;
+    measured("overlap", &mut phases, async {
+        let board_layer = overlap_client.query();
+        let board = board_layer.select(Query::<Card> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::var("status"),
+            rank: Term::var("rank"),
+            reporter: Term::var("reporter"),
+            created: Term::var("created"),
+        });
+        let list_layer = overlap_client.query();
+        let list = list_layer.select(Query::<Listing> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            status: Term::var("status"),
+            rank: Term::var("rank"),
+        });
+        let (cards, rows): (Vec<Card>, Vec<Listing>) = futures_util::future::try_join(
+            board.perform(&operator).try_vec(),
+            list.perform(&operator).try_vec(),
+        )
+        .await?;
+        anyhow::ensure!(
+            cards.len() == expected && rows.len() == expected,
+            "both overlapping queries should see every entity"
         );
         Ok(())
     })
