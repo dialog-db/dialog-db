@@ -1359,12 +1359,15 @@ dependencies = [
 name = "dialog-iroh-remote"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-did-web",
  "dialog-effects",
  "dialog-ucan",
  "dialog-ucan-core",
+ "dialog-varsig",
  "ipld-core",
  "serde",
  "serde_ipld_dagcbor",

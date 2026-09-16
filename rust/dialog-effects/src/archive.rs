@@ -246,7 +246,7 @@ impl Effect for Import {
 pub mod prelude;
 
 /// Errors that can occur during archive operations.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, serde::Serialize, serde::Deserialize)]
 pub enum ArchiveError {
     /// The request was not authorized.
     ///
