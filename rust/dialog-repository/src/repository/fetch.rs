@@ -131,7 +131,7 @@ where
                     // Warming is advisory: an error ends this source's
                     // walk silently, and the demand read that actually
                     // needs the data owns the failure.
-                    let _ = warm_source(source, env, &selector).await;
+                    let _ = warm_source(source, env, &selector, likelihood).await;
                 }
                 likelihood
             };
@@ -195,14 +195,16 @@ where
 /// Reads go through the line's shared node cache (so a later demand read
 /// is free) and the networked index (so every fetched block hydrates the
 /// local archive); in-flight hydrations are shared by the env's own
-/// [`Hydrate`] flight, with every concurrent reader anywhere in the
-/// process. The scope is the selector's exact key range; a subtree the
+/// [`Hydrate`] scheduler with every concurrent reader anywhere in the
+/// process, and ranked at the hint's likelihood there, so warming never
+/// takes a site's slot from a demand read. The scope is the selector's exact key range; a subtree the
 /// range cannot touch is never fetched, and warming a conservative
 /// superset at the edges is harmless.
 async fn warm_source<Env>(
     source: Source,
     env: &Env,
     selector: &ArtifactSelector<Constrained>,
+    likelihood: Likelihood,
 ) -> Result<(), DialogSearchTreeError>
 where
     Env: Provider<Get>
@@ -219,7 +221,7 @@ where
     }
     let remote = source.as_ref().fallback(env).await;
     let catalog = source.as_ref().subject().archive().index();
-    let store = NetworkedIndex::new(env, catalog, remote);
+    let store = NetworkedIndex::new(env, catalog, remote).with_priority(likelihood.into());
     let store = CacheThrough {
         cache: source.as_ref().node_cache(),
         store,

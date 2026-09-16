@@ -49,6 +49,17 @@ pub enum Likelihood {
     Maybe,
 }
 
+impl From<Likelihood> for dialog_common::Priority {
+    /// A speculative job's reads rank below every demand read at the
+    /// site, and a committed range before one a decision may abandon.
+    fn from(likelihood: Likelihood) -> Self {
+        match likelihood {
+            Likelihood::Likely => Self::Likely,
+            Likelihood::Maybe => Self::Maybe,
+        }
+    }
+}
+
 /// A hint that a selector's blocks should replicate ahead of demand.
 #[derive(Debug, Clone)]
 pub struct PreloadRequest {

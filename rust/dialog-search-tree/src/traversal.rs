@@ -38,31 +38,6 @@ use crate::{
     PersistentNode, PersistentTree, Value,
 };
 
-/// How many block reads a traversal keeps in flight at once.
-///
-/// The queued reads are independent and every one of them is committed
-/// work: the walk has already decided it needs these nodes, and the set
-/// is bounded by the tree's fanout and by the caller's scope. So there is
-/// nothing to gain by metering them out, and a cap costs a round trip per
-/// wave -- 70 queued reads under a cap of 16 pay four waves where they
-/// could pay one.
-///
-/// Measured on the soak's download phase (median of three runs per
-/// profile, capped at 16 versus uncapped): intercontinental 28.6 -> 9.2
-/// rounds, broadband 31.7 -> 23.4, mobile 42.6 -> 41.7 (mobile is
-/// bandwidth-bound at 20 Mbps, so round trips are not its constraint).
-/// Query phases were unchanged within run-to-run variance, and duplicate
-/// fetches stayed at zero throughout, so partial replication is
-/// unaffected -- lifting the cap changes WHEN blocks are fetched, never
-/// WHICH.
-///
-/// The transport is the right place for any remaining limit: a browser
-/// caps connections per origin on its own, and a priority queue at the
-/// hydration flight is what would keep one big walk from starving a
-/// concurrent demand read (bead dialog-db-88). A constant here cannot
-/// express either.
-const FETCH_CONCURRENCY: usize = usize::MAX;
-
 /// What a gap-tolerant traversal found at one position in the tree.
 #[derive(Debug, Clone)]
 pub enum Visit<K, V> {
@@ -206,21 +181,31 @@ where
         if &root != NULL_BLAKE3_HASH {
             // A continuation queue rather than levels: the root goes out,
             // and every node that lands queues its children behind
-            // whatever is already waiting, up to `FETCH_CONCURRENCY` in
-            // flight at once. Against a backend that reaches a remote on a
-            // miss the wall clock is still depth round-trips, but no read
-            // waits for its slowest sibling before its own children go
-            // out -- a level walk paid that barrier once per level, a round
-            // trip of idle transport slots each time. Reads are polled BY
-            // this generator, so on wasm (where the poll issues the
-            // request) every queued read is on the wire together.
+            // whatever is already waiting. Against a backend that reaches
+            // a remote on a miss the wall clock is still depth
+            // round-trips, but no read waits for its slowest sibling
+            // before its own children go out -- a level walk paid that
+            // barrier once per level, a round trip of idle transport
+            // slots each time. Reads are polled BY this generator, so on
+            // wasm (where the poll issues the request) every queued read
+            // is on the wire together.
+            //
+            // Nothing here meters the reads out. Every queued read is
+            // committed work the walk has decided it needs, bounded by
+            // the tree's fanout and the caller's scope, and a cap at this
+            // level cost a round trip per wave (lifting a cap of 16
+            // measured 28.6 -> 9.2 download rounds intercontinental,
+            // 31.7 -> 23.4 broadband, with duplicate fetches at zero
+            // throughout, since a cap changes WHEN blocks are fetched,
+            // never WHICH). How many may cross the wire at once, and
+            // which go first, is the hydration scheduler's to decide per
+            // remote site (`dialog_common::Scheduler`): a demand read is
+            // admitted ahead of this walk's reads there, and a read still
+            // queued there is dropped for free when the walk ends.
             let mut queue: VecDeque<Blake3Hash> = VecDeque::from([root]);
             let mut reads = FuturesUnordered::new();
             loop {
-                while reads.len() < FETCH_CONCURRENCY {
-                    let Some(hash) = queue.pop_front() else {
-                        break;
-                    };
+                while let Some(hash) = queue.pop_front() {
                     reads.push(async move {
                         // `retrieve` verifies stored bytes against the
                         // hash it was asked for, so `None` here is
