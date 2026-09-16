@@ -35,7 +35,7 @@ impl Channel for Loopback {
         _peer: &IrohAddress,
         request: Vec<u8>,
     ) -> Result<Vec<u8>, ChannelError> {
-        let response = self.0.answer(&request).await;
+        let response = self.0.answer(&request).await.without_stream();
         Ok(crate::wire::encode("response", &response).expect("a response encodes"))
     }
 }

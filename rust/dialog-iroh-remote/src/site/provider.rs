@@ -17,7 +17,7 @@ use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Rejection;
 use dialog_effects::authority::{self, OperatorExt as _};
-use dialog_effects::{archive, blob, memory};
+use dialog_effects::{archive, memory};
 use dialog_ucan::Ucan;
 use dialog_ucan_core::container::Container;
 use dialog_ucan_core::container::bundle::InvocationBundle;
@@ -180,38 +180,6 @@ performs_by_value!(
     memory::Publish,
     memory::Retract,
 );
-
-/// The blob effects answer with a streaming handle, not a value.
-///
-/// [`BlobReader`] and [`BlobWriter`] are trait objects over a live
-/// transfer, so there is nothing for a one-request-one-response
-/// [`Channel`](crate::channel::Channel) to encode and nothing this body
-/// could decode. Buffering a whole blob into a response would make them
-/// compile and would misrepresent a blob store as a block store, so
-/// they are refused by name — the same stance
-/// [`Responder`](crate::serve::Responder) takes on the serving side,
-/// and for the same reason.
-macro_rules! not_streamed_yet {
-    ($($effect:ty),+ $(,)?) => {
-        $(
-            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-            impl Provider<ForkInvocation<Iroh, $effect>> for Iroh {
-                async fn execute(
-                    &self,
-                    _invocation: ForkInvocation<Iroh, $effect>,
-                ) -> <$effect as Effect>::Output {
-                    Err(blob::BlobError::Storage(format!(
-                        "{} is a streaming transfer, which this peer transport does not carry yet",
-                        <$effect as Effect>::command(),
-                    )))
-                }
-            }
-        )+
-    };
-}
-
-not_streamed_yet!(blob::Read, blob::Write, blob::Import);
 
 /// A peer's refusal, in the caller's own vocabulary.
 ///
