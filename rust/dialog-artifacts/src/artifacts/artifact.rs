@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ATTRIBUTE_KEY_TAG, AttributeKey, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, Key,
     KeyView, VALUE_KEY_TAG, ValueKey, decode_value,
+    history::{Edition, Version},
     key::varkey::{self, KeyRef, ValueRef},
+    make_reference,
 };
 
 use super::{Attribute, Cause, Entity, Value};
@@ -266,6 +268,25 @@ impl ArtifactView {
         }
     }
 
+    /// Every claim version this row stands for (the revision that wrote
+    /// it plus any collapsed claims of the same fact, see
+    /// [`Datum::versions`]). Empty for a row no revision tagged: data
+    /// committed straight through [`Artifacts`](crate::Artifacts), or an
+    /// owned row.
+    pub fn versions(&self) -> impl Iterator<Item = &Version> {
+        self.datum().into_iter().flat_map(Datum::versions)
+    }
+
+    /// The standing this row brings to the cardinality-one election: its
+    /// deepest claim version, as the pair the election compares (the
+    /// edition, then the hash of the whole version). `None` for a row no
+    /// revision tagged.
+    fn standing(&self) -> Option<(Edition, [u8; 32])> {
+        self.versions()
+            .map(|version| (version.edition, make_reference(version.key_bytes())))
+            .max()
+    }
+
     /// The [`Cause`] of this fact, if any, without touching the key.
     pub fn cause(&self) -> Option<&Cause> {
         match &self.backing {
@@ -378,17 +399,42 @@ impl ArtifactView {
     /// `Cardinality::One` reader observes. The policy belongs to the value
     /// layer — the query engine folds competing rows through this method
     /// and encodes no rule of its own — so refining how concurrent edits
-    /// resolve (e.g. merging by value and cause rather than electing a
-    /// winner) happens here without touching the engine.
+    /// resolve happens here without touching the engine.
     ///
-    /// The current rule: the higher cause wins, a caused row beats an
-    /// uncaused one, and equal (including absent) causes fall to the fact
-    /// hash. Deterministic and commutative — folding any set of rows in
-    /// any order elects the same row — which is what lets every replica
-    /// agree on the observed value without coordination. Causes read
-    /// straight off the rows; only a genuine tie pays for the
-    /// materialization the fact hash needs.
+    /// Two live rows at one `(attribute, entity)` are concurrent claims: a
+    /// writer that had observed the other row and replaced it retracted
+    /// it, so the rows that remain were written without sight of each
+    /// other (or by a writer that chose to keep both). The election is
+    /// therefore which concurrent revision the reader follows, and it
+    /// decides that by the revision, not by the fact: a row's standing is
+    /// its deepest claim version, compared by edition (causal depth: the
+    /// revision that had seen more when it wrote wins) and then by the
+    /// hash of the version (a coin no writer can load without grinding
+    /// its own origin's editions). Because every fact one revision wrote
+    /// carries the same version, every fact of that revision resolves the
+    /// same way against every fact of a concurrent one: a batch wins or
+    /// loses whole, so a reader never sees half of one writer's batch and
+    /// half of another's. Depth also makes the outcome monotonic along a
+    /// lineage: once a revision beats a concurrent one, so does every
+    /// revision built on it.
+    ///
+    /// A versioned row beats one no revision tagged. Rows the version
+    /// cannot separate (both unversioned, or both written by the same
+    /// revision) fall to the older rule: the higher cause wins, a caused
+    /// row beats an uncaused one, and equal (including absent) causes fall
+    /// to the fact hash. Every tier is deterministic and commutative:
+    /// folding any set of rows in any order elects the same row, which is
+    /// what lets every replica agree on the observed value without
+    /// coordination. Versions and causes read straight off the rows; only
+    /// a genuine tie pays for the materialization the fact hash needs.
     pub fn elect(self, challenger: ArtifactView) -> Result<ArtifactView, DialogArtifactsError> {
+        match (self.standing(), challenger.standing()) {
+            (Some(a), Some(b)) if a > b => return Ok(self),
+            (Some(a), Some(b)) if a < b => return Ok(challenger),
+            (Some(_), None) => return Ok(self),
+            (None, Some(_)) => return Ok(challenger),
+            _ => {}
+        }
         Ok(match (self.cause(), challenger.cause()) {
             (Some(a), Some(b)) if a > b => self,
             (Some(a), Some(b)) if a < b => challenger,
@@ -569,30 +615,148 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::history::Origin;
     use crate::key::varkey::{ValuePayload, build_key};
     use crate::{ValueDataType, encode_value_owned};
 
-    fn view(entity: &[u8]) -> ArtifactView {
+    fn row(
+        entity: &[u8],
+        value: &str,
+        version: Option<Version>,
+        cause: Option<Cause>,
+    ) -> ArtifactView {
         let parts = varkey::KeyParts {
             tag: ENTITY_KEY_TAG,
             entity: entity.to_vec(),
             attribute: b"user/name".to_vec(),
             value_type: ValueDataType::String,
-            value: ValuePayload::Inline(encode_value_owned(&Value::String("v".into()))),
+            value: ValuePayload::Inline(encode_value_owned(&Value::String(value.into()))),
             version: None,
         };
         ArtifactView::new(
             KeyHandle::Owned(build_key(&parts)),
             Datum {
-                cause: None,
+                cause,
                 blob: None,
-                version: None,
+                version,
                 collapsed: vec![],
                 supersedes: vec![],
                 retraction: false,
             },
             None,
         )
+    }
+
+    fn view(entity: &[u8]) -> ArtifactView {
+        row(entity, "v", None, None)
+    }
+
+    fn version(origin: u8, edition: u64) -> Version {
+        Version::new(Origin([origin; 32]), Edition::new(edition))
+    }
+
+    fn elected(winner: Result<ArtifactView, DialogArtifactsError>) -> Value {
+        winner.expect("elects").to_owned().expect("materializes").is
+    }
+
+    /// Between concurrent revisions the deeper edition wins, in either
+    /// fold order, whatever the rows' causes say.
+    #[dialog_common::test]
+    fn it_elects_the_deeper_edition_in_either_order() {
+        let shallow = row(
+            b"user:alice",
+            "Alice",
+            Some(version(1, 2)),
+            Some(Cause([9; 32])),
+        );
+        let deep = row(b"user:alice", "Alicia", Some(version(2, 3)), None);
+        assert_eq!(
+            elected(shallow.clone().elect(deep.clone())),
+            Value::String("Alicia".into())
+        );
+        assert_eq!(elected(deep.elect(shallow)), Value::String("Alicia".into()));
+    }
+
+    /// Equal editions fall to the hash of the version, so the outcome is
+    /// the same in either fold order and decided by the revision, not the
+    /// fact: every fact of one revision beats every fact of the other,
+    /// however the facts themselves hash.
+    #[dialog_common::test]
+    fn it_resolves_a_batch_of_equal_editions_by_the_version_hash() {
+        let (a, b) = (version(1, 2), version(2, 2));
+        let favoured = if make_reference(a.key_bytes()) > make_reference(b.key_bytes()) {
+            a
+        } else {
+            b
+        };
+        for index in 0..16u8 {
+            let entity = format!("user:{index}");
+            let ours = row(entity.as_bytes(), "ours", Some(a), None);
+            let theirs = row(entity.as_bytes(), "theirs", Some(b), None);
+            for winner in [ours.clone().elect(theirs.clone()), theirs.elect(ours)] {
+                let winner = winner.expect("elects");
+                assert_eq!(
+                    winner.versions().copied().collect::<Vec<_>>(),
+                    vec![favoured]
+                );
+            }
+        }
+    }
+
+    /// A row a revision tagged beats one committed without a version,
+    /// whatever their causes.
+    #[dialog_common::test]
+    fn it_prefers_a_versioned_row_to_an_unversioned_one() {
+        let tagged = row(b"user:alice", "Alice", Some(version(1, 1)), None);
+        let untagged = row(b"user:alice", "Alicia", None, Some(Cause([9; 32])));
+        assert_eq!(
+            elected(tagged.clone().elect(untagged.clone())),
+            Value::String("Alice".into())
+        );
+        assert_eq!(
+            elected(untagged.elect(tagged)),
+            Value::String("Alice".into())
+        );
+    }
+
+    /// Two values one revision wrote for the same attribute cannot be told
+    /// apart by version, so they fall to the cause rule.
+    #[dialog_common::test]
+    fn it_falls_to_the_cause_rule_within_one_revision() {
+        let low = row(
+            b"user:alice",
+            "Alice",
+            Some(version(1, 1)),
+            Some(Cause([1; 32])),
+        );
+        let high = row(
+            b"user:alice",
+            "Alicia",
+            Some(version(1, 1)),
+            Some(Cause([2; 32])),
+        );
+        assert_eq!(
+            elected(low.clone().elect(high.clone())),
+            Value::String("Alicia".into())
+        );
+        assert_eq!(elected(high.elect(low)), Value::String("Alicia".into()));
+    }
+
+    /// A collapsed claim counts: a fact two revisions asserted stands at
+    /// the deeper of them.
+    #[dialog_common::test]
+    fn it_stands_at_its_deepest_collapsed_claim() {
+        let mut shared = row(b"user:alice", "Alice", Some(version(1, 1)), None);
+        match &mut shared.backing {
+            Backing::Scanned { datum, .. } => datum.absorb_versions([&version(2, 5)]),
+            Backing::Owned(_) => unreachable!("scanned row"),
+        }
+        let rival = row(b"user:alice", "Alicia", Some(version(3, 4)), None);
+        assert_eq!(
+            elected(shared.clone().elect(rival.clone())),
+            Value::String("Alice".into())
+        );
+        assert_eq!(elected(rival.elect(shared)), Value::String("Alice".into()));
     }
 
     /// In a cause-tied election a corrupt stored row (an entity that fails

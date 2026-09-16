@@ -429,6 +429,128 @@ mod tests {
         Ok(())
     }
 
+    /// After a merge of two concurrent installs of a seed (one revision
+    /// each, one value per name), every name follows the same revision:
+    /// the election compares versions, not facts, so a batch resolves
+    /// whole in both scan shapes, and the direction follows causal depth,
+    /// not which branch pulled.
+    #[dialog_common::test]
+    async fn it_follows_one_revision_for_every_name_after_a_merge() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        let filler = the!("seed/filler");
+        let definition = the!("seed/definition");
+
+        macro_rules! install {
+            ($branch:expr, $names:expr, $side:expr) => {{
+                let mut transaction = $branch.transaction();
+                for (index, name) in $names.iter().enumerate() {
+                    transaction = transaction.assert(
+                        definition
+                            .clone()
+                            .of(name.clone())
+                            .is(format!("{}:{index}", $side)),
+                    );
+                }
+                transaction.commit().publish().perform(&operator).await?;
+            }};
+        }
+
+        // Which revision every name of a seed resolved to, per scan shape.
+        macro_rules! winners {
+            ($branch:expr, $names:expr) => {{
+                let source = TestEnv::new(&$branch, &operator, RuleRegistry::new());
+                let mut by_entity = Vec::new();
+                for name in $names.iter() {
+                    let query = AttributeQueryOnly::new(
+                        Term::from(definition.clone()),
+                        Term::from(name.clone()),
+                        Term::var("value"),
+                        Term::var("cause"),
+                    );
+                    let results = query.perform(&source).try_vec().await?;
+                    assert_eq!(results.len(), 1, "one winner per name");
+                    by_entity.push(side_of(results[0].is()));
+                }
+                let query = AttributeQueryOnly::new(
+                    Term::from(definition.clone()),
+                    Term::var("name"),
+                    Term::var("value"),
+                    Term::var("cause"),
+                );
+                let by_attribute: Vec<_> = query
+                    .perform(&source)
+                    .try_vec()
+                    .await?
+                    .iter()
+                    .filter(|result| $names.contains(result.of()))
+                    .map(|result| side_of(result.is()))
+                    .collect();
+                assert_eq!(by_attribute.len(), $names.len(), "one winner per name");
+                (by_entity, by_attribute)
+            }};
+        }
+
+        fn side_of(value: &Value) -> String {
+            let Value::String(value) = value else {
+                panic!("seed values are strings, got {value:?}");
+            };
+            value.split(':').next().expect("side:index").to_string()
+        }
+
+        // A shared base, so the pulls below are merges.
+        assert_relation!(main, &operator, filler, Entity::new()?, "base".to_string());
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        // main goes one revision deeper before installing its seed;
+        // feature installs its own straight away.
+        let first: Vec<Entity> = (0..6).map(|_| Entity::new()).collect::<Result<_, _>>()?;
+        assert_relation!(
+            main,
+            &operator,
+            filler,
+            Entity::new()?,
+            "deeper".to_string()
+        );
+        install!(main, first, "main");
+        install!(feature, first, "feature");
+        feature.pull().perform(&operator).await?;
+
+        let (by_entity, by_attribute) = winners!(feature, first);
+        assert_eq!(
+            by_entity,
+            vec!["main"; 6],
+            "the deeper revision wins every name"
+        );
+        assert_eq!(by_attribute, by_entity, "both scan shapes agree");
+
+        // Now feature is the deeper writer of a second seed.
+        let second: Vec<Entity> = (0..6).map(|_| Entity::new()).collect::<Result<_, _>>()?;
+        assert_relation!(
+            feature,
+            &operator,
+            filler,
+            Entity::new()?,
+            "deeper".to_string()
+        );
+        install!(feature, second, "feature");
+        install!(main, second, "main");
+        feature.pull().perform(&operator).await?;
+
+        let (by_entity, by_attribute) = winners!(feature, second);
+        assert_eq!(
+            by_entity,
+            vec!["feature"; 6],
+            "depth decides, not the branch"
+        );
+        assert_eq!(by_attribute, by_entity, "both scan shapes agree");
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_attribute() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;

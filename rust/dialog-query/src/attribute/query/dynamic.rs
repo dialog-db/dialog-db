@@ -633,6 +633,11 @@ mod tests {
             .collect();
         assert_eq!(eav_name_results.len(), 1);
         let eav_winner = eav_name_results[0].is().clone();
+        assert_eq!(
+            eav_winner,
+            Value::String("Alicia".into()),
+            "one writer's later revision wins outright"
+        );
 
         let aev_query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
