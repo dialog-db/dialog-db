@@ -1211,8 +1211,9 @@ impl ArtifactTreeExt for ArtifactTree {
 /// How many spilled value blocks a scan keeps in flight ahead of the row
 /// it is yielding. A spilled value is its own block, so over a hydrating
 /// store every spilled row is a round trip; fetched one row at a time a
-/// scan of large values would cost one round trip per row.
-const SPILL_LOOKAHEAD: usize = 16;
+/// scan of large values would cost one round trip per row. The history
+/// reader walks its records the same way.
+pub(crate) const SPILL_LOOKAHEAD: usize = 16;
 
 /// A scanned entry between the scan's two stages: finished from its key
 /// alone, waiting on its spilled value block, or filtered out.
