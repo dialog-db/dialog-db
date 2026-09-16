@@ -12,11 +12,16 @@
 //! Arc-backed internals (a self handle cloned by the env's own
 //! implementation, not handed to any component): the same move the Fs
 //! transport's `Get` makes with its transport-level `Flight`, one layer
-//! up. The flight holds the work weakly, so the strong shared futures
+//! up. The scheduler holds the work weakly, so the strong shared futures
 //! live only in active joiners — work makes progress exactly while some
 //! `.perform` drives it (every joiner polls the shared future itself,
 //! preserving the co-driving liveness rule), drops with its last
 //! joiner, and can never keep the operator alive through its own field.
+//!
+//! The ordering lives here too: each request names its site and its
+//! priority, and the scheduler admits a site's reads through one window
+//! by priority (demand before speculative warming), then arrival. The
+//! readers keep no widths of their own.
 
 use std::sync::Arc;
 
@@ -45,13 +50,15 @@ where
         request: HydrationRequest,
     ) -> Result<Option<Arc<Vec<u8>>>, ArchiveError> {
         let digest = request.digest.clone();
+        let site = request.address.clone();
+        let priority = request.priority;
         // Hydration is content-addressed, so every joiner's answer is
         // identical regardless of whose route runs; errors are shared
         // as their rendering and never cached, so retry semantics are
         // unchanged.
         let outcome = self
             .hydration
-            .join(digest, move || {
+            .join(site, digest, priority, move || {
                 let env = self.clone();
                 async move {
                     hydrate(&env, request)

@@ -19,7 +19,7 @@
 //! `dialog-capability`.
 
 mod hydrate;
-pub use hydrate::{Hydrate, HydrationFlight, HydrationRequest};
+pub use hydrate::{Hydrate, HydrationRequest, HydrationScheduler};
 
 use dialog_capability::Site;
 use dialog_remote_fs::Fs;

@@ -130,11 +130,11 @@ pub struct Operator<S: Clone> {
     /// what is already local, or the recursion would never bottom out.
     reach: Arc<OnceLock<WalkReach>>,
 
-    /// In-flight remote hydrations, joined by digest across every
-    /// evaluation path performing through this operator (see
-    /// `operator/hydrate.rs`). Held weakly: the shared work lives only
-    /// while some `.perform` call drives it.
-    hydration: Arc<dialog_network::HydrationFlight>,
+    /// Remote hydrations, joined by digest and admitted per site by
+    /// priority across every evaluation path performing through this
+    /// operator (see `operator/hydrate.rs`). Held weakly: the shared
+    /// work lives only while some `.perform` call drives it.
+    hydration: Arc<dialog_network::HydrationScheduler>,
 
     /// The ambient speculative-fetch queue `Preload` hints land in and
     /// driven evaluation streams pop from (see `operator/preload.rs`).
@@ -154,6 +154,13 @@ impl<S: Clone> Operator<S> {
             .ok_or_else(|| AuthorizeError::Malformed {
                 detail: "operator access branch is not wired".to_string(),
             })
+    }
+
+    /// The scheduler every remote block read of this operator goes
+    /// through: where a site's window is set (`set_window`) and its
+    /// traffic is read back (`tally`).
+    pub fn hydration(&self) -> &dialog_network::HydrationScheduler {
+        &self.hydration
     }
 
     /// The operator's DID (the ephemeral/derived session key).
