@@ -8,10 +8,12 @@ edition.workspace = true
 
 [features]
 default = []
+helpers = []
 integration-tests = ["dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
+async-trait = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
@@ -20,6 +22,7 @@ dialog-ucan-core = { workspace = true }
 dialog-did-web = { workspace = true }
 dialog-varsig = { workspace = true }
 ipld-core = { workspace = true }
+iroh-base = { version = "1.2", features = ["key"] }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
 thiserror = { workspace = true }
@@ -28,6 +31,8 @@ thiserror = { workspace = true }
 dialog-common = { workspace = true, features = ["helpers"] }
 async-trait = { workspace = true }
 dialog-credentials = { workspace = true }
+dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true }
 
 # The async tests run on tokio natively; in wasm `dialog_common::test`
 # expands to wasm-bindgen-test instead. Target-gated because tokio's
@@ -37,6 +42,6 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
-  "cfg(feature, values(\"web-integration-tests\"))",
+  "cfg(feature, values(\"web-integration-tests\", \"helpers\"))",
   "cfg(dialog_test_wasm_integration)",
 ] }

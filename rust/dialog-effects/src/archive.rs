@@ -212,6 +212,15 @@ impl Effect for Put {
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Import {
     /// The blocks to store.
+    ///
+    /// Projected to both hashes, in the same order, for the same reason
+    /// [`Put`] carries both: the checksum is how a block is addressed in
+    /// transit, and the digest is what it *is* — the key the archive
+    /// files it under. A peer receiving an import must be able to prove
+    /// the bytes it was handed are the blocks that were signed for, and
+    /// the checksum alone cannot say that, because a sender signs its
+    /// own invocation and so chooses every commitment in it.
+    #[attenuate(into = Vec<Blake3Hash>, with = block_digests, rename = digests)]
     #[attenuate(into = Vec<Checksum>, with = block_checksums, rename = checksums)]
     pub blocks: Vec<Buffer>,
 }
@@ -222,6 +231,15 @@ fn block_checksums(blocks: Vec<Buffer>) -> Vec<Checksum> {
     blocks
         .iter()
         .map(|buffer| Checksum::sha256(buffer.as_ref()))
+        .collect()
+}
+
+/// Projects an [`Import`]'s blocks to their content digests, in the
+/// same order as [`block_checksums`] — the two lists are read as pairs.
+fn block_digests(blocks: Vec<Buffer>) -> Vec<Blake3Hash> {
+    blocks
+        .iter()
+        .map(|buffer| buffer.blake3_hash().clone())
         .collect()
 }
 
