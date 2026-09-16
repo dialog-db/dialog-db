@@ -772,6 +772,27 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     })
     .await?;
 
+    // A device that seeded itself before its first contact with the
+    // space. That is how a profile joins an account: its defaults are
+    // committed locally first, so the pull replays the seed onto the
+    // remote tree (the reverse-replay arm) instead of adopting the head
+    // by reference as the `pull` phase does. The seed is dense in key
+    // order, consecutive entities under the same attributes, which is
+    // the shape whose integrate read the remote tree leaf by leaf while
+    // its opening pass looked ahead a fixed number of changes: the
+    // rounds here should track the tree's depth, never its leaf count.
+    let seeded = mount_client(&operator, &profile, &server, &address, "soak-seeded").await?;
+    let mut seed = Vec::new();
+    for index in scenario.entities..scenario.entities + scenario.entities / 4 {
+        seed.extend(entity_facts(index)?);
+    }
+    seeded.commit(stream::iter(seed)).perform(&operator).await?;
+    measured("seeded", &mut phases, async {
+        seeded.pull().perform(&operator).await?;
+        Ok(())
+    })
+    .await?;
+
     simulation::configure(None);
 
     let manifest = dialog_search_tree::Manifest::default();
