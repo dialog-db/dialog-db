@@ -27,14 +27,6 @@ use crate::{
     PersistentNode, Value, into_owned,
 };
 
-/// How many sibling reads a range scan keeps in flight while it walks.
-///
-/// A scan reads a whole run of siblings, one after another, and each read that
-/// misses locally can cost a round trip. Reading ahead of the walk turns a run
-/// of round trips into an overlapping few, and bounding it keeps a scan that
-/// stops early from having fetched much it never looked at.
-const PREFETCH_CONCURRENCY: usize = 16;
-
 /// How [`TreeWalker::stream`] materializes the keys of the entries it yields.
 ///
 /// The typed instantiation (any [`Key`]) rebuilds the tree's key from the
@@ -484,21 +476,23 @@ where
                         // the cache while the walk descends into the first of
                         // them. Only children the range can still visit are
                         // warmed: a narrow scan (an entity probe) would
-                        // otherwise queue up to PREFETCH_CONCURRENCY siblings
-                        // past its end bound at every level, fetches the walk
-                        // then drops mid-flight when the stream ends — paid
-                        // for on a remote backend, delivered to no one. A
-                        // sibling still queued from an earlier descent is not
-                        // queued twice.
+                        // otherwise queue siblings past its end bound at every
+                        // level, fetches the walk then drops mid-flight when
+                        // the stream ends — paid for on a remote backend,
+                        // delivered to no one. A sibling still queued from an
+                        // earlier descent is not queued twice. Nothing caps
+                        // the read-ahead here: a scan reads every one of these
+                        // siblings unless it stops early, and how many cross
+                        // the wire at once is the hydration scheduler's
+                        // decision per site, where a read this scan has queued
+                        // but the scheduler has not admitted costs nothing to
+                        // abandon.
                         let visitable = index.children_within(match range.end_bound() {
                             Bound::Included(bound) => Bound::Included(bound.as_ref()),
                             Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
                             Bound::Unbounded => Bound::Unbounded,
                         })?;
                         for sibling in (child_index + 1)..visitable {
-                            if warming.len() >= PREFETCH_CONCURRENCY {
-                                break;
-                            }
                             let hash = index.hash_at(sibling)?.clone();
                             if queued.insert(hash.clone()) {
                                 warming.push(accessor.warm(hash));
@@ -1439,9 +1433,8 @@ mod prefetch_tests {
     /// A range scan bounded within a single leaf's span (the shape of an
     /// entity probe inside a join) must read exactly the blocks a point
     /// lookup of the same leaf reads: the descent path, nothing beside
-    /// it. Unbounded sibling warming used to queue up to
-    /// `PREFETCH_CONCURRENCY` siblings past the range's end at every
-    /// level; the probe's stream then dropped them mid-flight — reads a
+    /// it. Unbounded sibling warming used to queue up to sixteen
+    /// siblings past the range's end at every level; the probe's stream then dropped them mid-flight — reads a
     /// remote backend had already paid for, delivered to no one and
     /// re-fetched by the next probe.
     #[dialog_common::test]

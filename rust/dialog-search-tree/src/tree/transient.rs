@@ -63,22 +63,6 @@ const OPEN_LOOKAHEAD_MAX: usize = 32_768;
 /// again, whatever the leaf size.
 const OPEN_WIDTH: usize = 32;
 
-/// How many of the nodes [`TransientTree::integrate`]'s opening pass has
-/// queued are in flight at once.
-///
-/// Unbounded, for the reason `traversal::FETCH_CONCURRENCY` is: every
-/// queued node is one a pending change's descent is about to read, so
-/// the set is bounded by the changes in the lookahead and by the tree's
-/// fanout, and how many of them may cross the wire together is the
-/// transport's limit to impose (the browser's per-host cap, the client's
-/// pool), not a tree constant's. A cap here costs a round trip per wave
-/// on a level wider than it, and with the queue it also hides the walk's
-/// shape: a level walk under a cap smaller than a level takes the level
-/// in slices, and a slice of the next level goes out while the tail of
-/// this one is still queued, which looks like the continuation queue
-/// without being it.
-const OPEN_CONCURRENCY: usize = usize::MAX;
-
 /// How many levels one opening pass walks before handing back to the
 /// descent. Each level is one concurrent batch, so a deeper descent unlocks
 /// more overlap; the bound keeps a pass from running away on a tall tree.
@@ -806,10 +790,10 @@ where
     /// to make, so they go out together.
     ///
     /// The reads form a continuation queue rather than levels: the node
-    /// each path stops at is queued in change order, up to
-    /// `OPEN_CONCURRENCY` are in flight at once, and when one lands the
-    /// paths that stopped at it are re-followed through it and their next
-    /// nodes queued behind whatever is already waiting. A path drills down
+    /// each path stops at is queued in change order, every queued node is
+    /// in flight at once, and when one lands the paths that stopped at
+    /// it are re-followed through it and their next nodes queued behind
+    /// whatever is already waiting. A path drills down
     /// as fast as its own reads return; it never waits for a sibling's. A
     /// level-by-level walk paid a barrier per level -- the whole level's
     /// slowest read before any path could take its next step -- which over
@@ -830,6 +814,18 @@ where
     /// there, and anything missing or failing is read again by the descent
     /// that needs it, which still owns the error and the missing-block
     /// policy. A path whose read did not land stops opening there.
+    ///
+    /// The pass meters nothing out: every queued node is one a descent is
+    /// about to read, bounded by the lookahead and the fanout, and how
+    /// many may cross the wire together, and which first, is the
+    /// hydration scheduler's decision per remote site
+    /// (`dialog_common::Scheduler`), where a demand read goes ahead of
+    /// this pass and a node still queued is dropped for free if the pass
+    /// is abandoned. A cap here hid the walk's shape besides costing a
+    /// round trip per wave: a level walk under a cap smaller than a level
+    /// took the level in slices, and a slice of the next level went out
+    /// while the tail of this one was still queued, which looked like the
+    /// continuation queue without being it.
     async fn open_pending<'changes, Backend, Changes>(
         &self,
         changes: Changes,
@@ -877,10 +873,7 @@ where
         // queued read is on the wire at once, never one at a time.
         let mut reads = FuturesUnordered::new();
         loop {
-            while reads.len() < OPEN_CONCURRENCY {
-                let Some(hash) = queue.pop_front() else {
-                    break;
-                };
+            while let Some(hash) = queue.pop_front() {
                 reads.push(accessor.warm(hash));
             }
             let Some(hash) = reads.next().await else {
