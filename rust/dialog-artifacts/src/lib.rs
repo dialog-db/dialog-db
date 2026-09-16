@@ -47,7 +47,7 @@
 //! # }
 //! ```
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(all(feature = "web", target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
 
 mod artifacts;
