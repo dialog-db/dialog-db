@@ -386,6 +386,36 @@ impl ObservingBackend {
         self.reads.lock().events.clone()
     }
 
+    /// The longest run of consecutive reads that were each alone: requested
+    /// with nothing in flight and completed before anything else was
+    /// requested. Over a remote backend each such read is its own round
+    /// trip, so this is the serial chain a reader pays, where a peak
+    /// (which any one wide wave lifts) would hide it.
+    pub fn longest_solo_run(&self) -> usize {
+        let events = self.reads.lock().events.clone();
+        let (mut open, mut run, mut longest, mut alone) = (0usize, 0usize, 0usize, false);
+        for (_, event) in events {
+            match event {
+                ReadEvent::Requested => {
+                    alone = open == 0;
+                    if !alone {
+                        run = 0;
+                    }
+                    open += 1;
+                }
+                ReadEvent::Completed => {
+                    open -= 1;
+                    if alone && open == 0 {
+                        run += 1;
+                        longest = longest.max(run);
+                    }
+                    alone = false;
+                }
+            }
+        }
+        longest
+    }
+
     /// Whether some read of `below` was requested before every read of `above`
     /// had completed: the signature of a reader that keeps going on one
     /// path while another is still outstanding, as opposed to one that
