@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use dialog_capability::{Effect, Fork, Site};
 
-use crate::channel::Channel;
+use crate::channel::{Channel, Unconfigured};
 
 /// A peer that performs dialog effects, reached over a [`Channel`].
 ///
@@ -44,6 +44,17 @@ impl Iroh {
 
     pub(crate) fn channel(&self) -> &Arc<dyn Channel> {
         &self.channel
+    }
+}
+
+/// A site that reaches nobody, over [`Unconfigured`].
+///
+/// Exists so [`Iroh`] can be a field of a composite site built by
+/// [`Default`] — see [`Unconfigured`] for why that is a channel rather
+/// than an absent one.
+impl Default for Iroh {
+    fn default() -> Self {
+        Self::new(Unconfigured)
     }
 }
 

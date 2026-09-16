@@ -15,6 +15,7 @@ dialog-effects = { workspace = true }
 dialog-remote-s3 = { workspace = true }
 dialog-remote-ucan-s3 = { workspace = true }
 dialog-remote-fs = { workspace = true }
+dialog-iroh-remote = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 
@@ -22,3 +23,21 @@ serde = { workspace = true }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
 dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-remote-fs = { workspace = true }
+dialog-iroh-remote = { workspace = true, features = ["helpers"] }
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true }
+dialog-did-web = { workspace = true }
+iroh-base = { version = "1.2", features = ["key"] }
+async-trait = { workspace = true }
+
+# The async tests run on tokio natively; in wasm `dialog_common::test`
+# expands to wasm-bindgen-test instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\", \"integration-tests\", \"helpers\"))",
+  "cfg(dialog_test_wasm_integration)",
+] }
