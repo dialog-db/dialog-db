@@ -1,14 +1,11 @@
 //! `Provider<ForkInvocation<UcanSite, Fx>>` for [`UcanSite`], one impl
 //! per effect the access service performs.
 //!
-//! Every impl runs the same exchange ([`direct::invoke`]) and then reads
-//! the answer the way the object route's client would have: the
-//! statuses, the `ETag`, the body. A permit in place of an answer is
-//! completed through the permit-based site's request runner, so a
-//! service that only redeems costs what it always did. A service that
-//! does not read the invocation at all, or one that turned the request
-//! away for its size or never answered it, gets the operation through
-//! the permit-based site from the start.
+//! An address names the exchange to speak. The direct exchange runs
+//! [`direct::invoke`] and reads the answer the way the object route's
+//! client would have: the statuses, the `ETag`, the body. The permit
+//! exchange hands the fork to the permit-based site, which redeems and
+//! performs it the way it always has.
 
 use base58::ToBase58;
 use dialog_capability::{Constraint, Effect, ForkInvocation, Provider};
@@ -19,10 +16,10 @@ use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobWriter, Import, Read};
 use dialog_effects::memory::prelude::{PublishExt, RetractExt};
 use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
-use dialog_remote_s3::S3;
 use dialog_remote_ucan_s3::UcanSite as PermitSite;
 
-use crate::direct::{self, Outcome};
+use crate::address::Exchange;
+use crate::direct;
 use crate::site::UcanSite;
 
 /// Hand a fork to the permit-based site, which redeems and performs it
@@ -57,13 +54,15 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Get>,
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
-        match direct::invoke(&invocation.address, &invocation.authorization, None).await? {
-            Outcome::Unsupported => through_permits(self, invocation).await,
-            Outcome::Permit(permit) => permit.invoke(invocation.capability).perform(&S3).await,
-            Outcome::Answered(answer) if answer.is_success() => Ok(Some(answer.bytes().await?)),
-            Outcome::Answered(answer) if answer.status == 404 => Ok(None),
-            Outcome::Answered(answer) if answer.is_refusal() => Err(answer.refusal().await.into()),
-            Outcome::Answered(answer) => Err(ArchiveError::Storage(format!(
+        if invocation.address.exchange() == Exchange::Permit {
+            return through_permits(self, invocation).await;
+        }
+        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        match answer {
+            answer if answer.is_success() => Ok(Some(answer.bytes().await?)),
+            answer if answer.status == 404 => Ok(None),
+            answer if answer.is_refusal() => Err(answer.refusal().await.into()),
+            answer => Err(ArchiveError::Storage(format!(
                 "Failed to get value: {}",
                 answer.status
             ))),
@@ -75,19 +74,20 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
     async fn execute(&self, invocation: ForkInvocation<UcanSite, Put>) -> Result<(), ArchiveError> {
+        if invocation.address.exchange() == Exchange::Permit {
+            return through_permits(self, invocation).await;
+        }
         let payload = invocation.capability.content().to_vec();
-        match direct::invoke(
+        let answer = direct::invoke(
             &invocation.address,
             &invocation.authorization,
             Some(payload),
         )
-        .await?
-        {
-            Outcome::Unsupported => through_permits(self, invocation).await,
-            Outcome::Permit(permit) => permit.invoke(invocation.capability).perform(&S3).await,
-            Outcome::Answered(answer) if answer.is_success() => Ok(()),
-            Outcome::Answered(answer) if answer.is_refusal() => Err(answer.refusal().await.into()),
-            Outcome::Answered(answer) => Err(ArchiveError::Storage(format!(
+        .await?;
+        match answer {
+            answer if answer.is_success() => Ok(()),
+            answer if answer.is_refusal() => Err(answer.refusal().await.into()),
+            answer => Err(ArchiveError::Storage(format!(
                 "Failed to put value: {}",
                 answer.status
             ))),
@@ -102,19 +102,21 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Resolve>,
     ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
-        match direct::invoke(&invocation.address, &invocation.authorization, None).await? {
-            Outcome::Unsupported => through_permits(self, invocation).await,
-            Outcome::Permit(permit) => permit.invoke(invocation.capability).perform(&S3).await,
-            Outcome::Answered(answer) if answer.is_success() => {
+        if invocation.address.exchange() == Exchange::Permit {
+            return through_permits(self, invocation).await;
+        }
+        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        match answer {
+            answer if answer.is_success() => {
                 let version = Version::from(answer.version()?);
                 Ok(Some(Edition {
                     content: answer.bytes().await?,
                     version,
                 }))
             }
-            Outcome::Answered(answer) if answer.status == 404 => Ok(None),
-            Outcome::Answered(answer) if answer.is_refusal() => Err(answer.refusal().await.into()),
-            Outcome::Answered(answer) => Err(MemoryError::Storage(format!(
+            answer if answer.status == 404 => Ok(None),
+            answer if answer.is_refusal() => Err(answer.refusal().await.into()),
+            answer => Err(MemoryError::Storage(format!(
                 "Failed to resolve value: {}",
                 answer.status
             ))),
@@ -129,27 +131,24 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Publish>,
     ) -> Result<Version, MemoryError> {
+        if invocation.address.exchange() == Exchange::Permit {
+            return through_permits(self, invocation).await;
+        }
         let payload = invocation.capability.content().to_vec();
-        match direct::invoke(
+        let answer = direct::invoke(
             &invocation.address,
             &invocation.authorization,
             Some(payload),
         )
-        .await?
-        {
-            Outcome::Unsupported => through_permits(self, invocation).await,
-            Outcome::Permit(permit) => permit.invoke(invocation.capability).perform(&S3).await,
-            Outcome::Answered(answer) if answer.is_success() => {
-                Ok(Version::from(answer.version()?))
-            }
-            Outcome::Answered(answer) if answer.status == 412 => {
-                Err(MemoryError::VersionMismatch {
-                    expected: invocation.capability.when().cloned(),
-                    actual: None,
-                })
-            }
-            Outcome::Answered(answer) if answer.is_refusal() => Err(answer.refusal().await.into()),
-            Outcome::Answered(answer) => Err(MemoryError::Storage(format!(
+        .await?;
+        match answer {
+            answer if answer.is_success() => Ok(Version::from(answer.version()?)),
+            answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
+                expected: invocation.capability.when().cloned(),
+                actual: None,
+            }),
+            answer if answer.is_refusal() => Err(answer.refusal().await.into()),
+            answer => Err(MemoryError::Storage(format!(
                 "Failed to publish value: {}",
                 answer.status
             ))),
@@ -164,18 +163,18 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Retract>,
     ) -> Result<(), MemoryError> {
-        match direct::invoke(&invocation.address, &invocation.authorization, None).await? {
-            Outcome::Unsupported => through_permits(self, invocation).await,
-            Outcome::Permit(permit) => permit.invoke(invocation.capability).perform(&S3).await,
-            Outcome::Answered(answer) if answer.is_success() => Ok(()),
-            Outcome::Answered(answer) if answer.status == 412 => {
-                Err(MemoryError::VersionMismatch {
-                    expected: Some(invocation.capability.when().clone()),
-                    actual: None,
-                })
-            }
-            Outcome::Answered(answer) if answer.is_refusal() => Err(answer.refusal().await.into()),
-            Outcome::Answered(answer) => Err(MemoryError::Storage(format!(
+        if invocation.address.exchange() == Exchange::Permit {
+            return through_permits(self, invocation).await;
+        }
+        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        match answer {
+            answer if answer.is_success() => Ok(()),
+            answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
+                expected: Some(invocation.capability.when().clone()),
+                actual: None,
+            }),
+            answer if answer.is_refusal() => Err(answer.refusal().await.into()),
+            answer => Err(MemoryError::Storage(format!(
                 "Failed to retract value: {}",
                 answer.status
             ))),
@@ -192,15 +191,17 @@ impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Read>,
     ) -> Result<BlobReader, BlobError> {
-        match direct::invoke(&invocation.address, &invocation.authorization, None).await? {
-            Outcome::Unsupported => through_permits(self, invocation).await,
-            Outcome::Permit(permit) => permit.invoke(invocation.capability).perform(&S3).await,
-            Outcome::Answered(answer) if answer.is_success() => Ok(answer.source()),
-            Outcome::Answered(answer) if answer.status == 404 => Err(BlobError::NotFound(
+        if invocation.address.exchange() == Exchange::Permit {
+            return through_permits(self, invocation).await;
+        }
+        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        match answer {
+            answer if answer.is_success() => Ok(answer.source()),
+            answer if answer.status == 404 => Err(BlobError::NotFound(
                 invocation.capability.digest().as_bytes().to_base58(),
             )),
-            Outcome::Answered(answer) if answer.is_refusal() => Err(answer.refusal().await.into()),
-            Outcome::Answered(answer) => Err(BlobError::Storage(format!(
+            answer if answer.is_refusal() => Err(answer.refusal().await.into()),
+            answer => Err(BlobError::Storage(format!(
                 "blob read failed: {}",
                 answer.status
             ))),
@@ -218,8 +219,10 @@ impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Import>,
     ) -> Result<BlobWriter, BlobError> {
+        if invocation.address.exchange() == Exchange::Permit {
+            return through_permits(self, invocation).await;
+        }
         Ok(Box::new(Upload {
-            site: self.clone(),
             invocation,
             buffer: Vec::new(),
         }))
@@ -229,7 +232,6 @@ impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
 /// Gathers a blob's bytes and sends them, in the request that proves
 /// the import, once they have been checked against the declared digest.
 struct Upload {
-    site: UcanSite,
     invocation: ForkInvocation<UcanSite, Import>,
     buffer: Vec<u8>,
 }
@@ -243,11 +245,7 @@ impl BlobSink for Upload {
     }
 
     async fn finish(self: Box<Self>) -> Result<Blake3Hash, BlobError> {
-        let Upload {
-            site,
-            invocation,
-            buffer,
-        } = *self;
+        let Upload { invocation, buffer } = *self;
         let expected = invocation.capability.digest().clone();
         let hash = Blake3Hash::hash(&buffer);
         if hash != expected {
@@ -256,26 +254,12 @@ impl BlobSink for Upload {
                 actual: hash.as_bytes().to_base58(),
             });
         }
-        match direct::invoke(
-            &invocation.address,
-            &invocation.authorization,
-            Some(buffer.clone()),
-        )
-        .await?
-        {
-            Outcome::Unsupported => {
-                let mut writer = through_permits(&site, invocation).await?;
-                writer.write_all(&buffer).await?;
-                writer.finish().await
-            }
-            Outcome::Permit(permit) => {
-                let mut writer = permit.invoke(invocation.capability).perform(&S3).await?;
-                writer.write_all(&buffer).await?;
-                writer.finish().await
-            }
-            Outcome::Answered(answer) if answer.is_success() => Ok(hash),
-            Outcome::Answered(answer) if answer.is_refusal() => Err(answer.refusal().await.into()),
-            Outcome::Answered(answer) => Err(BlobError::Storage(format!(
+        let answer =
+            direct::invoke(&invocation.address, &invocation.authorization, Some(buffer)).await?;
+        match answer {
+            answer if answer.is_success() => Ok(hash),
+            answer if answer.is_refusal() => Err(answer.refusal().await.into()),
+            answer => Err(BlobError::Storage(format!(
                 "blob import failed: {}",
                 answer.status
             ))),

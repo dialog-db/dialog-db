@@ -19,9 +19,8 @@ use crate::address::UcanAddress;
 
 /// A UCAN site that proves and performs each operation in one request.
 ///
-/// Holds the permit-based site beside it for the exchanges that still
-/// need a permit: blob streams, and any operation a service answers
-/// with a permit instead of performing.
+/// Holds the permit-based site beside it for the addresses that ask
+/// for the permit exchange.
 #[derive(Debug, Clone, Default)]
 pub struct UcanSite {
     permits: PermitSite,

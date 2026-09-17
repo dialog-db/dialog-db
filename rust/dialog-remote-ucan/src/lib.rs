@@ -12,16 +12,14 @@
 //! a read asked for on the way out. Nothing frames the bytes, so either
 //! side can stream them.
 //!
-//! `Accept` names what the site takes back: the outcome first, a permit
-//! second. A service that does not perform operations verifies the
-//! invocation and answers with a permit, which the site completes the
-//! way the permit flow always has, at the cost that flow always had. A
-//! service that does not read the invocation from the header at all
-//! answers the request as one it cannot read, and the site goes through
-//! the permit flow from the start, one request the poorer. Addresses,
-//! authorization material and the signed invocations are the ones
-//! [`dialog_remote_ucan_s3`] mints; only the exchange with the service
-//! differs.
+//! The address names the exchange. By default it is this one; an
+//! address that asks for the [`Permit`](Exchange::Permit) exchange is
+//! served through the permit-based site instead, redeeming and
+//! performing as it always has. Nothing is negotiated on the wire: a
+//! service that does not speak the exchange an address names answers
+//! an error that says so. Authorization material and the signed
+//! invocations are the ones [`dialog_remote_ucan_s3`] mints; only the
+//! exchange with the service differs.
 //!
 //! The server side is [`Access`]: an embedder brings a provider of the
 //! effects, the layer decodes and verifies each invocation and performs
@@ -37,11 +35,8 @@ mod site;
 #[cfg(test)]
 mod test;
 
-pub use address::UcanAddress;
+pub use address::{Exchange, UcanAddress};
 pub use dialog_remote_ucan_s3::{Ucan, UcanAuthorization, UcanInvocation};
-pub use direct::{
-    ACCEPT, OBJECT_MEDIA_TYPE, PERMIT_MEDIA_TYPE, SCHEME, credential, credential_container,
-    is_credential,
-};
+pub use direct::{OBJECT_MEDIA_TYPE, SCHEME, credential, credential_container, is_credential};
 pub use server::{Access, Answer, Content, Payload, Refusal, Request, Response, Store, Verified};
 pub use site::{UcanFork, UcanSite};

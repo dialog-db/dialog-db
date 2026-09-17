@@ -1,8 +1,10 @@
 //! UCAN access service test server.
 //!
 //! Provides a local UCAN access service for integration testing.
-//! Receives UCAN invocation containers, verifies them using [`UcanAuthorizer`],
-//! and returns presigned S3 request descriptors.
+//! Receives UCAN invocations, verifies them using [`UcanAuthorizer`],
+//! and either performs them against the local S3 (an invocation in
+//! `Authorization`) or returns presigned S3 request descriptors (a
+//! container in the body).
 
 use super::UcanS3Address;
 use crate::{FromUcanArgs, UcanAuthorizer};
@@ -28,23 +30,10 @@ pub struct UcanAccessServer {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
 }
 
-/// What the service holds across requests: the authorizer, whether it
-/// performs operations itself, and how it has answered so far.
+/// What the service holds across requests: the authorizer, and how it
+/// has answered so far.
 struct ServerState {
     authorizer: RwLock<UcanAuthorizer>,
-    /// Perform an operation in the request that proved it when the
-    /// invocation arrives in `Authorization` and the client accepts
-    /// the outcome. Off, the service verifies such an invocation and
-    /// answers with a permit, as a service over storage it cannot reach
-    /// itself does.
-    direct: bool,
-    /// Never read `Authorization`: every request's body is read as a
-    /// container, as a service that predates the direct exchange does.
-    legacy: bool,
-    /// The largest body the service reads; larger ones are turned away
-    /// with a 413, as the real service turns away a body that outgrew
-    /// what it expected.
-    max_body_bytes: u64,
     stats: Stats,
 }
 
@@ -76,31 +65,6 @@ impl UcanAccessServer {
         access_key: &str,
         secret_key: &str,
     ) -> anyhow::Result<Self> {
-        Self::start_with(
-            s3_server,
-            bucket,
-            access_key,
-            secret_key,
-            true,
-            false,
-            u64::MAX,
-        )
-        .await
-    }
-
-    /// Start the service, performing operations directly when `direct`
-    /// and answering every invocation with a permit otherwise, reading
-    /// no `Authorization` header at all when `legacy`, and turning away
-    /// bodies over `max_body_bytes`.
-    pub async fn start_with(
-        s3_server: LocalS3,
-        bucket: &str,
-        access_key: &str,
-        secret_key: &str,
-        direct: bool,
-        legacy: bool,
-        max_body_bytes: u64,
-    ) -> anyhow::Result<Self> {
         let address = Address::builder(&s3_server.endpoint)
             .region("us-east-1")
             .bucket(bucket)
@@ -111,9 +75,6 @@ impl UcanAccessServer {
 
         let authorizer = Arc::new(ServerState {
             authorizer: RwLock::new(UcanAuthorizer::new(address, Some(credential))),
-            direct,
-            legacy,
-            max_body_bytes,
             stats: Stats::default(),
         });
 
@@ -206,36 +167,19 @@ async fn handle_request(
             .unwrap());
     }
 
-    let declared = req
-        .headers()
-        .get("content-length")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
-    if declared.is_some_and(|declared| declared > state.max_body_bytes) {
-        return Ok(too_large(state.max_body_bytes));
-    }
-
     state.stats.requests.fetch_add(1, Ordering::SeqCst);
 
-    // An invocation under the UCAN scheme in `Authorization` asks for
-    // the operation's outcome, or a permit to perform it, as `Accept`
-    // says; its body is the bytes the operation stores. A request that
-    // carries none is the permit flow: a container in the body,
-    // answered with a permit. A legacy service never looks at the
-    // header, and reads every request's body as a container.
+    // An invocation under the UCAN scheme in `Authorization` is
+    // performed in this request, its body being the bytes the operation
+    // stores. A request that carries none is the permit flow: a
+    // container in the body, answered with a permit.
     let credential = req
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        .filter(|_| !state.legacy)
         .and_then(|value| value.split_once(char::is_whitespace))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("UCAN"))
         .map(|(_, rest)| rest.trim_start().to_owned());
-    let wants_outcome = req
-        .headers()
-        .get("accept")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|accept| accept.contains("application/octet-stream"));
 
     use http_body_util::BodyExt;
     let body_bytes = match req.into_body().collect().await {
@@ -250,9 +194,6 @@ async fn handle_request(
                 .unwrap());
         }
     };
-    if body_bytes.len() as u64 > state.max_body_bytes {
-        return Ok(too_large(state.max_body_bytes));
-    }
 
     let container = match &credential {
         Some(credential) => match dialog_ucan_core::Container::decode(credential.as_bytes())
@@ -267,11 +208,10 @@ async fn handle_request(
         },
         None => body_bytes.to_vec(),
     };
-    let perform_here = credential.is_some() && wants_outcome && state.direct;
 
     let authorizer = state.authorizer.read().await;
     match authorizer.authorize(&container).await {
-        Ok(descriptor) if perform_here => {
+        Ok(descriptor) if credential.is_some() => {
             state.stats.performed.fetch_add(1, Ordering::SeqCst);
             let range = read_range(&container);
             Ok(perform(descriptor, body_bytes, range).await)
@@ -306,7 +246,7 @@ async fn handle_request(
 
 /// The range a blob read asks for, from the invocation's arguments, so
 /// the object request carries it the way the client's own would have.
-fn read_range(container: &[u8]) -> Option<String> {
+pub fn read_range(container: &[u8]) -> Option<String> {
     use dialog_effects::blob::prelude::BlobReadExt as _;
 
     let container = dialog_ucan_core::Container::from_bytes(container).ok()?;
@@ -333,9 +273,6 @@ fn read_range(container: &[u8]) -> Option<String> {
 
 /// The answer to an invocation that did not verify, in the shape the
 /// real service gives: the reason as JSON, under the status it earns.
-/// A container that could not be read is a 400, which is also what a
-/// service that predates the direct exchange answers a request whose
-/// body is not a container.
 fn refused(reason: &AuthorizeError) -> Response<http_body_util::Full<bytes::Bytes>> {
     use bytes::Bytes;
     use http_body_util::Full;
@@ -360,21 +297,6 @@ fn refused(reason: &AuthorizeError) -> Response<http_body_util::Full<bytes::Byte
         .unwrap()
 }
 
-/// The answer to a body over the limit, in the shape the real service
-/// gives: a JSON error the client reads as "turned away for size".
-fn too_large(limit: u64) -> Response<http_body_util::Full<bytes::Bytes>> {
-    use bytes::Bytes;
-    use http_body_util::Full;
-
-    add_cors_headers(Response::builder())
-        .status(StatusCode::PAYLOAD_TOO_LARGE)
-        .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(format!(
-            r#"{{"error":{{"code":"PAYLOAD_TOO_LARGE","message":"request body exceeds the {limit}-byte limit"}}}}"#
-        ))))
-        .unwrap()
-}
-
 /// Perform the operation the permit authorizes against the local S3,
 /// the way the real service performs it against its bucket, and answer
 /// with the outcome the object route would have given: the status, the
@@ -382,7 +304,7 @@ fn too_large(limit: u64) -> Response<http_body_util::Full<bytes::Bytes>> {
 ///
 /// A write's bytes are the request body; a write with an empty body is
 /// answered as the object route answers a body of the wrong length.
-async fn perform(
+pub async fn perform(
     mut permit: dialog_remote_s3::Permit,
     body_bytes: bytes::Bytes,
     range: Option<String>,
@@ -452,19 +374,6 @@ pub struct UcanS3Settings {
     pub access_key_id: String,
     /// AWS secret access key. Defaults to "test-secret-key".
     pub secret_access_key: String,
-    /// Whether the service performs operations in the request that
-    /// proved them. Off, it verifies the invocation and answers with a
-    /// permit, standing in for a service over storage it cannot reach
-    /// itself. Defaults to on.
-    pub direct: bool,
-    /// Whether the service ignores `Authorization` altogether and reads
-    /// every body as a container, standing in for a service that
-    /// predates the direct exchange. Defaults to off.
-    pub legacy: bool,
-    /// The largest request body the service reads. Unbounded by default;
-    /// a test sets it to stand in for a service whose limit a write's
-    /// bytes exceed.
-    pub max_body_bytes: u64,
 }
 
 impl Default for UcanS3Settings {
@@ -473,9 +382,6 @@ impl Default for UcanS3Settings {
             bucket: String::new(),
             access_key_id: "test-access-key".to_string(),
             secret_access_key: "test-secret-key".to_string(),
-            direct: true,
-            legacy: false,
-            max_body_bytes: u64::MAX,
         }
     }
 }
@@ -500,14 +406,11 @@ pub async fn ucan_s3(
 
     let s3_endpoint = s3_server.endpoint.clone();
 
-    let ucan_server = UcanAccessServer::start_with(
+    let ucan_server = UcanAccessServer::start(
         s3_server,
         bucket,
         &settings.access_key_id,
         &settings.secret_access_key,
-        settings.direct,
-        settings.legacy,
-        settings.max_body_bytes,
     )
     .await?;
 

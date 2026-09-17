@@ -1,15 +1,13 @@
 //! The exchange with the access service: one request whose
 //! `Authorization` header carries the signed invocation and whose body
-//! carries the bytes the operation stores. `Accept` names what the site
-//! will take back, in order: the operation's outcome (the status the
-//! object route would have given, the object's version, the bytes a
-//! read asked for), or a permit to perform the operation itself, which
-//! a service that does not perform operations answers with.
+//! carries the bytes the operation stores, answered with the
+//! operation's outcome: the status the object route would have given,
+//! the object's version, and the bytes a read asked for.
 
 use dialog_capability::access::AuthorizeError;
 use dialog_effects::Rejection;
 use dialog_effects::blob::{BlobError, BlobReader, BlobSource};
-use dialog_remote_s3::{Permit, S3Error, http_client};
+use dialog_remote_s3::{S3Error, http_client};
 use dialog_remote_ucan_s3::UcanAuthorization;
 use dialog_ucan_core::{Container, ContainerError, Tag};
 
@@ -22,15 +20,10 @@ pub const SCHEME: &str = "UCAN";
 /// what a read's answer carries.
 pub const OBJECT_MEDIA_TYPE: &str = "application/octet-stream";
 
-/// The media type of a permit, which a service answers with when it
-/// does not perform operations itself.
-pub const PERMIT_MEDIA_TYPE: &str = "application/cbor";
-
-/// What the site asks for, in order of preference: the outcome, else a
-/// permit. A service that performs operations answers with the first;
-/// one that does not answers with the second, and the site completes
-/// the operation with it.
-pub const ACCEPT: &str = "application/octet-stream, application/cbor";
+/// The media type of a permit, which is what a service that does not
+/// perform operations answers an invocation with, and which this
+/// exchange has no use for.
+const PERMIT_MEDIA_TYPE: &str = "application/cbor";
 
 /// How much of a refusal body is read for its reason.
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
@@ -74,33 +67,12 @@ pub fn credential_container(value: &str) -> Result<Container, ContainerError> {
     Container::decode(rest.trim_start().as_bytes())
 }
 
-/// How the service answered a request.
-#[derive(Debug)]
-pub(crate) enum Outcome {
-    /// The service performed the operation; this is its answer.
-    Answered(Answer),
-    /// The service verified the invocation but does not perform
-    /// operations: here is the permit to perform this one with.
-    Permit(Permit),
-    /// The service does not read invocations this way: it answered a
-    /// request it could not read as such, turned it away for its size,
-    /// or the request never completed. The operation goes through the
-    /// permit flow from the start.
-    Unsupported,
-}
-
-/// An answer's body: still on the wire, or already read.
-enum Body {
-    Pending(reqwest::Response),
-    Read(Vec<u8>),
-}
-
 /// An operation's answer: the status the object route would have given,
 /// the object's version when the operation has one, and the body.
 pub(crate) struct Answer {
     pub status: u16,
     pub etag: Option<String>,
-    body: Body,
+    response: reqwest::Response,
 }
 
 impl std::fmt::Debug for Answer {
@@ -125,18 +97,12 @@ impl Answer {
 
     /// The whole body.
     pub async fn bytes(self) -> Result<Vec<u8>, S3Error> {
-        match self.body {
-            Body::Pending(response) => Ok(response.bytes().await?.to_vec()),
-            Body::Read(bytes) => Ok(bytes),
-        }
+        Ok(self.response.bytes().await?.to_vec())
     }
 
     /// The body as a stream of chunks.
     pub fn source(self) -> BlobReader {
-        match self.body {
-            Body::Pending(response) => Box::new(Source::from_response(response)),
-            Body::Read(bytes) => Box::new(Source::from_bytes(bytes)),
-        }
+        Box::new(Source::from_response(self.response))
     }
 
     /// The reason the request was refused, as the service sent it.
@@ -158,40 +124,32 @@ impl Answer {
 /// Send the invocation to the service and read how it answered.
 ///
 /// The invocation rides in `Authorization`, the payload is the body,
-/// and `Accept` names the outcome first and a permit second. A service
-/// that performs answers with the outcome, one that redeems answers
-/// with a permit, and the site tells the two apart by content type.
+/// and `Accept` names the object's media type, which is what the
+/// outcome of an operation is answered as.
+///
+/// A service that does not speak this exchange gives itself away in
+/// one of two ways, and each is answered with an error that says so: a
+/// permit in place of the outcome, from a service that verified the
+/// invocation but performs nothing; or a refusal to read the request,
+/// from a service that looks for the invocation in the body.
 pub(crate) async fn invoke(
     address: &UcanAddress,
     authorization: &UcanAuthorization,
     payload: Option<Vec<u8>>,
-) -> Result<Outcome, S3Error> {
+) -> Result<Answer, S3Error> {
     let container = Container::from(authorization.invocation().chain());
     let credential = credential(container).map_err(|e| S3Error::Serialization(e.to_string()))?;
 
     let mut request = http_client()
         .post(address.endpoint())
         .header("Authorization", credential)
-        .header("Accept", ACCEPT);
+        .header("Accept", OBJECT_MEDIA_TYPE);
     if let Some(payload) = payload {
         request = request
             .header("Content-Type", OBJECT_MEDIA_TYPE)
             .body(payload);
     }
-    let response = match request.send().await {
-        Ok(response) => response,
-        // A service that refuses a body on its declared length answers
-        // before reading it, which a browser reports as a failed fetch
-        // rather than as the refusal.
-        Err(error) => {
-            let error = S3Error::from(error);
-            return if error.is_transport() {
-                Ok(Outcome::Unsupported)
-            } else {
-                Err(error)
-            };
-        }
-    };
+    let response = request.send().await?;
 
     let status = response.status().as_u16();
     let etag = response
@@ -207,35 +165,36 @@ pub(crate) async fn invoke(
         .unwrap_or_default();
 
     if (200..300).contains(&status) && content_type.starts_with(PERMIT_MEDIA_TYPE) {
-        let permit = serde_ipld_dagcbor::from_slice(&response.bytes().await?)
-            .map_err(|e| S3Error::Serialization(format!("failed to decode the permit: {e}")))?;
-        return Ok(Outcome::Permit(permit));
-    }
-    if status == 413 {
-        return Ok(Outcome::Unsupported);
+        return Err(does_not_perform(
+            address,
+            "it answered a permit in place of the outcome",
+        ));
     }
     if status == 400 {
-        // An older service looks for the container in the body, finds
-        // none, and says the request is malformed. That is the one
-        // 400 that means "not this way" rather than "not this".
         let body = bounded(response).await?;
-        if matches!(
-            serde_json::from_slice::<AuthorizeError>(&body),
-            Ok(AuthorizeError::Malformed { .. })
-        ) {
-            return Ok(Outcome::Unsupported);
+        if let Ok(AuthorizeError::Malformed { detail }) = serde_json::from_slice(&body) {
+            return Err(does_not_perform(
+                address,
+                &format!("it did not read the invocation from the request: {detail}"),
+            ));
         }
-        return Ok(Outcome::Answered(Answer {
-            status,
-            etag,
-            body: Body::Read(body),
-        }));
+        return Err(read_refusal(status, &body));
     }
-    Ok(Outcome::Answered(Answer {
+    Ok(Answer {
         status,
         etag,
-        body: Body::Pending(response),
-    }))
+        response,
+    })
+}
+
+/// The error for a service that does not speak this exchange.
+fn does_not_perform(address: &UcanAddress, evidence: &str) -> S3Error {
+    S3Error::Rejected(Rejection::Unclassified {
+        detail: format!(
+            "the service at {} does not perform invocations: {evidence}",
+            address.endpoint()
+        ),
+    })
 }
 
 /// At most [`MAX_ERROR_BODY_BYTES`] of a body.
@@ -243,19 +202,6 @@ async fn bounded(response: reqwest::Response) -> Result<Vec<u8>, S3Error> {
     let mut bytes = response.bytes().await?.to_vec();
     bytes.truncate(MAX_ERROR_BODY_BYTES);
     Ok(bytes)
-}
-
-/// Whether an error is the request failing to complete in transport,
-/// as opposed to the service answering it.
-pub(crate) trait Transport {
-    /// See the trait.
-    fn is_transport(&self) -> bool;
-}
-
-impl Transport for S3Error {
-    fn is_transport(&self) -> bool {
-        matches!(self, S3Error::Transport(_))
-    }
 }
 
 /// Read the reason a request was refused, as the permit flow does: the
@@ -314,12 +260,6 @@ impl Source {
                     .map_err(|e| BlobError::Storage(e.to_string()))
             }));
         Self { stream }
-    }
-
-    fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self {
-            stream: Box::pin(futures_util::stream::once(async move { Ok(bytes) })),
-        }
     }
 }
 

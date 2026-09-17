@@ -1005,7 +1005,7 @@ mod tests {
         use dialog_effects::archive::prelude::*;
         use dialog_effects::memory::prelude::*;
         use dialog_network::NetworkAddress as SiteAddress;
-        use dialog_remote_ucan::UcanAddress;
+        use dialog_remote_ucan::{Exchange, UcanAddress};
         use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
         fn ucan_address(s3: &UcanS3Address) -> SiteAddress {
@@ -1407,12 +1407,11 @@ mod tests {
             Ok(())
         }
 
-        /// A service that only redeems serves the same forks: it reads
-        /// the invocation from the header, answers with a permit, and
-        /// the site completes the operation the way the permit flow
-        /// always has, at the cost that flow always had and no more.
-        #[dialog_common::test(direct = false)]
-        async fn fork_completes_permits_from_a_service_that_only_redeems(
+        /// An address that asks for the permit exchange goes through the
+        /// permit-based site: every invocation is redeemed for a permit
+        /// the site performs itself, and the service performs nothing.
+        #[dialog_common::test]
+        async fn fork_goes_through_permits_when_the_address_asks(
             s3: UcanS3Address,
         ) -> anyhow::Result<()> {
             let storage = Storage::volatile();
@@ -1426,8 +1425,10 @@ mod tests {
                 .build(storage)
                 .await?;
 
-            let address = ucan_address(&s3);
-            let content = b"one request, proved and performed".to_vec();
+            let address = SiteAddress::Ucan(
+                UcanAddress::new(&s3.access_service_url).with_exchange(Exchange::Permit),
+            );
+            let content = b"redeemed, then performed by the site".to_vec();
             let digest = Blake3Hash::hash(&content);
             Subject::from(operator.profile_did())
                 .archive()
@@ -1446,98 +1447,9 @@ mod tests {
             assert_eq!(retrieved, Some(content));
 
             let (performed, redeemed, requests) = answered(&s3).await?;
-            assert_eq!(performed, 0, "a service that only redeems performs nothing");
+            assert_eq!(performed, 0, "the service performed nothing");
             assert_eq!(redeemed, 2, "the put and the get were each redeemed once");
-            assert_eq!(requests, 2, "the permit came back in the first request");
-            Ok(())
-        }
-
-        /// A service that predates the exchange never reads the header:
-        /// it answers the request as one it cannot read, and the site
-        /// goes through the permit flow from the start, one request the
-        /// poorer per operation.
-        #[dialog_common::test(legacy = true)]
-        async fn fork_completes_through_permits_at_a_service_that_ignores_the_credential(
-            s3: UcanS3Address,
-        ) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
-            let profile = Profile::open(unique_name("ucan-legacy"))
-                .perform(&storage)
-                .await?;
-            let operator = profile
-                .derive(b"test")
-                .allow(Subject::any())
-                .network(Network::default())
-                .build(storage)
-                .await?;
-
-            let address = ucan_address(&s3);
-            let content = b"one request, proved and performed".to_vec();
-            let digest = Blake3Hash::hash(&content);
-            Subject::from(operator.profile_did())
-                .archive()
-                .catalog("direct")
-                .put(Buffer::from(content.clone()))
-                .fork(&address)
-                .perform(&operator)
-                .await?;
-            let retrieved = Subject::from(operator.profile_did())
-                .archive()
-                .catalog("direct")
-                .get(digest)
-                .fork(&address)
-                .perform(&operator)
-                .await?;
-            assert_eq!(retrieved, Some(content));
-
-            let (performed, redeemed, requests) = answered(&s3).await?;
-            assert_eq!(performed, 0, "a legacy service performs nothing");
-            assert_eq!(redeemed, 2, "the put and the get were each redeemed once");
-            assert_eq!(requests, 4, "each operation cost a refused request first");
-            Ok(())
-        }
-
-        /// A write's body can outgrow what a service reads. Turned away
-        /// for size, the write goes through a permit instead, the way it
-        /// always did, and the read that follows is still performed in
-        /// its request.
-        #[dialog_common::test(max_body_bytes = 1024u64)]
-        async fn fork_completes_a_write_the_service_turned_away_for_size(
-            s3: UcanS3Address,
-        ) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
-            let profile = Profile::open(unique_name("ucan-too-large"))
-                .perform(&storage)
-                .await?;
-            let operator = profile
-                .derive(b"test")
-                .allow(Subject::any())
-                .network(Network::default())
-                .build(storage)
-                .await?;
-
-            let address = ucan_address(&s3);
-            let content = vec![7u8; 4096];
-            let digest = Blake3Hash::hash(&content);
-            Subject::from(operator.profile_did())
-                .archive()
-                .catalog("direct")
-                .put(Buffer::from(content.clone()))
-                .fork(&address)
-                .perform(&operator)
-                .await?;
-            let retrieved = Subject::from(operator.profile_did())
-                .archive()
-                .catalog("direct")
-                .get(digest)
-                .fork(&address)
-                .perform(&operator)
-                .await?;
-            assert_eq!(retrieved, Some(content));
-
-            let (performed, redeemed, _) = answered(&s3).await?;
-            assert_eq!(redeemed, 1, "the write went through a permit");
-            assert_eq!(performed, 1, "the read was performed in its request");
+            assert_eq!(requests, 2, "one redeem each");
             Ok(())
         }
     }
