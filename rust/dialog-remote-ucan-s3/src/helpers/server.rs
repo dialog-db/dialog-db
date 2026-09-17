@@ -27,6 +27,35 @@ pub struct UcanAccessServer {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
 }
 
+/// What the service holds across requests: the authorizer, whether it
+/// performs operations itself, and how it has answered so far.
+struct ServerState {
+    authorizer: RwLock<UcanAuthorizer>,
+    /// Perform an operation in the request that proved it when the
+    /// client asks for the outcome (`Accept: application/octet-stream`).
+    /// Off, the service answers every invocation with a permit, as a
+    /// service that predates the direct exchange does.
+    direct: bool,
+    stats: Stats,
+}
+
+/// How the service answered, for a test to read back at `GET /stats`:
+/// whether a request was answered with a permit or performed outright.
+#[derive(Default)]
+struct Stats {
+    redeemed: std::sync::atomic::AtomicUsize,
+    performed: std::sync::atomic::AtomicUsize,
+}
+
+/// The counts `GET /stats` reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServerStats {
+    /// Invocations answered with a permit.
+    pub redeemed: usize,
+    /// Invocations performed in the request that proved them.
+    pub performed: usize,
+}
+
 impl UcanAccessServer {
     /// Start a UCAN access service backed by a local S3 server.
     pub async fn start(
@@ -34,6 +63,18 @@ impl UcanAccessServer {
         bucket: &str,
         access_key: &str,
         secret_key: &str,
+    ) -> anyhow::Result<Self> {
+        Self::start_with(s3_server, bucket, access_key, secret_key, true).await
+    }
+
+    /// Start the service, performing operations directly when `direct`
+    /// and answering every invocation with a permit otherwise.
+    pub async fn start_with(
+        s3_server: LocalS3,
+        bucket: &str,
+        access_key: &str,
+        secret_key: &str,
+        direct: bool,
     ) -> anyhow::Result<Self> {
         let address = Address::builder(&s3_server.endpoint)
             .region("us-east-1")
@@ -43,7 +84,11 @@ impl UcanAccessServer {
 
         let credential = S3Credential::new(access_key, secret_key);
 
-        let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(address, Some(credential))));
+        let authorizer = Arc::new(ServerState {
+            authorizer: RwLock::new(UcanAuthorizer::new(address, Some(credential))),
+            direct,
+            stats: Stats::default(),
+        });
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -87,23 +132,39 @@ impl UcanAccessServer {
 fn add_cors_headers(builder: hyper::http::response::Builder) -> hyper::http::response::Builder {
     builder
         .header("Access-Control-Allow-Origin", "*")
-        .header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        .header("Access-Control-Allow-Headers", "Content-Type")
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "Content-Type, Accept")
+        .header("Access-Control-Expose-Headers", "ETag")
         .header("Access-Control-Max-Age", "86400")
         .header("Cache-Control", "no-store")
 }
 
 async fn handle_request(
     req: Request<Incoming>,
-    authorizer: Arc<RwLock<UcanAuthorizer>>,
+    state: Arc<ServerState>,
 ) -> Result<Response<http_body_util::Full<bytes::Bytes>>, Infallible> {
     use bytes::Bytes;
     use http_body_util::Full;
+    use std::sync::atomic::Ordering;
 
     if req.method() == Method::OPTIONS {
         return Ok(add_cors_headers(Response::builder())
             .status(StatusCode::NO_CONTENT)
             .body(Full::new(Bytes::new()))
+            .unwrap());
+    }
+
+    if req.method() == Method::GET && req.uri().path() == "/stats" {
+        let stats = ServerStats {
+            redeemed: state.stats.redeemed.load(Ordering::SeqCst),
+            performed: state.stats.performed.load(Ordering::SeqCst),
+        };
+        return Ok(add_cors_headers(Response::builder())
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(
+                serde_json::to_vec(&stats).expect("stats serialize"),
+            )))
             .unwrap());
     }
 
@@ -113,6 +174,15 @@ async fn handle_request(
             .body(Full::new(Bytes::from("Method not allowed")))
             .unwrap());
     }
+
+    // The client that wants the outcome names it first in `Accept`; a
+    // client after a permit names only the permit's media type, or
+    // nothing.
+    let wants_outcome = req
+        .headers()
+        .get("accept")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("application/octet-stream"));
 
     use http_body_util::BodyExt;
     let body_bytes = match req.into_body().collect().await {
@@ -128,14 +198,21 @@ async fn handle_request(
         }
     };
 
-    let authorizer = authorizer.read().await;
+    let authorizer = state.authorizer.read().await;
     match authorizer.authorize(&body_bytes).await {
+        Ok(descriptor) if state.direct && wants_outcome => {
+            state.stats.performed.fetch_add(1, Ordering::SeqCst);
+            Ok(perform(descriptor, &body_bytes).await)
+        }
         Ok(descriptor) => match serde_ipld_dagcbor::to_vec(&descriptor) {
-            Ok(cbor_bytes) => Ok(add_cors_headers(Response::builder())
-                .status(StatusCode::OK)
-                .header("Content-Type", "application/cbor")
-                .body(Full::new(Bytes::from(cbor_bytes)))
-                .unwrap()),
+            Ok(cbor_bytes) => {
+                state.stats.redeemed.fetch_add(1, Ordering::SeqCst);
+                Ok(add_cors_headers(Response::builder())
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/cbor")
+                    .body(Full::new(Bytes::from(cbor_bytes)))
+                    .unwrap())
+            }
             Err(e) => Ok(add_cors_headers(Response::builder())
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Full::new(Bytes::from(format!(
@@ -151,6 +228,66 @@ async fn handle_request(
                 e
             ))))
             .unwrap()),
+    }
+}
+
+/// Perform the operation the permit authorizes against the local S3,
+/// the way the real service performs it against its bucket, and answer
+/// with the outcome the object route would have given: the status, the
+/// `ETag`, and the body.
+///
+/// A write's bytes come from the container's payload; a container
+/// carrying none is answered as the object route answers a body of the
+/// wrong length.
+async fn perform(
+    permit: dialog_remote_s3::Permit,
+    body_bytes: &[u8],
+) -> Response<http_body_util::Full<bytes::Bytes>> {
+    use bytes::Bytes;
+    use http_body_util::Full;
+
+    let outcome = match permit.method.as_str() {
+        "PUT" => {
+            let payload = dialog_ucan_core::Container::from_bytes(body_bytes)
+                .ok()
+                .and_then(|mut container| container.take_payload());
+            match payload {
+                Some(payload) => permit.upload(payload).await,
+                None => {
+                    return add_cors_headers(Response::builder())
+                        .status(StatusCode::LENGTH_REQUIRED)
+                        .body(Full::new(Bytes::from(
+                            "the container carries no payload to store",
+                        )))
+                        .unwrap();
+                }
+            }
+        }
+        _ => permit.send().await,
+    };
+    match outcome {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let etag = response
+                .headers()
+                .get("etag")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let bytes = response.bytes().await.unwrap_or_default();
+            let mut builder = add_cors_headers(Response::builder())
+                .status(status)
+                .header("Content-Type", "application/octet-stream");
+            if let Some(etag) = etag {
+                builder = builder.header("ETag", etag);
+            }
+            builder
+                .body(Full::new(Bytes::from(bytes.to_vec())))
+                .unwrap()
+        }
+        Err(error) => add_cors_headers(Response::builder())
+            .status(StatusCode::BAD_GATEWAY)
+            .body(Full::new(Bytes::from(format!("storage failed: {error}"))))
+            .unwrap(),
     }
 }
 
@@ -171,6 +308,10 @@ pub struct UcanS3Settings {
     pub access_key_id: String,
     /// AWS secret access key. Defaults to "test-secret-key".
     pub secret_access_key: String,
+    /// Whether the service performs operations in the request that
+    /// proved them. Off, it answers with permits only, standing in for a
+    /// service that predates the direct exchange. Defaults to on.
+    pub direct: bool,
 }
 
 impl Default for UcanS3Settings {
@@ -179,6 +320,7 @@ impl Default for UcanS3Settings {
             bucket: String::new(),
             access_key_id: "test-access-key".to_string(),
             secret_access_key: "test-secret-key".to_string(),
+            direct: true,
         }
     }
 }
@@ -203,11 +345,12 @@ pub async fn ucan_s3(
 
     let s3_endpoint = s3_server.endpoint.clone();
 
-    let ucan_server = UcanAccessServer::start(
+    let ucan_server = UcanAccessServer::start_with(
         s3_server,
         bucket,
         &settings.access_key_id,
         &settings.secret_access_key,
+        settings.direct,
     )
     .await?;
 

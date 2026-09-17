@@ -80,14 +80,24 @@ pub enum ContainerError {
 /// UCAN Container version key
 pub const CONTAINER_VERSION: &str = "ctn-v1";
 
+/// The container key carrying the bytes an invocation acts on, beside
+/// the tokens. See [`Container::payload`].
+pub const PAYLOAD_KEY: &str = "payload";
+
 /// A UCAN container holding a sequence of DAG-CBOR encoded tokens.
 ///
 /// This is the wire format for UCAN delegation chains and invocation chains.
-/// The container is serialized as `{ "ctn-v1": [token_bytes...] }`.
+/// The container is serialized as `{ "ctn-v1": [token_bytes...] }`, with
+/// an optional `"payload"` key beside it (see [`Container::payload`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Container {
     /// The DAG-CBOR encoded tokens in order.
     tokens: Vec<Vec<u8>>,
+    /// Bytes the invocation acts on, carried beside the tokens so one
+    /// request can both prove an operation and supply its content: the
+    /// block an `archive` put stores, the value a `memory` publish sets.
+    /// Absent from a container that only proves.
+    payload: Option<Vec<u8>>,
 }
 
 impl Container {
@@ -97,7 +107,31 @@ impl Container {
     ///
     /// * `tokens` - Vector of DAG-CBOR encoded token bytes
     pub fn new(tokens: Vec<Vec<u8>>) -> Self {
-        Self { tokens }
+        Self {
+            tokens,
+            payload: None,
+        }
+    }
+
+    /// Attach the bytes the invocation acts on. See [`Container::payload`].
+    pub fn with_payload(mut self, payload: impl Into<Vec<u8>>) -> Self {
+        self.payload = Some(payload.into());
+        self
+    }
+
+    /// The bytes the invocation acts on, when the container carries them.
+    ///
+    /// A responder that understands the payload performs the operation
+    /// with it in the same request that proved it. One that does not
+    /// reads the tokens alone, the payload being a separate key it never
+    /// looks at, and answers as it always has.
+    pub fn payload(&self) -> Option<&[u8]> {
+        self.payload.as_deref()
+    }
+
+    /// Take the payload out of the container, leaving the tokens.
+    pub fn take_payload(&mut self) -> Option<Vec<u8>> {
+        self.payload.take()
     }
 
     /// Get the tokens in this container.
@@ -155,8 +189,19 @@ impl Container {
             token_bytes.push(bytes.clone());
         }
 
+        let payload = match container.get(PAYLOAD_KEY) {
+            None => None,
+            Some(Ipld::Bytes(bytes)) => Some(bytes.clone()),
+            Some(_) => {
+                return Err(ContainerError::Invocation(format!(
+                    "'{PAYLOAD_KEY}' must be bytes"
+                )));
+            }
+        };
+
         Ok(Self {
             tokens: token_bytes,
+            payload,
         })
     }
 
@@ -174,6 +219,9 @@ impl Container {
         let tokens: Vec<Ipld> = self.tokens.into_iter().map(Ipld::Bytes).collect();
         let mut container: BTreeMap<String, Ipld> = BTreeMap::new();
         container.insert(CONTAINER_VERSION.to_string(), Ipld::List(tokens));
+        if let Some(payload) = self.payload {
+            container.insert(PAYLOAD_KEY.to_string(), Ipld::Bytes(payload));
+        }
 
         serde_ipld_dagcbor::to_vec(&container)
             .map_err(|e| ContainerError::Invocation(format!("failed to encode container: {}", e)))
@@ -211,6 +259,46 @@ mod tests {
         let parsed = Container::from_bytes(&serialized).unwrap();
 
         assert_eq!(parsed.tokens(), &original_bytes[..]);
+    }
+
+    #[test]
+    fn it_carries_a_payload_beside_the_tokens() {
+        let container = Container::new(vec![vec![1, 2, 3]]).with_payload(vec![9, 9, 9]);
+        let parsed = Container::from_bytes(&container.to_bytes().unwrap()).unwrap();
+
+        assert_eq!(parsed.tokens(), &[vec![1, 2, 3]][..]);
+        assert_eq!(parsed.payload(), Some(&[9, 9, 9][..]));
+        assert_eq!(parsed, container);
+    }
+
+    #[test]
+    fn it_reads_a_container_without_a_payload_as_having_none() {
+        let container = Container::new(vec![vec![1, 2, 3]]);
+        let parsed = Container::from_bytes(&container.to_bytes().unwrap()).unwrap();
+        assert_eq!(parsed.payload(), None);
+    }
+
+    /// The payload is a separate key, so a reader that only knows the
+    /// tokens still decodes the tokens from a container that carries one.
+    #[test]
+    fn it_keeps_the_tokens_readable_by_a_tokens_only_reader() {
+        let container = Container::new(vec![vec![1, 2, 3]]).with_payload(vec![9]);
+        let bytes = container.to_bytes().unwrap();
+        let map: BTreeMap<String, Ipld> = serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+        assert!(matches!(map.get(CONTAINER_VERSION), Some(Ipld::List(_))));
+        assert!(matches!(map.get(PAYLOAD_KEY), Some(Ipld::Bytes(_))));
+    }
+
+    #[test]
+    fn it_rejects_a_payload_that_is_not_bytes() {
+        let mut map: BTreeMap<String, Ipld> = BTreeMap::new();
+        map.insert(
+            CONTAINER_VERSION.to_string(),
+            Ipld::List(vec![Ipld::Bytes(vec![1])]),
+        );
+        map.insert(PAYLOAD_KEY.to_string(), Ipld::String("no".into()));
+        let bytes = serde_ipld_dagcbor::to_vec(&map).unwrap();
+        assert!(Container::from_bytes(&bytes).is_err());
     }
 
     #[test]

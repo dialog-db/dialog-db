@@ -13,7 +13,7 @@
 //!
 //! This crate exposes [`Network`], the composite
 //! [`Site`](dialog_capability::Site) that dispatches fork invocations to
-//! the appropriate transport (S3, UCAN-over-S3, ...). The associated
+//! the appropriate transport (S3, UCAN access service, ...). The associated
 //! [`NetworkAddress`], [`NetworkAuthorization`], and `NetworkFork` types
 //! are generated from the struct fields by `#[derive(Site)]` in
 //! `dialog-capability`.
@@ -24,7 +24,7 @@ pub use hydrate::{Hydrate, HydrationRequest, HydrationScheduler};
 use dialog_capability::Site;
 use dialog_remote_fs::Fs;
 use dialog_remote_s3::S3;
-use dialog_remote_ucan_s3::UcanSite;
+use dialog_remote_ucan::UcanSite;
 
 /// Network dispatch table for fork invocations.
 ///
@@ -53,7 +53,7 @@ mod tests {
     use dialog_effects::storage::Location;
     use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address as S3Address;
-    use dialog_remote_ucan_s3::UcanAddress;
+    use dialog_remote_ucan::UcanAddress;
 
     fn s3_address() -> S3Address {
         S3Address::builder("https://s3.amazonaws.com")

@@ -1326,6 +1326,7 @@ dependencies = [
  "dialog-effects",
  "dialog-remote-fs",
  "dialog-remote-s3",
+ "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "serde",
 ]
@@ -1346,6 +1347,7 @@ dependencies = [
  "dialog-identity",
  "dialog-network",
  "dialog-remote-s3",
+ "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "dialog-repository",
  "dialog-storage",
@@ -1481,6 +1483,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-remote-ucan"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-effects",
+ "dialog-remote-s3",
+ "dialog-remote-ucan-s3",
+ "dialog-ucan-core",
+ "serde",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-remote-ucan-s3"
 version = "0.1.0"
 dependencies = [
@@ -1539,6 +1561,7 @@ dependencies = [
  "dialog-operator",
  "dialog-query",
  "dialog-remote-s3",
+ "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "dialog-search-tree",
  "dialog-storage",

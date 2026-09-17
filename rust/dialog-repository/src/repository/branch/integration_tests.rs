@@ -2350,7 +2350,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
 
 // UCAN integration tests
 
-use dialog_remote_ucan_s3::UcanAddress;
+use dialog_remote_ucan::UcanAddress;
 use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
 /// The login flow: the ACCOUNT repository is the durable home of

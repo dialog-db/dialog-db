@@ -1005,7 +1005,7 @@ mod tests {
         use dialog_effects::archive::prelude::*;
         use dialog_effects::memory::prelude::*;
         use dialog_network::NetworkAddress as SiteAddress;
-        use dialog_remote_ucan_s3::UcanAddress;
+        use dialog_remote_ucan::UcanAddress;
         use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
         fn ucan_address(s3: &UcanS3Address) -> SiteAddress {
@@ -1343,6 +1343,110 @@ mod tests {
                 .await?;
 
             assert_eq!(retrieved, Some(content));
+            Ok(())
+        }
+
+        /// How the helper service answered so far: invocations it
+        /// performed in the request that proved them, and invocations it
+        /// answered with a permit.
+        async fn answered(s3: &UcanS3Address) -> anyhow::Result<(u64, u64)> {
+            let response = dialog_remote_s3::http_client()
+                .get(format!(
+                    "{}/stats",
+                    s3.access_service_url.trim_end_matches('/')
+                ))
+                .send()
+                .await?;
+            let stats: serde_json::Value = serde_json::from_slice(&response.bytes().await?)?;
+            let count = |field: &str| stats[field].as_u64().unwrap_or_default();
+            Ok((count("performed"), count("redeemed")))
+        }
+
+        /// A service that performs operations gets each one in the
+        /// request that proves it: the write ships its bytes in the
+        /// container, the read answers with the bytes, and no permit is
+        /// ever redeemed.
+        #[dialog_common::test]
+        async fn fork_performs_in_the_request_that_proves_it(
+            s3: UcanS3Address,
+        ) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-direct"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let content = b"one request, proved and performed".to_vec();
+            let digest = Blake3Hash::hash(&content);
+            Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .put(Buffer::from(content.clone()))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            let retrieved = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            assert_eq!(retrieved, Some(content));
+
+            let (performed, redeemed) = answered(&s3).await?;
+            assert_eq!(performed, 2, "the put and the get were performed");
+            assert_eq!(redeemed, 0, "nothing was redeemed for a permit");
+            Ok(())
+        }
+
+        /// A service that only redeems serves the same forks: it answers
+        /// every invocation with a permit, which the site completes the
+        /// way the permit flow always has, at the cost that flow always
+        /// had and no more.
+        #[dialog_common::test(direct = false)]
+        async fn fork_completes_permits_from_a_service_that_only_redeems(
+            s3: UcanS3Address,
+        ) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-permits"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let content = b"one request, proved and performed".to_vec();
+            let digest = Blake3Hash::hash(&content);
+            Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .put(Buffer::from(content.clone()))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            let retrieved = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            assert_eq!(retrieved, Some(content));
+
+            let (performed, redeemed) = answered(&s3).await?;
+            assert_eq!(performed, 0, "a service that only redeems performs nothing");
+            assert_eq!(redeemed, 2, "the put and the get were each redeemed once");
             Ok(())
         }
     }

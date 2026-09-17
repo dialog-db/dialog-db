@@ -1,0 +1,40 @@
+[package]
+name = "dialog-remote-ucan"
+description = "UCAN remote: one request proves and performs each operation at an access service"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+helpers = ["dialog-common/helpers", "dialog-remote-ucan-s3/helpers"]
+integration-tests = ["helpers", "dialog-common/integration-tests"]
+web-integration-tests = ["helpers", "dialog-common/web-integration-tests"]
+
+[dependencies]
+async-trait = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-remote-s3 = { workspace = true }
+dialog-remote-ucan-s3 = { workspace = true }
+dialog-ucan-core = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_ipld_dagcbor = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
+wasm-bindgen-test = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\", \"integration-tests\", \"helpers\"))",
+  "cfg(dialog_test_wasm_integration)"
+] }
