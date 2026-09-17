@@ -383,6 +383,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::{Value, the};
     use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use futures_util::TryStreamExt as _;
 
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
@@ -756,6 +757,47 @@ mod tests {
             assert_eq!(by_attribute, by_entity, "both scan shapes agree");
         }
 
+        Ok(())
+    }
+
+    /// A revision that re-asserts a fact already live records its own
+    /// version on the row beside the earlier claim's, so a batch that
+    /// re-asserts every name, unchanged ones included, lifts every name
+    /// to its version. That is the writer's tool for keeping a seed
+    /// whole under the election, which stands a row at its deepest
+    /// collapsed claim.
+    #[dialog_common::test]
+    async fn it_records_a_re_asserted_claim_under_the_new_revision() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let definition = the!("seed/definition");
+        let name = Entity::new()?;
+        for _ in 0..2 {
+            main.transaction()
+                .assert(definition.clone().of(name.clone()).is("v".to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        let source = TestEnv::new(&main, &operator, RuleRegistry::new());
+        let rows: Vec<ArtifactView> =
+            Provider::<Select<'_>>::execute(&source, ArtifactSelector::new().of(name.clone()))
+                .await?
+                .try_collect()
+                .await?;
+        let editions: Vec<u64> = rows
+            .iter()
+            .flat_map(|row| row.versions().map(|version| version.edition.into()))
+            .collect();
+        assert_eq!(rows.len(), 1, "one live row for the fact");
+        assert_eq!(
+            editions.len(),
+            2,
+            "both revisions stand on the row: {editions:?}"
+        );
+        assert_ne!(editions[0], editions[1], "two distinct editions");
         Ok(())
     }
 
