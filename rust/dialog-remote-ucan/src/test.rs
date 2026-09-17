@@ -1,12 +1,15 @@
 //! The site against the service, on native and on wasm: every effect
 //! the service performs, the refusals it answers with, and the layer's
-//! own checks on what a request carries.
-
-#![cfg(feature = "helpers")]
+//! own checks on what a request carries. The service is provisioned
+//! natively; on wasm the client half runs in a browser against it.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use crate::helpers::{MemoryStore, UcanServiceAddress};
+use crate::{
+    Access, Answer, Content, Payload, Request, UcanAddress, UcanAuthorization, UcanSite, credential,
+};
 use dialog_capability::access::{Authorization as _, AuthorizeError, TimeRange};
 use dialog_capability::{Ability, Capability, Effect, ForkInvocation, Provider, Subject};
 use dialog_common::{Blake3Hash, Buffer};
@@ -17,10 +20,6 @@ use dialog_effects::blob::BlobError;
 use dialog_effects::blob::prelude::*;
 use dialog_effects::memory::prelude::*;
 use dialog_effects::memory::{MemoryError, Version};
-use dialog_remote_ucan::helpers::{MemoryStore, UcanServiceAddress};
-use dialog_remote_ucan::{
-    Access, Answer, Content, Payload, Request, UcanAddress, UcanAuthorization, UcanSite, credential,
-};
 use dialog_ucan::Scope;
 use dialog_ucan_core::{Container, Tag};
 use dialog_varsig::Principal as _;

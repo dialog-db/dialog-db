@@ -34,6 +34,8 @@ pub mod helpers;
 mod provider;
 pub mod server;
 mod site;
+#[cfg(test)]
+mod test;
 
 pub use address::UcanAddress;
 pub use dialog_remote_ucan_s3::{Ucan, UcanAuthorization, UcanInvocation};
