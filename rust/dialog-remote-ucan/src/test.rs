@@ -407,6 +407,34 @@ async fn it_refuses_an_import_whose_bytes_do_not_hash_to_the_digest(
     Ok(())
 }
 
+/// The request a fork sends names its command and subject in the URL,
+/// for whoever reads a network log, and nothing else: the arguments
+/// would make every URL distinct and cost a preflight each.
+#[dialog_common::test]
+async fn it_labels_the_request_with_the_command_and_the_subject() {
+    let (signer, subject) = owner().await;
+    let capability = subject
+        .clone()
+        .archive()
+        .catalog("index")
+        .put(Buffer::from(b"content".to_vec()));
+    let authorization = issued(&signer, &capability).await;
+    let chain = authorization.invocation().chain();
+    let url = crate::direct::labeled("https://access.example/ucan/", chain);
+    assert_eq!(
+        url,
+        format!(
+            "https://access.example/ucan/?cmd=/use/put/archive/block&sub={}",
+            subject.did()
+        )
+    );
+    let url = crate::direct::labeled("https://access.example/ucan/?cache=bypass", chain);
+    assert!(
+        url.starts_with("https://access.example/ucan/?cache=bypass&cmd="),
+        "{url}"
+    );
+}
+
 /// The layer itself, driven directly: what it does with a request that
 /// carries no invocation, a credential it cannot read, an operation it
 /// does not perform, and a body that is not what the invocation bound.

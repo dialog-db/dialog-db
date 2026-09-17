@@ -9,7 +9,8 @@ use dialog_effects::Rejection;
 use dialog_effects::blob::{BlobError, BlobReader, BlobSource};
 use dialog_remote_s3::{S3Error, http_client};
 use dialog_remote_ucan_s3::UcanAuthorization;
-use dialog_ucan_core::{Container, ContainerError, Tag};
+use dialog_ucan_core::{Container, ContainerError, InvocationChain, Tag};
+use dialog_varsig::AnySignature;
 
 use crate::address::UcanAddress;
 
@@ -137,11 +138,13 @@ pub(crate) async fn invoke(
     authorization: &UcanAuthorization,
     payload: Option<Vec<u8>>,
 ) -> Result<Answer, S3Error> {
-    let container = Container::from(authorization.invocation().chain());
-    let credential = credential(container).map_err(|e| S3Error::Serialization(e.to_string()))?;
+    let chain = authorization.invocation().chain();
+    let url = labeled(address.endpoint(), chain);
+    let credential =
+        credential(Container::from(chain)).map_err(|e| S3Error::Serialization(e.to_string()))?;
 
     let mut request = http_client()
-        .post(address.endpoint())
+        .post(url)
         .header("Authorization", credential)
         .header("Accept", OBJECT_MEDIA_TYPE);
     if let Some(payload) = payload {
@@ -185,6 +188,25 @@ pub(crate) async fn invoke(
         etag,
         response,
     })
+}
+
+/// The endpoint with the invocation's command and subject in its query,
+/// as `cmd` and `sub`.
+///
+/// The service ignores them; they are for whoever reads a network log,
+/// where every request to the endpoint otherwise looks the same. Only
+/// the command and the subject go there, not the arguments: a browser
+/// keys its preflight cache by URL, so a session's worth of requests
+/// must share a handful of URLs to share a handful of preflights. Both
+/// values are made of characters a query carries as they are, so they
+/// read in a log as they read here.
+pub(crate) fn labeled(endpoint: &str, chain: &InvocationChain<AnySignature>) -> String {
+    let separator = if endpoint.contains('?') { '&' } else { '?' };
+    format!(
+        "{endpoint}{separator}cmd={}&sub={}",
+        chain.command(),
+        chain.subject().as_str()
+    )
 }
 
 /// The error for a service that does not speak this exchange.
