@@ -548,6 +548,54 @@ mod tests {
         );
         assert_eq!(by_attribute, by_entity, "both scan shapes agree");
 
+        // A winner stays won: main, which beat feature's install of the
+        // first seed, revises half of that seed without ever seeing
+        // feature's rows. Feature's rows for those names are still live
+        // on feature, so they contest the revision as they contested the
+        // install, and lose to it the same way. The untouched half keeps
+        // the outcome it had, so no name of the seed changes sides.
+        let mut revision = main.transaction();
+        for (index, name) in first.iter().take(3).enumerate() {
+            revision = revision
+                .retract(
+                    definition
+                        .clone()
+                        .of(name.clone())
+                        .is(format!("main:{index}")),
+                )
+                .assert(
+                    definition
+                        .clone()
+                        .of(name.clone())
+                        .is(format!("main:{}", index + 10)),
+                );
+        }
+        revision.commit().publish().perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        let (by_entity, by_attribute) = winners!(feature, first);
+        assert_eq!(
+            by_entity,
+            vec!["main"; 6],
+            "a revision built on the winner beats what the winner beat"
+        );
+        assert_eq!(by_attribute, by_entity, "both scan shapes agree");
+        let source = TestEnv::new(&feature, &operator, RuleRegistry::new());
+        let revised = AttributeQueryOnly::new(
+            Term::from(definition.clone()),
+            Term::from(first[0].clone()),
+            Term::var("value"),
+            Term::var("cause"),
+        )
+        .perform(&source)
+        .try_vec()
+        .await?;
+        assert_eq!(
+            revised[0].is(),
+            &Value::String("main:10".into()),
+            "the revised names carry the revision's value"
+        );
+
         Ok(())
     }
 
