@@ -599,6 +599,166 @@ mod tests {
         Ok(())
     }
 
+    /// The case the version election leaves open, shown rather than
+    /// argued (dialog-db/dialog-db#513, second half).
+    ///
+    /// Two branches install the same six-name seed concurrently. Main's
+    /// install is the deeper revision, so every name follows main once
+    /// the two meet. But feature, still without having seen main's
+    /// rows, revises half of its own seed in a later commit. That
+    /// revision is deeper than main's install, so for the three names
+    /// it touched it wins, while the three it left alone still belong
+    /// to main's install: feature's lineage lost the contest for the
+    /// batch and then overtook it for part of the batch. A reader gets a
+    /// seed stitched from both installs, on every replica alike.
+    ///
+    /// A per-row election cannot prevent this. For an untouched name it
+    /// sees only the two installs; for a revised name it does not know
+    /// the siblings exist. It also takes a lineage that lost and then
+    /// grew deeper than the winner before the two met, which needs a
+    /// long-used branch installing concurrently with a deeper one: a
+    /// fresh branch meeting an established one never gets there. The
+    /// writer closes it from its side: a revision that re-asserts the
+    /// whole batch, unchanged names included, lifts every name to its
+    /// version, since a row stands at its deepest collapsed claim. This
+    /// test pins the mixed outcome so a change in either direction is a
+    /// visible decision, not an accident.
+    #[dialog_common::test]
+    async fn it_still_mixes_seeds_when_a_losing_lineage_revises_part_of_its_batch()
+    -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        let filler = the!("seed/filler");
+        let definition = the!("seed/definition");
+
+        macro_rules! install {
+            ($branch:expr, $names:expr, $side:expr) => {{
+                let mut transaction = $branch.transaction();
+                for (index, name) in $names.iter().enumerate() {
+                    transaction = transaction.assert(
+                        definition
+                            .clone()
+                            .of(name.clone())
+                            .is(format!("{}:{index}", $side)),
+                    );
+                }
+                transaction.commit().publish().perform(&operator).await?;
+            }};
+        }
+
+        macro_rules! winners {
+            ($branch:expr, $names:expr) => {{
+                let source = TestEnv::new(&$branch, &operator, RuleRegistry::new());
+                let mut by_entity = Vec::new();
+                for name in $names.iter() {
+                    let query = AttributeQueryOnly::new(
+                        Term::from(definition.clone()),
+                        Term::from(name.clone()),
+                        Term::var("value"),
+                        Term::var("cause"),
+                    );
+                    let results = query.perform(&source).try_vec().await?;
+                    assert_eq!(results.len(), 1, "one winner per name");
+                    by_entity.push(side_of(results[0].is()));
+                }
+                let query = AttributeQueryOnly::new(
+                    Term::from(definition.clone()),
+                    Term::var("name"),
+                    Term::var("value"),
+                    Term::var("cause"),
+                );
+                let mut by_attribute: Vec<(Entity, String)> = query
+                    .perform(&source)
+                    .try_vec()
+                    .await?
+                    .iter()
+                    .filter(|result| $names.contains(result.of()))
+                    .map(|result| (result.of().clone(), side_of(result.is())))
+                    .collect();
+                by_attribute.sort_by_key(|(entity, _)| {
+                    $names
+                        .iter()
+                        .position(|name| name == entity)
+                        .expect("a seed name")
+                });
+                let by_attribute: Vec<String> =
+                    by_attribute.into_iter().map(|(_, side)| side).collect();
+                (by_entity, by_attribute)
+            }};
+        }
+
+        fn side_of(value: &Value) -> String {
+            let Value::String(value) = value else {
+                panic!("seed values are strings, got {value:?}");
+            };
+            value.split(':').next().expect("side:index").to_string()
+        }
+
+        // A shared base, so the pulls below are merges.
+        assert_relation!(main, &operator, filler, Entity::new()?, "base".to_string());
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        // Concurrent installs: main goes one revision deeper first, so
+        // its install outranks feature's.
+        let names: Vec<Entity> = (0..6).map(|_| Entity::new()).collect::<Result<_, _>>()?;
+        assert_relation!(
+            main,
+            &operator,
+            filler,
+            Entity::new()?,
+            "deeper".to_string()
+        );
+        install!(main, names, "main");
+        install!(feature, names, "feature");
+
+        // Feature, still unaware of main's install, goes deeper than it
+        // and revises half of its own seed: it retracts the values it
+        // wrote and asserts new ones for the first three names.
+        assert_relation!(
+            feature,
+            &operator,
+            filler,
+            Entity::new()?,
+            "deeper still".to_string()
+        );
+        let mut revision = feature.transaction();
+        for (index, name) in names.iter().take(3).enumerate() {
+            revision = revision
+                .retract(
+                    definition
+                        .clone()
+                        .of(name.clone())
+                        .is(format!("feature:{index}")),
+                )
+                .assert(
+                    definition
+                        .clone()
+                        .of(name.clone())
+                        .is(format!("feature:{}", index + 10)),
+                );
+        }
+        revision.commit().publish().perform(&operator).await?;
+
+        // Now the two meet, in both directions.
+        feature.pull().perform(&operator).await?;
+        main.pull().from(&feature).perform(&operator).await?;
+
+        let mixed = vec!["feature", "feature", "feature", "main", "main", "main"];
+        for branch in [&feature, &main] {
+            let (by_entity, by_attribute) = winners!(branch, names);
+            assert_eq!(
+                by_entity, mixed,
+                "the revised names follow feature's deeper revision, the rest main's install"
+            );
+            assert_eq!(by_attribute, by_entity, "both scan shapes agree");
+        }
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_attribute() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
