@@ -1449,6 +1449,50 @@ mod tests {
             assert_eq!(redeemed, 2, "the put and the get were each redeemed once");
             Ok(())
         }
+
+        /// A container carrying a payload can outgrow what a service
+        /// reads. Turned away for size, the write goes through a permit
+        /// instead, the way it always did, and the read that follows is
+        /// still performed in its request.
+        #[dialog_common::test(max_body_bytes = 1024u64)]
+        async fn fork_completes_a_write_the_service_turned_away_for_size(
+            s3: UcanS3Address,
+        ) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-too-large"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let content = vec![7u8; 4096];
+            let digest = Blake3Hash::hash(&content);
+            Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .put(Buffer::from(content.clone()))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            let retrieved = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            assert_eq!(retrieved, Some(content));
+
+            let (performed, redeemed) = answered(&s3).await?;
+            assert_eq!(redeemed, 1, "the write went through a permit");
+            assert_eq!(performed, 1, "the read was performed in its request");
+            Ok(())
+        }
     }
 
     // Blob effects stream through a real filesystem, so these tests build

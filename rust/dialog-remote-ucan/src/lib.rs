@@ -25,10 +25,14 @@
 
 mod address;
 mod direct;
+#[cfg(any(test, feature = "helpers"))]
+pub mod helpers;
 mod provider;
+pub mod server;
 mod site;
 
 pub use address::UcanAddress;
 pub use dialog_remote_ucan_s3::{Ucan, UcanAuthorization, UcanInvocation};
 pub use direct::{ACCEPT, OBJECT_MEDIA_TYPE, PERMIT_MEDIA_TYPE};
+pub use server::{Access, Answer, Refusal, Request, Response, Store, Verified};
 pub use site::{UcanFork, UcanSite};

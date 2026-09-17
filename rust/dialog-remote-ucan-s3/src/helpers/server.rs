@@ -36,6 +36,10 @@ struct ServerState {
     /// Off, the service answers every invocation with a permit, as a
     /// service that predates the direct exchange does.
     direct: bool,
+    /// The largest body the service reads; larger ones are turned away
+    /// with a 413, as the real service turns away a container that
+    /// outgrew what it expected.
+    max_body_bytes: u64,
     stats: Stats,
 }
 
@@ -64,17 +68,19 @@ impl UcanAccessServer {
         access_key: &str,
         secret_key: &str,
     ) -> anyhow::Result<Self> {
-        Self::start_with(s3_server, bucket, access_key, secret_key, true).await
+        Self::start_with(s3_server, bucket, access_key, secret_key, true, u64::MAX).await
     }
 
     /// Start the service, performing operations directly when `direct`
-    /// and answering every invocation with a permit otherwise.
+    /// and answering every invocation with a permit otherwise, and
+    /// turning away bodies over `max_body_bytes`.
     pub async fn start_with(
         s3_server: LocalS3,
         bucket: &str,
         access_key: &str,
         secret_key: &str,
         direct: bool,
+        max_body_bytes: u64,
     ) -> anyhow::Result<Self> {
         let address = Address::builder(&s3_server.endpoint)
             .region("us-east-1")
@@ -87,6 +93,7 @@ impl UcanAccessServer {
         let authorizer = Arc::new(ServerState {
             authorizer: RwLock::new(UcanAuthorizer::new(address, Some(credential))),
             direct,
+            max_body_bytes,
             stats: Stats::default(),
         });
 
@@ -184,6 +191,15 @@ async fn handle_request(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|accept| accept.contains("application/octet-stream"));
 
+    let declared = req
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared.is_some_and(|declared| declared > state.max_body_bytes) {
+        return Ok(too_large(state.max_body_bytes));
+    }
+
     use http_body_util::BodyExt;
     let body_bytes = match req.into_body().collect().await {
         Ok(collected) => collected.to_bytes(),
@@ -197,6 +213,9 @@ async fn handle_request(
                 .unwrap());
         }
     };
+    if body_bytes.len() as u64 > state.max_body_bytes {
+        return Ok(too_large(state.max_body_bytes));
+    }
 
     let authorizer = state.authorizer.read().await;
     match authorizer.authorize(&body_bytes).await {
@@ -229,6 +248,21 @@ async fn handle_request(
             ))))
             .unwrap()),
     }
+}
+
+/// The answer to a body over the limit, in the shape the real service
+/// gives: a JSON error the client reads as "turned away for size".
+fn too_large(limit: u64) -> Response<http_body_util::Full<bytes::Bytes>> {
+    use bytes::Bytes;
+    use http_body_util::Full;
+
+    add_cors_headers(Response::builder())
+        .status(StatusCode::PAYLOAD_TOO_LARGE)
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(format!(
+            r#"{{"error":{{"code":"PAYLOAD_TOO_LARGE","message":"request body exceeds the {limit}-byte limit"}}}}"#
+        ))))
+        .unwrap()
 }
 
 /// Perform the operation the permit authorizes against the local S3,
@@ -312,6 +346,10 @@ pub struct UcanS3Settings {
     /// proved them. Off, it answers with permits only, standing in for a
     /// service that predates the direct exchange. Defaults to on.
     pub direct: bool,
+    /// The largest request body the service reads. Unbounded by default;
+    /// a test sets it to stand in for a service whose limit a container
+    /// with a payload exceeds.
+    pub max_body_bytes: u64,
 }
 
 impl Default for UcanS3Settings {
@@ -321,6 +359,7 @@ impl Default for UcanS3Settings {
             access_key_id: "test-access-key".to_string(),
             secret_access_key: "test-secret-key".to_string(),
             direct: true,
+            max_body_bytes: u64::MAX,
         }
     }
 }
@@ -351,6 +390,7 @@ pub async fn ucan_s3(
         &settings.access_key_id,
         &settings.secret_access_key,
         settings.direct,
+        settings.max_body_bytes,
     )
     .await?;
 
