@@ -6,22 +6,26 @@
 //! every remote effect. Where [`dialog_remote_ucan_s3`] redeems that
 //! container for a permit and then makes a second request against the
 //! object it names, this site asks the service to carry the operation
-//! out in the same request: a read answers with the object's bytes, and
-//! a write ships the bytes it stores inside the container, under the
-//! [`payload`](dialog_ucan_core::Container::payload) key beside the
-//! tokens.
+//! out in the same request. The invocation rides in the `Authorization`
+//! header, in the container spec's text serialization, and the body is
+//! the operation's bytes alone: what a write stores on the way in, what
+//! a read asked for on the way out. Nothing frames the bytes, so either
+//! side can stream them.
 //!
-//! The request is the invocation the service always received, so a
-//! service that does not perform operations directly notices nothing: it
-//! reads the tokens, ignores the payload, and answers with a permit as it
-//! always has. The site tells the two answers apart by content type and
-//! completes a permit the old way, so the cost against such a service is
-//! exactly what it was, one redeem and one object request, never a third.
+//! `Accept` names what the site takes back: the outcome first, a permit
+//! second. A service that does not perform operations verifies the
+//! invocation and answers with a permit, which the site completes the
+//! way the permit flow always has, at the cost that flow always had. A
+//! service that does not read the invocation from the header at all
+//! answers the request as one it cannot read, and the site goes through
+//! the permit flow from the start, one request the poorer. Addresses,
+//! authorization material and the signed invocations are the ones
+//! [`dialog_remote_ucan_s3`] mints; only the exchange with the service
+//! differs.
 //!
-//! Addresses, authorization material and the signed invocations are the
-//! ones [`dialog_remote_ucan_s3`] mints; only the exchange with the service
-//! differs. Blob streams still go through permits: a blob is read and
-//! written in ranges over a URL, which is what a permit is for.
+//! The server side is [`Access`]: an embedder brings a provider of the
+//! effects, the layer decodes and verifies each invocation and performs
+//! it with that provider.
 
 mod address;
 mod direct;
@@ -33,6 +37,9 @@ mod site;
 
 pub use address::UcanAddress;
 pub use dialog_remote_ucan_s3::{Ucan, UcanAuthorization, UcanInvocation};
-pub use direct::{ACCEPT, OBJECT_MEDIA_TYPE, PERMIT_MEDIA_TYPE};
-pub use server::{Access, Answer, Refusal, Request, Response, Store, Verified};
+pub use direct::{
+    ACCEPT, OBJECT_MEDIA_TYPE, PERMIT_MEDIA_TYPE, SCHEME, credential, credential_container,
+    is_credential,
+};
+pub use server::{Access, Answer, Content, Payload, Refusal, Request, Response, Store, Verified};
 pub use site::{UcanFork, UcanSite};

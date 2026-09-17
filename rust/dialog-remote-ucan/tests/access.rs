@@ -1,6 +1,6 @@
 //! The site against the service, on native and on wasm: every effect
 //! the service performs, the refusals it answers with, and the layer's
-//! own checks on what a container carries.
+//! own checks on what a request carries.
 
 #![cfg(feature = "helpers")]
 
@@ -13,13 +13,16 @@ use dialog_common::{Blake3Hash, Buffer};
 use dialog_credentials::{Ed25519Signer, Signer};
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::prelude::*;
+use dialog_effects::blob::BlobError;
 use dialog_effects::blob::prelude::*;
 use dialog_effects::memory::prelude::*;
 use dialog_effects::memory::{MemoryError, Version};
 use dialog_remote_ucan::helpers::{MemoryStore, UcanServiceAddress};
-use dialog_remote_ucan::{Access, Answer, Request, UcanAddress, UcanAuthorization, UcanSite};
+use dialog_remote_ucan::{
+    Access, Answer, Content, Payload, Request, UcanAddress, UcanAuthorization, UcanSite, credential,
+};
 use dialog_ucan::Scope;
-use dialog_ucan_core::Container;
+use dialog_ucan_core::{Container, Tag};
 use dialog_varsig::Principal as _;
 
 fn now_s() -> u64 {
@@ -274,115 +277,285 @@ async fn it_refuses_an_invocation_its_subject_did_not_issue(
     }
 }
 
+/// Read a blob to its end.
+async fn drain(mut reader: dialog_effects::blob::BlobReader) -> anyhow::Result<(Vec<u8>, usize)> {
+    let mut bytes = Vec::new();
+    let mut chunks = 0;
+    while let Some(chunk) = reader.next().await? {
+        bytes.extend_from_slice(&chunk);
+        chunks += 1;
+    }
+    Ok((bytes, chunks))
+}
+
+/// A blob big enough to travel as several chunks.
+fn blob() -> Vec<u8> {
+    (0..20_000u32).flat_map(|i| i.to_le_bytes()).collect()
+}
+
+#[dialog_common::test]
+async fn it_imports_a_blob_and_streams_it_back(service: UcanServiceAddress) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let content = blob();
+    let digest = Blake3Hash::hash(&content);
+
+    let mut sink = perform(
+        &service,
+        &signer,
+        subject
+            .clone()
+            .archive()
+            .blob()
+            .import(digest.clone(), content.len() as u64),
+    )
+    .await?;
+    for part in content.chunks(3_000) {
+        sink.write_all(part).await?;
+    }
+    assert_eq!(sink.finish().await?, digest);
+
+    let reader = perform(&service, &signer, subject.archive().blob().read(digest)).await?;
+    let (served, chunks) = drain(reader).await?;
+    assert_eq!(served, content);
+    assert!(chunks >= 1, "the blob came back as {chunks} chunks");
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_reads_a_range_of_a_blob(service: UcanServiceAddress) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let content = blob();
+    let digest = Blake3Hash::hash(&content);
+    let mut sink = perform(
+        &service,
+        &signer,
+        subject
+            .clone()
+            .archive()
+            .blob()
+            .import(digest.clone(), content.len() as u64),
+    )
+    .await?;
+    sink.write_all(&content).await?;
+    sink.finish().await?;
+
+    let ranged = subject
+        .clone()
+        .archive()
+        .blob()
+        .invoke(dialog_effects::blob::Read::range(
+            digest.clone(),
+            10_000,
+            Some(5_000),
+        ));
+    let reader = perform(&service, &signer, ranged).await?;
+    let (served, _) = drain(reader).await?;
+    assert_eq!(served, &content[10_000..15_000]);
+
+    let tail = subject
+        .archive()
+        .blob()
+        .invoke(dialog_effects::blob::Read::range(digest, 70_000, None));
+    let reader = perform(&service, &signer, tail).await?;
+    let (served, _) = drain(reader).await?;
+    assert_eq!(served, &content[70_000..]);
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_answers_not_found_for_a_blob_it_does_not_hold(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let missing = perform(
+        &service,
+        &signer,
+        subject
+            .archive()
+            .blob()
+            .read(Blake3Hash::hash(b"never imported")),
+    )
+    .await;
+    let missing = missing.err();
+    assert!(
+        matches!(missing, Some(BlobError::NotFound(_))),
+        "a blob the service does not hold is not found, got {missing:?}"
+    );
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_refuses_an_import_whose_bytes_do_not_hash_to_the_digest(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let content = b"what the invocation declares".to_vec();
+    let mut sink = perform(
+        &service,
+        &signer,
+        subject
+            .archive()
+            .blob()
+            .import(Blake3Hash::hash(&content), content.len() as u64),
+    )
+    .await?;
+    sink.write_all(b"what is actually written.....").await?;
+    let finished = sink.finish().await;
+    assert!(
+        matches!(finished, Err(BlobError::DigestMismatch { .. })),
+        "got {finished:?}"
+    );
+    Ok(())
+}
+
 /// The layer itself, driven directly: what it does with a request that
-/// asks for no outcome, an operation it does not perform, and a
-/// container whose payload does not match what the invocation bound.
+/// carries no invocation, a credential it cannot read, an operation it
+/// does not perform, and a body that is not what the invocation bound.
 mod layer {
     use super::*;
 
-    async fn container_for<Fx>(
-        signer: &Ed25519Signer,
-        capability: &Capability<Fx>,
-        payload: Option<&[u8]>,
-    ) -> Vec<u8>
+    async fn credential_for<Fx>(signer: &Ed25519Signer, capability: &Capability<Fx>) -> String
     where
         Fx: Effect + Clone,
         Capability<Fx>: Ability,
     {
         let authorization = issued(signer, capability).await;
-        let mut container = Container::from(authorization.invocation().chain());
-        if let Some(payload) = payload {
-            container = container.with_payload(payload);
+        credential(Container::from(authorization.invocation().chain())).expect("encodes")
+    }
+
+    async fn performed(answer: Answer) -> (u16, Vec<u8>) {
+        match answer {
+            Answer::Performed(response) => {
+                let status = response.status;
+                (status, response.body.collect().await.expect("readable"))
+            }
+            other => panic!("expected the operation's outcome, got {other:?}"),
         }
-        container.into_bytes().expect("the container encodes")
     }
 
     #[dialog_common::test]
-    async fn it_leaves_a_request_for_a_permit_to_the_embedder() {
+    async fn it_leaves_a_request_without_an_invocation_to_the_embedder() {
+        let access = Access::new(MemoryStore::default());
+        assert!(matches!(
+            access.handle(Request::new(None)).await,
+            Answer::Unsupported
+        ));
+        assert!(matches!(
+            access.handle(Request::new(Some("Bearer abc"))).await,
+            Answer::Unsupported
+        ));
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_a_credential_it_cannot_read() {
+        let access = Access::new(MemoryStore::default());
+        for value in ["UCAN ", "UCAN Cnot-a-container", "UCAN Zabc"] {
+            match access.handle(Request::new(Some(value))).await {
+                Answer::Refused(refusal) => {
+                    assert_eq!(refusal.status(), 400, "{value}");
+                    assert!(
+                        matches!(refusal.reason(), AuthorizeError::Malformed { .. }),
+                        "{value}"
+                    );
+                }
+                other => panic!("expected a refusal to {value:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[dialog_common::test]
+    async fn it_reads_the_invocation_in_either_text_form() {
         let (signer, subject) = owner().await;
-        let capability = subject
+        let content = b"content".to_vec();
+        let put = subject
             .archive()
             .catalog("index")
-            .get(Blake3Hash::hash(b"x"));
-        let body = container_for(&signer, &capability, None).await;
+            .put(Buffer::from(content.clone()));
+        let authorization = issued(&signer, &put).await;
+        let container = Container::from(authorization.invocation().chain());
         let access = Access::new(MemoryStore::default());
-        assert!(matches!(
-            access.handle(Request::new(&body)).await,
-            Answer::Unsupported
-        ));
-        assert!(matches!(
-            access
-                .handle(Request::new(&body).accept("application/cbor"))
-                .await,
-            Answer::Unsupported
-        ));
+        for tag in [Tag::Base64Url, Tag::Base64UrlGzip] {
+            let text = String::from_utf8(container.clone().encode(tag).unwrap()).unwrap();
+            let value = format!("UCAN {text}");
+            let request = Request::new(Some(&value)).payload(content.clone());
+            let (status, _) = performed(access.handle(request).await).await;
+            assert_eq!(status, 200, "{tag:?}");
+        }
+        assert_eq!(access.provider().blocks(), 1);
     }
 
     #[dialog_common::test]
-    async fn it_leaves_a_blob_stream_to_the_embedder() {
-        let (signer, subject) = owner().await;
-        let capability = subject.archive().blob().read(Blake3Hash::hash(b"x"));
-        let body = container_for(&signer, &capability, None).await;
-        let access = Access::new(MemoryStore::default());
-        assert!(matches!(
-            access
-                .handle(Request::new(&body).accept("application/octet-stream"))
-                .await,
-            Answer::Unsupported
-        ));
-    }
-
-    #[dialog_common::test]
-    async fn it_requires_the_payload_a_write_stores() {
+    async fn it_requires_the_body_a_write_stores() {
         let (signer, subject) = owner().await;
         let capability = subject
             .archive()
             .catalog("index")
             .put(Buffer::from(b"content".to_vec()));
-        let body = container_for(&signer, &capability, None).await;
+        let value = credential_for(&signer, &capability).await;
         let access = Access::new(MemoryStore::default());
-        match access
-            .handle(Request::new(&body).accept("application/octet-stream"))
-            .await
-        {
-            Answer::Performed(response) => assert_eq!(response.status, 411),
-            other => panic!("expected a 411, got {other:?}"),
-        }
+        let (status, _) = performed(access.handle(Request::new(Some(&value))).await).await;
+        assert_eq!(status, 411);
         assert_eq!(access.provider().blocks(), 0);
     }
 
     #[dialog_common::test]
-    async fn it_refuses_a_payload_that_is_not_what_the_invocation_bound() {
+    async fn it_refuses_a_body_that_is_not_what_the_invocation_bound() {
         let (signer, subject) = owner().await;
         let capability = subject
             .archive()
             .catalog("index")
             .put(Buffer::from(b"content".to_vec()));
-        let body = container_for(&signer, &capability, Some(b"something else")).await;
+        let value = credential_for(&signer, &capability).await;
         let access = Access::new(MemoryStore::default());
-        match access
-            .handle(Request::new(&body).accept("application/octet-stream"))
-            .await
-        {
-            Answer::Performed(response) => assert_eq!(response.status, 400),
-            other => panic!("expected a 400, got {other:?}"),
-        }
+        let request = Request::new(Some(&value)).payload(b"something else".to_vec());
+        let (status, body) = performed(access.handle(request).await).await;
+        assert_eq!(status, 400);
+        assert!(
+            String::from_utf8_lossy(&body).contains("ChecksumMismatch"),
+            "{body:?}"
+        );
         assert_eq!(access.provider().blocks(), 0, "nothing was stored");
     }
 
     #[dialog_common::test]
-    async fn it_refuses_a_container_it_cannot_read() {
+    async fn it_refuses_an_import_shorter_than_declared() {
+        let (signer, subject) = owner().await;
+        let content = b"a blob of some length".to_vec();
+        let capability = subject
+            .archive()
+            .blob()
+            .import(Blake3Hash::hash(&content), content.len() as u64);
+        let value = credential_for(&signer, &capability).await;
         let access = Access::new(MemoryStore::default());
-        match access
-            .handle(Request::new(b"not a container").accept("application/octet-stream"))
-            .await
-        {
-            Answer::Refused(refusal) => {
-                assert_eq!(refusal.status(), 400);
-                assert!(matches!(refusal.reason(), AuthorizeError::Malformed { .. }));
-            }
-            other => panic!("expected a refusal, got {other:?}"),
-        }
+        let request = Request::new(Some(&value)).payload(content[..5].to_vec());
+        let (status, body) = performed(access.handle(request).await).await;
+        assert_eq!(status, 400);
+        assert!(
+            String::from_utf8_lossy(&body).contains("SizeMismatch"),
+            "{body:?}"
+        );
+        assert_eq!(access.provider().blobs(), 0, "nothing was stored");
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_an_import_that_does_not_hash_to_its_digest() {
+        let (signer, subject) = owner().await;
+        let content = b"a blob of some length".to_vec();
+        let capability = subject
+            .archive()
+            .blob()
+            .import(Blake3Hash::hash(&content), content.len() as u64);
+        let value = credential_for(&signer, &capability).await;
+        let access = Access::new(MemoryStore::default());
+        let other = b"a blob of same length".to_vec();
+        let request = Request::new(Some(&value)).payload(other);
+        let (status, body) = performed(access.handle(request).await).await;
+        assert_eq!(status, 400);
+        assert!(
+            String::from_utf8_lossy(&body).contains("DigestMismatch"),
+            "{body:?}"
+        );
+        assert_eq!(access.provider().blobs(), 0, "nothing was stored");
     }
 
     #[dialog_common::test]
@@ -395,28 +568,66 @@ mod layer {
             .catalog("index")
             .put(Buffer::from(content.clone()));
         let access = Access::new(MemoryStore::default());
-        let body = container_for(&signer, &put, Some(&content)).await;
-        match access
-            .handle(Request::new(&body).accept("application/octet-stream"))
-            .await
-        {
-            Answer::Performed(response) => assert!(response.is_success(), "{response:?}"),
-            other => panic!("expected success, got {other:?}"),
-        }
+        let value = credential_for(&signer, &put).await;
+        let request = Request::new(Some(&value)).payload(content.clone());
+        let (status, _) = performed(access.handle(request).await).await;
+        assert_eq!(status, 200);
+
         let get = subject
             .archive()
             .catalog("index")
             .get(Blake3Hash::hash(&content));
-        let body = container_for(&signer, &get, None).await;
-        match access
-            .handle(Request::new(&body).accept("application/octet-stream"))
-            .await
-        {
+        let value = credential_for(&signer, &get).await;
+        let (status, body) = performed(access.handle(Request::new(Some(&value))).await).await;
+        assert_eq!(status, 200);
+        assert_eq!(body, content);
+    }
+
+    /// A blob's bytes reach the provider as they arrive: the layer
+    /// feeds a streamed body into the sink chunk by chunk, and answers
+    /// a read with a stream.
+    #[dialog_common::test]
+    async fn it_streams_a_blob_in_and_out() {
+        let (signer, subject) = owner().await;
+        let content = blob();
+        let digest = Blake3Hash::hash(&content);
+        let import = subject
+            .clone()
+            .archive()
+            .blob()
+            .import(digest.clone(), content.len() as u64);
+        let access = Access::new(MemoryStore::default());
+        let value = credential_for(&signer, &import).await;
+        let source: dialog_effects::blob::BlobReader = Box::new(Pieces {
+            pieces: content.chunks(7_000).map(<[u8]>::to_vec).collect(),
+        });
+        let request = Request::new(Some(&value)).payload(Payload::Stream(source));
+        let (status, _) = performed(access.handle(request).await).await;
+        assert_eq!(status, 200);
+        assert_eq!(access.provider().blobs(), 1);
+
+        let read = subject.archive().blob().read(digest);
+        let value = credential_for(&signer, &read).await;
+        match access.handle(Request::new(Some(&value))).await {
             Answer::Performed(response) => {
                 assert_eq!(response.status, 200);
-                assert_eq!(response.body, content);
+                assert!(matches!(response.body, Content::Stream(_)), "{response:?}");
+                assert_eq!(response.body.collect().await.unwrap(), content);
             }
-            other => panic!("expected the block, got {other:?}"),
+            other => panic!("expected the blob, got {other:?}"),
+        }
+    }
+
+    /// A body that yields the pieces it was given, in order.
+    struct Pieces {
+        pieces: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl dialog_effects::blob::BlobSource for Pieces {
+        async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
+            Ok(self.pieces.pop_front())
         }
     }
 }

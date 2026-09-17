@@ -1,18 +1,25 @@
 //! A loopback access service: [`Access`] over a [`MemoryStore`], behind
-//! a small HTTP server, provisioned for cross-target tests.
+//! a small HTTP server, provisioned for cross-target tests. Request
+//! bodies reach the layer as they arrive and a blob read's answer
+//! leaves as its source yields, so the streaming paths are the ones
+//! the tests drive.
 
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use dialog_common::helpers::{Provider, Service};
-use hyper::body::Incoming;
+use dialog_effects::blob::{BlobError, BlobReader, BlobSource};
+use http_body_util::combinators::UnsyncBoxBody;
+use http_body_util::{BodyExt as _, Full, StreamBody};
+use hyper::body::{Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
 use super::{MemoryStore, UcanServiceAddress};
-use crate::server::{Access, Answer, Request as AccessRequest};
+use crate::server::{Access, Answer, Content, Payload, Request as AccessRequest};
 
 /// A running access service over an in-memory store.
 pub struct UcanServer {
@@ -71,28 +78,65 @@ impl UcanServer {
     }
 }
 
-type Body = http_body_util::Full<bytes::Bytes>;
+type Body = UnsyncBoxBody<Bytes, std::io::Error>;
 
 fn respond(status: StatusCode) -> hyper::http::response::Builder {
     Response::builder()
         .status(status)
         .header("Access-Control-Allow-Origin", "*")
         .header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        .header("Access-Control-Allow-Headers", "Content-Type, Accept")
+        .header(
+            "Access-Control-Allow-Headers",
+            "Authorization, Content-Type, Accept",
+        )
         .header("Access-Control-Expose-Headers", "Content-Type, ETag")
         .header("Cache-Control", "no-store")
 }
 
-fn body(bytes: impl Into<bytes::Bytes>) -> Body {
-    http_body_util::Full::new(bytes.into())
+fn body(bytes: impl Into<Bytes>) -> Body {
+    Full::new(bytes.into())
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
+
+/// A response body streamed from a blob source, chunk by chunk.
+fn streamed(source: BlobReader) -> Body {
+    let chunks = futures_util::stream::unfold(source, |mut source| async move {
+        match source.next().await {
+            Ok(Some(chunk)) => Some((Ok(Frame::data(Bytes::from(chunk))), source)),
+            Ok(None) => None,
+            Err(error) => Some((Err(std::io::Error::other(error.to_string())), source)),
+        }
+    });
+    StreamBody::new(chunks).boxed_unsync()
+}
+
+/// A request body as the layer reads it: chunk by chunk, as it arrives.
+struct IncomingSource {
+    body: Incoming,
+}
+
+#[async_trait::async_trait]
+impl BlobSource for IncomingSource {
+    async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
+        loop {
+            match self.body.frame().await {
+                None => return Ok(None),
+                Some(Err(error)) => return Err(BlobError::Storage(error.to_string())),
+                Some(Ok(frame)) => {
+                    if let Ok(data) = frame.into_data() {
+                        return Ok(Some(data.to_vec()));
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn handle(
     req: Request<Incoming>,
     state: Arc<ServerState>,
 ) -> Result<Response<Body>, Infallible> {
-    use http_body_util::BodyExt as _;
-
     if req.method() == Method::OPTIONS {
         return Ok(respond(StatusCode::NO_CONTENT).body(body("")).unwrap());
     }
@@ -102,9 +146,9 @@ async fn handle(
             .unwrap());
     }
 
-    let accept = req
+    let authorization = req
         .headers()
-        .get("accept")
+        .get("authorization")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     let declared = req
@@ -115,22 +159,10 @@ async fn handle(
     if declared.is_some_and(|declared| declared > state.max_body_bytes) {
         return Ok(too_large(state.max_body_bytes));
     }
-    let bytes = match req.into_body().collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(error) => {
-            return Ok(respond(StatusCode::BAD_REQUEST)
-                .body(body(format!("Failed to read body: {error}")))
-                .unwrap());
-        }
-    };
-    if bytes.len() as u64 > state.max_body_bytes {
-        return Ok(too_large(state.max_body_bytes));
-    }
-
-    let mut request = AccessRequest::new(&bytes);
-    if let Some(accept) = accept.as_deref() {
-        request = request.accept(accept);
-    }
+    let payload: BlobReader = Box::new(IncomingSource {
+        body: req.into_body(),
+    });
+    let request = AccessRequest::new(authorization.as_deref()).payload(Payload::Stream(payload));
     let response = match state.access.handle(request).await {
         Answer::Performed(response) => response,
         Answer::Refused(refusal) => refusal.into_response(),
@@ -138,7 +170,7 @@ async fn handle(
             return Ok(respond(StatusCode::NOT_ACCEPTABLE)
                 .header("Content-Type", "application/json")
                 .body(body(
-                    r#"{"kind":"Unsupported","detail":"this service performs operations only; ask for the outcome"}"#,
+                    r#"{"kind":"Unsupported","detail":"this service performs operations only; send an invocation under the UCAN scheme"}"#,
                 ))
                 .unwrap());
         }
@@ -148,7 +180,11 @@ async fn handle(
     if let Some(version) = &response.version {
         builder = builder.header("ETag", format!("\"{version}\""));
     }
-    Ok(builder.body(body(response.body)).unwrap())
+    let content = match response.body {
+        Content::Bytes(bytes) => body(bytes),
+        Content::Stream(source) => streamed(source),
+    };
+    Ok(builder.body(content).unwrap())
 }
 
 fn too_large(limit: u64) -> Response<Body> {
