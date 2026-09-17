@@ -5181,3 +5181,105 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
 
     Ok(())
 }
+
+/// What a push does when its cached view of upstream has gone stale:
+/// another writer advanced the remote after our last fetch.
+///
+/// Pinned because push's own refresh is what keeps this case from
+/// reaching the upload. The refresh costs a round trip on every push,
+/// so it is a candidate for skipping when the observation is recent;
+/// this test says what must remain true if it ever is skipped. The
+/// contract is not "push succeeds" — it is that a stale base is
+/// *caught*, upstream keeps the revision the other writer published,
+/// and the failure is the typed one callers already recognize.
+#[dialog_common::test]
+async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // Alice publishes the branch both writers track.
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "stale-alice").await?;
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+
+    // Bob tracks the same branch and pulls, so his cache holds the
+    // upstream edition Alice just published.
+    let bob_repo = profile
+        .repository(unique_name("stale-bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = bob_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob_branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+    bob_branch.pull().perform(&operator).await?;
+
+    // Alice advances upstream behind Bob's back. Bob's cache now names
+    // a revision that is no longer the remote's head.
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice-again".parse()?,
+            is: Value::String("Alice again".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+    let ahead = alice_branch
+        .upstream()
+        .map(|upstream| upstream.tree().clone())
+        .expect("alice's upstream records what she published");
+
+    // Bob commits on his stale base and pushes.
+    bob_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:bob".parse()?,
+            is: Value::String("Bob".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    let refused = bob_branch.push().perform(&operator).await;
+
+    // The push is refused, not silently accepted.
+    assert!(
+        matches!(refused, Err(crate::PushError::NonFastForward { .. })),
+        "a push from a stale base must be refused, got: {refused:?}"
+    );
+
+    // And upstream still carries Alice's second revision: a refused
+    // push leaves the head exactly where the other writer put it.
+    let observer = bob_repo.remote("origin").load().perform(&operator).await?;
+    let observed = observer.branch("main").open().perform(&operator).await?;
+    observed.fetch().perform(&operator).await?;
+    assert_eq!(
+        observed.revision().map(|revision| revision.tree),
+        Some(ahead),
+        "upstream keeps the revision the other writer published"
+    );
+
+    // Bob converges the ordinary way: pull, then push.
+    bob_branch.pull().perform(&operator).await?;
+    bob_branch.push().perform(&operator).await?;
+
+    Ok(())
+}
