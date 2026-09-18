@@ -118,8 +118,8 @@ where
     // Connecting is part of reaching the peer, so a failure here is the
     // same kind of answer as a dial that did not land: nothing was sent,
     // and the request stands as retryable.
-    let channel = match site.channel().await {
-        Ok(channel) => channel,
+    let connection = match site.connection().await {
+        Ok(connection) => connection,
         Err(error) => {
             return Err(E::from(Rejection::Unavailable {
                 reason: error.to_string(),
@@ -127,11 +127,17 @@ where
         }
     };
 
-    let answer = match channel.exchange(&address, authorization.into_bytes()).await {
+    let answer = match connection
+        .exchange(&address, authorization.into_bytes())
+        .await
+    {
         Ok(answer) => answer,
         // The peer never answered, so nothing is known about the
-        // request: retryable as it stands.
+        // request: retryable as it stands. The site hears about it
+        // first — a failure that says the link is gone is what drops it,
+        // and the caller's retry is what brings it back.
         Err(error) => {
+            site.broke(&connection, &error).await;
             return Err(E::from(Rejection::Unavailable {
                 reason: error.to_string(),
             }));
