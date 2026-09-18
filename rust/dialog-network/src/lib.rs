@@ -13,7 +13,7 @@
 //!
 //! This crate exposes [`Network`], the composite
 //! [`Site`](dialog_capability::Site) that dispatches fork invocations to
-//! the appropriate transport (S3, UCAN access service, ...). The associated
+//! the appropriate transport (S3, permit or direct UCAN access service, ...). The associated
 //! [`NetworkAddress`], [`NetworkAuthorization`], and `NetworkFork` types
 //! are generated from the struct fields by `#[derive(Site)]` in
 //! `dialog-capability`.
@@ -24,11 +24,15 @@ pub use hydrate::{Hydrate, HydrationRequest, HydrationScheduler};
 use dialog_capability::Site;
 use dialog_remote_fs::Fs;
 use dialog_remote_s3::S3;
-use dialog_remote_ucan::UcanSite;
+use dialog_remote_ucan::UcanSite as DirectUcanSite;
+use dialog_remote_ucan_s3::UcanSite as PermitUcanSite;
 
 /// Network dispatch table for fork invocations.
 ///
-/// Holds one concrete site per supported transport. The `#[derive(Site)]`
+/// Holds one concrete site per supported transport. `ucan` remains the
+/// permit exchange so persisted addresses keep their original meaning;
+/// `ucan_direct` opts into performing the operation with the invocation.
+/// The `#[derive(Site)]`
 /// macro inspects the field types and generates:
 /// - [`NetworkAddress`] -- composite address enum
 /// - [`NetworkAuthorization`] -- composite authorization enum
@@ -39,7 +43,8 @@ use dialog_remote_ucan::UcanSite;
 #[derive(Debug, Clone, Default, Site)]
 pub struct Network {
     s3: S3,
-    ucan: UcanSite,
+    ucan: PermitUcanSite,
+    ucan_direct: DirectUcanSite,
     fs: Fs,
 }
 
@@ -53,7 +58,8 @@ mod tests {
     use dialog_effects::storage::Location;
     use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address as S3Address;
-    use dialog_remote_ucan::UcanAddress;
+    use dialog_remote_ucan::UcanAddress as DirectUcanAddress;
+    use dialog_remote_ucan_s3::UcanAddress as PermitUcanAddress;
 
     fn s3_address() -> S3Address {
         S3Address::builder("https://s3.amazonaws.com")
@@ -63,8 +69,12 @@ mod tests {
             .unwrap()
     }
 
-    fn ucan_address() -> UcanAddress {
-        UcanAddress::new("https://access.example.com")
+    fn ucan_address() -> PermitUcanAddress {
+        PermitUcanAddress::new("https://access.example.com")
+    }
+
+    fn direct_ucan_address() -> DirectUcanAddress {
+        DirectUcanAddress::new("https://access.example.com")
     }
 
     fn fs_address() -> FsAddress {
@@ -77,6 +87,7 @@ mod tests {
     fn it_generates_address_enum_with_variant_per_field() {
         let _: NetworkAddress = NetworkAddress::S3(s3_address());
         let _: NetworkAddress = NetworkAddress::Ucan(ucan_address());
+        let _: NetworkAddress = NetworkAddress::UcanDirect(direct_ucan_address());
         let _: NetworkAddress = NetworkAddress::Fs(fs_address());
     }
 
@@ -89,6 +100,9 @@ mod tests {
 
         let net: NetworkAddress = ucan_address().into();
         assert!(matches!(net, NetworkAddress::Ucan(_)));
+
+        let net: NetworkAddress = direct_ucan_address().into();
+        assert!(matches!(net, NetworkAddress::UcanDirect(_)));
 
         let net: NetworkAddress = fs_address().into();
         assert!(matches!(net, NetworkAddress::Fs(_)));
