@@ -5283,3 +5283,107 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
 
     Ok(())
 }
+
+/// The same stale-base race, but with the caller declaring it already
+/// knows where upstream stands.
+///
+/// The push is still refused and upstream still keeps the other
+/// writer's revision — the head write is conditional, so safety does
+/// not rest on the check that was skipped. What changes is when the
+/// refusal arrives and what it is called: after the upload rather than
+/// before it, and as a version mismatch rather than a non-fast-forward.
+/// A caller that reports conflicts has to recognize both, which is the
+/// trade [`Push::assuming_upstream`] documents.
+#[dialog_common::test]
+async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "assumed-alice").await?;
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+
+    let bob_repo = profile
+        .repository(unique_name("assumed-bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = bob_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob_branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+    bob_branch.pull().perform(&operator).await?;
+
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice-again".parse()?,
+            is: Value::String("Alice again".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+    let ahead = alice_branch
+        .upstream()
+        .map(|upstream| upstream.tree().clone())
+        .expect("alice's upstream records what she published");
+
+    bob_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:bob".parse()?,
+            is: Value::String("Bob".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    let refused = bob_branch
+        .push()
+        .assuming_upstream()
+        .perform(&operator)
+        .await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(crate::PushError::PublishRemoteBranch(
+                crate::PublishRemoteBranchError::Publish(
+                    crate::PublishError::VersionMismatch { .. }
+                )
+            ))
+        ),
+        "an assumed push whose upstream moved is refused by the conditional write, got: {refused:?}"
+    );
+
+    let observer = bob_repo.remote("origin").load().perform(&operator).await?;
+    let observed = observer.branch("main").open().perform(&operator).await?;
+    observed.fetch().perform(&operator).await?;
+    assert_eq!(
+        observed.revision().map(|revision| revision.tree),
+        Some(ahead),
+        "upstream keeps the revision the other writer published"
+    );
+
+    // And the ordinary route still converges.
+    bob_branch.pull().perform(&operator).await?;
+    bob_branch.push().perform(&operator).await?;
+
+    Ok(())
+}
