@@ -67,6 +67,18 @@ impl Network {
         self.iroh = Iroh::connecting(connect);
         self
     }
+
+    /// Dispatch iroh forks through a site built elsewhere.
+    ///
+    /// For an embedder that has to hold the site as well as give it
+    /// away: cloning an [`Iroh`] shares its link, so a table built from
+    /// one keeps whatever connection the original has — and an embedder
+    /// that rebuilds its environment (a session rotating, say) can hand
+    /// the new one the live link rather than making it reconnect.
+    pub fn sharing_iroh(mut self, iroh: Iroh) -> Self {
+        self.iroh = iroh;
+        self
+    }
 }
 
 #[cfg(test)]
