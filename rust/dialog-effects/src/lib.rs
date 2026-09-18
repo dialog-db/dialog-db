@@ -43,6 +43,7 @@ pub mod authority;
 pub mod blob;
 pub mod credential;
 pub mod memory;
+pub mod peer;
 pub mod rejection;
 pub mod space;
 pub mod storage;

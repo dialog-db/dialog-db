@@ -5,6 +5,7 @@
 mod access;
 mod builder;
 mod fork;
+mod peer;
 mod space;
 #[cfg(test)]
 mod test;

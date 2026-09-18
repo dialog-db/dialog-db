@@ -33,7 +33,7 @@
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_did_web::{PerformingResolver, Resolve};
-use dialog_effects::{Use, archive, blob, memory};
+use dialog_effects::{Use, archive, blob, memory, peer};
 use dialog_ucan_core::container::bundle::InvocationBundle;
 use dialog_ucan_core::{
     Environment, InvocationChain, VerificationContext, revocation::RevocationChecker,
@@ -63,6 +63,7 @@ pub trait Store:
     + Provider<blob::Read>
     + Provider<blob::Write>
     + Provider<blob::Import>
+    + Provider<peer::Hello>
     + ConditionalSync
 {
 }
@@ -77,6 +78,7 @@ impl<T> Store for T where
         + Provider<blob::Read>
         + Provider<blob::Write>
         + Provider<blob::Import>
+        + Provider<peer::Hello>
         + ConditionalSync
 {
 }
@@ -195,6 +197,17 @@ where
         let command: Vec<&str> = chain.command().0.iter().map(String::as_str).collect();
 
         match command.as_slice() {
+            // A unit effect is constructed, never read: there is
+            // nothing in the arguments to deserialize it from.
+            ["use", "get", "peer"] => {
+                let capability = Subject::from(subject.clone())
+                    .attenuate(Use)
+                    .attenuate(peer::Peer)
+                    .attenuate(peer::Hello);
+                Ok(Answer::Value(performed(
+                    Provider::<peer::Hello>::execute(&self.store, capability).await,
+                )))
+            }
             ["use", "get", "archive", "block"] => {
                 let capability = archive_claim::<archive::Get>(&subject, args)?;
                 Ok(Answer::Value(performed(
