@@ -15,7 +15,7 @@ use dialog_capability::{Capability, Did, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
 use dialog_effects::credential::Secret;
-use dialog_effects::{archive, blob, credential, memory, storage};
+use dialog_effects::{archive, blob, credential, memory, peer, storage};
 
 use loader::Loader;
 use router::Router;
@@ -137,6 +137,35 @@ where
     }
 }
 
+/// The spaces this environment has mounted, offered by DID alone.
+///
+/// A pool is keyed by subject and holds no labels, so every offer here
+/// is nameless. That is the truthful answer for a store — a name is what
+/// its embedder calls a space, not something the space's identity
+/// implies — and an embedder with names of its own supplies them by
+/// answering this itself.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<peer::Spaces> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        _input: Capability<peer::Spaces>,
+    ) -> Result<Vec<peer::Offer>, peer::PeerError> {
+        Ok(self
+            .mounted()
+            .into_iter()
+            .map(|subject| peer::Offer {
+                subject,
+                name: None,
+            })
+            .collect())
+    }
+}
+
 impl<S: Clone> Storage<S> {
     /// Create a new empty environment.
     pub fn new() -> Self {
@@ -150,6 +179,16 @@ impl<S: Clone> Storage<S> {
     /// Check if a DID is mounted.
     pub fn contains(&self, did: &Did) -> bool {
         self.router.spaces.contains(did)
+    }
+
+    /// Every space mounted here, by subject DID.
+    ///
+    /// What this environment can actually route an effect to, which is
+    /// not the same as every space on the disk behind it: a space is
+    /// mounted by `storage::Load` or `storage::Create` and not before.
+    /// A caller that means "everything stored" has to mount them first.
+    pub fn mounted(&self) -> Vec<Did> {
+        self.router.spaces.addresses()
     }
 }
 

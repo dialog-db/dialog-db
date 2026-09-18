@@ -63,6 +63,19 @@ impl<Address: Eq + Hash, R> Pool<Address, R> {
     pub fn insert(&self, address: Address, resource: R) -> Option<R> {
         self.resources.write().insert(address, resource)
     }
+
+    /// Every address currently held, in no particular order.
+    ///
+    /// Collected rather than iterated, because the lock must not outlive
+    /// the call: a caller holding an iterator would be holding the read
+    /// guard, and this pool's whole discipline is that guards are
+    /// short-lived and never span an `.await`.
+    pub fn addresses(&self) -> Vec<Address>
+    where
+        Address: Clone,
+    {
+        self.resources.read().keys().cloned().collect()
+    }
 }
 
 #[cfg(test)]
