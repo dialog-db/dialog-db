@@ -1,6 +1,7 @@
 use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve};
 use dialog_capability::{Capability, Did, Policy};
 use dialog_common::ConditionalSync;
+use dialog_common::time::{self, Duration, SystemTime};
 use dialog_effects::memory::prelude::CellExt;
 use dialog_effects::memory::{self, Edition, Version};
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
@@ -9,8 +10,83 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 use std::sync::Arc;
 
-/// Cached [`Edition`] behind a shared lock.
-pub type SharedState<T> = Arc<RwLock<Option<Edition<T>>>>;
+/// An edition and when this replica last observed it.
+///
+/// The stamp is this replica's own reading of its clock at the moment
+/// the value was confirmed — a resolve that answered, or a publish that
+/// landed — not anything a writer minted. It says how old our knowledge
+/// is, which is what a caller weighing "refresh, or act on what I hold"
+/// needs to know.
+///
+/// It is an observation, never an input to correctness: a version is
+/// what decides whether a write may land, and a clock that jumps must
+/// not be able to change that. The cost of a stamp read wrongly is one
+/// refresh paid or skipped.
+#[derive(Debug, Clone)]
+pub struct Observed<T> {
+    /// The edition observed.
+    pub edition: Edition<T>,
+    /// When this replica confirmed it.
+    pub at: SystemTime,
+}
+
+impl<T> Observed<T> {
+    /// Stamp `edition` as observed now.
+    pub fn now(edition: Edition<T>) -> Self {
+        Self {
+            edition,
+            at: time::now(),
+        }
+    }
+
+    /// How long ago this was observed.
+    pub fn age(&self) -> Age {
+        match time::now().duration_since(self.at) {
+            Ok(elapsed) => Age::Since(elapsed),
+            Err(_) => Age::Unknown,
+        }
+    }
+}
+
+/// How old a cached value's observation is.
+///
+/// Three answers, not two: a caller that treats "never observed" and "a
+/// clock that moved" alike still gets the safe reading from
+/// [`is_fresher_than`](Age::is_fresher_than), while one that meters or
+/// logs can tell them apart. Collapsing them into an absent duration
+/// hid a real distinction behind a value that is easy to misread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Age {
+    /// Nothing is cached, so nothing has been observed.
+    Unobserved,
+    /// Observed this long ago.
+    Since(Duration),
+    /// Observed, but the clock has moved backwards since, so how long
+    /// ago cannot be said.
+    Unknown,
+}
+
+impl Age {
+    /// Whether the observation is newer than `limit`.
+    ///
+    /// False for anything that is not a duration we can vouch for, so a
+    /// caller asking "may I act on what I hold?" is told no when the
+    /// answer is unknown.
+    pub fn is_fresher_than(&self, limit: Duration) -> bool {
+        matches!(self, Age::Since(elapsed) if *elapsed < limit)
+    }
+
+    /// The elapsed time, when it is known.
+    pub fn elapsed(&self) -> Option<Duration> {
+        match self {
+            Age::Since(elapsed) => Some(*elapsed),
+            Age::Unobserved | Age::Unknown => None,
+        }
+    }
+}
+
+/// Cached [`Observed`] edition behind a shared lock.
+pub type SharedState<T> = Arc<RwLock<Option<Observed<T>>>>;
 
 /// Typed cache over shared state. Handles encode/decode and cache updates.
 #[derive(Debug)]
@@ -19,6 +95,20 @@ pub struct Cache<T, Codec: Clone = CborEncoder> {
     pub codec: Codec,
     /// Shared state holding the last-known edition for this cell.
     pub state: SharedState<T>,
+}
+
+impl<T, Codec: Clone> Cache<T, Codec> {
+    /// How long ago this cell's value was confirmed.
+    ///
+    /// Reads only the stamp, so it asks nothing of `T`: a caller
+    /// weighing a refresh should not have to be able to clone the value
+    /// to ask how old it is.
+    pub fn age(&self) -> Age {
+        self.state
+            .read()
+            .as_ref()
+            .map_or(Age::Unobserved, |o| o.age())
+    }
 }
 
 impl<T, Codec: Clone> Clone for Cache<T, Codec> {
@@ -33,22 +123,28 @@ impl<T, Codec: Clone> Clone for Cache<T, Codec> {
 impl<T: Clone, Codec: Clone> Cache<T, Codec> {
     /// Read the cached content.
     pub fn content(&self) -> Option<T> {
-        self.state.read().as_ref().map(|e| e.content.clone())
+        self.state
+            .read()
+            .as_ref()
+            .map(|o| o.edition.content.clone())
     }
 
     /// Read the full cached edition.
     pub fn edition(&self) -> Option<Edition<T>> {
-        self.state.read().clone()
+        self.state.read().as_ref().map(|o| o.edition.clone())
     }
 
     /// Read just the cached version.
     pub fn version(&self) -> Option<Version> {
-        self.state.read().as_ref().map(|e| e.version.clone())
+        self.state
+            .read()
+            .as_ref()
+            .map(|o| o.edition.version.clone())
     }
 
-    /// Update the cache with a new edition.
+    /// Update the cache with a new edition, observed now.
     pub fn update(&self, edition: Edition<T>) {
-        *self.state.write() = Some(edition);
+        *self.state.write() = Some(Observed::now(edition));
     }
 
     /// Clear the cache.
@@ -132,6 +228,15 @@ impl<T> Cell<T> {
     /// Returns the name of this cell.
     pub fn name(&self) -> &str {
         &memory::Cell::of(&self.capability).cell
+    }
+
+    /// How long ago this replica confirmed this cell's value.
+    ///
+    /// For a cell read over the network, this is how stale the local
+    /// answer is, which is what a caller weighing another round trip
+    /// against acting on what it holds needs to know.
+    pub fn age(&self) -> Age {
+        self.cache.age()
     }
 }
 
@@ -645,6 +750,80 @@ mod tests {
         };
         let result = cell_b.publish(v2).perform(&provider).await;
         assert!(result.is_err(), "publish with stale edition should fail");
+
+        Ok(())
+    }
+
+    /// A cached value carries how long ago this replica confirmed it,
+    /// so a caller can weigh acting on what it holds against paying for
+    /// a refresh. Nothing is cached until something is observed.
+    #[dialog_common::test]
+    fn it_reports_how_long_ago_a_value_was_observed() -> Result<()> {
+        let cell: Cell<String> = test_cell("observed");
+        assert_eq!(
+            cell.cache.age(),
+            Age::Unobserved,
+            "a cell that has observed nothing says so"
+        );
+        assert!(
+            !cell.cache.age().is_fresher_than(Duration::from_secs(60)),
+            "an unobserved value is never fresh enough to act on"
+        );
+
+        // A value is observed at the moment it is cached, and the stamp
+        // is compared against the cell's own clock, so the observation
+        // is stale by construction once that clock has moved past it.
+        let observed = Observed::now(Edition {
+            content: "first".to_string(),
+            version: Version::from("v1"),
+        });
+        let elapsed = Duration::from_millis(50);
+        *cell.cache.state.write() = Some(Observed {
+            at: observed.at - elapsed,
+            ..observed
+        });
+        let first = cell
+            .cache
+            .age()
+            .elapsed()
+            .expect("an observed value has an elapsed age");
+        assert!(
+            first >= elapsed,
+            "an observation made {elapsed:?} ago is at least that old, got {first:?}"
+        );
+        assert!(
+            !cell.cache.age().is_fresher_than(Duration::from_millis(10)),
+            "and is not fresher than a limit it has already outlived"
+        );
+
+        // Re-observing resets the clock: the age is of the observation,
+        // not of the value, so a re-confirmed value reads as fresh even
+        // when its content and version never changed.
+        cell.cache.update(Edition {
+            content: "first".to_string(),
+            version: Version::from("v1"),
+        });
+        let second = cell
+            .cache
+            .age()
+            .elapsed()
+            .expect("an observed value has an elapsed age");
+        assert!(
+            second < first,
+            "re-observing the same value makes it fresh again, {second:?} vs {first:?}"
+        );
+        assert!(
+            cell.cache.age().is_fresher_than(Duration::from_secs(60)),
+            "a value observed just now is fresh"
+        );
+
+        // Clearing forgets the observation along with the value.
+        cell.cache.clear();
+        assert_eq!(
+            cell.cache.age(),
+            Age::Unobserved,
+            "a cleared cell forgets the observation with the value"
+        );
 
         Ok(())
     }

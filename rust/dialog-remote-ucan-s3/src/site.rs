@@ -59,6 +59,11 @@ pub use dialog_ucan::{Ucan, UcanInvocation};
 pub struct UcanAuthorization(UcanInvocation);
 
 impl UcanAuthorization {
+    /// The signed invocation this authorization presents.
+    pub fn invocation(&self) -> &UcanInvocation {
+        &self.0
+    }
+
     /// Redeem this authorization at the access service for a presigned URL permit.
     pub async fn redeem(&self, address: &UcanAddress) -> Result<Permit, S3Error> {
         let body = self

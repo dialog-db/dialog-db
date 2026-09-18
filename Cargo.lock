@@ -1326,6 +1326,7 @@ dependencies = [
  "dialog-effects",
  "dialog-remote-fs",
  "dialog-remote-s3",
+ "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "serde",
 ]
@@ -1346,6 +1347,7 @@ dependencies = [
  "dialog-identity",
  "dialog-network",
  "dialog-remote-s3",
+ "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "dialog-repository",
  "dialog-storage",
@@ -1481,6 +1483,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-remote-ucan"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base58",
+ "bytes",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-did-web",
+ "dialog-effects",
+ "dialog-remote-s3",
+ "dialog-remote-ucan-s3",
+ "dialog-ucan",
+ "dialog-ucan-core",
+ "dialog-varsig",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-remote-ucan-s3"
 version = "0.1.0"
 dependencies = [
@@ -1539,6 +1574,7 @@ dependencies = [
  "dialog-operator",
  "dialog-query",
  "dialog-remote-s3",
+ "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "dialog-search-tree",
  "dialog-storage",
@@ -1705,6 +1741,7 @@ dependencies = [
  "dialog-common",
  "dialog-credentials",
  "dialog-varsig",
+ "flate2",
  "futures",
  "getrandom 0.2.16",
  "ipld-core",

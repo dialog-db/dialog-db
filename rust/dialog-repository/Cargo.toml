@@ -28,6 +28,7 @@ dialog-effects = { workspace = true }
 dialog-network = { workspace = true }
 dialog-remote-s3 = { workspace = true }
 dialog-remote-ucan-s3 = { workspace = true }
+dialog-remote-ucan = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-search-tree = { workspace = true }
 dialog-ucan = { workspace = true }

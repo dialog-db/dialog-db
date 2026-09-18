@@ -31,11 +31,47 @@ use crate::{
 pub struct Push<'a> {
     branch: &'a Branch,
     to: Option<Upstream>,
+    confirm_upstream: bool,
 }
 
 impl<'a> Push<'a> {
     fn new(branch: &'a Branch) -> Self {
-        Self { branch, to: None }
+        Self {
+            branch,
+            to: None,
+            confirm_upstream: true,
+        }
+    }
+
+    /// Push without first confirming where upstream stands.
+    ///
+    /// A push reads the upstream head before its fast-forward check, so
+    /// that a push doomed by another writer is refused before the upload
+    /// rather than after it. That read costs a round trip, and a caller
+    /// that *just* read the same cell — a sync sweep that pulls and then
+    /// pushes — is paying for an answer it already has.
+    ///
+    /// Only the caller can weigh that, which is why this is not decided
+    /// here from a freshness rule of our own: how recently *we* observed
+    /// upstream says nothing about whether *someone else* has written
+    /// since, so the saving is real only when we are the likely sole
+    /// writer. Read [`Cell::age`](crate::Age) and decide.
+    ///
+    /// Skipping is safe, never merely cheap: the head write is a
+    /// conditional request carrying the version we hold, so a remote
+    /// that moved rejects it regardless. What is given up is *early*
+    /// detection. The costs of being wrong:
+    ///
+    /// - The novelty upload ships before the rejection. Those blocks are
+    ///   content-addressed, so the target absorbs them idempotently and
+    ///   nothing is corrupted, but the bandwidth is spent.
+    /// - The refusal arrives as
+    ///   [`PublishError::VersionMismatch`](crate::PublishError) rather
+    ///   than [`PushError::NonFastForward`]. A caller that reports
+    ///   conflicts must recognize both.
+    pub fn assuming_upstream(mut self) -> Self {
+        self.confirm_upstream = false;
+        self
     }
 
     /// Push to the given branch instead of the default upstream.
@@ -194,9 +230,13 @@ impl Push<'_> {
                     .await?;
 
                 // Refresh the cache from the remote so our divergence
-                // check sees the latest upstream tree, not whatever
-                // was in our last snapshot.
-                upstream.fetch().perform(env).await?;
+                // check sees the latest upstream tree, not whatever was
+                // in our last snapshot. The caller may already hold a
+                // fresh answer and say so; see [`Push::assuming_upstream`]
+                // for what that gives up.
+                if self.confirm_upstream {
+                    upstream.fetch().perform(env).await?;
+                }
 
                 // The trust boundary, same as pull's: this head was minted
                 // elsewhere, and every gate below (the fast-forward check,
