@@ -2250,6 +2250,271 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
     Ok(())
 }
 
+/// A local upstream that is GONE leaves provenance unreadable, and the
+/// forward must happen from a remote the branch still names.
+///
+/// Attribution resolves local entries by loading their branches, so a
+/// deleted one leaves part of the tracked set unreadable. Reading that as
+/// "no remotes through there" would make the push target look like the
+/// sole source and skip forwarding what `backup` brought in — the
+/// laundering `notes/version-control.md` invariant 3 warns about, which
+/// deleting a branch is what finally makes reachable. Failing the whole
+/// push on the unreadable entry is no better: the content is right there
+/// on a remote this branch tracks. Unknown provenance means the fast path
+/// stands down and probes decide, so the forward runs from the sources
+/// that are still identifiable.
+#[dialog_common::test]
+async fn it_forwards_adopted_content_when_a_tracked_local_upstream_is_gone(
+    s3: S3Address,
+) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // Remote A: history from the authoring device.
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "orphan-a").await?;
+    for batch in 0..3 {
+        let facts: Vec<_> = (0..60)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{batch}-{i}")),
+                    cause: None,
+                })
+            })
+            .collect();
+        alice_branch
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+    alice_branch.push().perform(&operator).await?;
+
+    let b_address = S3Address {
+        bucket: format!("{}-second", s3.bucket),
+        ..s3.clone()
+    };
+    profile
+        .credential()
+        .site(s3_site_address(&b_address))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator)
+        .await?;
+    let device_repo = profile
+        .repository(unique_name("orphan-device"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin_a = device_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let origin_b = device_repo
+        .remote("mirror")
+        .create(s3_site_address(&b_address))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+
+    // `backup` adopts A by root; `main` tracks A too, and adopts from
+    // local `backup`. Neither pull reads a block.
+    let backup = device_repo
+        .branch("backup")
+        .open()
+        .perform(&operator)
+        .await?;
+    let remote_a = origin_a.branch("main").open().perform(&operator).await?;
+    backup.set_upstream(&remote_a).perform(&operator).await?;
+    backup
+        .pull()
+        .perform(&operator)
+        .await?
+        .expect("backup adopts from A");
+    let main = device_repo.branch("main").open().perform(&operator).await?;
+    main.set_upstream(&remote_a).perform(&operator).await?;
+    main.pull()
+        .from(&backup)
+        .perform(&operator)
+        .await?
+        .expect("main adopts from local backup");
+
+    // The entry naming `backup` survives the branch — the tracked set only
+    // ever grows — but nothing can be read through it any more.
+    device_repo
+        .branch("backup")
+        .delete()
+        .perform(&operator)
+        .await?;
+    assert!(
+        main.upstreams()
+            .iter()
+            .any(|entry| entry.branch() == "backup"),
+        "deleting the branch does not remove the entry naming it"
+    );
+
+    let remote_b = origin_b.branch("main").open().perform(&operator).await?;
+    let pushed = main.push().to(&remote_b).perform(&operator).await?;
+    assert!(
+        pushed.is_some(),
+        "the push lands, forwarding from the remote main still tracks"
+    );
+
+    // A replica that has only ever heard of B reads the full history,
+    // which it can only do if the forward happened.
+    let reader_repo = profile
+        .repository(unique_name("orphan-reader"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let reader_origin = reader_repo
+        .remote("origin")
+        .create(s3_site_address(&b_address))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let reader_branch = reader_repo.branch("main").open().perform(&operator).await?;
+    let reader_remote = reader_origin
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    reader_branch
+        .set_upstream(reader_remote)
+        .perform(&operator)
+        .await?;
+    reader_branch
+        .pull()
+        .perform(&operator)
+        .await?
+        .expect("reader adopts from B");
+    let names: Vec<_> = reader_branch
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        names.len(),
+        180,
+        "every fact adopted through the deleted upstream reads from B"
+    );
+
+    Ok(())
+}
+
+/// The honest limit of deleting a branch others adopted content through:
+/// when the deleted branch was the ONLY route to that content's remote,
+/// the push refuses rather than publishing a head the target cannot serve.
+///
+/// Attribution cannot recover what the deleted branch tracked, and nothing
+/// else on the pusher names it, so there is no source to forward from.
+/// Refusing is the only safe answer left — and it is loud, which is the
+/// difference that matters: the alternative is a published head whose
+/// readers fail on a missing block. A caller that deletes branches should
+/// keep the remotes its other branches depend on reachable from those
+/// branches.
+#[dialog_common::test]
+async fn it_refuses_to_publish_a_head_whose_only_provenance_was_deleted(
+    s3: S3Address,
+) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "stranded-a").await?;
+    for batch in 0..3 {
+        let facts: Vec<_> = (0..60)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{batch}-{i}")),
+                    cause: None,
+                })
+            })
+            .collect();
+        alice_branch
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+    alice_branch.push().perform(&operator).await?;
+
+    let b_address = S3Address {
+        bucket: format!("{}-second", s3.bucket),
+        ..s3.clone()
+    };
+    profile
+        .credential()
+        .site(s3_site_address(&b_address))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator)
+        .await?;
+    let device_repo = profile
+        .repository(unique_name("stranded-device"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin_a = device_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let origin_b = device_repo
+        .remote("mirror")
+        .create(s3_site_address(&b_address))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let backup = device_repo
+        .branch("backup")
+        .open()
+        .perform(&operator)
+        .await?;
+    let remote_a = origin_a.branch("main").open().perform(&operator).await?;
+    backup.set_upstream(remote_a).perform(&operator).await?;
+    backup
+        .pull()
+        .perform(&operator)
+        .await?
+        .expect("backup adopts from A");
+
+    // `main`'s only route to A is through `backup`, which then goes away.
+    let main = device_repo.branch("main").open().perform(&operator).await?;
+    main.pull()
+        .from(&backup)
+        .perform(&operator)
+        .await?
+        .expect("main adopts from local backup");
+    device_repo
+        .branch("backup")
+        .delete()
+        .perform(&operator)
+        .await?;
+
+    let remote_b = origin_b.branch("main").open().perform(&operator).await?;
+    let refused = main.push().to(&remote_b).perform(&operator).await;
+    assert!(
+        refused.is_err(),
+        "a head whose content is reachable from nowhere must not be published"
+    );
+
+    // B holds no head, so no reader can be handed an unservable one.
+    let mirror = origin_b.branch("main").open().perform(&operator).await?;
+    assert!(
+        mirror.fetch().perform(&operator).await?.is_none(),
+        "the refused push published nothing"
+    );
+
+    Ok(())
+}
+
 #[dialog_common::test]
 async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;

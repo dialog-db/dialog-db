@@ -2,7 +2,7 @@ use dialog_capability::{Capability, Did, Policy, Subject};
 use dialog_effects::memory::Space;
 use dialog_effects::memory::prelude::SpaceExt;
 
-use crate::{Cell, LoadBranch, OpenBranch, Revision, Upstreams};
+use crate::{Cell, DeleteBranch, LoadBranch, OpenBranch, Revision, Upstreams};
 
 /// A reference to a named branch within a repository's memory.
 ///
@@ -43,6 +43,15 @@ impl BranchReference {
 
     /// Load the branch, returning an error if it doesn't exist.
     pub fn load(self) -> LoadBranch {
+        self.into()
+    }
+
+    /// Delete the branch: remove every cell that makes it exist.
+    ///
+    /// See [`DeleteBranch`] for what survives (the revisions themselves),
+    /// what does not (this branch's reference to them), and what another
+    /// branch tracking this one sees afterwards.
+    pub fn delete(self) -> DeleteBranch {
         self.into()
     }
 

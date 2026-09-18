@@ -12,6 +12,9 @@ pub use publish::*;
 mod resolve;
 pub use resolve::*;
 
+mod retract;
+pub use retract::*;
+
 /// Extension trait for repository memory navigation.
 ///
 /// Extends [`MemorySubjectExt`] with repository-specific helpers for

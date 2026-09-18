@@ -490,6 +490,76 @@ impl From<MemoryError> for PublishError {
     }
 }
 
+/// Errors returned by cell retract operations.
+#[derive(Error, Debug)]
+pub enum RetractError {
+    /// The cell has never been observed, so there is no version to set
+    /// the removal against. Resolve the cell first.
+    #[error("Cell {cell} has not been resolved; nothing to retract against")]
+    Unobserved {
+        /// The cell name.
+        cell: String,
+    },
+
+    /// CAS edition mismatch — another writer won the race.
+    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    VersionMismatch {
+        /// The edition we held locally.
+        expected: Option<Version>,
+        /// The edition the backing store actually had.
+        actual: Option<Version>,
+    },
+
+    /// Storage backend failure.
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    /// The request was not authorized.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
+
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
+}
+
+impl From<MemoryError> for RetractError {
+    fn from(error: MemoryError) -> Self {
+        match error {
+            MemoryError::VersionMismatch { expected, actual } => {
+                Self::VersionMismatch { expected, actual }
+            }
+            MemoryError::Storage(message) => Self::Storage(message),
+            MemoryError::Rejected(error) => Self::Rejected(error),
+            MemoryError::Authorization(error) => Self::Authorization(error),
+        }
+    }
+}
+
+/// Errors returned by [`Branch::delete`](crate::Branch::delete).
+#[derive(Error, Debug)]
+pub enum DeleteBranchError {
+    /// Reading a cell's current version before removing it failed.
+    #[error("Failed to resolve branch cells: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// Removing one of the branch's cells failed. The delete is not
+    /// atomic across cells, so a failure here can leave the branch
+    /// partly removed; retrying is safe — a cell already gone is
+    /// skipped.
+    #[error("Failed to retract the {cell} cell of branch {branch}: {source}")]
+    Retract {
+        /// The branch being deleted.
+        branch: String,
+        /// The cell that would not go.
+        cell: &'static str,
+        /// Why it would not.
+        #[source]
+        source: RetractError,
+    },
+}
+
 /// Errors returned by the remote archive upload command.
 #[derive(Error, Debug)]
 pub enum UploadError {

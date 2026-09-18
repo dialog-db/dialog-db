@@ -1,4 +1,4 @@
-use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve};
+use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve, Retract};
 use dialog_capability::{Capability, Did, Policy};
 use dialog_common::ConditionalSync;
 use dialog_common::time::{self, Duration, SystemTime};
@@ -340,6 +340,31 @@ where
             capability: self.capability.clone(),
             cache: self.cache.clone(),
             content,
+        }
+    }
+}
+
+impl<T, Codec> Cell<T, Codec>
+where
+    T: Clone,
+    Codec: Clone,
+{
+    /// Create a command to remove this cell's contents.
+    ///
+    /// The CAS precondition is the cache's current version, like
+    /// [`publish`](Self::publish) — so a cell the handle has never read
+    /// has nothing to set against and the command errors rather than
+    /// removing whatever happens to be there. `resolve` first.
+    ///
+    /// Removal is not a value: a retracted cell reads as empty, which is
+    /// the same state it had before its first publish. Nothing in a
+    /// revision's ancestry is touched, so this is not a way to rewind a
+    /// branch — see [`Reset`](crate::Reset) for why that is forbidden —
+    /// it is how a cell stops existing.
+    pub fn retract(&self) -> Retract<T, Codec> {
+        Retract {
+            capability: self.capability.clone(),
+            cache: self.cache.clone(),
         }
     }
 }

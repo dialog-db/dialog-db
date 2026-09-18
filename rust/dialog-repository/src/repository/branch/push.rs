@@ -20,8 +20,9 @@ use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use crate::{
-    Branch, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex, RemoteRepository,
-    RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
+    Branch, Index, LoadBranchError, LocalIndex, PublishError, PushError, RemoteArchiveIndex,
+    RemoteRepository, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision,
+    Upstream, UpstreamBranch,
 };
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -330,12 +331,12 @@ impl Push<'_> {
                 // remotes only IT tracks — attribution that stopped at the
                 // local entry would credit that content to this branch's own
                 // remote and silently skip forwarding it.
-                let tracked = tracked_remote_names(branch, env).await?;
-                let sole_remote = tracked.iter().all(|name| name == remote_name);
+                let provenance = tracked_remote_names(branch, env).await?;
+                let sole_remote = provenance.sole_remote(remote_name);
                 let sources = if sole_remote {
                     Vec::new()
                 } else {
-                    source_remotes(&tracked, branch, remote_name, env).await
+                    source_remotes(&provenance.remotes, branch, remote_name, env).await
                 };
 
                 // Ship the blocks the tree nodes reference but the node
@@ -528,20 +529,25 @@ fn node_children(
 /// via a visited set) and returns the union of remote names. Attribution
 /// is sound only against this transitive set; the branch's own entries
 /// alone under-count where by-reference content can have come from.
-async fn tracked_remote_names<Env>(branch: &Branch, env: &Env) -> Result<Vec<String>, PushError>
+///
+/// A local entry naming a branch with no head leaves the answer
+/// [`incomplete`](Provenance::complete): the branch was deleted, or was
+/// never committed to, and either way what it held by reference cannot be
+/// credited to anyone. The fast path must not fire on a set that might be
+/// missing a remote — see [`Provenance`].
+async fn tracked_remote_names<Env>(branch: &Branch, env: &Env) -> Result<Provenance, PushError>
 where
     Env: Provider<Resolve> + ConditionalSync + 'static,
 {
-    let mut remotes: Vec<String> = Vec::new();
+    let mut provenance = Provenance {
+        remotes: Vec::new(),
+        complete: true,
+    };
     let mut visited: HashSet<String> = HashSet::from([branch.name().to_string()]);
     let mut locals: Vec<String> = Vec::new();
     for entry in branch.upstreams().iter() {
         match entry {
-            Upstream::Remote { remote, .. } => {
-                if !remotes.contains(remote) {
-                    remotes.push(remote.clone());
-                }
-            }
+            Upstream::Remote { remote, .. } => provenance.remote(remote),
             Upstream::Local { branch: name, .. } => {
                 if visited.insert(name.clone()) {
                     locals.push(name.clone());
@@ -550,14 +556,20 @@ where
         }
     }
     while let Some(name) = locals.pop() {
-        let local = branch.subject().branch(name).load().perform(env).await?;
+        let local = match branch.subject().branch(name).load().perform(env).await {
+            Ok(local) => local,
+            // A tracked local branch that has no head: gone, or never
+            // written to. Its tracked set is unreadable, so the remotes
+            // reachable through it are unknown — not absent.
+            Err(LoadBranchError::NotFound { .. }) => {
+                provenance.complete = false;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         for entry in local.upstreams().iter() {
             match entry {
-                Upstream::Remote { remote, .. } => {
-                    if !remotes.contains(remote) {
-                        remotes.push(remote.clone());
-                    }
-                }
+                Upstream::Remote { remote, .. } => provenance.remote(remote),
                 Upstream::Local { branch: name, .. } => {
                     if visited.insert(name.clone()) {
                         locals.push(name.clone());
@@ -566,7 +578,42 @@ where
             }
         }
     }
-    Ok(remotes)
+    Ok(provenance)
+}
+
+/// Where by-reference content on this branch could have come from.
+///
+/// `complete` is what licenses the zero-request fast path. Attribution
+/// says "the push target is the only remote reachable from the tracked
+/// set, so everything held by reference came from it" — which is a claim
+/// about the *whole* set. A walk that could not read part of it may have
+/// missed the very remote that content came from, and crediting it to the
+/// target instead would silently skip forwarding those bytes (the
+/// laundering `notes/version-control.md` invariant 3 warns about, now
+/// reachable because a tracked branch can be deleted). So an incomplete
+/// walk falls back to existence probes, which ask the target directly
+/// rather than reasoning about provenance at all: one request per
+/// by-reference frontier root, and correct whatever the tracked set says.
+struct Provenance {
+    /// Remote names reachable from the tracked set, as far as the walk got.
+    remotes: Vec<String>,
+    /// Whether the walk read the whole tracked set.
+    complete: bool,
+}
+
+impl Provenance {
+    /// Note a reachable remote, once.
+    fn remote(&mut self, name: &str) {
+        if !self.remotes.iter().any(|known| known == name) {
+            self.remotes.push(name.to_string());
+        }
+    }
+
+    /// Whether `target` is provably the only remote this branch's
+    /// by-reference content could have come from.
+    fn sole_remote(&self, target: &str) -> bool {
+        self.complete && self.remotes.iter().all(|name| name == target)
+    }
 }
 
 /// Load every reachable tracked remote other than the push target,
@@ -1270,7 +1317,7 @@ mod tests {
         assert!(
             upstreams.iter().any(|entry| matches!(
                 entry,
-                Upstream::Local { branch, tree } if branch == "main" && *tree == revision.tree
+                Upstream::Local { branch, tree, .. } if branch == "main" && *tree == revision.tree
             )),
             "A's tracking advance for main lands despite the stale snapshot"
         );
@@ -1343,7 +1390,7 @@ mod tests {
         ));
         assert!(upstreams.iter().any(|entry| matches!(
             entry,
-            Upstream::Local { branch, tree } if branch == "backup" && *tree == revision.tree
+            Upstream::Local { branch, tree, .. } if branch == "backup" && *tree == revision.tree
         )));
 
         // Pushing to the branch itself is refused.

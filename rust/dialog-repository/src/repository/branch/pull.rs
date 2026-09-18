@@ -4019,7 +4019,7 @@ mod history_tests {
         assert!(
             upstreams.iter().any(|entry| matches!(
                 entry,
-                crate::Upstream::Local { branch, tree } if branch == "main" && *tree == main_head.tree
+                crate::Upstream::Local { branch, tree, .. } if branch == "main" && *tree == main_head.tree
             )),
             "the pull's sync-base advance survives the race"
         );
