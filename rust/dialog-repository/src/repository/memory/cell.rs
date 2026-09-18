@@ -770,9 +770,17 @@ mod tests {
             "an unobserved value is never fresh enough to act on"
         );
 
-        cell.cache.update(Edition {
+        // A value is observed at the moment it is cached, and the stamp
+        // is compared against the cell's own clock, so the observation
+        // is stale by construction once that clock has moved past it.
+        let observed = Observed::now(Edition {
             content: "first".to_string(),
             version: Version::from("v1"),
+        });
+        let elapsed = Duration::from_millis(50);
+        *cell.cache.state.write() = Some(Observed {
+            at: observed.at - elapsed,
+            ..observed
         });
         let first = cell
             .cache
@@ -780,8 +788,12 @@ mod tests {
             .elapsed()
             .expect("an observed value has an elapsed age");
         assert!(
-            cell.cache.age().is_fresher_than(Duration::from_secs(60)),
-            "a value observed just now is fresh"
+            first >= elapsed,
+            "an observation made {elapsed:?} ago is at least that old, got {first:?}"
+        );
+        assert!(
+            !cell.cache.age().is_fresher_than(Duration::from_millis(10)),
+            "and is not fresher than a limit it has already outlived"
         );
 
         // Re-observing resets the clock: the age is of the observation,
@@ -797,8 +809,12 @@ mod tests {
             .elapsed()
             .expect("an observed value has an elapsed age");
         assert!(
-            second <= first,
+            second < first,
             "re-observing the same value makes it fresh again, {second:?} vs {first:?}"
+        );
+        assert!(
+            cell.cache.age().is_fresher_than(Duration::from_secs(60)),
+            "a value observed just now is fresh"
         );
 
         // Clearing forgets the observation along with the value.
