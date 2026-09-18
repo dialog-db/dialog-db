@@ -185,7 +185,13 @@ wasm-bindgen-cli-support = "=0.2.126"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
 wasmparser = "0.229"
-wasm-streams = "0.6"
+# Pinned to 0.5 to match the version `reqwest` uses, which `iroh` pulls
+# in. Both export the same wasm-bindgen describe symbols, so a wasm
+# cdylib linking dialog-storage and iroh together fails with duplicate
+# symbols if the two versions diverge — a link error with no line
+# number, in a build that type-checks cleanly. `ReadableStream::from_raw`
+# is unchanged between them, which is all this uses.
+wasm-streams = "0.5"
 web-sys = "0.3"
 web-time = "1"
 zerocopy = "0.8"
