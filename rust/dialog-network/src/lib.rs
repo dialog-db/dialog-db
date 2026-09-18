@@ -19,7 +19,7 @@
 //! `dialog-capability`.
 
 use dialog_capability::Site;
-use dialog_iroh_remote::channel::Channel;
+use dialog_iroh_remote::channel::{Channel, Connect};
 use dialog_iroh_remote::site::Iroh;
 use dialog_remote_fs::Fs;
 use dialog_remote_s3::S3;
@@ -53,6 +53,18 @@ impl Network {
     /// [`Unconfigured`](dialog_iroh_remote::channel::Unconfigured).
     pub fn with_iroh(mut self, channel: impl Channel + 'static) -> Self {
         self.iroh = Iroh::new(channel);
+        self
+    }
+
+    /// Reach peers over whatever `connect` produces, when first needed.
+    ///
+    /// For the embedder that cannot have a channel yet. A browser's
+    /// worker builds this table at startup and its channel rides a
+    /// carrier some page opens later; handing over the recipe lets the
+    /// table be complete from the start and the endpoint arrive when
+    /// the first remote actually needs it.
+    pub fn connecting_iroh(mut self, connect: impl Connect + 'static) -> Self {
+        self.iroh = Iroh::connecting(connect);
         self
     }
 }

@@ -120,6 +120,53 @@ pub trait Channel: ConditionalSync {
     }
 }
 
+/// How a site gets the channel it will reuse.
+///
+/// The counterpart of `dialog-remote-s3`'s `http_client()`: a
+/// [`reqwest::Client`] owns a connection pool, so it is built once and
+/// shared rather than made per request. An iroh endpoint is the same
+/// kind of thing and more so — its key *is* the peer's name, so a second
+/// one is not a second pool but a second identity.
+///
+/// It is a trait and not just a value because of what an endpoint needs
+/// that a `reqwest::Client` does not. `reqwest::Client::new()` takes no
+/// arguments, so S3's site can build one on first use from nothing. An
+/// endpoint needs a transport, and in a browser it needs a carrier some
+/// page has yet to open — so what a site can hold from the start is the
+/// knowledge of how to get one, not the thing itself.
+///
+/// Called at most once per site for as long as it succeeds. A failure is
+/// not remembered: the ordinary reason to fail here is that nothing has
+/// dialed yet, and that stops being true without anything being rebuilt.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait Connect: ConditionalSync {
+    /// Produce the channel, or say why there is not one yet.
+    async fn connect(&self) -> Result<std::sync::Arc<dyn Channel>, ChannelError>;
+}
+
+/// A [`Connect`] that is already connected.
+///
+/// What [`Iroh::new`](crate::site::Iroh::new) wraps a channel in, so an
+/// embedder holding the thing does not have to describe how to build it
+/// and a site has one way to reach its channel rather than two.
+pub struct Ready(std::sync::Arc<dyn Channel>);
+
+impl Ready {
+    /// Hand this channel over whenever asked.
+    pub fn new(channel: impl Channel + 'static) -> Self {
+        Self(std::sync::Arc::new(channel))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Connect for Ready {
+    async fn connect(&self) -> Result<std::sync::Arc<dyn Channel>, ChannelError> {
+        Ok(self.0.clone())
+    }
+}
+
 /// A channel that reaches nobody.
 ///
 /// What an [`Iroh`](crate::site::Iroh) site holds when it was built by

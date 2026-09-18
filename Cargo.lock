@@ -1547,6 +1547,7 @@ dependencies = [
  "dialog-varsig",
  "ed25519-dalek 2.2.0",
  "form_urlencoded",
+ "futures-util",
  "ipld-core",
  "iroh",
  "iroh-base",

@@ -106,6 +106,8 @@ async fn opened(
 ) -> Result<(Box<dyn Transfer>, BlobAnswer), BlobError> {
     let mut transfer = site
         .channel()
+        .await
+        .map_err(broken)?
         .open(address, container)
         .await
         .map_err(broken)?;
