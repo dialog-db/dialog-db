@@ -1525,6 +1525,7 @@ dependencies = [
  "base58",
  "blake3",
  "bytes",
+ "chrono",
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
