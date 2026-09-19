@@ -23,11 +23,22 @@
 //! - **Every change is an instant.** A write that changes what readers
 //!   see mints one [`Instant`]: the facts that became readable, the
 //!   facts that stopped being readable, a sequence number, and a
-//!   chained hash. Instants are kept in a bounded ring so a
-//!   subscription pinned at an earlier sequence reads the exact delta
-//!   since its pin ([`Ephemeral::since`]) and maintains its result per
-//!   touched entity instead of recomputing. Nothing is hashed but the
-//!   delta, so a commit costs the delta, never the store.
+//!   chained hash. Nothing is hashed but the delta, so a commit costs
+//!   the delta, never the store.
+//! - **Observers see instants, not folds.** There is no shared log.
+//!   Anything that wants the instants rather than the fold — a
+//!   subscription maintaining its result per touched entity, a command
+//!   provider that must see a fact asserted and retracted within one
+//!   commit — registers an [`Observer`] with a demand, and every
+//!   instant is fanned out at write time into each observer's own
+//!   bounded queue, filtered to the facts its demand covers. An
+//!   instant nobody demanded costs nothing; memory is the sum of
+//!   unconsumed matched instants across observers. An observer that
+//!   falls off its queue's bound finds a gap on its next drain and
+//!   recomputes from the fold. Dropping the observer unregisters it.
+//!   An instant can also be [witnessed](Ephemeral::witness): minted
+//!   for observers without changing the store, which is how a
+//!   transient that lived for one induction round is seen at all.
 //!
 //! A [`Revision`](EphemeralRevision) here is an identity, not a
 //! persistence claim: the sequence plus the chained hash of every
@@ -40,7 +51,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
@@ -52,11 +63,14 @@ use dialog_capability::Provider;
 use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
 use futures_util::stream;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
-/// How many instants the ring retains. A subscription pinned further
-/// back than this recomputes from the fold instead of maintaining.
-const LOG_CAPACITY: usize = 1024;
+use crate::Demand;
+
+/// How many matched instants an observer's queue holds before it
+/// gaps. An observer that drains less often than this many matching
+/// writes land recomputes from the fold instead of maintaining.
+pub(crate) const QUEUE_CAPACITY: usize = 1024;
 
 /// The identity of an ephemeral layer at some instant: how many
 /// instants have been minted and the hash chained through all of
@@ -123,9 +137,9 @@ struct State {
     manifest: Manifest,
     sequence: u64,
     hash: Blake3Hash,
-    /// The most recent instants, oldest first, at most
-    /// [`LOG_CAPACITY`].
-    log: VecDeque<Instant>,
+    /// Every registered observer's queue, weakly: an observer that was
+    /// dropped is pruned at the next fan-out.
+    observers: Vec<Weak<Mutex<Queue>>>,
 }
 
 impl Default for State {
@@ -137,7 +151,7 @@ impl Default for State {
             manifest: Manifest::default(),
             sequence: 0,
             hash: Blake3Hash::from([0u8; 32]),
-            log: VecDeque::new(),
+            observers: Vec::new(),
         }
     }
 }
@@ -269,11 +283,146 @@ impl State {
             asserted: delta.asserted,
             retracted: delta.retracted,
         };
-        if self.log.len() == LOG_CAPACITY {
-            self.log.pop_front();
-        }
-        self.log.push_back(instant.clone());
+        self.fan_out(&instant);
         Some(instant)
+    }
+
+    /// Hand `instant` to every live observer, filtered to the facts
+    /// its demand covers; prune observers that were dropped.
+    fn fan_out(&mut self, instant: &Instant) {
+        self.observers.retain(|weak| weak.strong_count() > 0);
+        for weak in &self.observers {
+            let Some(queue) = weak.upgrade() else {
+                continue;
+            };
+            let mut queue = queue.lock();
+            if queue.gapped {
+                continue;
+            }
+            let Some(matched) = queue.filter.matched(instant, &self.manifest) else {
+                continue;
+            };
+            if queue.instants.len() == QUEUE_CAPACITY {
+                queue.instants.clear();
+                queue.gapped = true;
+            } else {
+                queue.instants.push_back(matched);
+            }
+        }
+    }
+}
+
+/// What an observer's queue admits.
+#[derive(Clone, Debug)]
+enum Filter {
+    /// Every instant, whole.
+    Everything,
+    /// The facts whose index keys fall inside the demand's cover.
+    Demand(Demand),
+}
+
+impl Filter {
+    /// The part of `instant` this filter admits, or `None` when it
+    /// admits nothing of it.
+    fn matched(&self, instant: &Instant, manifest: &Manifest) -> Option<Instant> {
+        match self {
+            Filter::Everything => Some(instant.clone()),
+            Filter::Demand(demand) => {
+                let covers = |fact: &Artifact| {
+                    index_keys(fact, manifest)
+                        .iter()
+                        .any(|key| demand.covers(key))
+                };
+                let asserted: Vec<Artifact> = instant
+                    .asserted
+                    .iter()
+                    .filter(|f| covers(f))
+                    .cloned()
+                    .collect();
+                let retracted: Vec<Artifact> = instant
+                    .retracted
+                    .iter()
+                    .filter(|f| covers(f))
+                    .cloned()
+                    .collect();
+                if asserted.is_empty() && retracted.is_empty() {
+                    return None;
+                }
+                Some(Instant {
+                    sequence: instant.sequence,
+                    hash: instant.hash.clone(),
+                    asserted,
+                    retracted,
+                })
+            }
+        }
+    }
+}
+
+/// One observer's queue: the instants that matched its filter since
+/// its last drain, and whether the queue overflowed.
+#[derive(Debug)]
+struct Queue {
+    filter: Filter,
+    instants: VecDeque<Instant>,
+    gapped: bool,
+}
+
+/// What an observer finds when it drains.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Drained {
+    /// The instants that matched since the last drain, oldest first;
+    /// empty when nothing did.
+    Instants(Vec<Instant>),
+    /// The observer fell behind its queue's bound and instants were
+    /// dropped: recompute from the fold. `sequence` is where the layer
+    /// stands at the drain.
+    Gap {
+        /// The layer's sequence at the drain.
+        sequence: u64,
+    },
+}
+
+/// A registration to see a layer's instants. Created by
+/// [`Ephemeral::observe`]; drained by [`drain`](Self::drain); dropping
+/// it unregisters. Each observer owns its queue: what one drains no
+/// other misses.
+#[derive(Debug)]
+pub struct Observer {
+    layer: Ephemeral,
+    queue: Arc<Mutex<Queue>>,
+}
+
+impl Observer {
+    /// Take every instant queued since the last drain, or the gap
+    /// marker if the queue overflowed. Draining a gap clears it, so
+    /// the next drain starts collecting again.
+    pub fn drain(&self) -> Drained {
+        let mut queue = self.queue.lock();
+        if queue.gapped {
+            queue.gapped = false;
+            queue.instants.clear();
+            return Drained::Gap {
+                sequence: self.layer.revision().sequence,
+            };
+        }
+        Drained::Instants(queue.instants.drain(..).collect())
+    }
+
+    /// Narrow the observer to the facts `demand` covers from now on.
+    /// Instants already queued are kept as they were admitted.
+    pub fn retarget(&self, demand: Demand) {
+        self.queue.lock().filter = Filter::Demand(demand);
+    }
+
+    /// Widen the observer to every instant from now on.
+    pub fn retarget_everything(&self) {
+        self.queue.lock().filter = Filter::Everything;
+    }
+
+    /// The layer observed.
+    pub fn layer(&self) -> &Ephemeral {
+        &self.layer
     }
 }
 
@@ -390,30 +539,65 @@ impl Ephemeral {
         }
     }
 
-    /// The instants minted after `sequence`, oldest first, or `None`
-    /// when the ring no longer reaches back that far and a reader
-    /// pinned there must recompute from the fold. An up-to-date pin
-    /// yields an empty vector.
-    pub fn since(&self, sequence: u64) -> Option<Vec<Instant>> {
-        let state = self.state.read();
-        if sequence >= state.sequence {
-            return Some(Vec::new());
+    /// Register an observer of the facts `demand` covers. Every
+    /// instant minted from now on is queued for it, filtered to the
+    /// covered facts; see [`Observer`].
+    pub fn observe(&self, demand: Demand) -> Observer {
+        self.register(Filter::Demand(demand))
+    }
+
+    /// Register an observer of every instant, whole.
+    pub fn observe_everything(&self) -> Observer {
+        self.register(Filter::Everything)
+    }
+
+    fn register(&self, filter: Filter) -> Observer {
+        let queue = Arc::new(Mutex::new(Queue {
+            filter,
+            instants: VecDeque::new(),
+            gapped: false,
+        }));
+        self.state.write().observers.push(Arc::downgrade(&queue));
+        Observer {
+            layer: self.clone(),
+            queue,
         }
-        match state.log.front() {
-            Some(oldest) if oldest.sequence > sequence + 1 => None,
-            // An empty ring with a moved sequence cannot happen: every
-            // sequence advance records an instant, and the ring only
-            // drops from the front once full.
-            None => None,
-            Some(_) => Some(
-                state
-                    .log
-                    .iter()
-                    .filter(|instant| instant.sequence > sequence)
-                    .cloned()
-                    .collect(),
-            ),
+    }
+
+    /// Mint an instant for observers without changing the store: the
+    /// statement's asserted facts appear as both asserted and
+    /// retracted, its retracted facts as retracted. This is how a
+    /// fact that lived for one induction round — asserted and gone
+    /// within a commit, so never in any fold — is seen by whoever
+    /// registered to see it. Advances the sequence and the chained
+    /// hash like any instant: a revision is an identity of what
+    /// happened, not of what is held.
+    pub(crate) fn witness(&self, changes: Changes) -> Option<Instant> {
+        if changes.is_empty() {
+            return None;
         }
+        let mut delta = Delta::default();
+        for instruction in changes.into_instructions() {
+            match instruction {
+                Instruction::Assert(fact) | Instruction::Replace(fact) => {
+                    delta.asserted.push(fact.clone());
+                    delta.retracted.push(fact);
+                }
+                Instruction::Retract(fact) => delta.retracted.push(fact),
+            }
+        }
+        self.state.write().mint(delta)
+    }
+
+    /// How many observers are registered and alive.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn observers(&self) -> usize {
+        self.state
+            .read()
+            .observers
+            .iter()
+            .filter(|weak| weak.strong_count() > 0)
+            .count()
     }
 
     /// Sort keys of every fact this layer hides beneath it. Shared, so
@@ -494,6 +678,14 @@ mod tests {
         Claim(fact(of, the_, is))
     }
 
+    /// The single instant an observer of everything saw, or a panic.
+    fn only(observer: &Observer) -> Instant {
+        match observer.drain() {
+            Drained::Instants(mut instants) if instants.len() == 1 => instants.remove(0),
+            other => panic!("expected exactly one instant, got {other:?}"),
+        }
+    }
+
     fn values(line: &Ephemeral, of: &str, the_: &str) -> Vec<Value> {
         let selector = ArtifactSelector::new()
             .of(of.parse().expect("entity"))
@@ -504,12 +696,13 @@ mod tests {
     #[dialog_common::test]
     fn it_asserts_idempotently_and_replaces_per_cell() {
         let line = Ephemeral::new();
+        let observer = line.observe_everything();
         line.assert(
             the!("person/name")
                 .of("id:a".parse().unwrap())
                 .is("A".to_string()),
         );
-        let first = &line.since(0).expect("in the ring")[0];
+        let first = only(&observer);
         assert_eq!(first.sequence, 1);
         assert_eq!(first.asserted, vec![fact("id:a", "person/name", "A")]);
         line.assert(
@@ -555,12 +748,13 @@ mod tests {
                 .of("id:a".parse().unwrap())
                 .is("A".to_string()),
         );
+        let observer = line.observe_everything();
         line.retract(
             the!("person/name")
                 .of("id:a".parse().unwrap())
                 .is("A".to_string()),
         );
-        let removed = &line.since(1).expect("in the ring")[0];
+        let removed = only(&observer);
         assert_eq!(removed.retracted, vec![fact("id:a", "person/name", "A")]);
         assert!(line.is_empty());
         assert!(
@@ -573,7 +767,7 @@ mod tests {
                 .of("id:b".parse().unwrap())
                 .is("B".to_string()),
         );
-        let shadowed = &line.since(2).expect("a tombstone is a visible change")[0];
+        let shadowed = only(&observer);
         assert_eq!(shadowed.retracted, vec![fact("id:b", "person/name", "B")]);
         assert_eq!(line.tombstones().len(), 1);
         line.retract(
@@ -588,7 +782,7 @@ mod tests {
         );
 
         line.clear();
-        let lifted = &line.since(3).expect("lifting a tombstone is visible")[0];
+        let lifted = only(&observer);
         assert_eq!(lifted.asserted, vec![fact("id:b", "person/name", "B")]);
         assert!(line.tombstones().is_empty());
     }
@@ -644,27 +838,105 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_reports_instants_since_a_pin_and_gaps_past_the_ring() {
+    fn it_queues_matched_instants_per_observer_and_gaps_past_the_bound() {
         let line = Ephemeral::new();
-        assert_eq!(line.since(0), Some(Vec::new()));
-        line.assert(claim("id:a", "person/name", "A"));
-        line.assert(claim("id:b", "person/name", "B"));
-        let since = line.since(0).expect("within the ring");
-        assert_eq!(since.len(), 2);
-        assert_eq!(since[0].sequence, 1);
-        assert_eq!(since[1].asserted, vec![fact("id:b", "person/name", "B")]);
-        assert_eq!(line.since(1).expect("within the ring").len(), 1);
-        assert_eq!(line.since(2), Some(Vec::new()));
+        let everything = line.observe_everything();
+        let names = {
+            let demand = Demand::new();
+            demand.record(&ArtifactSelector::new().the("person/name".parse().unwrap()));
+            line.observe(demand)
+        };
+        assert_eq!(everything.drain(), Drained::Instants(Vec::new()));
 
-        for index in 0..LOG_CAPACITY {
+        line.assert(claim("id:a", "person/name", "A"));
+        line.assert(claim("id:b", "person/role", "Admin"));
+        let Drained::Instants(all) = everything.drain() else {
+            panic!("no gap")
+        };
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].sequence, 1);
+        assert_eq!(all[1].asserted, vec![fact("id:b", "person/role", "Admin")]);
+        let Drained::Instants(matched) = names.drain() else {
+            panic!("no gap")
+        };
+        assert_eq!(
+            matched.len(),
+            1,
+            "an instant outside the demand is never queued"
+        );
+        assert_eq!(matched[0].asserted, vec![fact("id:a", "person/name", "A")]);
+        assert_eq!(
+            everything.drain(),
+            Drained::Instants(Vec::new()),
+            "a drain empties the queue"
+        );
+
+        for index in 0..=QUEUE_CAPACITY {
             line.assert(claim(&format!("id:{index}"), "person/tag", "x"));
         }
-        assert!(
-            line.since(1).is_none(),
-            "a pin older than the ring must recompute"
-        );
         let head = line.revision().sequence;
-        assert_eq!(line.since(head - 1).expect("the newest instant").len(), 1);
+        assert_eq!(
+            everything.drain(),
+            Drained::Gap { sequence: head },
+            "an observer past the bound must recompute"
+        );
+        assert_eq!(
+            names.drain(),
+            Drained::Instants(Vec::new()),
+            "the tags never matched the names observer"
+        );
+        line.assert(claim("id:z", "person/name", "Z"));
+        assert_eq!(
+            only(&everything).asserted,
+            vec![fact("id:z", "person/name", "Z")],
+            "a drained gap collects again"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_filters_an_instant_to_the_covered_facts() {
+        let line = Ephemeral::new();
+        let demand = Demand::new();
+        demand.record(&ArtifactSelector::new().the("person/name".parse().unwrap()));
+        let names = line.observe(demand);
+        let mut changes = Changes::new();
+        claim("id:a", "person/name", "A").assert(&mut changes);
+        claim("id:a", "person/role", "Admin").assert(&mut changes);
+        line.apply(changes);
+        let instant = only(&names);
+        assert_eq!(instant.asserted, vec![fact("id:a", "person/name", "A")]);
+        assert!(instant.retracted.is_empty());
+    }
+
+    #[dialog_common::test]
+    fn it_unregisters_a_dropped_observer() {
+        let line = Ephemeral::new();
+        let observer = line.observe_everything();
+        assert_eq!(line.observers(), 1);
+        drop(observer);
+        line.assert(claim("id:a", "person/name", "A"));
+        assert_eq!(line.observers(), 0, "pruned at the next fan-out");
+    }
+
+    #[dialog_common::test]
+    fn it_witnesses_without_changing_the_store() {
+        let line = Ephemeral::new();
+        let observer = line.observe_everything();
+        let before = line.revision();
+        let mut transient = Changes::new();
+        claim("cmd:1", "cmd.start/target", "doc:1").assert(&mut transient);
+        line.witness(transient);
+        let instant = only(&observer);
+        assert_eq!(
+            instant.asserted,
+            vec![fact("cmd:1", "cmd.start/target", "doc:1")]
+        );
+        assert_eq!(
+            instant.retracted, instant.asserted,
+            "gone within the instant"
+        );
+        assert!(line.is_empty(), "nothing is held");
+        assert_ne!(line.revision(), before, "but it happened");
     }
 
     #[dialog_common::test]
@@ -688,9 +960,9 @@ mod tests {
         line.assert(claim("site:1", "site/path", "/a"));
         line.assert(claim("site:2", "site/path", "/b"));
         line.retract(claim("doc:1", "doc/title", "T"));
-        let pinned = line.revision().sequence;
+        let observer = line.observe_everything();
         assert!(line.retain_entities(|entity| entity.to_string() != "site:1"));
-        let dropped = &line.since(pinned).expect("in the ring")[0];
+        let dropped = only(&observer);
         assert_eq!(dropped.retracted, vec![fact("site:1", "site/path", "/a")]);
         assert!(
             dropped.asserted.is_empty(),
