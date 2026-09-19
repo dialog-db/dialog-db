@@ -33,10 +33,11 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_did_web::Resolve;
 use dialog_ucan_core::revocation::RevocationChecker;
 
-use crate::channel::{Channel, ChannelError};
+use crate::channel::{Channel, ChannelError, Transfer};
+
 use crate::serve::{Responder, Store};
 use crate::site::IrohAddress;
-use crate::wire::encode;
+use crate::wire::{encode, frame, read_frame};
 
 /// What this protocol is called on the wire.
 ///
@@ -126,27 +127,129 @@ impl Channel for IrohChannel {
         peer: &IrohAddress,
         request: Vec<u8>,
     ) -> Result<Vec<u8>, ChannelError> {
+        let mut transfer = self.open(peer, request).await?;
+        // Nothing follows a plain request, and finishing is what ends
+        // the peer's read: without it the exchange hangs rather than
+        // merely leaking a stream.
+        transfer.finish().await?;
+        read_frame("response", transfer.as_mut()).await
+    }
+
+    async fn open(
+        &self,
+        peer: &IrohAddress,
+        request: Vec<u8>,
+    ) -> Result<Box<dyn Transfer>, ChannelError> {
         let connection = self.connect(peer).await?;
 
-        let interrupted = |error: &dyn std::fmt::Display| ChannelError::Interrupted {
+        let (mut send, recv) =
+            connection
+                .open_bi()
+                .await
+                .map_err(|error| ChannelError::Interrupted {
+                    peer: peer.to_string(),
+                    detail: error.to_string(),
+                })?;
+
+        // Length-prefixed, because a body may follow and the peer reads
+        // the frame before it knows which effect this is.
+        send.write_all(&frame(&request))
+            .await
+            .map_err(|error| ChannelError::Interrupted {
+                peer: peer.to_string(),
+                detail: error.to_string(),
+            })?;
+
+        // The send side stays open: whether anything follows is the
+        // effect's business, not this layer's.
+        Ok(Box::new(QuicTransfer {
+            send,
+            recv,
             peer: peer.to_string(),
+            spare: Vec::new(),
+        }))
+    }
+}
+
+/// One QUIC stream, as a [`Transfer`].
+///
+/// `recv` hands back whatever chunk QUIC has ready rather than a fixed
+/// size, because a blob's chunk boundaries are the network's and
+/// re-cutting them would buffer for no one's benefit. `read_exact`
+/// keeps the remainder of an over-long chunk, so a frame and the body
+/// behind it can arrive in one packet without the body being lost.
+struct QuicTransfer {
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+    peer: String,
+    /// Bytes read past what the last `read_exact` wanted.
+    spare: Vec<u8>,
+}
+
+impl QuicTransfer {
+    fn interrupted(&self, error: &dyn std::fmt::Display) -> ChannelError {
+        ChannelError::Interrupted {
+            peer: self.peer.clone(),
             detail: error.to_string(),
-        };
+        }
+    }
 
-        let (mut send, mut recv) = connection
-            .open_bi()
-            .await
-            .map_err(|error| interrupted(&error))?;
-        send.write_all(&request)
-            .await
-            .map_err(|error| interrupted(&error))?;
-        // Finishing is what makes the peer's `read_to_end` return, so
-        // the exchange deadlocks without it rather than merely leaking.
-        send.finish().map_err(|error| interrupted(&error))?;
+    /// The next chunk from the stream, spare bytes first.
+    async fn chunk(&mut self) -> Result<Option<Vec<u8>>, ChannelError> {
+        if !self.spare.is_empty() {
+            return Ok(Some(std::mem::take(&mut self.spare)));
+        }
+        match self.recv.read_chunk(MAX_RESPONSE).await {
+            Ok(Some(chunk)) => Ok(Some(chunk.to_vec())),
+            Ok(None) => Ok(None),
+            Err(error) => Err(self.interrupted(&error)),
+        }
+    }
+}
 
-        recv.read_to_end(MAX_RESPONSE)
+#[async_trait::async_trait]
+impl Transfer for QuicTransfer {
+    async fn send(&mut self, bytes: &[u8]) -> Result<(), ChannelError> {
+        self.send
+            .write_all(bytes)
             .await
-            .map_err(|error| interrupted(&error))
+            .map_err(|error| ChannelError::Interrupted {
+                peer: self.peer.clone(),
+                detail: error.to_string(),
+            })
+    }
+
+    async fn finish(&mut self) -> Result<(), ChannelError> {
+        self.send
+            .finish()
+            .map_err(|error| ChannelError::Interrupted {
+                peer: self.peer.clone(),
+                detail: error.to_string(),
+            })
+    }
+
+    async fn read_exact(&mut self, len: usize) -> Result<Vec<u8>, ChannelError> {
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            let Some(chunk) = self.chunk().await? else {
+                return Err(ChannelError::Interrupted {
+                    peer: self.peer.clone(),
+                    detail: format!("wanted {len} bytes and the peer stopped at {}", out.len()),
+                });
+            };
+            let wanted = len - out.len();
+            if chunk.len() > wanted {
+                out.extend_from_slice(&chunk[..wanted]);
+                self.spare = chunk[wanted..].to_vec();
+            } else {
+                out.extend_from_slice(&chunk);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn recv(&mut self) -> Result<Option<Vec<u8>>, ChannelError> {
+        self.chunk().await
     }
 }
 
@@ -199,10 +302,9 @@ async fn serve_connection<S, Resolver, Revocations>(
 
     // A connection is reused for many exchanges, so this accepts streams
     // until the dialer closes it rather than answering once and hanging
-    // up. `accept_bi` ends with an error when it does, which is the
-    // ordinary way out and not worth reporting as a failure.
+    // up. `accept_bi` ending is the ordinary way out, not a failure.
     loop {
-        let (mut send, mut recv) = match connection.accept_bi().await {
+        let (send, recv) = match connection.accept_bi().await {
             Ok(streams) => streams,
             Err(error) => {
                 tracing::trace!(%peer, %error, "a peer stopped sending");
@@ -210,36 +312,51 @@ async fn serve_connection<S, Resolver, Revocations>(
             }
         };
 
-        let request = match recv.read_to_end(MAX_RESPONSE).await {
-            Ok(request) => request,
-            // Nothing was fully received, so nothing can be answered:
-            // the stream is abandoned and the connection stays up.
-            Err(error) => {
-                tracing::debug!(%peer, %error, "a request did not arrive whole");
-                continue;
-            }
+        let mut transfer = QuicTransfer {
+            send,
+            recv,
+            peer: peer.to_string(),
+            spare: Vec::new(),
         };
+        let responder = responder.clone();
 
-        let response = responder.answer(&request).await;
-        let encoded = match encode("response", &response) {
-            Ok(encoded) => encoded,
-            // The responder's own answer would not encode. That is this
-            // peer's bug, not the caller's, and there is no honest way
-            // to report it in a protocol the caller can read.
-            Err(error) => {
-                tracing::error!(%peer, %error, "an answer could not be encoded");
-                continue;
+        // Per stream, because a blob transfer can outlast many small
+        // exchanges and holding the connection's accept loop for its
+        // duration would serialize everything behind it.
+        tokio::spawn(async move {
+            if let Err(error) = serve_stream(&mut transfer, responder).await {
+                tracing::debug!(%error, "an exchange did not complete");
             }
-        };
-
-        if let Err(error) = send.write_all(&encoded).await {
-            tracing::debug!(%peer, %error, "an answer could not be sent");
-            continue;
-        }
-        if let Err(error) = send.finish() {
-            tracing::debug!(%peer, %error, "an answer was not finished");
-        }
+        });
     }
+}
+
+/// Read one request and answer it.
+async fn serve_stream<S, Resolver, Revocations>(
+    transfer: &mut QuicTransfer,
+    responder: Arc<Responder<S, Resolver, Revocations>>,
+) -> Result<(), ChannelError>
+where
+    S: Store + ConditionalSend + 'static,
+    Resolver: Provider<Resolve> + ConditionalSync + 'static,
+    Revocations: RevocationChecker + ConditionalSync + 'static,
+{
+    let request = read_frame("request", transfer).await?;
+    let response = responder.answer(&request).await;
+
+    let encoded = match encode("response", &response) {
+        Ok(encoded) => encoded,
+        // The peer's own answer would not encode. That is this peer's
+        // bug rather than the caller's, and there is no honest way to
+        // report it in a protocol the caller can read.
+        Err(error) => {
+            tracing::error!(%error, "an answer could not be encoded");
+            return Ok(());
+        }
+    };
+
+    transfer.send(&frame(&encoded)).await?;
+    transfer.finish().await
 }
 
 #[cfg(test)]
