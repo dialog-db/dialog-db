@@ -1,45 +1,47 @@
-//! Finding the material an invocation's arguments name.
+//! Finding the material an invocation's arguments name, and proving it
+//! is that material.
 //!
 //! A signed invocation does not carry the bytes it authorizes. Its
 //! arguments come from the capability's attenuation, and `archive::Put`
 //! projects its block to a `digest` and a `checksum`, so the signature
-//! covers a commitment and never the content. An access service needs
-//! no more than that — it presigns a URL for `{subject}/{catalog}/{digest}`
-//! and the bytes go to S3 directly — but a peer that *performs* the
-//! effect has to be handed them.
+//! covers two commitments and never the content. An access service needs
+//! no more — it presigns a URL for `{subject}/{catalog}/{digest}` and
+//! the bytes go to S3 — but a peer that *performs* the effect has to be
+//! handed them, and the bytes ride in the same `ctn-v1` container as
+//! their own token.
 //!
-//! The wrong way to do that is a second field beside the container,
-//! because then two things claim to be the payload and the signature
-//! covers only one. [`InvocationBundle`] is the right way, and it says
-//! so itself: material that is neither proof nor argument travels as its
-//! own token in the same `ctn-v1` container, since "inlining those as
-//! arguments gives up content addressing".
+//! # Two hashes, two jobs
 //!
-//! # Content addressing does the binding
+//! Both commitments are signed, and each answers a different question.
 //!
-//! A bundle keys every carried block by `dagcbor_cid`, which is SHA-256
-//! over the block's bytes. `Put`'s attenuation projects its block to
-//! `Checksum::sha256` of those same bytes. So the checksum *in the
-//! signed arguments* is the address of the block in the container:
-//! [`locate`] turns one into the other, and a lookup either finds the
-//! block whose bytes hash to what was signed, or finds nothing.
+//! **SHA-256 addresses the block.** A bundle keys carried blocks by
+//! `dagcbor_cid`, which is SHA-256 over their bytes, and `Put` projects
+//! its block to `Checksum::sha256` of those same bytes. So the checksum
+//! in the signed arguments *is* the block's address in the container:
+//! [`locate`] turns one into the other. This is SHA-256 only because it
+//! is what S3 supports; here it earns its keep as addressing and as a
+//! transport-integrity check that costs nothing extra.
 //!
-//! There is no comparison step to get wrong, and no way to substitute a
-//! block: a different block has a different SHA-256, so it hashes to a
-//! different CID and is simply not at the address the signature names.
-//! This is why the attenuation carries a SHA-256 checksum beside the
-//! BLAKE3 digest — the digest is the archive's own identity for the
-//! block, the checksum is how it is addressed in transit.
+//! **BLAKE3 identifies the block.** It is the archive's own content
+//! address — the key a block is stored under — and it is the one that
+//! has to be checked.
 //!
-//! # A carried block is not an authorized one
+//! # Why checking BLAKE3 is not belt and braces
 //!
-//! Presence asserts nothing, as the bundle's own documentation is careful
-//! to say. A peer may be handed blocks it never asked for and must not
-//! act on them. Only a block that a *verified* invocation's arguments
-//! name is authorized, which is why every function here takes the
-//! checksum from the arguments rather than iterating what arrived.
+//! Finding a block at the address the checksum names proves the sender
+//! sent the bytes it said it would. It does not prove those bytes are
+//! the block the invocation claims to store, because a sender signs its
+//! own invocation and therefore chooses *both* commitments. Nothing
+//! stops it signing a `digest` of one block and a `checksum` of another.
+//!
+//! A peer that skipped the BLAKE3 check would then store bytes under a
+//! key that is not their hash, and a content-addressed store that has
+//! lost that invariant is corrupt in a way no later read can detect: the
+//! block answers to a digest it does not have, and every proof built
+//! over it is wrong. The signature does not help — it is the attacker's
+//! own. [`block`] is where that is refused.
 
-use dialog_common::Checksum;
+use dialog_common::{Blake3Hash, Buffer, Checksum};
 use dialog_ucan_core::container::bundle::InvocationBundle;
 use ipld_core::cid::Cid;
 use ipld_core::cid::multihash::Multihash;
@@ -63,13 +65,25 @@ pub enum ResolveError {
         algorithm: String,
     },
     /// The invocation named material the container did not carry. The
-    /// sender omitted it, or sent a different block than it signed for —
-    /// which is indistinguishable here, and deliberately so: both are
-    /// "not the authorized bytes".
+    /// sender omitted it, or sent different bytes than it signed the
+    /// checksum for — indistinguishable here, and deliberately so: both
+    /// are "not the authorized bytes".
     #[error("the container carries no block at {link}")]
     Absent {
         /// The address the arguments named.
         link: Box<Cid>,
+    },
+    /// The carried block is not the block the invocation says it is.
+    ///
+    /// Storing it would put bytes under a key that is not their hash and
+    /// silently corrupt the archive, so this is refused rather than
+    /// repaired.
+    #[error("block at the signed address hashes to {found}, not the signed digest {signed}")]
+    Impostor {
+        /// The digest the invocation committed to.
+        signed: Box<Blake3Hash>,
+        /// The digest the carried bytes actually have.
+        found: Box<Blake3Hash>,
     },
 }
 
@@ -89,42 +103,85 @@ pub fn locate(checksum: &Checksum) -> Result<Cid, ResolveError> {
     }
 }
 
-/// The bytes the signed `checksum` names, from the container that
-/// carried the invocation.
+/// The block a verified invocation's arguments name, proven to be that
+/// block.
 ///
-/// `checksum` must come from a *verified* invocation's arguments.
-/// Passing one from anywhere else resolves a block by an address nobody
-/// vouched for, which asserts nothing.
-pub fn payload<'a>(
-    bundle: &'a InvocationBundle,
+/// `digest` and `checksum` must both come from the *same verified*
+/// invocation's arguments. The checksum finds the bytes; the digest
+/// decides whether they may be used. Passing either from anywhere else
+/// resolves a block against a claim nobody vouched for.
+///
+/// The returned [`Buffer`] has memoized the hash this checked, so the
+/// archive will not pay for it twice.
+pub fn block(
+    bundle: &InvocationBundle,
+    digest: &Blake3Hash,
     checksum: &Checksum,
-) -> Result<&'a [u8], ResolveError> {
+) -> Result<Buffer, ResolveError> {
     let link = locate(checksum)?;
-    bundle.block(&link).ok_or(ResolveError::Absent {
+    let bytes = bundle.block(&link).ok_or(ResolveError::Absent {
         link: Box::new(link),
-    })
+    })?;
+
+    let buffer = Buffer::from(bytes);
+    let found = buffer.blake3_hash();
+    if found != digest {
+        return Err(ResolveError::Impostor {
+            signed: Box::new(digest.clone()),
+            found: Box::new(found.clone()),
+        });
+    }
+    Ok(buffer)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_capability::Principal;
+    use dialog_credentials::Ed25519Signer;
     use dialog_ucan_core::cid::dagcbor_cid;
+    use dialog_ucan_core::{InvocationBuilder, InvocationChain};
+    use std::collections::BTreeMap;
 
-    /// The property the whole design leans on: the checksum a signature
-    /// covers *is* the address of the block in the container.
+    /// Build a bundle the way a sender would, then round-trip it
+    /// through `ctn-v1` so the tests resolve against bytes that really
+    /// travelled rather than an in-memory map.
+    async fn bundle_carrying(blocks: &[&[u8]]) -> InvocationBundle {
+        let signer = Ed25519Signer::import(&[42u8; 32])
+            .await
+            .expect("a fixed test key imports");
+        let did = signer.did();
+        let invocation = InvocationBuilder::new()
+            .issuer(signer)
+            .audience(&did)
+            .subject(&did)
+            .command(vec!["use".to_string(), "put".to_string()])
+            .arguments(BTreeMap::new())
+            .proofs(vec![])
+            .try_build()
+            .await
+            .expect("the invocation builds");
+
+        let chain = InvocationChain::new(invocation, Default::default());
+        InvocationBundle::from_chain(&chain, blocks.iter().map(|bytes| bytes.to_vec()))
+            .expect("a bundle assembles from a chain")
+    }
+
+    /// The property the design leans on: the checksum a signature covers
+    /// is the address of the block in the container.
     #[dialog_common::test]
     fn a_signed_checksum_is_a_block_address() {
-        let block = b"the authorized block".as_slice();
+        let bytes = b"the authorized block".as_slice();
         assert_eq!(
-            locate(&Checksum::sha256(block)).unwrap(),
-            dagcbor_cid(block),
+            locate(&Checksum::sha256(bytes)).unwrap(),
+            dagcbor_cid(bytes),
             "a block's address must be derivable from the checksum that was signed"
         );
     }
 
-    /// Substitution is not refused, it is impossible: different bytes
-    /// hash to a different address, so they are never *at* the address
-    /// the invocation named.
+    /// Substitution by a sender that signed honestly is not refused, it
+    /// is impossible: different bytes hash to a different address, so
+    /// they are never *at* the address the invocation named.
     #[dialog_common::test]
     fn substituted_bytes_are_at_a_different_address() {
         let authorized = b"the authorized block".as_slice();
@@ -135,18 +192,56 @@ mod tests {
         );
     }
 
-    /// A checksum whose block did not travel is absent, and says which
-    /// address went missing rather than failing anonymously.
     #[dialog_common::test]
-    fn an_omitted_block_names_the_address_it_should_have_been_at() {
-        let checksum = Checksum::sha256(b"never sent");
-        let link = locate(&checksum).unwrap();
-        assert_eq!(
-            ResolveError::Absent {
-                link: Box::new(link)
-            }
-            .to_string(),
-            format!("the container carries no block at {link}")
+    async fn the_block_that_was_signed_resolves() {
+        let bytes = b"the authorized block".as_slice();
+        let bundle = bundle_carrying(&[bytes]).await;
+
+        let resolved = block(
+            &bundle,
+            Buffer::from(bytes).blake3_hash(),
+            &Checksum::sha256(bytes),
+        )
+        .expect("the signed block resolves");
+        assert_eq!(resolved.as_ref(), bytes);
+    }
+
+    /// The attack the BLAKE3 check exists for. A sender signs its own
+    /// invocation, so it can commit to one block's digest and another
+    /// block's checksum. Addressing alone would hand over the second and
+    /// the archive would file it under the first.
+    #[dialog_common::test]
+    async fn a_block_signed_under_another_digest_is_refused() {
+        let carried = b"the block that actually travelled".as_slice();
+        let claimed = b"the block whose digest was signed".as_slice();
+        let bundle = bundle_carrying(&[carried]).await;
+
+        // Both commitments are the sender's to choose, and these
+        // disagree: the checksum addresses `carried`, the digest names
+        // `claimed`.
+        let refusal = block(
+            &bundle,
+            Buffer::from(claimed).blake3_hash(),
+            &Checksum::sha256(carried),
+        )
+        .expect_err("bytes that are not the signed block must not be stored under its digest");
+        assert!(
+            matches!(refusal, ResolveError::Impostor { .. }),
+            "expected an impostor, got {refusal:?}"
         );
+    }
+
+    #[dialog_common::test]
+    async fn an_omitted_block_is_absent_rather_than_wrong() {
+        let bundle = bundle_carrying(&[]).await;
+        let never_sent = b"never sent".as_slice();
+
+        let refusal = block(
+            &bundle,
+            Buffer::from(never_sent).blake3_hash(),
+            &Checksum::sha256(never_sent),
+        )
+        .expect_err("a block that did not travel cannot resolve");
+        assert!(matches!(refusal, ResolveError::Absent { .. }));
     }
 }
