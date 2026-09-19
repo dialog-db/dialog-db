@@ -1065,6 +1065,7 @@ mod tests {
         ops::{Bound, RangeBounds},
         rc::Rc,
         str::FromStr,
+        sync::{Arc, Mutex as StdMutex},
     };
     use testresult::TestResult;
 
@@ -2571,8 +2572,12 @@ mod tests {
     }
 
     /// Records the candidate revoker sets it was queried with.
+    ///
+    /// Shared rather than cell-shared: a checker's query future is
+    /// `ConditionalSend`, so a test double has to be as movable as the
+    /// real ones it stands in for.
     #[derive(Debug, Clone, Default)]
-    struct RecordingRevocations(Rc<RefCell<Vec<Vec<Did>>>>);
+    struct RecordingRevocations(Arc<StdMutex<Vec<Vec<Did>>>>);
 
     impl RevocationChecker for RecordingRevocations {
         type Error = Unreachable;
@@ -2581,7 +2586,10 @@ mod tests {
             &self,
             selector: RevocationSelector<'_>,
         ) -> Result<Option<RevocationMatch>, Self::Error> {
-            RefCell::borrow_mut(&self.0).push(selector.by.to_vec());
+            self.0
+                .lock()
+                .expect("not poisoned")
+                .push(selector.by.to_vec());
             Ok(None)
         }
     }
@@ -2702,7 +2710,7 @@ mod tests {
         invocation: &Invocation<Ed25519Signature>,
         store: &DelegationStore,
     ) -> TestResult<Vec<Vec<Did>>> {
-        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen = Arc::new(StdMutex::new(Vec::new()));
         let environment: Environment<
             DelegationStore,
             DidKeyResolver,
@@ -2719,7 +2727,7 @@ mod tests {
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut recorded = RefCell::borrow(&seen).clone();
+        let mut recorded = seen.lock().expect("not poisoned").clone();
         // Queries complete concurrently, so order by chain position: each
         // link's prefix is strictly longer than the one before it.
         recorded.sort_by_key(Vec::len);
