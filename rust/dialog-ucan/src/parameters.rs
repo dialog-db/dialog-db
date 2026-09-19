@@ -84,8 +84,6 @@ mod tests {
     use super::*;
     use dialog_capability::{Subject, did};
     use dialog_common::{Blake3Hash, Buffer};
-    use dialog_effects::Use;
-    use dialog_effects::archive::{Archive, Catalog, Get, Put};
 
     #[dialog_common::test]
     fn it_returns_no_parameters_for_bare_subject() {

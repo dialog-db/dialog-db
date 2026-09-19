@@ -234,8 +234,6 @@ mod tests {
     use super::*;
     use dialog_capability::{Subject, did};
     use dialog_common::Blake3Hash;
-    use dialog_effects::Use;
-    use dialog_effects::archive::{Archive, Catalog, Get};
 
     #[dialog_common::test]
     fn it_builds_scope_from_subject() {

@@ -22,7 +22,9 @@
 //! a blob effect's *output* is a streaming transfer handle that the caller
 //! reads from ([`BlobReader`]) or writes into ([`BlobWriter`]).
 
+use crate::archive::Archive;
 use async_trait::async_trait;
+use std::marker::PhantomData;
 
 use dialog_common::{Blake3Hash, ConditionalSend};
 use serde::{Deserialize, Serialize};
@@ -35,12 +37,12 @@ pub use dialog_capability::{
 /// Blob store domain under the archive. Contributes no ability segment of
 /// its own: the effects name the whole command (`/use/get/archive/blob`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Blob<V = crate::Get>(#[serde(skip)] core::marker::PhantomData<V>);
+pub struct Blob<V = crate::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Blob<V> {
     /// The blob resource under `V`.
     pub fn new() -> Self {
-        Self(core::marker::PhantomData)
+        Self(PhantomData)
     }
 }
 
@@ -54,7 +56,7 @@ impl<V: crate::Verb> Attenuation for Blob<V>
 where
     V::Of: dialog_capability::Constraint,
 {
-    type Of = crate::archive::Archive<V>;
+    type Of = Archive<V>;
 
     fn attenuation() -> Option<&'static str> {
         Some("blob")

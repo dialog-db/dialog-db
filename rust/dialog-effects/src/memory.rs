@@ -16,6 +16,7 @@
 
 use crate::Verb;
 use std::fmt;
+use std::marker::PhantomData;
 use std::str;
 
 use crate::Rejection;
@@ -35,12 +36,12 @@ use thiserror::Error;
 /// the chain, so the path reads verb-then-namespace without any link
 /// having to spell the combination out.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Memory<V = crate::Get>(core::marker::PhantomData<V>);
+pub struct Memory<V = crate::Get>(PhantomData<V>);
 
 impl<V> Memory<V> {
     /// The memory namespace under `V`.
     pub fn new() -> Self {
-        Self(core::marker::PhantomData)
+        Self(PhantomData)
     }
 }
 
@@ -71,8 +72,10 @@ where
 pub struct Space<V = crate::Get> {
     /// The space name (typically a DID).
     pub space: String,
+    /// The verb this policy hangs from. A type-level marker: it holds
+    /// no data and never reaches the wire.
     #[serde(skip)]
-    verb: core::marker::PhantomData<V>,
+    pub verb: PhantomData<V>,
 }
 
 impl<V> Space<V> {
@@ -80,7 +83,7 @@ impl<V> Space<V> {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             space: name.into(),
-            verb: core::marker::PhantomData,
+            verb: PhantomData,
         }
     }
 }
@@ -101,8 +104,10 @@ where
 pub struct Cell<V = crate::Get> {
     /// The cell name.
     pub cell: String,
+    /// The verb this policy hangs from. A type-level marker: it holds
+    /// no data and never reaches the wire.
     #[serde(skip)]
-    verb: core::marker::PhantomData<V>,
+    pub verb: PhantomData<V>,
 }
 
 impl<V> Cell<V> {
@@ -110,7 +115,7 @@ impl<V> Cell<V> {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             cell: name.into(),
-            verb: core::marker::PhantomData,
+            verb: PhantomData,
         }
     }
 }
@@ -340,13 +345,14 @@ impl From<StorageError> for MemoryError {
 
 #[cfg(test)]
 mod tests {
+    use crate::memory::prelude::CellScope;
     use crate::prelude::*;
     use dialog_capability::{Subject, did};
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    fn cell() -> crate::memory::prelude::CellScope {
+    fn cell() -> CellScope {
         Subject::from(did!("key:zSpace"))
             .memory()
             .space("local")

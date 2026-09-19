@@ -35,6 +35,7 @@ use crate::Verb;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Attenuate, Attenuation, Constraint, Effect};
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use thiserror::Error;
 
 use crate::memory::MemoryError;
@@ -46,12 +47,12 @@ use crate::memory::MemoryError;
 /// (`get/dialog/branch` — verb, then namespace, then resource,
 /// as in `get/memory/cell`), as they do in [`memory`](crate::memory).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Branches<V = crate::Get>(#[serde(skip)] core::marker::PhantomData<V>);
+pub struct Branches<V = crate::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Branches<V> {
     /// The dialog namespace under `V`.
     pub fn new() -> Self {
-        Self(core::marker::PhantomData)
+        Self(PhantomData)
     }
 }
 
@@ -81,8 +82,10 @@ where
 pub struct Branch<V = crate::Get> {
     /// The branch name, as it appears in `dialog.branch/name`.
     pub name: String,
+    /// The verb this policy hangs from. A type-level marker: it holds
+    /// no data and never reaches the wire.
     #[serde(skip)]
-    verb: core::marker::PhantomData<V>,
+    pub verb: PhantomData<V>,
 }
 
 impl<V> Branch<V> {
@@ -90,7 +93,7 @@ impl<V> Branch<V> {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            verb: core::marker::PhantomData,
+            verb: PhantomData,
         }
     }
 }

@@ -15,6 +15,7 @@
 
 use crate::Verb;
 use std::error::Error;
+use std::marker::PhantomData;
 
 use crate::Rejection;
 pub use dialog_capability::Constraint;
@@ -34,12 +35,12 @@ use thiserror::Error;
 /// Generic over the verb above it, because the same namespace is
 /// reached by reading and by writing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Archive<V = crate::Get>(#[serde(skip)] core::marker::PhantomData<V>);
+pub struct Archive<V = crate::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Archive<V> {
     /// The archive namespace under `V`.
     pub fn new() -> Self {
-        Self(core::marker::PhantomData)
+        Self(PhantomData)
     }
 }
 
@@ -67,8 +68,10 @@ where
 pub struct Catalog<V = crate::Get> {
     /// The catalog name (e.g., "index", "blobs").
     pub catalog: String,
+    /// The verb this policy hangs from. A type-level marker: it holds
+    /// no data and never reaches the wire.
     #[serde(skip)]
-    verb: core::marker::PhantomData<V>,
+    pub verb: PhantomData<V>,
 }
 
 impl<V> Catalog<V> {
@@ -76,7 +79,7 @@ impl<V> Catalog<V> {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             catalog: name.into(),
-            verb: core::marker::PhantomData,
+            verb: PhantomData,
         }
     }
 }
@@ -91,12 +94,12 @@ where
 /// The block resource: the unit an archive stores, named by content
 /// hash. Completes the command `/use/get/archive/block`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Block<V = crate::Get>(#[serde(skip)] core::marker::PhantomData<V>);
+pub struct Block<V = crate::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Block<V> {
     /// The block resource under `V`.
     pub fn new() -> Self {
-        Self(core::marker::PhantomData)
+        Self(PhantomData)
     }
 }
 
