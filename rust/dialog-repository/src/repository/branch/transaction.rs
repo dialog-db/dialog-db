@@ -255,7 +255,16 @@ impl TransactionCommit<&Snapshot> {
         let mut changes = self.changes;
         let source = SourceRef::Snapshot(snapshot);
         let view = Composite::of(source.to_source());
-        induce::induce(source, &view, &mut changes, self.transients, env).await?;
+        let mut witness = source.overlay();
+        induce::induce(
+            source,
+            &view,
+            &mut changes,
+            self.transients,
+            &mut witness,
+            env,
+        )
+        .await?;
 
         // Route the settled batch by attribute placement: tree-bound
         // instructions commit to the tree, session-bound ones land in
