@@ -174,6 +174,7 @@ macro_rules! performs_by_value {
 
 performs_by_value!(
     peer::Hello,
+    peer::Spaces,
     archive::Get,
     archive::Put,
     archive::Import,

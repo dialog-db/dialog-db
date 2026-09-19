@@ -226,3 +226,53 @@ async fn a_peer_says_who_it_is() {
     assert!(greeting.profile.to_string().starts_with("did:"));
     assert!(greeting.operator.to_string().starts_with("did:"));
 }
+
+/// The other half of self-description: what a peer holds, asked for by
+/// a caller that holds no authority over any of it.
+///
+/// The offers are seeded rather than derived so the assertion can be
+/// about the values themselves. A store answering with an empty list
+/// would satisfy a test that only checked the call succeeded, and that
+/// is exactly the failure — the effect reaching a provider that has
+/// nothing to say — this has to be able to catch.
+#[dialog_common::test]
+async fn a_peer_says_which_spaces_it_holds() {
+    use dialog_effects::peer::Offer;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let subject = profile.did();
+
+    let offered = vec![
+        Offer {
+            subject: dialog_capability::did!("key:zSpaceOne"),
+            name: Some("notes".into()),
+        },
+        Offer {
+            subject: dialog_capability::did!("key:zSpaceTwo"),
+            name: None,
+        },
+    ];
+
+    let responder = Arc::new(Responder::new(
+        Volatile::default().offering(offered.clone()),
+        CachingResolver::new(WebResolver::new()),
+    ));
+    let site = Iroh::new(Loopback(responder.clone()));
+
+    let ask = Subject::from(subject)
+        .attenuate(Use)
+        .attenuate(dialog_effects::peer::Peer)
+        .attenuate(dialog_effects::peer::Spaces);
+    let fork: IrohFork<dialog_effects::peer::Spaces> = Fork::<Iroh, _>::new(ask, peer()).into();
+    let invocation = fork.authorize(&operator).await.expect("authorized");
+
+    let held =
+        Provider::<ForkInvocation<Iroh, dialog_effects::peer::Spaces>>::execute(&site, invocation)
+            .await
+            .expect("the peer lists what it holds");
+
+    assert_eq!(
+        held, offered,
+        "every space came back as it was offered, name and all"
+    );
+}

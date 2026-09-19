@@ -20,9 +20,22 @@ use dialog_effects::{archive, blob, memory, peer};
 pub struct Volatile {
     blocks: Mutex<HashMap<Blake3Hash, Vec<u8>>>,
     blobs: Arc<Mutex<HashMap<Blake3Hash, Vec<u8>>>>,
+    offers: Mutex<Vec<peer::Offer>>,
 }
 
 impl Volatile {
+    /// Offer `offers` when asked what spaces this peer holds.
+    ///
+    /// Held rather than derived, because this store has no spaces to
+    /// derive them from. A test that wants a peer with an inventory says
+    /// what is in it, and then checks that what came back over the wire
+    /// is what went in — which a store answering with an empty list
+    /// could never fail.
+    pub fn offering(self, offers: impl IntoIterator<Item = peer::Offer>) -> Self {
+        *self.offers.lock().expect("not poisoned") = offers.into_iter().collect();
+        self
+    }
+
     /// How many blocks have been stored.
     pub fn len(&self) -> usize {
         self.blocks.lock().expect("not poisoned").len()
@@ -211,6 +224,18 @@ impl Provider<peer::Hello> for Volatile {
             profile: dialog_capability::did!("key:zVolatileProfile"),
             operator: dialog_capability::did!("key:zVolatileOperator"),
         })
+    }
+}
+
+/// Whatever [`Volatile::offering`] was given, and nothing by default.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<peer::Spaces> for Volatile {
+    async fn execute(
+        &self,
+        _input: Capability<peer::Spaces>,
+    ) -> Result<Vec<peer::Offer>, peer::PeerError> {
+        Ok(self.offers.lock().expect("not poisoned").clone())
     }
 }
 
