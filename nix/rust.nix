@@ -116,7 +116,28 @@ let
     }
   );
 
-  wasmAttributes = commonAttributes // {
+  # The C toolchain for wasm32, which is not the stdenv one.
+  #
+  # `ring` compiles C, and it is in the wasm graph — iroh brings quinn,
+  # which brings rustls, which brings ring — so a wasm build here has C to
+  # compile for a target the stdenv compiler cannot serve. On Linux that
+  # compiler is gcc, which has no wasm backend at all; on Darwin it is a
+  # nix-wrapped clang, and the wrapper injects hardening flags
+  # (`-fzero-call-used-regs=used-gpr`) that clang rejects for a wasm
+  # target. Nix says so itself when it happens, and suggests exactly this:
+  # use an un-wrapped compiler.
+  #
+  # Scoped to the target, so nothing native changes: cc-rs reads the
+  # `_wasm32_unknown_unknown` suffix and every other target keeps the
+  # stdenv compiler and its hardening. `llvm-ar` rather than the stdenv
+  # `ar` for the same reason — wasm object files are not what a host `ar`
+  # expects.
+  wasmCcEnv = {
+    CC_wasm32_unknown_unknown = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+    AR_wasm32_unknown_unknown = "${pkgs.llvmPackages.llvm}/bin/llvm-ar";
+  };
+
+  wasmAttributes = commonAttributes // wasmCcEnv // {
     CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
   };
 
@@ -265,5 +286,6 @@ in
     cargoChecks
     wasm-bindgen-cli
     wbg-pool
+    wasmCcEnv
     ;
 }
