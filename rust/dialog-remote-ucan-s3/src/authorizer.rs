@@ -190,15 +190,17 @@ impl FromUcanArgs for memory::Resolve {
         // `Resolve` is a unit struct: it carries no arguments, so it is
         // constructed rather than deserialized. Reading it out of the
         // args map fails, since a map does not deserialize into a unit.
-        let space: memory::Space<dialog_effects::Get> = deserialize_from_args(args)?;
-        let cell: memory::Cell<dialog_effects::Get> = deserialize_from_args(args)?;
-        Ok(dialog_effects::AttenuateVerb::<dialog_effects::Get>::verb(
-            dialog_capability::Subject::from(subject.clone()),
+        let space: memory::Space<dialog_effects::verb::Get> = deserialize_from_args(args)?;
+        let cell: memory::Cell<dialog_effects::verb::Get> = deserialize_from_args(args)?;
+        Ok(
+            dialog_effects::AttenuateVerb::<dialog_effects::verb::Get>::verb(
+                dialog_capability::Subject::from(subject.clone()),
+            )
+            .attenuate(memory::Memory::<dialog_effects::verb::Get>::new())
+            .attenuate(space)
+            .attenuate(cell)
+            .attenuate(memory::Resolve),
         )
-        .attenuate(memory::Memory::<dialog_effects::Get>::new())
-        .attenuate(space)
-        .attenuate(cell)
-        .attenuate(memory::Resolve))
     }
 }
 impl FromUcanArgs for memory::Publish {

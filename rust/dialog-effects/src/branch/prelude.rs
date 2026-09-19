@@ -5,6 +5,8 @@
 //! use dialog_effects::branch::prelude::*;
 //! ```
 
+use crate::destroy;
+use crate::verb;
 use dialog_capability::{Capability, Did, Policy, Subject};
 
 use super::{Branch, Branches, Create, Delete, List};
@@ -80,7 +82,7 @@ impl BranchesExt for BranchesScope {
     }
 
     fn list(self) -> Capability<List> {
-        self.under::<crate::Get>().invoke(List)
+        self.under::<verb::Get>().invoke(List)
     }
 }
 
@@ -126,11 +128,11 @@ impl BranchExt for BranchScope {
     type Delete = Capability<Delete>;
 
     fn create(self) -> Capability<Create> {
-        self.under::<crate::Put>().invoke(Create)
+        self.under::<verb::Put>().invoke(Create)
     }
 
     fn delete(self) -> Capability<Delete> {
-        self.under::<crate::Discard>().invoke(Delete)
+        self.under::<destroy::Delete>().invoke(Delete)
     }
 }
 
@@ -142,12 +144,12 @@ pub trait BranchNameExt {
 
 impl BranchNameExt for Capability<Create> {
     fn name(&self) -> &str {
-        &Branch::<crate::Put>::of(self).name
+        &Branch::<verb::Put>::of(self).name
     }
 }
 
 impl BranchNameExt for Capability<Delete> {
     fn name(&self) -> &str {
-        &Branch::<crate::Discard>::of(self).name
+        &Branch::<destroy::Delete>::of(self).name
     }
 }

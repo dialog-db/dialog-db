@@ -4,6 +4,7 @@
 //! use dialog_effects::blob::prelude::*;
 //! ```
 
+use crate::verb;
 use dialog_capability::{Capability, Policy, Subject};
 use dialog_common::Blake3Hash;
 
@@ -90,15 +91,15 @@ impl BlobExt for BlobScope {
     type Import = Capability<Import>;
 
     fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read> {
-        self.under::<crate::Get>().invoke(Read::new(digest))
+        self.under::<verb::Get>().invoke(Read::new(digest))
     }
 
     fn write(self) -> Capability<Write> {
-        self.under::<crate::Put>().invoke(Write::new())
+        self.under::<verb::Put>().invoke(Write::new())
     }
 
     fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Capability<Import> {
-        self.under::<crate::Put>().invoke(Import::new(digest, size))
+        self.under::<verb::Put>().invoke(Import::new(digest, size))
     }
 }
 
@@ -158,18 +159,18 @@ where
 
 impl InvokeOn<Read> for BlobScope {
     fn invoke_on(self, effect: Read) -> Capability<Read> {
-        self.under::<crate::Get>().invoke(effect)
+        self.under::<verb::Get>().invoke(effect)
     }
 }
 
 impl InvokeOn<Write> for BlobScope {
     fn invoke_on(self, effect: Write) -> Capability<Write> {
-        self.under::<crate::Put>().invoke(effect)
+        self.under::<verb::Put>().invoke(effect)
     }
 }
 
 impl InvokeOn<Import> for BlobScope {
     fn invoke_on(self, effect: Import) -> Capability<Import> {
-        self.under::<crate::Put>().invoke(effect)
+        self.under::<verb::Put>().invoke(effect)
     }
 }

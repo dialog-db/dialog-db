@@ -19,10 +19,12 @@
 //! capability comes out verb-first, and neither has to know about the
 //! other.
 
+use crate::verb;
 use dialog_capability::{Capability, Did, Policy, Subject};
 
 use super::{Cell, Memory, Publish, Resolve, Retract, Space, Version};
-use crate::{AttenuateVerb, Delete, Get, Put};
+use crate::AttenuateVerb;
+use verb::{Delete, Get, Put};
 
 /// Extension trait to start a memory capability chain.
 pub trait MemorySubjectExt {

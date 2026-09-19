@@ -32,6 +32,8 @@
 
 use crate::Rejection;
 use crate::Verb;
+use crate::destroy;
+use crate::verb;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Attenuate, Attenuation, Constraint, Effect};
 use serde::{Deserialize, Serialize};
@@ -47,7 +49,7 @@ use crate::memory::MemoryError;
 /// (`get/dialog/branch` — verb, then namespace, then resource,
 /// as in `get/memory/cell`), as they do in [`memory`](crate::memory).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Branches<V = crate::Get>(#[serde(skip)] PhantomData<V>);
+pub struct Branches<V = verb::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Branches<V> {
     /// The dialog namespace under `V`.
@@ -79,7 +81,7 @@ where
 /// the branch *name* scopes the capability and travels in the
 /// invocation's parameters, as a cell's name does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Branch<V = crate::Get> {
+pub struct Branch<V = verb::Get> {
     /// The branch name, as it appears in `dialog.branch/name`.
     pub name: String,
     /// The verb this policy hangs from. A type-level marker: it holds
@@ -120,7 +122,7 @@ where
 pub struct List;
 
 impl Effect for List {
-    type Of = Branches<crate::Get>;
+    type Of = Branches<verb::Get>;
     type Output = Result<Vec<String>, BranchError>;
 
     // `/use/get/dialog/branch` is complete at the namespace: listing
@@ -142,7 +144,7 @@ impl Effect for List {
 pub struct Create;
 
 impl Effect for Create {
-    type Of = Branch<crate::Put>;
+    type Of = Branch<verb::Put>;
     type Output = Result<(), BranchError>;
 
     const NAMED: bool = false;
@@ -163,7 +165,7 @@ impl Effect for Create {
 pub struct Delete;
 
 impl Effect for Delete {
-    type Of = Branch<crate::Discard>;
+    type Of = Branch<destroy::Delete>;
     type Output = Result<(), BranchError>;
 
     const NAMED: bool = false;

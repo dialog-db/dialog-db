@@ -23,6 +23,7 @@
 //! reads from ([`BlobReader`]) or writes into ([`BlobWriter`]).
 
 use crate::archive::Archive;
+use crate::verb;
 use async_trait::async_trait;
 use std::marker::PhantomData;
 
@@ -37,7 +38,7 @@ pub use dialog_capability::{
 /// Blob store domain under the archive. Contributes no ability segment of
 /// its own: the effects name the whole command (`/use/get/archive/blob`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Blob<V = crate::Get>(#[serde(skip)] PhantomData<V>);
+pub struct Blob<V = verb::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Blob<V> {
     /// The blob resource under `V`.
@@ -132,7 +133,7 @@ impl Read {
 }
 
 impl Effect for Read {
-    type Of = Blob<crate::Get>;
+    type Of = Blob<verb::Get>;
     type Output = Result<BlobReader, BlobError>;
 
     const NAMED: bool = false;
@@ -158,7 +159,7 @@ impl Default for Write {
 }
 
 impl Effect for Write {
-    type Of = Blob<crate::Put>;
+    type Of = Blob<verb::Put>;
     type Output = Result<BlobWriter, BlobError>;
 
     const NAMED: bool = false;
@@ -191,7 +192,7 @@ impl Import {
 }
 
 impl Effect for Import {
-    type Of = Blob<crate::Put>;
+    type Of = Blob<verb::Put>;
     type Output = Result<BlobWriter, BlobError>;
 
     const NAMED: bool = false;

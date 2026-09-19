@@ -5,6 +5,7 @@
 //! use dialog_effects::archive::prelude::*;
 //! ```
 
+use crate::verb;
 use dialog_capability::{Capability, Did, Policy, Subject};
 use dialog_common::{Blake3Hash, Buffer};
 
@@ -143,15 +144,15 @@ impl CatalogExt for CatalogScope {
     type Import = Capability<Import>;
 
     fn get(self, digest: impl Into<Blake3Hash>) -> Capability<Get> {
-        self.under::<crate::Get>().invoke(Get::new(digest))
+        self.under::<verb::Get>().invoke(Get::new(digest))
     }
 
     fn put(self, block: impl Into<Buffer>) -> Capability<Put> {
-        self.under::<crate::Put>().invoke(Put::new(block))
+        self.under::<verb::Put>().invoke(Put::new(block))
     }
 
     fn import(self, blocks: impl IntoIterator<Item = impl Into<Buffer>>) -> Capability<Import> {
-        self.under::<crate::Put>().invoke(Import::new(blocks))
+        self.under::<verb::Put>().invoke(Import::new(blocks))
     }
 }
 
@@ -165,7 +166,7 @@ pub trait ImportExt {
 
 impl ImportExt for Capability<Import> {
     fn catalog(&self) -> &str {
-        &Catalog::<crate::Put>::of(self).catalog
+        &Catalog::<verb::Put>::of(self).catalog
     }
 
     fn blocks(&self) -> &[Buffer] {
@@ -183,7 +184,7 @@ pub trait GetExt {
 
 impl GetExt for Capability<Get> {
     fn catalog(&self) -> &str {
-        &Catalog::<crate::Get>::of(self).catalog
+        &Catalog::<verb::Get>::of(self).catalog
     }
 
     fn digest(&self) -> &Blake3Hash {
@@ -203,7 +204,7 @@ pub trait PutExt {
 
 impl PutExt for Capability<Put> {
     fn catalog(&self) -> &str {
-        &Catalog::<crate::Put>::of(self).catalog
+        &Catalog::<verb::Put>::of(self).catalog
     }
 
     fn digest(&self) -> &Blake3Hash {

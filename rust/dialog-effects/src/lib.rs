@@ -130,72 +130,82 @@ pub trait AttenuateVerb<V: dialog_capability::Constraint> {
     fn verb(self) -> Capability<V>;
 }
 
-impl AttenuateVerb<Get> for Subject {
-    fn verb(self) -> Capability<Get> {
-        self.attenuate(Use).attenuate(Get)
+impl AttenuateVerb<verb::Get> for Subject {
+    fn verb(self) -> Capability<verb::Get> {
+        self.attenuate(Use).attenuate(verb::Get)
     }
 }
 
-impl AttenuateVerb<Put> for Subject {
-    fn verb(self) -> Capability<Put> {
-        self.attenuate(Use).attenuate(Put)
+impl AttenuateVerb<verb::Put> for Subject {
+    fn verb(self) -> Capability<verb::Put> {
+        self.attenuate(Use).attenuate(verb::Put)
     }
 }
 
-impl AttenuateVerb<Delete> for Subject {
-    fn verb(self) -> Capability<Delete> {
-        self.attenuate(Use).attenuate(Delete)
+impl AttenuateVerb<verb::Delete> for Subject {
+    fn verb(self) -> Capability<verb::Delete> {
+        self.attenuate(Use).attenuate(verb::Delete)
     }
 }
 
-impl AttenuateVerb<Discard> for Subject {
-    fn verb(self) -> Capability<Discard> {
-        self.attenuate(Void).attenuate(Discard)
+impl AttenuateVerb<destroy::Delete> for Subject {
+    fn verb(self) -> Capability<destroy::Delete> {
+        self.attenuate(Void).attenuate(destroy::Delete)
     }
 }
 
-/// Reading, under [`Use`]: `/use/get/...`.
+/// The verbs a holder exercises on a subject's data, under [`Use`].
 ///
 /// A verb is a level of the hierarchy, not a prefix an effect spells
 /// out for itself. That is what makes `/use/get` a real thing to
-/// delegate -- every read of a subject's data and nothing else -- rather
-/// than a convention each effect's path has to agree to.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Get;
+/// delegate -- every read of a subject's data and nothing else --
+/// rather than a convention each effect's path has to agree to.
+pub mod verb {
+    use super::{Attenuation, Deserialize, Serialize, Use};
 
-impl Attenuation for Get {
-    type Of = Use;
+    /// Reading: `/use/get/...`.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+    pub struct Get;
+
+    impl Attenuation for Get {
+        type Of = Use;
+    }
+
+    /// Writing: `/use/put/...`.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+    pub struct Put;
+
+    impl Attenuation for Put {
+        type Of = Use;
+    }
+
+    /// Removing a value while leaving what held it: `/use/delete/...`.
+    ///
+    /// Distinct from [`destroy::Delete`](super::destroy::Delete), which
+    /// destroys the container itself. Emptying a cell is an ordinary
+    /// write; discarding the branch that cell belongs to is not.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+    pub struct Delete;
+
+    impl Attenuation for Delete {
+        type Of = Use;
+    }
 }
 
-/// Writing, under [`Use`]: `/use/put/...`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Put;
-
-impl Attenuation for Put {
-    type Of = Use;
-}
-
-/// Removing a value while leaving what held it, under [`Use`]:
-/// `/use/delete/...`.
+/// The verbs that destroy rather than change, under [`Void`].
 ///
-/// Distinct from [`Void`], which destroys the container itself. Emptying
-/// a cell is an ordinary write; discarding the branch that cell belongs
-/// to is not.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Delete;
+/// Its own module so the type is named for the path segment it
+/// contributes -- `delete` -- rather than given a different word to
+/// keep it distinct from [`verb::Delete`]. The two are told apart by
+/// the root they hang from, which is the distinction that matters.
+pub mod destroy {
+    use super::{Attenuation, Deserialize, Serialize, Void};
 
-impl Attenuation for Delete {
-    type Of = Use;
-}
+    /// Destroying the thing itself: `/void/delete/...`.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+    pub struct Delete;
 
-/// Destroying, under [`Void`]: `/void/delete/...`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Discard;
-
-impl Attenuation for Discard {
-    type Of = Void;
-
-    fn attenuation() -> Option<&'static str> {
-        Some("delete")
+    impl Attenuation for Delete {
+        type Of = Void;
     }
 }

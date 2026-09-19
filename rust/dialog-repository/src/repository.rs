@@ -650,9 +650,9 @@ mod tests {
             let capability = repo
                 .subject()
                 .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::Get>::new("data"));
+                .attenuate(dialog_effects::verb::Get)
+                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
+                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
 
             let result = profile.access().claim(capability).perform(&operator).await;
             assert!(
@@ -677,9 +677,9 @@ mod tests {
             let scoped_cap = repo
                 .subject()
                 .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::Get>::new("data"));
+                .attenuate(dialog_effects::verb::Get)
+                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
+                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
             let chain = repo
                 .access()
                 .claim(scoped_cap)
@@ -692,9 +692,9 @@ mod tests {
             let data_cap = repo
                 .subject()
                 .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::Get>::new("data"));
+                .attenuate(dialog_effects::verb::Get)
+                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
+                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
             let result = profile.access().claim(data_cap).perform(&operator).await;
             assert!(
                 result.is_ok(),
@@ -706,9 +706,9 @@ mod tests {
             let secret_cap = repo
                 .subject()
                 .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::Get>::new("secret"));
+                .attenuate(dialog_effects::verb::Get)
+                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
+                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("secret"));
             let result = profile.access().claim(secret_cap).perform(&operator).await;
             assert!(
                 result.is_err(),
@@ -731,9 +731,9 @@ mod tests {
             let scoped_cap = repo
                 .subject()
                 .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::Get>::new("data"));
+                .attenuate(dialog_effects::verb::Get)
+                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
+                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
             let chain = repo
                 .access()
                 .claim(scoped_cap)
@@ -746,9 +746,9 @@ mod tests {
             let data_cap = repo
                 .subject()
                 .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::Get>::new("data"));
+                .attenuate(dialog_effects::verb::Get)
+                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
+                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
             let result = profile
                 .access()
                 .claim(data_cap)
@@ -765,9 +765,9 @@ mod tests {
             let secret_cap = repo
                 .subject()
                 .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::Get>::new("secret"));
+                .attenuate(dialog_effects::verb::Get)
+                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
+                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("secret"));
             let result = profile
                 .access()
                 .claim(secret_cap)

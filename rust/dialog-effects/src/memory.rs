@@ -15,6 +15,7 @@
 //! ```
 
 use crate::Verb;
+use crate::verb;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str;
@@ -36,7 +37,7 @@ use thiserror::Error;
 /// the chain, so the path reads verb-then-namespace without any link
 /// having to spell the combination out.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Memory<V = crate::Get>(PhantomData<V>);
+pub struct Memory<V = verb::Get>(PhantomData<V>);
 
 impl<V> Memory<V> {
     /// The memory namespace under `V`.
@@ -69,7 +70,7 @@ where
 /// path segment -- `/use/get/memory/cell` names the kind of thing
 /// reached, not which one.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Space<V = crate::Get> {
+pub struct Space<V = verb::Get> {
     /// The space name (typically a DID).
     pub space: String,
     /// The verb this policy hangs from. A type-level marker: it holds
@@ -101,7 +102,7 @@ where
 /// applies to, and so completes the command. The cell *name* scopes the
 /// capability and travels in the parameters, as the space name does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Cell<V = crate::Get> {
+pub struct Cell<V = verb::Get> {
     /// The cell name.
     pub cell: String,
     /// The verb this policy hangs from. A type-level marker: it holds
@@ -243,7 +244,7 @@ pub struct Edition<T> {
 pub struct Resolve;
 
 impl Effect for Resolve {
-    type Of = Cell<crate::Get>;
+    type Of = Cell<verb::Get>;
     type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
 
     // `/use/get/memory/cell` is complete at the cell; a `resolve`
@@ -279,7 +280,7 @@ impl Publish {
 }
 
 impl Effect for Publish {
-    type Of = Cell<crate::Put>;
+    type Of = Cell<verb::Put>;
     type Output = Result<Version, MemoryError>;
 
     const NAMED: bool = false;
@@ -303,7 +304,7 @@ impl Retract {
 }
 
 impl Effect for Retract {
-    type Of = Cell<crate::Delete>;
+    type Of = Cell<verb::Delete>;
     type Output = Result<(), MemoryError>;
 
     const NAMED: bool = false;

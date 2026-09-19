@@ -12,9 +12,9 @@
 use dialog_effects::archive::prelude::CatalogScope;
 use std::sync::Arc;
 
-use dialog_capability::{Capability, Command, Did};
+use dialog_capability::{Command, Did};
 use dialog_common::{Blake3Hash, Priority, Scheduler};
-use dialog_effects::archive::{ArchiveError, Catalog};
+use dialog_effects::archive::ArchiveError;
 
 use crate::NetworkAddress;
 

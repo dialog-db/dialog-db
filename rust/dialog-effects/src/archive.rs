@@ -14,6 +14,7 @@
 //! ```
 
 use crate::Verb;
+use crate::verb;
 use std::error::Error;
 use std::marker::PhantomData;
 
@@ -35,7 +36,7 @@ use thiserror::Error;
 /// Generic over the verb above it, because the same namespace is
 /// reached by reading and by writing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Archive<V = crate::Get>(#[serde(skip)] PhantomData<V>);
+pub struct Archive<V = verb::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Archive<V> {
     /// The archive namespace under `V`.
@@ -65,7 +66,7 @@ where
 ///
 /// Does not add to ability path but constrains invocation arguments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Catalog<V = crate::Get> {
+pub struct Catalog<V = verb::Get> {
     /// The catalog name (e.g., "index", "blobs").
     pub catalog: String,
     /// The verb this policy hangs from. A type-level marker: it holds
@@ -94,7 +95,7 @@ where
 /// The block resource: the unit an archive stores, named by content
 /// hash. Completes the command `/use/get/archive/block`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Block<V = crate::Get>(#[serde(skip)] PhantomData<V>);
+pub struct Block<V = verb::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Block<V> {
     /// The block resource under `V`.
@@ -140,7 +141,7 @@ impl Get {
 }
 
 impl Effect for Get {
-    type Of = Block<crate::Get>;
+    type Of = Block<verb::Get>;
     type Output = Result<Option<Vec<u8>>, ArchiveError>;
 
     const NAMED: bool = false;
@@ -236,7 +237,7 @@ impl Put {
 }
 
 impl Effect for Put {
-    type Of = Block<crate::Put>;
+    type Of = Block<verb::Put>;
     type Output = Result<(), ArchiveError>;
 
     const NAMED: bool = false;
@@ -289,7 +290,7 @@ impl Import {
 }
 
 impl Effect for Import {
-    type Of = Block<crate::Put>;
+    type Of = Block<verb::Put>;
     type Output = Result<(), ArchiveError>;
 
     const NAMED: bool = false;

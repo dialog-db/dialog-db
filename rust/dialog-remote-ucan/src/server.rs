@@ -491,12 +491,12 @@ where
         {
             return Err(Failure::checksum_mismatch());
         }
-        let capability = dialog_effects::AttenuateVerb::<dialog_effects::Put>::verb(Subject::from(
-            subject.clone(),
-        ))
-        .attenuate(archive::Archive::<dialog_effects::Put>::new())
+        let capability = dialog_effects::AttenuateVerb::<dialog_effects::verb::Put>::verb(
+            Subject::from(subject.clone()),
+        )
+        .attenuate(archive::Archive::<dialog_effects::verb::Put>::new())
         .attenuate(Catalog::of(&attenuated).clone())
-        .attenuate(archive::Block::<dialog_effects::Put>::new())
+        .attenuate(archive::Block::<dialog_effects::verb::Put>::new())
         .invoke(archive::Put::new(Buffer::from(payload)));
         Provider::<archive::Put>::execute(&self.provider, capability).await?;
         Ok(Response::status(200))
@@ -581,10 +581,10 @@ where
         if Checksum::sha256(&payload) != bound.checksum {
             return Err(Failure::checksum_mismatch());
         }
-        let capability = dialog_effects::AttenuateVerb::<dialog_effects::Put>::verb(Subject::from(
-            subject.clone(),
-        ))
-        .attenuate(memory::Memory::<dialog_effects::Put>::new())
+        let capability = dialog_effects::AttenuateVerb::<dialog_effects::verb::Put>::verb(
+            Subject::from(subject.clone()),
+        )
+        .attenuate(memory::Memory::<dialog_effects::verb::Put>::new())
         .attenuate(Space::of(&attenuated).clone())
         .attenuate(Cell::of(&attenuated).clone())
         .invoke(memory::Publish::new(payload, bound.when.clone()));
