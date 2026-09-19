@@ -22,4 +22,9 @@ pub mod channel;
 pub mod resolve;
 pub mod serve;
 pub mod site;
+
+/// The iroh-backed [`Channel`](channel::Channel) and its accept loop.
+#[cfg(all(feature = "transport", not(target_arch = "wasm32")))]
+pub mod transport;
+
 pub mod wire;
