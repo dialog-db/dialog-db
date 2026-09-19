@@ -143,7 +143,7 @@ bijoux = { version = "0.3.2", default-features = false, features = ["u64"] }
 rsa = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 ryu = "1"
-s3s = "0.16"
+s3s = "0.14"
 serde = "1"
 serde-value = "0.7"
 serde-big-array = "0.5"
