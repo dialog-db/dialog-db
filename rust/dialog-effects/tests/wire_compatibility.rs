@@ -24,10 +24,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use dialog_capability::{Subject, did};
 use dialog_common::Blake3Hash;
-use dialog_effects::Use;
-use dialog_effects::archive::{Archive, Catalog, Get, Import as ArchiveImport, Put};
-use dialog_effects::blob::{Blob, Import as BlobImport, Read, Write};
-use dialog_effects::memory::{Cell, Memory, Publish, Resolve, Retract, Space};
+use dialog_effects::prelude::*;
 
 fn subject() -> Subject {
     Subject::from(did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"))
@@ -36,24 +33,15 @@ fn subject() -> Subject {
 /// The three memory commands, as deployed clients spell them.
 #[dialog_common::test]
 fn it_preserves_memory_commands() {
-    let cell = subject()
-        .attenuate(Use)
-        .attenuate(Memory)
-        .attenuate(Space::new("branch/main"))
-        .attenuate(Cell::new("revision"));
+    let cell = || subject().memory().space("branch/main").cell("revision");
 
+    assert_eq!(cell().resolve().ability(), "/use/get/memory/cell");
     assert_eq!(
-        cell.clone().invoke(Resolve).ability(),
-        "/use/get/memory/cell"
-    );
-    assert_eq!(
-        cell.clone()
-            .invoke(Publish::new(b"content".to_vec(), None))
-            .ability(),
+        cell().publish(b"content".to_vec(), None).ability(),
         "/use/put/memory/cell"
     );
     assert_eq!(
-        cell.invoke(Retract::new(b"version")).ability(),
+        cell().retract(b"version").ability(),
         "/use/delete/memory/cell"
     );
 }
@@ -64,26 +52,17 @@ fn it_preserves_memory_commands() {
 #[dialog_common::test]
 fn it_preserves_archive_commands() {
     let digest = Blake3Hash::hash(b"block");
-    let catalog = subject()
-        .attenuate(Use)
-        .attenuate(Archive)
-        .attenuate(Catalog::new("index"));
-
+    let catalog = || subject().archive().catalog("index");
     assert_eq!(
-        catalog.clone().invoke(Get::new(digest.clone())).ability(),
+        catalog().get(digest.clone()).ability(),
         "/use/get/archive/block"
     );
     assert_eq!(
-        catalog
-            .clone()
-            .invoke(Put::new(b"block".to_vec()))
-            .ability(),
+        catalog().put(b"block".to_vec()).ability(),
         "/use/put/archive/block"
     );
     assert_eq!(
-        catalog
-            .invoke(ArchiveImport::new(vec![b"block".to_vec()]))
-            .ability(),
+        catalog().import(vec![b"block".to_vec()]).ability(),
         "/use/put/archive/block"
     );
 }
@@ -94,18 +73,15 @@ fn it_preserves_archive_commands() {
 #[dialog_common::test]
 fn it_preserves_blob_commands() {
     let digest = Blake3Hash::hash(b"blob");
-    let blob = subject().attenuate(Use).attenuate(Archive).attenuate(Blob);
+    let blob = || subject().archive().blob();
 
     assert_eq!(
-        blob.clone().invoke(Read::new(digest.clone())).ability(),
+        blob().read(digest.clone()).ability(),
         "/use/get/archive/blob"
     );
+    assert_eq!(blob().write().ability(), "/use/put/archive/blob");
     assert_eq!(
-        blob.clone().invoke(Write::new()).ability(),
-        "/use/put/archive/blob"
-    );
-    assert_eq!(
-        blob.invoke(BlobImport::new(digest, 7)).ability(),
+        blob().import(digest.clone(), 7).ability(),
         "/use/put/archive/blob"
     );
 }
@@ -118,27 +94,18 @@ fn it_preserves_blob_commands() {
 #[dialog_common::test]
 fn it_preserves_the_whole_command_vocabulary() {
     let digest = Blake3Hash::hash(b"x");
-    let cell = subject()
-        .attenuate(Use)
-        .attenuate(Memory)
-        .attenuate(Space::new("s"))
-        .attenuate(Cell::new("c"));
-    let catalog = subject()
-        .attenuate(Use)
-        .attenuate(Archive)
-        .attenuate(Catalog::new("i"));
-    let blob = subject().attenuate(Use).attenuate(Archive).attenuate(Blob);
+    let cell = || subject().memory().space("s").cell("c");
+    let catalog = || subject().archive().catalog("i");
+    let blob = || subject().archive().blob();
 
     let mut commands = vec![
-        cell.clone().invoke(Resolve).ability(),
-        cell.clone()
-            .invoke(Publish::new(b"c".to_vec(), None))
-            .ability(),
-        cell.invoke(Retract::new(b"v")).ability(),
-        catalog.clone().invoke(Get::new(digest.clone())).ability(),
-        catalog.clone().invoke(Put::new(b"c".to_vec())).ability(),
-        blob.clone().invoke(Read::new(digest.clone())).ability(),
-        blob.invoke(Write::new()).ability(),
+        cell().resolve().ability(),
+        cell().publish(b"c".to_vec(), None).ability(),
+        cell().retract(b"v").ability(),
+        catalog().get(digest.clone()).ability(),
+        catalog().put(b"c".to_vec()).ability(),
+        blob().read(digest.clone()).ability(),
+        blob().write().ability(),
     ];
     commands.sort();
     commands.dedup();
@@ -162,15 +129,11 @@ fn it_preserves_the_whole_command_vocabulary() {
 /// is what keeps a data delegation clear of `/ucan`.
 #[dialog_common::test]
 fn it_roots_every_command_under_use_or_void() {
-    let cell = subject()
-        .attenuate(Use)
-        .attenuate(Memory)
-        .attenuate(Space::new("s"))
-        .attenuate(Cell::new("c"));
+    let cell = || subject().memory().space("s").cell("c");
 
     for ability in [
-        cell.clone().invoke(Resolve).ability(),
-        cell.invoke(Publish::new(b"c".to_vec(), None)).ability(),
+        cell().resolve().ability(),
+        cell().publish(b"c".to_vec(), None).ability(),
     ] {
         assert!(
             ability.starts_with("/use/") || ability.starts_with("/void/"),

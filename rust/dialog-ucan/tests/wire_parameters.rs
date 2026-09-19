@@ -21,8 +21,7 @@
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use dialog_capability::{Subject, did};
-use dialog_effects::Use;
-use dialog_effects::memory::{Cell, Memory, Publish, Resolve, Space};
+use dialog_effects::prelude::*;
 use dialog_ucan::parameters;
 
 fn subject() -> Subject {
@@ -34,13 +33,9 @@ fn subject() -> Subject {
 /// delegation's caveats against, so they may not move or be renamed.
 #[dialog_common::test]
 fn it_preserves_memory_parameters() {
-    let cell = subject()
-        .attenuate(Use)
-        .attenuate(Memory)
-        .attenuate(Space::new("branch/main"))
-        .attenuate(Cell::new("revision"));
+    let cell = || subject().memory().space("branch/main").cell("revision");
 
-    let resolve = parameters(&cell.clone().invoke(Resolve));
+    let resolve = parameters(&cell().resolve());
     assert_eq!(resolve.get("space").unwrap(), &"branch/main".into());
     assert_eq!(resolve.get("cell").unwrap(), &"revision".into());
     assert_eq!(
@@ -51,7 +46,7 @@ fn it_preserves_memory_parameters() {
 
     // An effect adds its own fields on top of the chain's, and the
     // chain's are unchanged by which effect is invoked.
-    let publish = parameters(&cell.invoke(Publish::new(b"hi".to_vec(), None)));
+    let publish = parameters(&cell().publish(b"hi".to_vec(), None));
     assert_eq!(publish.get("space").unwrap(), &"branch/main".into());
     assert_eq!(publish.get("cell").unwrap(), &"revision".into());
     assert!(
@@ -65,14 +60,10 @@ fn it_preserves_memory_parameters() {
 /// spelling cannot affect them.
 #[dialog_common::test]
 fn it_derives_parameters_from_the_chain_not_the_effect() {
-    let cell = subject()
-        .attenuate(Use)
-        .attenuate(Memory)
-        .attenuate(Space::new("branch/main"))
-        .attenuate(Cell::new("revision"));
+    let cell = || subject().memory().space("branch/main").cell("revision");
 
-    let without_effect = parameters(&cell.clone());
-    let with_effect = parameters(&cell.invoke(Resolve));
+    let without_effect = parameters(&cell());
+    let with_effect = parameters(&cell().resolve());
 
     assert_eq!(
         without_effect, with_effect,
@@ -88,16 +79,12 @@ fn it_derives_parameters_from_the_chain_not_the_effect() {
 /// are independent, which is the property a path refactor relies on.
 #[dialog_common::test]
 fn it_keeps_path_segments_out_of_parameters() {
-    let chain = subject()
-        .attenuate(Use)
-        .attenuate(Memory)
-        .attenuate(Space::new("s"))
-        .attenuate(Cell::new("c"));
+    let chain = || subject().memory().space("s").cell("c");
 
-    let prm = parameters(&chain.clone().invoke(Resolve));
+    let prm = parameters(&chain().resolve());
     assert!(
         !prm.contains_key("use") && !prm.contains_key("memory"),
         "path-only links must not leak into prm: {prm:?}"
     );
-    assert_eq!(chain.invoke(Resolve).ability(), "/use/get/memory/cell");
+    assert_eq!(chain().resolve().ability(), "/use/get/memory/cell");
 }
