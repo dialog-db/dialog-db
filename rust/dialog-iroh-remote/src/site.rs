@@ -238,6 +238,11 @@ impl Iroh {
     /// arrived, an endpoint bound — rather than waiting to find out. A
     /// backoff is a guess about when retrying is worth it, and an event
     /// beats a guess.
+    ///
+    /// Clones share a link, so reviving through any handle revives the
+    /// one every clone reads. That is what lets an embedder keep a
+    /// handle for this while the site itself lives inside an
+    /// environment it has given away.
     pub async fn revive(&self) {
         let mut link = self.link.lock().await;
         if let Link::Down { .. } = &*link {
