@@ -1357,7 +1357,6 @@ dependencies = [
  "dialog-effects",
  "dialog-ucan",
  "dialog-ucan-core",
- "dialog-varsig",
  "ipld-core",
  "serde",
  "serde_ipld_dagcbor",
