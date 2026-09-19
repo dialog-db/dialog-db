@@ -1,6 +1,6 @@
 //! Naming a peer.
 
-use dialog_capability::SiteId;
+use dialog_capability::{SiteAddress, SiteId};
 use iroh_base::{EndpointAddr, EndpointId};
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +29,10 @@ impl IrohAddress {
     pub fn addr(&self) -> &EndpointAddr {
         &self.0
     }
+}
+
+impl SiteAddress for IrohAddress {
+    type Site = crate::site::Iroh;
 }
 
 impl From<EndpointAddr> for IrohAddress {
