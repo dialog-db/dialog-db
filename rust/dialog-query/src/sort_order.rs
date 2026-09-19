@@ -14,9 +14,11 @@
 //! output sorted on it. Nothing consumes it yet; it is surfaced so the planner
 //! can, without changing how any scan runs today.
 
-use crate::Term;
+use crate::attribute::The;
 use crate::attribute::query::all::AttributeQueryAll;
-use crate::types::Typed;
+use crate::attribute::query::dynamic::DynamicAttributeQuery;
+use crate::types::{Any, Typed};
+use crate::{Entity, Term};
 
 /// The variable a scan's output is sorted on, or that it carries no useful
 /// order (a fully-constrained point lookup, or an ordering led by a variable
@@ -91,44 +93,54 @@ impl AttributeQueryAll {
     /// Returns [`SortOrder::None`] when the leading dimensions are all bound to
     /// constants (a point lookup carries no join-useful order).
     pub fn sort_order(&self) -> SortOrder {
-        let entity_bound = matches!(self.of(), Term::Constant(_));
-        let value_bound = matches!(self.is(), Term::Constant(_));
-        let attribute_bound = matches!(self.the(), Term::Constant(_));
+        sort_order_of(self.the(), self.of(), self.is())
+    }
+}
 
-        // The component sequence of the ordering the storage layer will pick,
-        // most significant first. This is the exact priority `selector_range`
-        // applies: entity index unless entity is free and something else is
-        // bound, then value, then attribute.
-        let sequence: [Option<String>; 3] = if entity_bound || (!value_bound && !attribute_bound) {
-            // EAV: entity, attribute, value.
-            [
-                free_variable(self.of()),
-                free_variable(self.the()),
-                free_variable(self.is()),
-            ]
-        } else if value_bound {
-            // VAE: value, attribute, entity.
-            [
-                free_variable(self.is()),
-                free_variable(self.the()),
-                free_variable(self.of()),
-            ]
-        } else {
-            // AEV: attribute, entity, value.
-            [
-                free_variable(self.the()),
-                free_variable(self.of()),
-                free_variable(self.is()),
-            ]
-        };
+/// The sort order of an attribute scan with the given `(the, of, is)` terms,
+/// independent of cardinality: cardinality-one winner selection reads the same
+/// index in the same order as the cardinality-many scan, so both sort on the
+/// same variable. Shared by [`AttributeQueryAll::sort_order`] and
+/// [`DynamicAttributeQuery::sort_order`].
+pub(crate) fn sort_order_of(the: &Term<The>, of: &Term<Entity>, is: &Term<Any>) -> SortOrder {
+    let entity_bound = matches!(of, Term::Constant(_));
+    let value_bound = matches!(is, Term::Constant(_));
+    let attribute_bound = matches!(the, Term::Constant(_));
 
-        // The leading free dimension is the first sequence entry that is a
-        // variable. Bound leading components are fixed across the scan, so the
-        // order is decided by the first free one.
-        match sequence.into_iter().flatten().next() {
-            Some(name) => SortOrder::On(name),
-            None => SortOrder::None,
-        }
+    // The component sequence of the ordering the storage layer will pick, most
+    // significant first. This is the exact priority `selector_range` applies:
+    // entity index unless entity is free and something else is bound, then
+    // value, then attribute.
+    let sequence: [Option<String>; 3] = if entity_bound || (!value_bound && !attribute_bound) {
+        // EAV: entity, attribute, value.
+        [free_variable(of), free_variable(the), free_variable(is)]
+    } else if value_bound {
+        // VAE: value, attribute, entity.
+        [free_variable(is), free_variable(the), free_variable(of)]
+    } else {
+        // AEV: attribute, entity, value.
+        [free_variable(the), free_variable(of), free_variable(is)]
+    };
+
+    // The leading free dimension is the first sequence entry that is a
+    // variable. Bound leading components are fixed across the scan, so the
+    // order is decided by the first free one.
+    match sequence.into_iter().flatten().next() {
+        Some(name) => SortOrder::On(name),
+        None => SortOrder::None,
+    }
+}
+
+impl DynamicAttributeQuery {
+    /// The variable this scan's output is sorted on, for either cardinality.
+    ///
+    /// A cardinality-one (`Only`) scan reads the same index in the same order
+    /// as a cardinality-many (`All`) scan and merely selects a winner per
+    /// group, so its output is sorted on the same variable. This lets a merge
+    /// join over a concept's attribute premises apply regardless of their
+    /// cardinality.
+    pub fn sort_order(&self) -> SortOrder {
+        sort_order_of(self.the(), self.of(), self.is())
     }
 }
 

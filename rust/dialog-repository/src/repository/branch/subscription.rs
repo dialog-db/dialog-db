@@ -67,10 +67,12 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::repository::fetch::Driven;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled, selector_range};
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Changes, Entity, EntityKey, Key, State, ValueKey,
+    Artifact, ArtifactSelector, AttributeKey, Changes, Entity, EntityKey, Key, Speculation, State,
+    ValueKey,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -631,7 +633,9 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -771,7 +775,9 @@ where
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -952,7 +958,9 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -1074,7 +1082,9 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -1088,8 +1098,10 @@ where
             self.anchor(demand, &operator);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
+            let composite = self.composite();
+            let sources = composite.sources.clone();
             let mut query_env: QueryEnv<'a, Env> =
-                QueryEnv::new(self.composite(), overlay, env).with_demand(demand.clone());
+                QueryEnv::new(composite, overlay, env).with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -1097,7 +1109,13 @@ where
                 query_env = query_env
                     .with_fixpoint(concept.this(), Continuation::new(self.fixpoint.clone()));
             }
-            query.clone().perform(&query_env).try_vec().await
+            // The evaluation's own stream drives the env's preload
+            // queue, so a standing query's cold poll overlaps
+            // replication with evaluation exactly as a plain query
+            // does (see `crate::repository::fetch`).
+            let queue = Provider::<Speculation>::execute(env, ()).await;
+            let results = Box::pin(query.clone().perform(&query_env));
+            Driven::new(results, sources, env, queue).try_vec().await
         })
     }
 
@@ -1116,7 +1134,9 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -1134,13 +1154,19 @@ where
             self.anchor(&self.demand, &operator);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a, Env> = QueryEnv::new(self.composite(), overlay, env)
+            let composite = self.composite();
+            let sources = composite.sources.clone();
+            let query_env: QueryEnv<'a, Env> = QueryEnv::new(composite, overlay, env)
                 .with_demand(self.demand.clone())
                 .with_fixpoint(
                     concept.this(),
                     Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
                 );
-            self.query.clone().perform(&query_env).try_vec().await
+            // Driven for the same reason `evaluate` is: the
+            // continuation's reads warm through the ambient queue.
+            let queue = Provider::<Speculation>::execute(env, ()).await;
+            let results = Box::pin(self.query.clone().perform(&query_env));
+            Driven::new(results, sources, env, queue).try_vec().await
         })
     }
 }
@@ -1221,7 +1247,9 @@ mod tests {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSend
             + ConditionalSync

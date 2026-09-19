@@ -27,14 +27,6 @@ use crate::{
     PersistentNode, Value, into_owned,
 };
 
-/// How many sibling reads a range scan keeps in flight while it walks.
-///
-/// A scan reads a whole run of siblings, one after another, and each read that
-/// misses locally can cost a round trip. Reading ahead of the walk turns a run
-/// of round trips into an overlapping few, and bounding it keeps a scan that
-/// stops early from having fetched much it never looked at.
-const PREFETCH_CONCURRENCY: usize = 16;
-
 /// How [`TreeWalker::stream`] materializes the keys of the entries it yields.
 ///
 /// The typed instantiation (any [`Key`]) rebuilds the tree's key from the
@@ -465,7 +457,7 @@ where
             let mut warming = FuturesUnordered::new();
             let mut queued = HashSet::new();
 
-            while let Some((node, maybe_index)) = search_path.pop() {
+            'walk: while let Some((node, maybe_index)) = search_path.pop() {
                 let body = node.body();
                 let is_segment = matches!(body, ArchivedNodeBody::Segment(_));
                 if !is_segment {
@@ -482,12 +474,25 @@ where
                         // The scan will walk this node's remaining children in
                         // turn, so start reading them now and let them land in
                         // the cache while the walk descends into the first of
-                        // them. A sibling still queued from an earlier descent
-                        // is not queued twice.
-                        for sibling in (child_index + 1)..index.len() {
-                            if warming.len() >= PREFETCH_CONCURRENCY {
-                                break;
-                            }
+                        // them. Only children the range can still visit are
+                        // warmed: a narrow scan (an entity probe) would
+                        // otherwise queue siblings past its end bound at every
+                        // level, fetches the walk then drops mid-flight when
+                        // the stream ends — paid for on a remote backend,
+                        // delivered to no one. A sibling still queued from an
+                        // earlier descent is not queued twice. Nothing caps
+                        // the read-ahead here: a scan reads every one of these
+                        // siblings unless it stops early, and how many cross
+                        // the wire at once is the hydration scheduler's
+                        // decision per site, where a read this scan has queued
+                        // but the scheduler has not admitted costs nothing to
+                        // abandon.
+                        let visitable = index.children_within(match range.end_bound() {
+                            Bound::Included(bound) => Bound::Included(bound.as_ref()),
+                            Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
+                            Bound::Unbounded => Bound::Unbounded,
+                        })?;
+                        for sibling in (child_index + 1)..visitable {
                             let hash = index.hash_at(sibling)?.clone();
                             if queued.insert(hash.clone()) {
                                 warming.push(accessor.warm(hash));
@@ -620,7 +625,7 @@ where
                         // walk the rest of the tree, making an empty lookup
                         // cost the size of the database.
                         } else if entered_range || past_end_bytes(&end_bytes, key) {
-                            return;
+                            break 'walk;
                         }
                     }
                 } else {
@@ -664,7 +669,7 @@ where
                         // range matching no stored entry walks the rest of
                         // the tree.
                         } else if entered_range || past_end_bytes(&end_bytes, key) {
-                            return;
+                            break 'walk;
                         }
                     }
                 }
@@ -680,6 +685,15 @@ where
                     }
                 }
             }
+
+            // Drive the remaining read-aheads home before finishing. They
+            // are bounded to this scan's range, so each is a block a
+            // reader of the range legitimately wants — and on a remote
+            // backend the transport may already have served it. Dropping
+            // them here would discard paid-for bytes before they reach
+            // the cache and force the next scan of the range to fetch
+            // them again.
+            while warming.next().await.is_some() {}
         }
     }
 
@@ -1411,6 +1425,43 @@ mod prefetch_tests {
         assert!(
             backend.peak_reads_in_flight() > 1,
             "sibling reads overlap the read the scan is waiting on"
+        );
+
+        Ok(())
+    }
+
+    /// A range scan bounded within a single leaf's span (the shape of an
+    /// entity probe inside a join) must read exactly the blocks a point
+    /// lookup of the same leaf reads: the descent path, nothing beside
+    /// it. Unbounded sibling warming used to queue up to sixteen
+    /// siblings past the range's end at every level; the probe's stream then dropped them mid-flight — reads a
+    /// remote backend had already paid for, delivered to no one and
+    /// re-fetched by the next probe.
+    #[dialog_common::test]
+    async fn it_does_not_warm_siblings_past_the_range_bound() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+        let backend = storage.backend().clone();
+
+        backend.reset();
+        let found = tree.get(&100u32.to_be_bytes(), &storage).await?;
+        assert_eq!(found, Some(value_of(100)));
+        let point_path: HashSet<_> = backend.read_log().into_iter().collect();
+
+        // A fresh handle, so the scan's node cache is cold and every node
+        // it touches reaches the backend.
+        let scan_tree = Tree::from_hash(tree.root().clone());
+        backend.reset();
+        let entries: Vec<_> = scan_tree
+            .stream_range(100u32.to_be_bytes()..=103u32.to_be_bytes(), &storage)
+            .try_collect()
+            .await?;
+        assert_eq!(entries.len(), 4, "the scan yields exactly the range");
+
+        let scan_reads: HashSet<_> = backend.read_log().into_iter().collect();
+        assert_eq!(
+            scan_reads, point_path,
+            "a leaf-narrow range scan reads the descent path and nothing beside it"
         );
 
         Ok(())

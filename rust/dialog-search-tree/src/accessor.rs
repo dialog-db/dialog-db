@@ -107,7 +107,7 @@ where
     {
         buffer
             .ok_or_else(|| {
-                DialogSearchTreeError::Node(format!("Blob not found in storage: {}", hash))
+                DialogSearchTreeError::Node(format!("Block not found in storage: {}", hash))
             })
             .and_then(PersistentNode::try_from)
     }
