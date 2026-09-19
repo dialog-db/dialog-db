@@ -17,6 +17,8 @@ dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-ucan = { workspace = true }
 dialog-ucan-core = { workspace = true }
+dialog-did-web = { workspace = true }
+dialog-varsig = { workspace = true }
 ipld-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
@@ -24,6 +26,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
+async-trait = { workspace = true }
 dialog-credentials = { workspace = true }
 
 # The async tests run on tokio natively; in wasm `dialog_common::test`
