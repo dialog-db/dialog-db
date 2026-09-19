@@ -2519,4 +2519,170 @@ mod tests {
         assert!(matches!(result, Err(CommitError::Detached)));
         Ok(())
     }
+
+    /// The increment rule the induction tests use: `assert!
+    /// counter{count: ?prev + 1} when increment{counter: ?this},
+    /// counter{this: ?this, count: ?prev}`.
+    fn increment_rule() -> dialog_query::InductiveRule {
+        serde_json::from_value(serde_json::json!({
+            "description": "Increment a counter on an increment command",
+            "assert!": {
+                "with": {
+                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "counter": { "the": "cmd.increment/counter", "as": "Entity" }
+                        }
+                    },
+                    "where": {
+                        "counter": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/sum",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "with": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                }
+            ]
+        }))
+        .expect("increment rule compiles")
+    }
+
+    /// A rule committed on an upper branch layer fires in a stack
+    /// transaction: the command dispatched through the stack reaches
+    /// it, and its durable conclusion routes by placement to the
+    /// bottom, where the counter lives.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_committed_on_an_upper_layer() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let local = repo.branch("main.local").open().perform(&operator).await?;
+
+        let counter: Entity = "ctr:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        local
+            .transaction()
+            .assert(increment_rule())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        local.refresh(&operator).await?;
+
+        let stack = Stack::builder()
+            .layer(shared.clone())
+            .layer(local.clone())
+            .link(&shared, name("shared"))
+            .build()
+            .perform(&operator)
+            .await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the upper layer's rule must fire and its conclusion land on the bottom"
+        );
+        Ok(())
+    }
+
+    /// A rule held in an ephemeral layer fires in a stack transaction
+    /// too: the layer is part of the view a rule body reads, so it is
+    /// part of the slice dispatch discovers rules in.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_held_in_an_ephemeral_layer() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::new();
+
+        let counter: Entity = "ctr:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let mut rule = Changes::new();
+        increment_rule().assert(&mut rule);
+        state.apply(rule);
+
+        let stack = Stack::builder()
+            .layer(shared.clone())
+            .layer(state.clone())
+            .link(&shared, name("shared"))
+            .build()
+            .perform(&operator)
+            .await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the ephemeral layer's rule must fire and its conclusion land on the bottom"
+        );
+        Ok(())
+    }
 }

@@ -31,6 +31,7 @@
 //! and the `retract!` head polarity.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -54,7 +55,7 @@ use crate::repository::source::SourceRef;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
-use crate::{CommitError, RemoteSite, Revision};
+use crate::{CommitError, Ephemeral, RemoteSite, Revision, RuleCache};
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -66,10 +67,10 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// durable novelty into `changes`. Transients never enter `changes`;
 /// they are visible to rule bodies for exactly one round.
 ///
-/// `source` is the layer whose committed rules dispatch and whose
-/// watermark the lag is measured against; `view` is every layer a rule
-/// body reads, which is `source` alone for a transaction on one
-/// branch and the whole composite for a [`Stack`](crate::Stack).
+/// `source` is the layer whose watermark the lag is measured against;
+/// `view` is every layer a rule body reads and every layer whose rules
+/// dispatch, which is `source` alone for a transaction on one branch
+/// and the whole composite for a [`Stack`](crate::Stack).
 pub(crate) async fn induce<Env>(
     source: SourceRef<'_>,
     view: &Composite,
@@ -101,13 +102,14 @@ where
         return Ok(());
     }
 
-    // Committed trigger structures, resolved once per induction: the
-    // footprint (which `on:` keys exist at all — the O(1) gate) and
-    // the head it was scanned at, which keys every committed-slice
-    // cache lookup below. The overlay slice is never head-cached; it
-    // is re-scanned each round (cheap, in-memory) so rules installed
-    // by this very commit — or by a rule during induction — fire.
-    let dispatch = Dispatch::resolve(source, env).await?;
+    // Committed trigger structures, resolved once per induction and
+    // per layer of the view: the footprint (which `on:` keys exist at
+    // all — the O(1) gate) and the head it was scanned at, which keys
+    // every committed-slice cache lookup below. Ephemeral layers and
+    // the overlay slice are never head-cached; they are re-scanned
+    // each round (cheap, in-memory) so rules installed by this very
+    // commit — or by a rule during induction — fire.
+    let dispatch = Dispatch::resolve(view, env).await?;
 
     // The identity is resolved once: it only feeds the schema-metadata
     // overlay of the round view, which does not change across rounds.
@@ -302,16 +304,29 @@ where
     Ok(())
 }
 
-/// The committed side of trigger dispatch for one induction run: the
-/// layer (branch or snapshot), the head every cache entry is keyed by,
-/// and the trigger footprint (the O(1) gate). All committed lookups
-/// flow through the layer's shared [`RuleCache`](crate::RuleCache) under
-/// the established disciplines — discovery head-keyed, hydrated bodies
-/// content-addressed, the overlay never head-cached.
-struct Dispatch<'a> {
+/// One tree layer's committed trigger slice: the layer, the head
+/// every cache entry is keyed by, and the trigger footprint (the O(1)
+/// gate). All committed lookups flow through the layer's shared
+/// [`RuleCache`](crate::RuleCache) under the established disciplines —
+/// discovery head-keyed, hydrated bodies content-addressed, the
+/// overlay never head-cached.
+struct TreeSlice<'a> {
     source: SourceRef<'a>,
     head: Option<Revision>,
     footprint: TriggerFootprint,
+}
+
+/// The committed side of trigger dispatch for one induction run: a
+/// slice per tree layer of the view, bottom first, and every
+/// standalone ephemeral layer, scanned fresh. A rule fires from
+/// whichever layer of the view holds it; where its conclusion lands
+/// is placement's business, not dispatch's. Only the dispatching
+/// layer's watermark feeds the lag, so a rule on an upper layer
+/// fires on what this commit changes and on the bottom's catch-up,
+/// not on what entered its own layer outside the stack.
+struct Dispatch<'a> {
+    trees: Vec<TreeSlice<'a>>,
+    memories: Vec<&'a Ephemeral>,
 }
 
 /// The transaction overlay's trigger slice, re-scanned each round:
@@ -389,11 +404,11 @@ impl OverlayTriggers {
     }
 }
 
-impl<'a> Dispatch<'a> {
-    /// Resolve the committed dispatch state: the branch head and the
-    /// trigger footprint at it (cached per head; one range scan over
-    /// each of `dialog.rule/on` and `dialog.rule/reads` on a miss).
-    async fn resolve<Env>(source: SourceRef<'a>, env: &Env) -> Result<Dispatch<'a>, CommitError>
+impl<'a> TreeSlice<'a> {
+    /// Resolve one tree layer's committed trigger structures: the
+    /// footprint (which `on:` keys exist at all) and the head it was
+    /// scanned at, which keys every committed-slice cache lookup.
+    async fn resolve<Env>(source: SourceRef<'a>, env: &Env) -> Result<TreeSlice<'a>, CommitError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -408,7 +423,7 @@ impl<'a> Dispatch<'a> {
         let head = source.revision();
         let Some(head) = head else {
             // A branch with no commits has no committed rules.
-            return Ok(Dispatch {
+            return Ok(TreeSlice {
                 source,
                 head: None,
                 footprint: TriggerFootprint::default(),
@@ -436,16 +451,108 @@ impl<'a> Dispatch<'a> {
                 footprint
             }
         };
-        Ok(Dispatch {
+        Ok(TreeSlice {
             source,
             head: Some(head),
             footprint,
         })
     }
 
-    /// The inductive-rule entities watching `on`: the committed slice
-    /// (footprint-gated, head-cached) unioned with the overlay's,
-    /// minus rules the overlay retracts.
+    /// The committed entities holding `attribute = on` in this layer:
+    /// footprint-gated, head-cached under `cached`, else probed and
+    /// recorded through `record`.
+    async fn watchers<Env>(
+        &self,
+        on: &Entity,
+        gate: &BTreeSet<Entity>,
+        attribute: dialog_artifacts::Attribute,
+        cached: impl Fn(&RuleCache, &Entity, &Revision) -> Option<Vec<Entity>>,
+        record: impl Fn(&RuleCache, Entity, Revision, Vec<Entity>),
+        env: &Env,
+    ) -> Result<Vec<Entity>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let Some(head) = &self.head else {
+            return Ok(Vec::new());
+        };
+        if !gate.contains(on) {
+            return Ok(Vec::new());
+        }
+        let cache = self.source.rule_cache();
+        if let Some(entities) = cached(&cache, on, head) {
+            return Ok(entities);
+        }
+        let selector = ArtifactSelector::new()
+            .the(attribute)
+            .is(Value::Entity(on.clone()));
+        let entities: Vec<Entity> = committed(self.source, selector, env)
+            .await?
+            .into_iter()
+            .map(|claim| claim.of)
+            .collect();
+        record(&cache, on.clone(), head.clone(), entities.clone());
+        Ok(entities)
+    }
+}
+
+impl<'a> Dispatch<'a> {
+    /// Resolve the committed trigger structures of every layer in
+    /// `view`, once per induction.
+    async fn resolve<Env>(view: &'a Composite, env: &Env) -> Result<Dispatch<'a>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let mut trees = Vec::with_capacity(view.sources.len());
+        for source in &view.sources {
+            trees.push(TreeSlice::resolve(source.as_ref(), env).await?);
+        }
+        Ok(Dispatch {
+            trees,
+            memories: view.ephemerals.iter().collect(),
+        })
+    }
+
+    /// The cache hydrated bodies are recorded in: the bottom tree
+    /// layer's. Bodies are content-addressed, so any layer's cache is
+    /// correct and peers sharing a layer share its entries. `None`
+    /// for a view with no tree layer, which caches nothing.
+    fn body_cache(&self) -> Option<Arc<RuleCache>> {
+        self.trees.first().map(|slice| slice.source.rule_cache())
+    }
+
+    /// The entities holding `attribute = on` in every ephemeral layer,
+    /// scanned fresh: the layers are in memory and never head-cached.
+    fn remembered(&self, on: &Entity, attribute: dialog_artifacts::Attribute) -> Vec<Entity> {
+        let selector = ArtifactSelector::new()
+            .the(attribute)
+            .is(Value::Entity(on.clone()));
+        self.memories
+            .iter()
+            .flat_map(|line| line.scan(&selector))
+            .map(|claim| claim.of)
+            .collect()
+    }
+
+    /// The inductive-rule entities watching `on`: every layer's
+    /// committed slice (footprint-gated, head-cached), every ephemeral
+    /// layer's, and the overlay's, minus rules the overlay retracts.
     async fn triggers<Env>(
         &self,
         on: &Entity,
@@ -464,27 +571,21 @@ impl<'a> Dispatch<'a> {
             + 'static,
     {
         let mut entities: Vec<Entity> = Vec::new();
-        if let Some(head) = &self.head
-            && self.footprint.on.contains(on)
-        {
-            let cache = self.source.rule_cache();
-            let committed_entities = match cache.triggers(on, head) {
-                Some(entities) => entities,
-                None => {
-                    let selector = ArtifactSelector::new()
-                        .the(on_attr())
-                        .is(Value::Entity(on.clone()));
-                    let entities: Vec<Entity> = committed(self.source, selector, env)
-                        .await?
-                        .into_iter()
-                        .map(|claim| claim.of)
-                        .collect();
-                    cache.record_triggers(on.clone(), head.clone(), entities.clone());
-                    entities
-                }
-            };
-            entities.extend(committed_entities);
+        for slice in &self.trees {
+            entities.extend(
+                slice
+                    .watchers(
+                        on,
+                        &slice.footprint.on,
+                        on_attr(),
+                        |cache, on, head| cache.triggers(on, head),
+                        |cache, on, head, entities| cache.record_triggers(on, head, entities),
+                        env,
+                    )
+                    .await?,
+            );
         }
+        entities.extend(self.remembered(on, on_attr()));
         if let Some(staged) = overlay.on.get(on) {
             entities.extend(staged.iter().cloned());
         }
@@ -517,31 +618,25 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let cache = self.source.rule_cache();
         let mut frontier: Vec<Reach> = touched.iter().cloned().collect();
         while let Some(reach) = frontier.pop() {
             let mut readers: Vec<Entity> = Vec::new();
             for on in reach.probes() {
-                if let Some(head) = &self.head
-                    && self.footprint.reads.contains(&on)
-                {
-                    let committed_readers = match cache.reads(&on, head) {
-                        Some(entities) => entities,
-                        None => {
-                            let selector = ArtifactSelector::new()
-                                .the(reads_attr())
-                                .is(Value::Entity(on.clone()));
-                            let entities: Vec<Entity> = committed(self.source, selector, env)
-                                .await?
-                                .into_iter()
-                                .map(|claim| claim.of)
-                                .collect();
-                            cache.record_reads(on.clone(), head.clone(), entities.clone());
-                            entities
-                        }
-                    };
-                    readers.extend(committed_readers);
+                for slice in &self.trees {
+                    readers.extend(
+                        slice
+                            .watchers(
+                                &on,
+                                &slice.footprint.reads,
+                                reads_attr(),
+                                |cache, on, head| cache.reads(on, head),
+                                |cache, on, head, entities| cache.record_reads(on, head, entities),
+                                env,
+                            )
+                            .await?,
+                    );
                 }
+                readers.extend(self.remembered(&on, reads_attr()));
                 if let Some(staged) = overlay.reads.get(&on) {
                     readers.extend(staged.iter().cloned());
                 }
@@ -584,8 +679,8 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let cache = self.source.rule_cache();
-        if let Some(body) = cache.body(entity) {
+        let cache = self.body_cache();
+        if let Some(body) = cache.as_ref().and_then(|cache| cache.body(entity)) {
             return Ok(Some(body));
         }
         let bytes = match overlay.sources.get(entity) {
@@ -598,7 +693,9 @@ impl<'a> Dispatch<'a> {
             // mismatching entity are inert.
             .filter(|body| body.try_this() == Some(entity.clone()))
             .inspect(|body| {
-                cache.record_body(entity.clone(), body.clone());
+                if let Some(cache) = &cache {
+                    cache.record_body(entity.clone(), body.clone());
+                }
             }))
     }
 
@@ -623,8 +720,8 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let cache = self.source.rule_cache();
-        if let Some(rule) = cache.inductive(entity) {
+        let cache = self.body_cache();
+        if let Some(rule) = cache.as_ref().and_then(|cache| cache.inductive(entity)) {
             return Ok(Some(rule));
         }
         let bytes = match overlay.sources.get(entity) {
@@ -645,14 +742,16 @@ impl<'a> Dispatch<'a> {
         if rule.try_this() != Some(entity.clone()) {
             return Ok(None);
         }
-        cache.record_inductive(entity.clone(), rule.clone());
+        if let Some(cache) = &cache {
+            cache.record_inductive(entity.clone(), rule.clone());
+        }
         Ok(Some(rule))
     }
 
     /// Whether the concept at `entity` carries the
     /// `dialog.concept/transient` marker: the overlay's verdict wins
-    /// (marked or unmarked in this very commit), else the committed
-    /// slice, head-cached.
+    /// (marked or unmarked in this very commit), else any layer's
+    /// committed slice (head-cached) or ephemeral layer.
     async fn is_transient<Env>(
         &self,
         concept: &Entity,
@@ -676,22 +775,36 @@ impl<'a> Dispatch<'a> {
         if overlay.unmarked.contains(concept) {
             return Ok(false);
         }
-        let Some(head) = &self.head else {
-            return Ok(false);
-        };
-        let cache = self.source.rule_cache();
-        if let Some(verdict) = cache.transient(concept, head) {
-            return Ok(verdict);
-        }
         let selector = ArtifactSelector::new()
             .the(transient_attr())
             .of(concept.clone());
-        let verdict = !committed(self.source, selector, env).await?.is_empty();
-        cache.record_transient(concept.clone(), head.clone(), verdict);
-        Ok(verdict)
+        for slice in &self.trees {
+            let Some(head) = &slice.head else {
+                continue;
+            };
+            let cache = slice.source.rule_cache();
+            let verdict = match cache.transient(concept, head) {
+                Some(verdict) => verdict,
+                None => {
+                    let verdict = !committed(slice.source, selector.clone(), env)
+                        .await?
+                        .is_empty();
+                    cache.record_transient(concept.clone(), head.clone(), verdict);
+                    verdict
+                }
+            };
+            if verdict {
+                return Ok(true);
+            }
+        }
+        Ok(self
+            .memories
+            .iter()
+            .any(|line| !line.scan(&selector).is_empty()))
     }
 
-    /// The committed `dialog.rule/source` bytes for a rule entity, if any.
+    /// The `dialog.rule/source` bytes for a rule entity held in any
+    /// layer of the view, if any.
     async fn source_bytes<Env>(
         &self,
         entity: &Entity,
@@ -708,19 +821,27 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        if self.head.is_none() {
-            return Ok(None);
-        }
         let selector = ArtifactSelector::new()
             .the(source_attr())
             .of(entity.clone());
-        Ok(committed(self.source, selector, env)
-            .await?
-            .into_iter()
-            .find_map(|claim| match claim.is {
+        fn bytes_of(claims: Vec<Artifact>) -> Option<Vec<u8>> {
+            claims.into_iter().find_map(|claim| match claim.is {
                 Value::Bytes(bytes) => Some(bytes),
                 _ => None,
-            }))
+            })
+        }
+        for slice in &self.trees {
+            if slice.head.is_none() {
+                continue;
+            }
+            if let Some(bytes) = bytes_of(committed(slice.source, selector.clone(), env).await?) {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(self
+            .memories
+            .iter()
+            .find_map(|line| bytes_of(line.scan(&selector))))
     }
 }
 
