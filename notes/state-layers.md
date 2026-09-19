@@ -636,11 +636,11 @@ and not accidents:
   on "any tab's state" must read the join of every tab layer, which
   means induction on one stack's commit reads other stacks' layers.
   Either such rules are disallowed on tab scopes, or the registry is
-  what induction joins. Decide when a rule needs it. Leaning: a rule
-  reads the layers of the stack it fires in and nothing else, and
-  "every tab" is a layer the process maintains and every tab stack
-  links, so the join is topology rather than a special case in
-  induction.
+  what induction joins. Decided: a rule reads the layers of the stack
+  it fires in and nothing else, and "every tab" is a layer the process
+  maintains and every tab stack links, so the join is topology rather
+  than a special case in induction. Induction is unchanged; the
+  registry is a layer.
 - **Scope name convention.** `memory:shared`, `memory:local`,
   `memory:state`, `memory:tab` are used above as a convention only;
   the repository default fact and the placements are what bind them.
