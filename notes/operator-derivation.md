@@ -149,11 +149,26 @@ what a non-extractable key withholds.
 
 ## Testing
 
-CI runs wasm tests in Chromium only, so no browser test can catch a
-relapse into signature-based derivation. The guard is a known-answer
-vector instead: a fixed seed derives a fixed operator DID, asserted by
-the same test on native and wasm. It fails immediately, on every
-platform, if the derivation stops being a pure function of the key — and
-it is the reason the native and browser paths cannot silently diverge
-again. Do not delete it as redundant with the determinism tests; it is
-the structural one.
+CI runs wasm tests in Chromium only, and Chromium's Ed25519 does not
+hedge, so no browser test available to us can reproduce the Safari
+failure directly. Determinism tests are likewise not enough on their
+own: a signature-based derivation passes them everywhere except Safari.
+
+The guards are two known-answer vectors, each asserted by the same test
+on native and wasm:
+
+- `dialog_credentials`, `derivation_matches_a_known_vector` — a fixed
+  seed, context and label derive fixed secret bytes. Pins the primitive.
+- `dialog-operator`, `it_derives_a_fixed_operator_did_from_a_fixed_seed`
+  — a fixed seed and context derive a fixed operator DID. Pins what that
+  secret becomes: the agreement key, the agreement, the KDF, the context
+  label, the seed-to-Ed25519 import and the `did:key` encoding, which is
+  the value `Operator::did` returns.
+
+Either fails the moment the derivation stops being a pure function of
+the key material — a relapse into signing included — and both fail
+identically on native and wasm, which is what keeps the two platform
+arms from silently diverging again. Do not delete them as redundant with
+the determinism tests; they are the structural ones. Changing the
+derivation on purpose means bumping the context label and recording the
+new vectors deliberately.
