@@ -192,3 +192,37 @@ async fn a_stored_block_reads_back() {
 
     assert_eq!(found.expect("the get succeeds"), Some(bytes));
 }
+
+/// A peer describing itself, which is the first thing a client needs
+/// and the smallest whole exchange this protocol supports: no payload
+/// out, a typed answer back, and the invocation signed and verified
+/// like any other.
+#[dialog_common::test]
+async fn a_peer_says_who_it_is() {
+    let (operator, profile) = test_operator_with_profile().await;
+    let subject = profile.did();
+    let responder = Arc::new(Responder::new(
+        Volatile::default(),
+        CachingResolver::new(WebResolver::new()),
+    ));
+    let site = Iroh::new(Loopback(responder.clone()));
+
+    let hello = Subject::from(subject.clone())
+        .attenuate(Use)
+        .attenuate(dialog_effects::peer::Peer)
+        .attenuate(dialog_effects::peer::Hello);
+    let fork: IrohFork<dialog_effects::peer::Hello> = Fork::<Iroh, _>::new(hello, peer()).into();
+    let invocation = fork.authorize(&operator).await.expect("authorized");
+
+    let greeting =
+        Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
+            .await
+            .expect("the peer describes itself");
+
+    assert_eq!(
+        greeting.subject, subject,
+        "the answer names the subject that was asked about, not one the peer chose"
+    );
+    assert!(greeting.profile.to_string().starts_with("did:"));
+    assert!(greeting.operator.to_string().starts_with("did:"));
+}
