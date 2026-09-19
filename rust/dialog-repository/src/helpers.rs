@@ -57,28 +57,28 @@ pub struct TestEnv {
         Identify,
         Attest,
         Write,
-        dialog_effects::blob::Read,
-        dialog_effects::blob::Import,
-        dialog_effects::memory::Retract,
-        crate::Hydrate,
-        dialog_artifacts::Preload,
-        dialog_artifacts::Speculation,
+        BlobRead,
+        BlobImport,
+        Retract,
+        Hydrate,
+        Preload,
+        Speculation,
         Fork<Network, Get>,
         Fork<Network, Put>,
         Fork<Network, Resolve>,
         Fork<Network, Publish>,
-        Fork<Network, dialog_effects::blob::Import>,
-        Fork<Network, dialog_effects::blob::Read>
+        Fork<Network, BlobImport>,
+        Fork<Network, BlobRead>
     )]
-    operator: dialog_operator::Operator<VolatileSpaceForTests>,
-    #[provide(crate::CreateEphemeral, crate::OpenEphemeral)]
-    ephemerals: Arc<crate::EphemeralRegistry>,
+    operator: Operator<VolatileSpaceForTests>,
+    #[provide(CreateEphemeral, OpenEphemeral)]
+    ephemerals: Arc<EphemeralRegistry>,
 }
 
 #[cfg(test)]
 impl TestEnv {
     /// Wrap a test operator with a fresh ephemeral registry.
-    pub fn new(operator: dialog_operator::Operator<VolatileSpaceForTests>) -> Self {
+    pub fn new(operator: Operator<VolatileSpaceForTests>) -> Self {
         Self {
             operator,
             ephemerals: Arc::default(),
@@ -86,7 +86,7 @@ impl TestEnv {
     }
 
     /// The ephemeral layers this environment holds.
-    pub fn ephemerals(&self) -> &crate::EphemeralRegistry {
+    pub fn ephemerals(&self) -> &EphemeralRegistry {
         &self.ephemerals
     }
 }
@@ -94,21 +94,18 @@ impl TestEnv {
 #[cfg(test)]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<crate::CreateEphemeral> for Arc<crate::EphemeralRegistry> {
-    async fn execute(&self, input: ()) -> crate::Ephemeral {
-        Provider::<crate::CreateEphemeral>::execute(self.as_ref(), input).await
+impl Provider<CreateEphemeral> for Arc<EphemeralRegistry> {
+    async fn execute(&self, input: ()) -> Ephemeral {
+        Provider::<CreateEphemeral>::execute(self.as_ref(), input).await
     }
 }
 
 #[cfg(test)]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<crate::OpenEphemeral> for Arc<crate::EphemeralRegistry> {
-    async fn execute(
-        &self,
-        input: dialog_artifacts::Entity,
-    ) -> Result<crate::Ephemeral, crate::EphemeralError> {
-        Provider::<crate::OpenEphemeral>::execute(self.as_ref(), input).await
+impl Provider<OpenEphemeral> for Arc<EphemeralRegistry> {
+    async fn execute(&self, input: Entity) -> Result<Ephemeral, EphemeralError> {
+        Provider::<OpenEphemeral>::execute(self.as_ref(), input).await
     }
 }
 
@@ -198,17 +195,25 @@ where
 }
 
 #[cfg(test)]
+use crate::{
+    CreateEphemeral, Ephemeral, EphemeralError, EphemeralRegistry, Hydrate, OpenEphemeral,
+};
+#[cfg(test)]
+use dialog_artifacts::{Entity, Preload, Speculation};
+#[cfg(test)]
 use dialog_capability::Fork;
 #[cfg(test)]
 use dialog_effects::archive::{Get, Import, Put};
 #[cfg(test)]
 use dialog_effects::authority::{Attest, Identify};
 #[cfg(test)]
-use dialog_effects::blob::Write;
+use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Write};
 #[cfg(test)]
-use dialog_effects::memory::{Publish, Resolve};
+use dialog_effects::memory::{Publish, Resolve, Retract};
 #[cfg(test)]
 use dialog_network::Network;
+#[cfg(test)]
+use dialog_operator::Operator;
 /// The volatile space type test operators run over.
 #[cfg(test)]
 use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;

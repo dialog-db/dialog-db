@@ -1184,6 +1184,7 @@ mod tests {
 
     use crate::RemoteSite;
     use crate::helpers::test_repo;
+    use crate::repository::ephemeral::QUEUE_CAPACITY;
     use dialog_artifacts::{Attribute as ArtifactsAttribute, NameShape, Symbol};
     use dialog_artifacts::{Entity, Value};
     use dialog_capability::{Fork, Provider};
@@ -4473,7 +4474,7 @@ mod tests {
 
         // Instants inside the cover, past the queue's bound: a gap.
         let mut people = Vec::new();
-        for index in 0..=crate::repository::ephemeral::QUEUE_CAPACITY {
+        for index in 0..=QUEUE_CAPACITY {
             let person = Entity::new()?;
             branch.overlay().assert(
                 the!("person/name")

@@ -193,55 +193,67 @@ wrong.
 
 ### Recovery
 
-`Stack::open` takes a layer or a stack identity and walks descriptors
-downward, each fetch verifying its hash (a visited set only spares
-re-walking a diamond). The durable part of a tab stack recovers from
-`main.local`; the ephemeral scopes above it are rebuilt by the
-process, as they would be anyway. If that rebuild should be
-data-driven too, a durable layer may hold template facts pointing up,
-name plus kind and no revision, which reference no head and so do not
-violate the audience rule. Templates stay builder code for now.
+`Stack::open(layer)` walks the layer's `dialog.link/*` facts downward,
+resolving each target through the environment: a branch by repository
+and name, a snapshot by the revision its link recorded, an ephemeral
+layer by the address the process holds it under. A visited set spares
+re-walking a diamond. Every link's recorded identity is checked
+against the identity of the shape found beneath it; a mismatch is a
+configuration error, not something to paper over. The durable part of
+a tab stack recovers from `main.local`; the ephemeral layers above it
+are rebuilt by the process, as they would be anyway. If that rebuild
+should be data-driven too, a durable layer may hold template facts
+pointing up, name plus kind and no revision, which reference no head
+and so do not violate the audience rule. Templates are not built.
+
+Opening by a stack identity alone, with descriptor blobs in the
+archive, is not built: today the opener needs a handle to the top
+layer.
 
 ## Building a stack
 
 ```rust
 let shared = repo.branch("main").open().perform(&env).await?;
 let local = repo.branch("main.local").open().perform(&env).await?;
-let gossip = Ephemeral::channel(&shared);
-let state = Ephemeral::new();
-let tab = Ephemeral::new();
+let state = Ephemeral::create().perform(&env).await;
+let tab = Ephemeral::create().perform(&env).await;
 
-let stack = Stack::builder()
-    .layer(shared)                                    // memory:shared by the repository default
-    .layer(local).link(&shared, "memory:shared")
-    .layer(gossip).link(&shared, "memory:shared")
-    .layer(state).link(&local, "memory:local").link(&gossip, "memory:gossip")
-    .layer(tab).link(&state, "memory:state")
-    .build()
+let stack = Stack::open(tab.clone())
+    .link(&tab, &state, "memory:state")
+    .link(&state, &local, "memory:local")
+    .link(&local, &shared, "memory:shared")   // shared: memory:shared by the repository default
     .perform(&env)
     .await?;
 ```
 
-`link` declares a link from the layer just added to a layer beneath it,
-under a name; `build` validates and asserts the links, and every later
-commit of an enclosing layer refreshes its links' revisions. Enclosure
-is explicit rather than derived from list order: the derivation would
-produce the same graph here, but a rule that needs explaining must
-not be the only way to say it. A flat topology, every layer linked
-straight from the top, is expressible and is a bad idea for the same
-reason a deep one is good: the top is the tip that names everything
-beneath it, and a flat stack makes the top pay every capture.
+A stack is opened from a layer, never built. `open` walks the links
+the layer already records; the `link` calls are wiring edits applied
+in one commit once it is open, exactly as
+`stack.transaction().link(&from, &to, name)` applies them later. An
+edit names its encloser and its target explicitly: the encloser must
+be in the stack (an edit whose encloser another edit in the same
+transaction brings in applies after it), and a target that is not yet
+in the stack enters beneath its encloser. Each link records its
+position among its encloser's links (`dialog.link/order`), so the
+layers read bottom first in the order they were declared, on every
+reopen, and the bottom is not left to the hash order of link
+entities. `unlink` retracts a link's facts from its encloser, and any
+layer the top no longer reaches leaves the stack: unlinking one seed
+branch and linking another under the same name in one transaction
+swaps them.
 
-`build` checks:
+An ephemeral layer is a process resource: `Ephemeral::create()`
+mints one registered with the environment under its address, and
+`Ephemeral::open(address)` resolves it while some handle still holds
+it. Nothing constructs one; a tree layer's own session store is the
+one detached instance, and nothing addresses it.
 
-- **Every name a placement can target is bound**, including the
-  repository default. A write naming a scope the stack does not bind
-  fails with a clear error. A catch-all scope is a possible flag; it
-  is deliberately not the default, since it turns a schema and stack
-  mismatch into silent misplacement.
-- **Descriptors resolve.** Cycles cannot be built (see the descriptor
-  blob); a blob that does not hash to its claimed identity is a
-  configuration error.
+A commit that carries edits checks, before anything else:
+
+- **Ordering.** A layer links only layers beneath it; the walk and
+  the edits keep the list bottom first, so a cycle is unconstructible.
+- **Snapshots do not link.** Nothing reached through a snapshot
+  handle can write, so it cannot record wiring.
 - **The audience rule.** A layer may link a layer beneath it only if
   that layer's audience contains its own. A capture is a revision
   hash; if gossip captured local, every gossip instant a peer received
@@ -261,8 +273,13 @@ beneath it, and a flat stack makes the top pay every capture.
 |-------------------------|
 ```
 
+A write naming a scope the stack does not bind still fails with a
+clear error at the commit that routes it; a catch-all scope is a
+possible flag and deliberately not the default, since it turns a
+schema and stack mismatch into silent misplacement.
+
 Audience is a property of the layer: a branch's is its peers, an
-`Ephemeral::new()` is this process, a channel is the peers of the
+ephemeral layer's is this process, a channel's is the peers of the
 branch it is built from.
 
 ### Several links under one name
@@ -493,19 +510,25 @@ fixed `Scope` enum is gone.
 **Increment 4** (the stack, `stack.rs`): layers linked under scope
 names, read as one composite and written by placement.
 
-- A `Scope` is a branch, a snapshot, or an `Ephemeral` store; a stack
-  is built bottom first with `Stack::builder().layer(a).layer(b).link(&a,
-  name)`. `link` binds a name to the layer it points at, so
-  `local.link(&shared, "memory:shared")` routes `memory:shared` to
+- A layer is a branch, a snapshot, or an `Ephemeral` store; a stack is
+  opened from its top layer, `Stack::open(top)`, and wired by edits:
+  `.link(&from, &to, name)` on the open command or on a transaction.
+  `link` binds a name to the layer it points at, so
+  `link(&local, &shared, "memory:shared")` routes `memory:shared` to
   `shared`. A name may be bound by several links; a write to it lands
   in every layer so bound and the composite read dedups the fact.
-- `build().perform(env)` checks the shape: a link must name a layer
-  already beneath the linking one, a snapshot cannot hold links, and
-  the audience rule holds (a layer may link a layer beneath it only if
+  `unlink` drops a link and whatever the top no longer reaches.
+- A commit with edits checks the shape: a link must name a layer
+  beneath the linking one, a snapshot cannot hold links, and the
+  audience rule holds (a layer may link a layer beneath it only if
   the lower layer's audience contains its own, with `Process < Device
   < Peers`; a branch with an upstream is `Peers`, one without is
   `Device`, an ephemeral store is `Process`). Every check is a
-  `StackError`.
+  `StackError`. Wiring lives in the stack's shared state, so an edit
+  committed through one handle is the shape every clone reads.
+- An ephemeral layer is created and opened through the environment
+  (`Ephemeral::create()`, `Ephemeral::open(address)`), from a weak
+  registry the operator holds; it lives as long as some handle does.
 - Identity is a pure function of shape. A layer's stack identity is
   `stack:<base58(blake3(dagcbor{address, links}))>` where `links` is
   the sorted `(name, id(to))` list and `address` is the layer's
@@ -562,7 +585,8 @@ Carries over unchanged from increment 1: composite subscriptions,
 and the routing tests.
 
 Not yet built from the stack section: descriptor blobs in the
-archive, `Stack::open` by hash, `named` and the registry metadata.
+archive and `Stack::open` by a stack identity alone (today the opener
+holds the top layer), `named` and the registry metadata.
 Known limits of what is built, each a deliberate cut rather than an
 oversight:
 
@@ -586,9 +610,11 @@ oversight:
    `build`-time checks, descriptor identities, `dialog.link/*` facts
    refreshed by stack commits, `transaction` with bottom-to-top
    commit.~~
-   Done: increment 4. Still open from this item: descriptor blobs in
-   the archive, `Stack::open` by hash, `named`, the registry
-   metadata; see *Known limits* above for what stays bottom-only.
+   Done: increment 4, then `Stack::open` from a layer with links as
+   transaction edits in place of the builder. Still open: descriptor
+   blobs in the archive and open by identity alone, `named`, the
+   registry metadata; see *Known limits* above for what stays
+   bottom-only.
 4. Tonk migration: `scope:state` and `scope:tab` declared in the
    library, one stack per connection with its own tab layer,
    inspector over the registry, `navigate` as a tab-scope
