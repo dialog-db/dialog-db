@@ -6,6 +6,7 @@ mod access;
 mod builder;
 mod fork;
 mod hydrate;
+mod peer;
 mod preload;
 mod space;
 #[cfg(test)]

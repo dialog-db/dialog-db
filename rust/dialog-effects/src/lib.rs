@@ -47,6 +47,7 @@ pub mod blob;
 pub mod branch;
 pub mod credential;
 pub mod memory;
+pub mod peer;
 pub mod rejection;
 pub mod space;
 pub mod storage;

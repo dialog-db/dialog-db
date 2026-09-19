@@ -114,6 +114,24 @@ no_blobs!(
     Result<dialog_effects::blob::BlobWriter, dialog_effects::blob::BlobError>
 );
 
+/// This store has no identity of its own, so it answers with the
+/// subject it was asked about and placeholders for the rest — enough
+/// to satisfy [`Store`] and to show the command reached a provider.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<dialog_effects::peer::Hello> for Recording {
+    async fn execute(
+        &self,
+        input: Capability<dialog_effects::peer::Hello>,
+    ) -> Result<dialog_effects::peer::Greeting, dialog_effects::peer::PeerError> {
+        Ok(dialog_effects::peer::Greeting {
+            subject: input.subject().clone(),
+            profile: dialog_capability::did!("key:zTestProfile"),
+            operator: dialog_capability::did!("key:zTestOperator"),
+        })
+    }
+}
+
 async fn signers() -> (Ed25519Signer, Ed25519Signer) {
     (
         Ed25519Signer::import(&[1u8; 32])
