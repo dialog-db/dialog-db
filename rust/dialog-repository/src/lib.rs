@@ -58,8 +58,7 @@ pub use placement::{
 
 pub mod stack;
 pub use stack::{
-    AsLayer, Audience, Build, Head, Layer, Stack, StackBuilder, StackCommit, StackError,
-    StackTransaction,
+    AsLayer, Audience, Head, Layer, OpenStack, Stack, StackCommit, StackError, StackTransaction,
 };
 
 pub use dialog_artifacts::{Exporter, Importer};

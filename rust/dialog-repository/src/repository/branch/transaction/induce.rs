@@ -31,6 +31,7 @@
 //! and the `retract!` head polarity.
 
 use std::collections::{BTreeSet, HashMap};
+use std::mem;
 use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
@@ -344,7 +345,7 @@ where
 fn take_transient(changes: &mut Changes, placements: &Placements) -> Changes {
     let mut kept = Changes::new();
     let mut taken = Changes::new();
-    for instruction in std::mem::replace(changes, Changes::new()).into_instructions() {
+    for instruction in mem::replace(changes, Changes::new()).into_instructions() {
         let transient = match &instruction {
             Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
                 placements.is_transient(&a.the)
@@ -1419,6 +1420,7 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite};
+    use crate::{Drained, Observer, TransientAttribute};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Entity, Value};
     use dialog_capability::{Fork, Provider};
@@ -3164,14 +3166,14 @@ mod tests {
 
     /// The facts an observer saw asserted, as `(attribute, entity)`,
     /// in order.
-    fn seen(observer: &crate::Observer) -> Vec<(String, String)> {
+    fn seen(observer: &Observer) -> Vec<(String, String)> {
         match observer.drain() {
-            crate::Drained::Instants(instants) => instants
+            Drained::Instants(instants) => instants
                 .into_iter()
                 .flat_map(|instant| instant.asserted)
                 .map(|fact| (fact.the.to_string(), fact.of.to_string()))
                 .collect(),
-            crate::Drained::Gap { .. } => panic!("the observer gapped"),
+            Drained::Gap { .. } => panic!("the observer gapped"),
         }
     }
 
@@ -3285,7 +3287,7 @@ mod tests {
             .await?;
         branch.refresh(&operator).await?;
 
-        let crate::Drained::Instants(instants) = observer.drain() else {
+        let Drained::Instants(instants) = observer.drain() else {
             panic!("gapped")
         };
         assert_eq!(instants.len(), 2, "one instant per round with transients");
@@ -3329,9 +3331,7 @@ mod tests {
         let counter: Entity = "ctr:1".parse()?;
         branch
             .transaction()
-            .assert(crate::TransientAttribute::new(
-                "cmd.increment/counter".parse()?,
-            ))
+            .assert(TransientAttribute::new("cmd.increment/counter".parse()?))
             .assert(increment_rule())
             .assert(
                 dialog_query::the!("counter/count")
@@ -3402,8 +3402,8 @@ mod tests {
         }))?;
         branch
             .transaction()
-            .assert(crate::TransientAttribute::new("cmd.start/target".parse()?))
-            .assert(crate::TransientAttribute::new("cmd.stage/target".parse()?))
+            .assert(TransientAttribute::new("cmd.start/target".parse()?))
+            .assert(TransientAttribute::new("cmd.stage/target".parse()?))
             .assert(stage)
             .assert(finish)
             .commit()
