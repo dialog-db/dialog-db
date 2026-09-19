@@ -276,3 +276,132 @@ async fn a_peer_says_which_spaces_it_holds() {
         "every space came back as it was offered, name and all"
     );
 }
+
+/// Connecting is lazy and happens once.
+///
+/// The property the browser depends on. Its worker builds the site at
+/// startup, when no page has opened a carrier and there is no channel to
+/// hand over; if the site connected eagerly it would have nothing to
+/// connect to, and if it reconnected per exchange each one would bind a
+/// fresh endpoint — a different peer every time, and a stranger to
+/// anything the last one spoke to.
+#[dialog_common::test]
+async fn a_site_connects_once_and_not_before_it_must() {
+    use crate::channel::{ChannelError, Connect};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingConnect {
+        responder: Arc<Responder<Volatile, CachingResolver<WebResolver>>>,
+        connects: Arc<AtomicUsize>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Connect for CountingConnect {
+        async fn connect(&self) -> Result<Arc<dyn crate::channel::Channel>, ChannelError> {
+            self.connects.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(Loopback(self.responder.clone())))
+        }
+    }
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let subject = profile.did();
+    let responder = Arc::new(Responder::new(
+        Volatile::default(),
+        CachingResolver::new(WebResolver::new()),
+    ));
+    let connects = Arc::new(AtomicUsize::new(0));
+    let site = Iroh::connecting(CountingConnect {
+        responder,
+        connects: connects.clone(),
+    });
+
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        0,
+        "building a site must not connect: in a browser there is nothing to connect to yet"
+    );
+
+    for _ in 0..3 {
+        let hello = Subject::from(subject.clone())
+            .attenuate(Use)
+            .attenuate(dialog_effects::peer::Peer)
+            .attenuate(dialog_effects::peer::Hello);
+        let fork: IrohFork<dialog_effects::peer::Hello> =
+            Fork::<Iroh, _>::new(hello, peer()).into();
+        let invocation = fork.authorize(&operator).await.expect("authorized");
+        Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
+            .await
+            .expect("the peer answers");
+    }
+
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        1,
+        "three exchanges, one endpoint"
+    );
+}
+
+/// A connect that failed is not remembered.
+///
+/// "No page has dialed yet" is the ordinary state before anyone tries,
+/// and the one condition guaranteed to stop being true without anything
+/// being rebuilt. A site that cached the failure would refuse for the
+/// life of the process precisely when the carrier had just arrived.
+#[dialog_common::test]
+async fn a_site_that_could_not_connect_tries_again() {
+    use crate::channel::{ChannelError, Connect};
+    use std::sync::Mutex as StdMutex;
+
+    struct EventuallyReady {
+        responder: Arc<Responder<Volatile, CachingResolver<WebResolver>>>,
+        refusals_left: StdMutex<usize>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Connect for EventuallyReady {
+        async fn connect(&self) -> Result<Arc<dyn crate::channel::Channel>, ChannelError> {
+            let mut left = self.refusals_left.lock().expect("not poisoned");
+            if *left > 0 {
+                *left -= 1;
+                return Err(ChannelError::Unreachable {
+                    peer: "nobody".into(),
+                    detail: "no carrier yet".into(),
+                });
+            }
+            Ok(Arc::new(Loopback(self.responder.clone())))
+        }
+    }
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let subject = profile.did();
+    let responder = Arc::new(Responder::new(
+        Volatile::default(),
+        CachingResolver::new(WebResolver::new()),
+    ));
+    let site = Iroh::connecting(EventuallyReady {
+        responder,
+        refusals_left: StdMutex::new(1),
+    });
+
+    let ask = || {
+        let hello = Subject::from(subject.clone())
+            .attenuate(Use)
+            .attenuate(dialog_effects::peer::Peer)
+            .attenuate(dialog_effects::peer::Hello);
+        Fork::<Iroh, _>::new(hello, peer())
+    };
+
+    let first: IrohFork<dialog_effects::peer::Hello> = ask().into();
+    let invocation = first.authorize(&operator).await.expect("authorized");
+    Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
+        .await
+        .expect_err("the first exchange has no carrier to ride");
+
+    let second: IrohFork<dialog_effects::peer::Hello> = ask().into();
+    let invocation = second.authorize(&operator).await.expect("authorized");
+    Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
+        .await
+        .expect("the carrier arrived, so the second connects");
+}
