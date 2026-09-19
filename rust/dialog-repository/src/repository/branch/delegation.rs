@@ -43,7 +43,7 @@
 //! #         + Provider<Identify>
 //! #         + Provider<Attest>
 //! #         + Provider<BlobWrite>
-//! #         + Provider<Fork<RemoteSite, Get>>
+//! #         + Provider<crate::Hydrate>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + dialog_common::ConditionalSync
 //! #         + 'static,
@@ -227,7 +227,7 @@ impl RetainDelegation<'_> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -320,7 +320,7 @@ impl RetractDelegation<'_> {
             + Provider<Identify>
             + Provider<Attest>
             + Provider<BlobWrite>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

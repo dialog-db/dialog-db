@@ -55,6 +55,12 @@ pub use r#async::*;
 mod impossible;
 pub use impossible::*;
 
+pub mod flight;
+pub use flight::{Flight, WeakFlight};
+
+pub mod scheduler;
+pub use scheduler::{DEFAULT_WINDOW, Priority, Scheduler, Tally};
+
 #[cfg(feature = "helpers")]
 pub mod helpers;
 

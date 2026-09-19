@@ -108,7 +108,7 @@ impl ProveDelegation<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
@@ -330,7 +330,7 @@ impl ProveDelegation<'_> {
             + Provider<Resolve>
             + Provider<BlobRead>
             + Provider<BlobImport>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync

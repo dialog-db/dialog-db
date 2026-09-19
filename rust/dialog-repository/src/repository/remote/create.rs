@@ -55,7 +55,7 @@ mod tests {
     use anyhow::Result;
     use dialog_credentials::Ed25519Signer;
     use dialog_remote_s3::Address;
-    use dialog_remote_ucan_s3::UcanAddress;
+    use dialog_remote_ucan::UcanAddress;
     use dialog_storage::provider::Volatile;
 
     use crate::{CreateRemoteError, Repository};

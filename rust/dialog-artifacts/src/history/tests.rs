@@ -813,6 +813,124 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
     Ok(())
 }
 
+/// A revision's records fetch their spilled values together, not one
+/// record at a time. Over a hydrating store every spilled value is its own
+/// round trip, and the history region is exactly what a freshly joined
+/// device does not hold locally, so a version scan that awaited each
+/// record's block in turn read an account's install provenance one round
+/// trip per claim, in sequence, on every sign-in. The records still come
+/// out whole and in key order.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+    use futures_util::stream;
+    use std::future::poll_fn;
+    use std::sync::Arc;
+    use std::task::Poll;
+
+    /// Counts reads in flight; every read parks once so concurrently
+    /// polled reads overlap.
+    #[derive(Clone)]
+    struct Gauge {
+        inner: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl StorageBackend for Gauge {
+        type Key = Blake3Hash;
+        type Value = Vec<u8>;
+        type Error = DialogStorageError;
+
+        async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+            self.inner.set(key, value).await
+        }
+
+        async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            let mut yielded = false;
+            poll_fn(|context| {
+                if yielded {
+                    Poll::Ready(())
+                } else {
+                    yielded = true;
+                    context.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            let value = self.inner.get(key).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            value
+        }
+    }
+
+    let mut store = Gauge {
+        inner: MemoryStorageBackend::default(),
+        in_flight: Arc::new(AtomicUsize::new(0)),
+        peak: Arc::new(AtomicUsize::new(0)),
+    };
+    let the: Attribute = "post/body".parse()?;
+    let version = Version::new(Origin::from([9u8; 32]), Edition::new(0));
+    // Well above any inline threshold, so every value lands in its own
+    // block; distinct per claim so each is its own fetch.
+    let bodies: Vec<String> = (0..24)
+        .map(|index| format!("{index}:").repeat(2048))
+        .collect();
+    let mut tree = ArtifactTree::empty();
+    let mut delta = Delta::zero();
+    let mut claims = Vec::new();
+    for body in &bodies {
+        claims.push(Instruction::Assert(Artifact {
+            the: the.clone(),
+            of: Entity::new()?,
+            is: Value::String(body.clone()),
+            cause: None,
+        }));
+    }
+    tree.apply_versioned(&mut store, &mut delta, Some(version), stream::iter(claims))
+        .await?;
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+
+    // A cold reader: no node or spill cache holds anything yet, so every
+    // spilled block reads from the store.
+    let history = TreeHistory::new(ArtifactTree::from_hash(tree.root().clone()), store.clone());
+    store.peak.store(0, Ordering::SeqCst);
+    let records: Vec<_> = history.select(version).try_collect().await?;
+    assert_eq!(records.len(), bodies.len());
+    let mut read: Vec<String> = records
+        .iter()
+        .map(|(_, record)| match &record.claim().is {
+            Value::String(body) => body.clone(),
+            other => panic!("a spilled string came back as {other:?}"),
+        })
+        .collect();
+    read.sort();
+    let mut expected = bodies.clone();
+    expected.sort();
+    assert_eq!(read, expected, "every spilled value comes out whole");
+    let keys: Vec<_> = records.iter().map(|(version, _)| *version).collect();
+    assert!(
+        keys.windows(2).all(|pair| pair[0] == pair[1]),
+        "one revision's records carry its version"
+    );
+
+    let peak = store.peak.load(Ordering::SeqCst);
+    assert!(
+        peak > 1,
+        "a version scan must fetch its records' spilled blocks together, \
+         but only {peak} read was ever in flight: one round trip per record"
+    );
+    Ok(())
+}
+
 /// A [`History`] wrapper counting revision record reads, to assert the
 /// skip links actually shrink traversals rather than merely not breaking
 /// them.

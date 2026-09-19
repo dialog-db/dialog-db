@@ -1,14 +1,17 @@
 //! UCAN access service test server.
 //!
 //! Provides a local UCAN access service for integration testing.
-//! Receives UCAN invocation containers, verifies them using [`UcanAuthorizer`],
-//! and returns presigned S3 request descriptors.
+//! Receives UCAN invocations, verifies them using [`UcanAuthorizer`],
+//! and either performs them against the local S3 (an invocation in
+//! `Authorization`) or returns presigned S3 request descriptors (a
+//! container in the body).
 
 use super::UcanS3Address;
-use crate::UcanAuthorizer;
+use crate::{FromUcanArgs, UcanAuthorizer};
+use dialog_capability::access::AuthorizeError;
 use dialog_common::helpers::{Provider, Service};
 use dialog_remote_s3::helpers::LocalS3;
-use dialog_remote_s3::{Address, S3Credential};
+use dialog_remote_s3::{Address, S3Credential, S3Error};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
@@ -27,6 +30,33 @@ pub struct UcanAccessServer {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
 }
 
+/// What the service holds across requests: the authorizer, and how it
+/// has answered so far.
+struct ServerState {
+    authorizer: RwLock<UcanAuthorizer>,
+    stats: Stats,
+}
+
+/// How the service answered, for a test to read back at `GET /stats`:
+/// whether a request was answered with a permit or performed outright.
+#[derive(Default)]
+struct Stats {
+    requests: std::sync::atomic::AtomicUsize,
+    redeemed: std::sync::atomic::AtomicUsize,
+    performed: std::sync::atomic::AtomicUsize,
+}
+
+/// The counts `GET /stats` reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServerStats {
+    /// Requests received at the invocation endpoint.
+    pub requests: usize,
+    /// Invocations answered with a permit.
+    pub redeemed: usize,
+    /// Invocations performed in the request that proved them.
+    pub performed: usize,
+}
+
 impl UcanAccessServer {
     /// Start a UCAN access service backed by a local S3 server.
     pub async fn start(
@@ -43,7 +73,10 @@ impl UcanAccessServer {
 
         let credential = S3Credential::new(access_key, secret_key);
 
-        let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(address, Some(credential))));
+        let authorizer = Arc::new(ServerState {
+            authorizer: RwLock::new(UcanAuthorizer::new(address, Some(credential))),
+            stats: Stats::default(),
+        });
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -87,23 +120,43 @@ impl UcanAccessServer {
 fn add_cors_headers(builder: hyper::http::response::Builder) -> hyper::http::response::Builder {
     builder
         .header("Access-Control-Allow-Origin", "*")
-        .header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        .header("Access-Control-Allow-Headers", "Content-Type")
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header(
+            "Access-Control-Allow-Headers",
+            "Authorization, Content-Type, Accept",
+        )
+        .header("Access-Control-Expose-Headers", "ETag")
         .header("Access-Control-Max-Age", "86400")
         .header("Cache-Control", "no-store")
 }
 
 async fn handle_request(
     req: Request<Incoming>,
-    authorizer: Arc<RwLock<UcanAuthorizer>>,
+    state: Arc<ServerState>,
 ) -> Result<Response<http_body_util::Full<bytes::Bytes>>, Infallible> {
     use bytes::Bytes;
     use http_body_util::Full;
+    use std::sync::atomic::Ordering;
 
     if req.method() == Method::OPTIONS {
         return Ok(add_cors_headers(Response::builder())
             .status(StatusCode::NO_CONTENT)
             .body(Full::new(Bytes::new()))
+            .unwrap());
+    }
+
+    if req.method() == Method::GET && req.uri().path() == "/stats" {
+        let stats = ServerStats {
+            requests: state.stats.requests.load(Ordering::SeqCst),
+            redeemed: state.stats.redeemed.load(Ordering::SeqCst),
+            performed: state.stats.performed.load(Ordering::SeqCst),
+        };
+        return Ok(add_cors_headers(Response::builder())
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(
+                serde_json::to_vec(&stats).expect("stats serialize"),
+            )))
             .unwrap());
     }
 
@@ -113,6 +166,20 @@ async fn handle_request(
             .body(Full::new(Bytes::from("Method not allowed")))
             .unwrap());
     }
+
+    state.stats.requests.fetch_add(1, Ordering::SeqCst);
+
+    // An invocation under the UCAN scheme in `Authorization` is
+    // performed in this request, its body being the bytes the operation
+    // stores. A request that carries none is the permit flow: a
+    // container in the body, answered with a permit.
+    let credential = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(char::is_whitespace))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("UCAN"))
+        .map(|(_, rest)| rest.trim_start().to_owned());
 
     use http_body_util::BodyExt;
     let body_bytes = match req.into_body().collect().await {
@@ -128,14 +195,36 @@ async fn handle_request(
         }
     };
 
-    let authorizer = authorizer.read().await;
-    match authorizer.authorize(&body_bytes).await {
+    let container = match &credential {
+        Some(credential) => match dialog_ucan_core::Container::decode(credential.as_bytes())
+            .and_then(|container| container.to_bytes())
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Ok(refused(&AuthorizeError::Malformed {
+                    detail: format!("the credential does not carry a container: {error}"),
+                }));
+            }
+        },
+        None => body_bytes.to_vec(),
+    };
+
+    let authorizer = state.authorizer.read().await;
+    match authorizer.authorize(&container).await {
+        Ok(descriptor) if credential.is_some() => {
+            state.stats.performed.fetch_add(1, Ordering::SeqCst);
+            let range = read_range(&container);
+            Ok(perform(descriptor, body_bytes, range).await)
+        }
         Ok(descriptor) => match serde_ipld_dagcbor::to_vec(&descriptor) {
-            Ok(cbor_bytes) => Ok(add_cors_headers(Response::builder())
-                .status(StatusCode::OK)
-                .header("Content-Type", "application/cbor")
-                .body(Full::new(Bytes::from(cbor_bytes)))
-                .unwrap()),
+            Ok(cbor_bytes) => {
+                state.stats.redeemed.fetch_add(1, Ordering::SeqCst);
+                Ok(add_cors_headers(Response::builder())
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/cbor")
+                    .body(Full::new(Bytes::from(cbor_bytes)))
+                    .unwrap())
+            }
             Err(e) => Ok(add_cors_headers(Response::builder())
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Full::new(Bytes::from(format!(
@@ -144,6 +233,7 @@ async fn handle_request(
                 ))))
                 .unwrap()),
         },
+        Err(S3Error::Authorization(reason)) => Ok(refused(&reason)),
         Err(e) => Ok(add_cors_headers(Response::builder())
             .status(StatusCode::FORBIDDEN)
             .body(Full::new(Bytes::from(format!(
@@ -151,6 +241,119 @@ async fn handle_request(
                 e
             ))))
             .unwrap()),
+    }
+}
+
+/// The range a blob read asks for, from the invocation's arguments, so
+/// the object request carries it the way the client's own would have.
+pub fn read_range(container: &[u8]) -> Option<String> {
+    use dialog_effects::blob::prelude::BlobReadExt as _;
+
+    let container = dialog_ucan_core::Container::from_bytes(container).ok()?;
+    let chain = dialog_ucan_core::InvocationChain::try_from(container).ok()?;
+    let segments: Vec<&str> = chain.command().0.iter().map(String::as_str).collect();
+    if segments != ["use", "get", "archive", "blob"] {
+        return None;
+    }
+    let capability = <dialog_effects::blob::Read as FromUcanArgs>::capability_from_args(
+        chain.subject(),
+        chain.arguments(),
+    )
+    .ok()?;
+    let range = capability.range()?;
+    Some(match range.length {
+        Some(length) => format!(
+            "bytes={}-{}",
+            range.offset,
+            range.offset + length.max(1) - 1
+        ),
+        None => format!("bytes={}-", range.offset),
+    })
+}
+
+/// The answer to an invocation that did not verify, in the shape the
+/// real service gives: the reason as JSON, under the status it earns.
+fn refused(reason: &AuthorizeError) -> Response<http_body_util::Full<bytes::Bytes>> {
+    use bytes::Bytes;
+    use http_body_util::Full;
+
+    let status = match reason {
+        AuthorizeError::InvalidSignature { .. }
+        | AuthorizeError::InvalidAudience { .. }
+        | AuthorizeError::Expired { .. }
+        | AuthorizeError::NotValidBefore { .. } => StatusCode::UNAUTHORIZED,
+        AuthorizeError::Malformed { .. } | AuthorizeError::UnavailableProof { .. } => {
+            StatusCode::BAD_REQUEST
+        }
+        AuthorizeError::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::FORBIDDEN,
+    };
+    add_cors_headers(Response::builder())
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(
+            serde_json::to_vec(reason).unwrap_or_default(),
+        )))
+        .unwrap()
+}
+
+/// Perform the operation the permit authorizes against the local S3,
+/// the way the real service performs it against its bucket, and answer
+/// with the outcome the object route would have given: the status, the
+/// `ETag`, and the body.
+///
+/// A write's bytes are the request body; a write with an empty body is
+/// answered as the object route answers a body of the wrong length.
+pub async fn perform(
+    mut permit: dialog_remote_s3::Permit,
+    body_bytes: bytes::Bytes,
+    range: Option<String>,
+) -> Response<http_body_util::Full<bytes::Bytes>> {
+    use bytes::Bytes;
+    use http_body_util::Full;
+
+    let outcome = match permit.method.as_str() {
+        "PUT" => {
+            if body_bytes.is_empty() {
+                return add_cors_headers(Response::builder())
+                    .status(StatusCode::LENGTH_REQUIRED)
+                    .body(Full::new(Bytes::from(
+                        "the request carries no bytes to store",
+                    )))
+                    .unwrap();
+            }
+            permit.upload(body_bytes.to_vec()).await
+        }
+        _ => {
+            if let Some(range) = range {
+                permit.headers.push(("range".to_string(), range));
+            }
+            permit.send().await
+        }
+    };
+    match outcome {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let etag = response
+                .headers()
+                .get("etag")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let bytes = response.bytes().await.unwrap_or_default();
+            let mut builder = add_cors_headers(Response::builder())
+                .status(status)
+                .header("Content-Type", "application/octet-stream");
+            if let Some(etag) = etag {
+                builder = builder.header("ETag", etag);
+            }
+            builder
+                .body(Full::new(Bytes::from(bytes.to_vec())))
+                .unwrap()
+        }
+        Err(error) => add_cors_headers(Response::builder())
+            .status(StatusCode::BAD_GATEWAY)
+            .body(Full::new(Bytes::from(format!("storage failed: {error}"))))
+            .unwrap(),
     }
 }
 

@@ -476,6 +476,7 @@ impl Build {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -745,6 +746,7 @@ impl Stack {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -786,6 +788,7 @@ impl Stack {
             + Provider<Fork<RemoteSite, Publish>>
             + Provider<Fork<RemoteSite, BlobImport>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -977,6 +980,7 @@ impl Stack {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1050,6 +1054,7 @@ impl Stack {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1150,6 +1155,9 @@ impl<'a> StackCommit<'a> {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1231,6 +1239,9 @@ impl StackPublish<'_> {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1293,6 +1304,8 @@ impl<Q: Application> StackSelect<Q> {
             + Provider<Identify>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1345,6 +1358,9 @@ where
             + Provider<Identify>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1422,6 +1438,9 @@ mod tests {
              + Provider<Put>
              + Provider<Resolve>
              + Provider<Identify>
+             + Provider<crate::Hydrate>
+             + Provider<dialog_artifacts::Preload>
+             + Provider<dialog_artifacts::Speculation>
              + Provider<Fork<RemoteSite, Get>>
              + Provider<Fork<RemoteSite, Resolve>>
              + ConditionalSync
@@ -1446,6 +1465,7 @@ mod tests {
              impl Provider<Get>
              + Provider<Put>
              + Provider<Resolve>
+             + Provider<crate::Hydrate>
              + Provider<Fork<RemoteSite, Get>>
              + Provider<Fork<RemoteSite, Resolve>>
              + ConditionalSync

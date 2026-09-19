@@ -277,6 +277,7 @@ impl Placements {
             + Provider<Resolve>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -410,6 +411,7 @@ where
         + Provider<Resolve>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<crate::Hydrate>
         + ConditionalSync
         + 'static,
 {
@@ -457,6 +459,7 @@ where
         + Provider<Resolve>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<crate::Hydrate>
         + ConditionalSync
         + 'static,
 {
@@ -513,6 +516,9 @@ mod tests {
             + Provider<Identify>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -538,6 +544,7 @@ mod tests {
             + Provider<Resolve>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {

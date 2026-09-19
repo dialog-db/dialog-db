@@ -13,7 +13,7 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::tree::{SpillCache, spill_cache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
-use dialog_capability::{Capability, Fork, Provider, Subject};
+use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Archive, Get as ArchiveGet, Put as ArchivePut};
@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{
-    Bindings, Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback, RemoteSite,
+    Bindings, Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Snapshot, Upstream,
 };
 
@@ -301,18 +301,25 @@ impl<'a> SourceRef<'a> {
 
     /// The recorded claim lineage at this layer's revision. History
     /// records live in the same tree as the data, so this reads the
-    /// history region of the revision's tree. Reads that miss locally
-    /// are not fetched from a remote — traversal over unreplicated
-    /// history surfaces as `IncompleteHistory`.
-    pub(crate) fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
+    /// history region of the revision's tree.
+    ///
+    /// A read that misses locally falls back to the line's tracked
+    /// remote exactly as a fact read does (see [`fallback`](Self::fallback)),
+    /// so a replica that materialized only the operational regions
+    /// hydrates the history it turns out to need instead of failing with
+    /// `IncompleteHistory`. A line tracking no remote reads purely
+    /// locally, so an offline replica behaves as it always did.
+    pub(crate) async fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
-            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        let store = NetworkedIndex::new(env, self.archive().index(), None);
+        let remote = self.fallback(env).await;
+        let store = NetworkedIndex::new(env, self.archive().index(), remote);
         TreeHistory::from_root_with_cache(&self.root(), store, self.node_cache())
             .with_record_cache(self.records())
     }
@@ -327,14 +334,15 @@ impl<'a> SourceRef<'a> {
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
-            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
         let Some(head) = self.revision() else {
             return Ok(Vec::new());
         };
-        log(&head.version(), &self.history(env), limit).await
+        log(&head.version(), &self.history(env).await, limit).await
     }
 }
 

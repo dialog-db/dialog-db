@@ -160,11 +160,13 @@ async fn it_memoizes_uri_parses_transparently() -> Result<()> {
     Ok(())
 }
 
-/// The cardinality-one election (`ArtifactView::elect`) prefers the higher
-/// cause, symmetrically: whichever argument order two replicas fold the
-/// same rows in, the same row survives. This policy used to be hardcoded
-/// in the query engine's winner loop; it now lives with the value layer,
-/// and this pins its semantics where they are owned.
+/// Among rows no revision tagged, the cardinality-one election
+/// (`ArtifactView::elect`) prefers the higher cause, symmetrically:
+/// whichever argument order two replicas fold the same rows in, the same
+/// row survives. (Versioned rows are decided by their versions first; the
+/// unit tests beside `elect` pin that tier.) This policy used to be
+/// hardcoded in the query engine's winner loop; it now lives with the
+/// value layer, and this pins its semantics where they are owned.
 #[tokio::test]
 async fn it_elects_the_higher_cause_in_either_order() -> Result<()> {
     let attr = Attribute::from_str("person/name").expect("valid attribute");

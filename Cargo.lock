@@ -1059,6 +1059,7 @@ dependencies = [
  "getrandom 0.2.16",
  "leb128",
  "memchr",
+ "parking_lot",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1143,6 +1144,7 @@ dependencies = [
  "dialog-macros",
  "futures-util",
  "getrandom 0.2.16",
+ "parking_lot",
  "rand 0.8.5",
  "rkyv",
  "serde",
@@ -1204,15 +1206,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "wasm-bindgen-test",
-]
-
-[[package]]
-name = "dialog-dbsp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dialog-common",
- "tokio",
 ]
 
 [[package]]
@@ -1333,6 +1326,7 @@ dependencies = [
  "dialog-effects",
  "dialog-remote-fs",
  "dialog-remote-s3",
+ "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "serde",
 ]
@@ -1353,6 +1347,7 @@ dependencies = [
  "dialog-identity",
  "dialog-network",
  "dialog-remote-s3",
+ "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "dialog-repository",
  "dialog-storage",
@@ -1361,6 +1356,7 @@ dependencies = [
  "dialog-varsig",
  "dirs",
  "ed25519-dalek",
+ "futures-util",
  "getrandom 0.2.16",
  "ipld-core",
  "parking_lot",
@@ -1487,6 +1483,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-remote-ucan"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base58",
+ "bytes",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-did-web",
+ "dialog-effects",
+ "dialog-remote-s3",
+ "dialog-remote-ucan-s3",
+ "dialog-ucan",
+ "dialog-ucan-core",
+ "dialog-varsig",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-remote-ucan-s3"
 version = "0.1.0"
 dependencies = [
@@ -1522,6 +1551,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
+ "tracing",
  "wasm-bindgen-test",
 ]
 
@@ -1544,6 +1574,7 @@ dependencies = [
  "dialog-operator",
  "dialog-query",
  "dialog-remote-s3",
+ "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
  "dialog-search-tree",
  "dialog-storage",
@@ -1552,8 +1583,10 @@ dependencies = [
  "dialog-varsig",
  "futures-util",
  "getrandom 0.2.16",
+ "ipld-core",
  "parking_lot",
  "reqwest",
+ "ruzstd",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",
@@ -1599,6 +1632,29 @@ dependencies = [
  "tokio-test",
  "tracing",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-soak"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dialog-artifacts",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-operator",
+ "dialog-query",
+ "dialog-remote-fs",
+ "dialog-repository",
+ "dialog-search-tree",
+ "dialog-storage",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1685,6 +1741,7 @@ dependencies = [
  "dialog-common",
  "dialog-credentials",
  "dialog-varsig",
+ "flate2",
  "futures",
  "getrandom 0.2.16",
  "ipld-core",
@@ -3859,6 +3916,12 @@ dependencies = [
  "tempfile",
  "wait-timeout",
 ]
+
+[[package]]
+name = "ruzstd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
 
 [[package]]
 name = "ryu"

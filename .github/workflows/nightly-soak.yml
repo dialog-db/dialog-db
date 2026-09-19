@@ -7,6 +7,11 @@ name: 'Nightly Soak'
 # localizes to a level and node (see rust/dialog-search-tree/src/
 # validate.rs); an ignored minimizer test in tests/adversarial.rs shrinks
 # a caught divergence to its exact op prefix.
+#
+# The sync arm is a cost soak, not a convergence one: it replays the
+# join scenario over simulated network profiles (rust/dialog-soak) and
+# fails when round trips, bytes, or modeled join time regress past the
+# checked-in baseline under soak/baseline.
 
 on:
   workflow_dispatch:
@@ -52,6 +57,10 @@ jobs:
             env_value_input: 'fuzz_seeds'
           - name: 'SE convergence deep'
             command: 'soak:converge'
+            env_name: ''
+            env_value_input: ''
+          - name: 'sync cost over simulated networks'
+            command: 'soak:sync'
             env_name: ''
             env_value_input: ''
     steps:

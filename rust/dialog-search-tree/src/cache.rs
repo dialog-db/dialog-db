@@ -125,6 +125,15 @@ where
         cache.insert(key, value)
     }
 
+    /// The cached value for `key`, if the cache holds it, with no IO.
+    ///
+    /// Lets a caller follow a read path as far as memory already covers it,
+    /// so a read-ahead can name the node a descent would actually stop at
+    /// instead of guessing.
+    pub fn get_cached(&self, key: &K) -> Option<V> {
+        self.get(key)
+    }
+
     /// Retrieves a value from the cache, if it is cached.
     fn get(&self, key: &K) -> Option<V> {
         #[cfg(not(target_arch = "wasm32"))]

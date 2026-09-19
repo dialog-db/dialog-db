@@ -125,7 +125,7 @@ async fn report<const M: u64>(size: usize) {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     println!(
         "Threshold node sizes per level (level 0 = leaves; entry ~= 16B key + 32B value + overhead)"

@@ -48,6 +48,8 @@ mod error;
 pub mod request;
 pub mod s3;
 
+pub use dialog_common::flight;
+
 #[cfg(feature = "helpers")]
 pub mod helpers;
 
