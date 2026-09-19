@@ -430,6 +430,19 @@ pub enum StackError {
     /// Reading a layer's link facts failed.
     #[error("Failed to read link facts: {0}")]
     Read(String),
+    /// A write or maintenance names a scope no link of this stack binds.
+    #[error("No layer is linked under scope {scope}")]
+    UnboundScope {
+        /// The scope named.
+        scope: Entity,
+    },
+    /// Maintenance names a scope a tree layer is linked under; only
+    /// ephemeral layers are cleared or forgotten.
+    #[error("Scope {scope} binds a tree layer, which cannot be cleared")]
+    NotEphemeral {
+        /// The scope named.
+        scope: Entity,
+    },
     /// An ephemeral layer a link names is not open in this process.
     #[error(transparent)]
     Ephemeral(#[from] EphemeralError),
@@ -1444,6 +1457,8 @@ impl Stack {
             changes: Changes::new(),
             transients: Changes::new(),
             edits: Vec::new(),
+            into: BTreeMap::new(),
+            stores: Vec::new(),
         }
     }
 
@@ -1735,6 +1750,21 @@ pub struct StackTransaction<'a> {
     changes: Changes,
     transients: Changes,
     edits: Vec<LinkEdit>,
+    /// Facts bound for a named scope regardless of their attributes'
+    /// placements, by scope.
+    into: BTreeMap<Entity, Changes>,
+    /// Maintenance of the ephemeral layers under a scope, in order.
+    stores: Vec<(Entity, Maintenance)>,
+}
+
+/// What a transaction does to the ephemeral layers under a scope,
+/// besides writing facts.
+#[derive(Debug, Clone)]
+enum Maintenance {
+    /// Drop every fact and tombstone.
+    Clear,
+    /// Drop every fact and tombstone recorded for these entities.
+    Forget(Vec<Entity>),
 }
 
 impl<'a> StackTransaction<'a> {
@@ -1754,6 +1784,39 @@ impl<'a> StackTransaction<'a> {
     /// commit's induction, never written anywhere.
     pub fn dispatch<C: Statement>(mut self, claim: C) -> Self {
         claim.assert(&mut self.transients);
+        self
+    }
+
+    /// Assert a claim into the layers linked under `scope`, whatever
+    /// its attributes' placements say. The explicit form of placement,
+    /// for a writer that knows where a fact belongs when the schema
+    /// does not say: session facts a process keeps for itself. Induction
+    /// does not see these facts; they are written as given.
+    pub fn assert_into<C: Statement>(mut self, scope: Entity, claim: C) -> Self {
+        claim.assert(self.into.entry(scope).or_default());
+        self
+    }
+
+    /// Retract a claim from the layers linked under `scope`; see
+    /// [`assert_into`](Self::assert_into).
+    pub fn retract_from<C: Statement>(mut self, scope: Entity, claim: C) -> Self {
+        claim.retract(self.into.entry(scope).or_default());
+        self
+    }
+
+    /// Drop every fact the ephemeral layers under `scope` hold. A
+    /// tree layer under the scope is refused at commit.
+    pub fn clear(mut self, scope: Entity) -> Self {
+        self.stores.push((scope, Maintenance::Clear));
+        self
+    }
+
+    /// Drop every fact the ephemeral layers under `scope` hold for
+    /// `entities`: the garbage-collection form, for per-client facts
+    /// keyed by short-lived entities. A tree layer under the scope is
+    /// refused at commit.
+    pub fn forget(mut self, scope: Entity, entities: Vec<Entity>) -> Self {
+        self.stores.push((scope, Maintenance::Forget(entities)));
         self
     }
 
@@ -1795,6 +1858,8 @@ impl<'a> StackTransaction<'a> {
             changes: self.changes,
             transients: self.transients,
             edits: self.edits,
+            into: self.into,
+            stores: self.stores,
         }
     }
 }
@@ -1805,6 +1870,8 @@ pub struct StackCommit<'a> {
     changes: Changes,
     transients: Changes,
     edits: Vec<LinkEdit>,
+    into: BTreeMap<Entity, Changes>,
+    stores: Vec<(Entity, Maintenance)>,
 }
 
 impl<'a> StackCommit<'a> {
@@ -1861,6 +1928,42 @@ impl<'a> StackCommit<'a> {
             stack.captured()
         };
         let topology = stack.topology();
+
+        // Store maintenance first, so a fact this commit writes to a
+        // cleared layer survives the clear.
+        for (scope, maintenance) in self.stores {
+            let Some(indices) = topology.bound.get(&scope) else {
+                return Err(StackError::UnboundScope { scope });
+            };
+            for index in indices {
+                let Layer::Ephemeral(ephemeral) = &topology.layers[*index] else {
+                    return Err(StackError::NotEphemeral { scope });
+                };
+                match &maintenance {
+                    Maintenance::Clear => {
+                        ephemeral.clear();
+                    }
+                    Maintenance::Forget(entities) => {
+                        ephemeral.retain_entities(|entity| !entities.contains(entity));
+                    }
+                }
+                stack.state.write().published[*index] = Head::Ephemeral(ephemeral.revision());
+            }
+        }
+        // Facts placed by the writer land where the scope's links say,
+        // untouched by induction or the declarations.
+        for (scope, changes) in self.into {
+            let Some(indices) = topology.bound.get(&scope) else {
+                return Err(StackError::UnboundScope { scope });
+            };
+            for instruction in changes.into_instructions() {
+                let (op, artifact) = split(instruction);
+                for index in indices {
+                    apply(batches.entry(*index).or_default(), op, artifact.clone());
+                }
+            }
+        }
+        // Maintenance moved ephemeral heads: re-read what the stack reads at.
         let captured = stack.captured();
 
         if self.changes.is_empty() && self.transients.is_empty() && !rewired {
@@ -2094,6 +2197,11 @@ where
     /// [`Stack::behind`].
     pub fn behind(&self) -> bool {
         self.stack.behind()
+    }
+
+    /// The last evaluation's full result.
+    pub fn results(&self) -> &[Q::Conclusion] {
+        self.inner.results()
     }
 
     /// Full evaluations performed so far.
@@ -3642,6 +3750,106 @@ mod tests {
 
         let reopened = Stack::open(state.clone()).perform(&operator).await?;
         assert_eq!(reopened.identities(), stack.identities());
+        Ok(())
+    }
+
+    /// A writer that knows where a fact belongs says so: `assert_into`
+    /// lands it under the scope regardless of placements, `forget`
+    /// drops an entity's facts from the scope's layer, `clear` empties
+    /// it, and none of it touches the tree.
+    #[dialog_common::test]
+    async fn it_writes_and_maintains_a_scope_explicitly() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        let site: Entity = "site:1".parse()?;
+        let other: Entity = "site:2".parse()?;
+        stack
+            .transaction()
+            .assert_into(
+                name("state"),
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/a".to_string()),
+            )
+            .assert_into(
+                name("state"),
+                dialog_query::the!("site/path")
+                    .of(other.clone())
+                    .is("/b".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "site/path", &site).await?,
+            vec![Value::String("/a".into())],
+            "the composite reads the placed fact"
+        );
+        assert!(
+            committed(&shared, &operator, "site/path", &site)
+                .await?
+                .is_empty(),
+            "the tree never sees it"
+        );
+        let paths = ArtifactSelector::new().the("site/path".parse()?);
+        assert_eq!(state.scan(&paths).len(), 2);
+
+        stack
+            .transaction()
+            .forget(name("state"), vec![site.clone()])
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(state.scan(&paths).len(), 1, "one site forgotten");
+        assert!(
+            values::<String>(&stack, &operator, "site/path", &site)
+                .await?
+                .is_empty()
+        );
+
+        stack
+            .transaction()
+            .clear(name("state"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(state.scan(&paths).len(), 0, "cleared");
+
+        let refused = stack
+            .transaction()
+            .clear(name("shared"))
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(refused, Err(StackError::NotEphemeral { .. })),
+            "a tree layer is never cleared: {refused:?}"
+        );
+        let unbound = stack
+            .transaction()
+            .assert_into(
+                name("nowhere"),
+                dialog_query::the!("site/path")
+                    .of(site)
+                    .is("/c".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(matches!(unbound, Err(StackError::UnboundScope { .. })));
         Ok(())
     }
 }
