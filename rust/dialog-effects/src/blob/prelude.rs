@@ -4,10 +4,12 @@
 //! use dialog_effects::blob::prelude::*;
 //! ```
 
-use dialog_capability::{Capability, Policy};
+use dialog_capability::{Capability, Policy, Subject};
 use dialog_common::Blake3Hash;
 
+use crate::AttenuateVerb;
 use crate::archive::Archive;
+use crate::archive::prelude::ArchiveScope;
 
 use super::{Blob, ByteRange, Import, Read, Write};
 
@@ -19,10 +21,35 @@ pub trait ArchiveBlobExt {
     fn blob(self) -> Self::Blob;
 }
 
-impl ArchiveBlobExt for Capability<Archive> {
-    type Blob = Capability<Blob>;
-    fn blob(self) -> Capability<Blob> {
-        self.attenuate(Blob)
+impl ArchiveBlobExt for ArchiveScope {
+    type Blob = BlobScope;
+    fn blob(self) -> BlobScope {
+        BlobScope {
+            subject: self.into_subject(),
+        }
+    }
+}
+
+/// A blob chain that has not chosen its verb yet.
+///
+/// See the note in [`memory::prelude`](crate::memory::prelude) for why
+/// the builder defers.
+#[derive(Debug, Clone)]
+pub struct BlobScope {
+    subject: Subject,
+}
+
+impl BlobScope {
+    /// Build the chain under `V`.
+    fn under<V>(self) -> Capability<Blob<V>>
+    where
+        V: crate::Verb,
+        V::Of: dialog_capability::Constraint,
+        Subject: AttenuateVerb<V>,
+    {
+        AttenuateVerb::verb(self.subject)
+            .attenuate(Archive::<V>::new())
+            .attenuate(Blob::<V>::new())
     }
 }
 
@@ -43,21 +70,21 @@ pub trait BlobExt {
     fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Self::Import;
 }
 
-impl BlobExt for Capability<Blob> {
+impl BlobExt for BlobScope {
     type Read = Capability<Read>;
     type Write = Capability<Write>;
     type Import = Capability<Import>;
 
     fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read> {
-        self.invoke(Read::new(digest))
+        self.under::<crate::Get>().invoke(Read::new(digest))
     }
 
     fn write(self) -> Capability<Write> {
-        self.invoke(Write::new())
+        self.under::<crate::Put>().invoke(Write::new())
     }
 
     fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Capability<Import> {
-        self.invoke(Import::new(digest, size))
+        self.under::<crate::Put>().invoke(Import::new(digest, size))
     }
 }
 

@@ -7,49 +7,51 @@
 
 use dialog_capability::{Capability, Did, Policy, Subject};
 
-use super::{Branch, Branches, Create, Delete, Discard, Doomed, List};
-use crate::{Use, Void};
+use super::{Branch, Branches, Create, Delete, List};
+use crate::AttenuateVerb;
 
 /// Extension trait to start a branch capability chain.
-///
-/// [`branches`](Self::branches) begins the [`Use`] side (reads and
-/// writes); [`discard`](Self::discard) begins the [`Void`] side
-/// (destruction). They are separate entry points because they are
-/// separate powers.
 pub trait BranchSubjectExt {
     /// The resulting branches chain type.
     type Branches;
-    /// The resulting discard chain type.
-    type Discard;
-    /// Begin a branch read/write capability chain.
+    /// Begin a branch capability chain.
     fn branches(self) -> Self::Branches;
-    /// Begin a branch destruction capability chain.
-    fn discard(self) -> Self::Discard;
 }
 
 impl BranchSubjectExt for Subject {
-    type Branches = Capability<Branches>;
-    type Discard = Capability<Discard>;
-
-    fn branches(self) -> Capability<Branches> {
-        self.attenuate(Use).attenuate(Branches)
-    }
-
-    fn discard(self) -> Capability<Discard> {
-        self.attenuate(Void).attenuate(Discard)
+    type Branches = BranchesScope;
+    fn branches(self) -> BranchesScope {
+        BranchesScope { subject: self }
     }
 }
 
 impl BranchSubjectExt for Did {
-    type Branches = Capability<Branches>;
-    type Discard = Capability<Discard>;
-
-    fn branches(self) -> Capability<Branches> {
-        Subject::from(self).attenuate(Use).attenuate(Branches)
+    type Branches = BranchesScope;
+    fn branches(self) -> BranchesScope {
+        BranchesScope {
+            subject: Subject::from(self),
+        }
     }
+}
 
-    fn discard(self) -> Capability<Discard> {
-        Subject::from(self).attenuate(Void).attenuate(Discard)
+/// A branch chain that has not chosen its verb yet.
+///
+/// See the note in [`memory::prelude`](crate::memory::prelude) for why
+/// the builder defers.
+#[derive(Debug, Clone)]
+pub struct BranchesScope {
+    subject: Subject,
+}
+
+impl BranchesScope {
+    /// Build the namespace chain under `V`.
+    fn under<V>(self) -> Capability<Branches<V>>
+    where
+        V: crate::Verb,
+        V::Of: dialog_capability::Constraint,
+        Subject: AttenuateVerb<V>,
+    {
+        AttenuateVerb::verb(self.subject).attenuate(Branches::<V>::new())
     }
 }
 
@@ -66,32 +68,40 @@ pub trait BranchesExt {
     fn list(self) -> Self::List;
 }
 
-impl BranchesExt for Capability<Branches> {
-    type Branch = Capability<Branch>;
+impl BranchesExt for BranchesScope {
+    type Branch = BranchScope;
     type List = Capability<List>;
 
-    fn branch(self, name: impl Into<String>) -> Capability<Branch> {
-        self.attenuate(Branch::new(name))
+    fn branch(self, name: impl Into<String>) -> BranchScope {
+        BranchScope {
+            subject: self.subject,
+            name: name.into(),
+        }
     }
 
     fn list(self) -> Capability<List> {
-        self.invoke(List)
+        self.under::<crate::Get>().invoke(List)
     }
 }
 
-/// Extension methods for scoping a destruction chain to one branch.
-pub trait DiscardExt {
-    /// The resulting doomed-branch chain type.
-    type Branch;
-    /// Scope to the branch with this name.
-    fn branch(self, name: impl Into<String>) -> Self::Branch;
+/// A named-branch chain that has not chosen its verb yet.
+#[derive(Debug, Clone)]
+pub struct BranchScope {
+    subject: Subject,
+    name: String,
 }
 
-impl DiscardExt for Capability<Discard> {
-    type Branch = Capability<Doomed>;
-
-    fn branch(self, name: impl Into<String>) -> Capability<Doomed> {
-        self.attenuate(Doomed::new(name))
+impl BranchScope {
+    /// Build the branch chain under `V`.
+    fn under<V>(self) -> Capability<Branch<V>>
+    where
+        V: crate::Verb,
+        V::Of: dialog_capability::Constraint,
+        Subject: AttenuateVerb<V>,
+    {
+        AttenuateVerb::verb(self.subject)
+            .attenuate(Branches::<V>::new())
+            .attenuate(Branch::<V>::new(self.name))
     }
 }
 
@@ -99,31 +109,28 @@ impl DiscardExt for Capability<Discard> {
 pub trait BranchExt {
     /// The resulting create chain type.
     type Create;
-    /// Create the branch and record it in the `meta` branch.
-    fn create(self) -> Self::Create;
-}
-
-impl BranchExt for Capability<Branch> {
-    type Create = Capability<Create>;
-
-    fn create(self) -> Capability<Create> {
-        self.invoke(Create)
-    }
-}
-
-/// Extension methods for invoking the destruction effect.
-pub trait DoomedExt {
     /// The resulting delete chain type.
     type Delete;
+    /// Create the branch and record it in the `meta` branch.
+    fn create(self) -> Self::Create;
     /// Delete the branch: retract its facts and its memory cells.
+    ///
+    /// Rooted at `/void`, not `/use` — the verb decides the root, so a
+    /// caller asking to destroy a branch gets the destroying chain
+    /// without having to know that is where it lives.
     fn delete(self) -> Self::Delete;
 }
 
-impl DoomedExt for Capability<Doomed> {
+impl BranchExt for BranchScope {
+    type Create = Capability<Create>;
     type Delete = Capability<Delete>;
 
+    fn create(self) -> Capability<Create> {
+        self.under::<crate::Put>().invoke(Create)
+    }
+
     fn delete(self) -> Capability<Delete> {
-        self.invoke(Delete)
+        self.under::<crate::Discard>().invoke(Delete)
     }
 }
 
@@ -135,12 +142,12 @@ pub trait BranchNameExt {
 
 impl BranchNameExt for Capability<Create> {
     fn name(&self) -> &str {
-        &Branch::of(self).name
+        &Branch::<crate::Put>::of(self).name
     }
 }
 
 impl BranchNameExt for Capability<Delete> {
     fn name(&self) -> &str {
-        &Doomed::of(self).name
+        &Branch::<crate::Discard>::of(self).name
     }
 }

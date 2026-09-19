@@ -39,8 +39,8 @@ pub(crate) fn type_segment<T>() -> &'static str {
 ///     type Of = Subject;
 ///
 ///     // Custom path segment instead of default "blobstore"
-///     fn attenuation() -> &'static str {
-///         "blob"
+///     fn attenuation() -> Option<&'static str> {
+///         Some("blob")
 ///     }
 /// }
 /// ```
@@ -51,12 +51,15 @@ pub trait Attenuation: Sized + Caveat {
     /// Must implement [`Constraint`] so the blanket [`Policy`] impl works.
     type Of: Constraint;
 
-    /// Returns the path segment this attenuation adds to the ability path.
+    /// The path segment this attenuation adds to the ability path, or
+    /// `None` to add nothing.
     ///
-    /// By default, derives the segment from the struct name (lowercased).
-    /// Override this method to use a custom segment.
-    fn attenuation() -> &'static str {
-        type_segment::<Self>()
+    /// Defaults to the struct name (lowercased). Override to use a
+    /// different segment, or return `None` to stay out of the path while
+    /// still scoping the capability -- a link that narrows authority
+    /// need not also name itself.
+    fn attenuation() -> Option<&'static str> {
+        Some(type_segment::<Self>())
     }
 }
 
@@ -65,15 +68,18 @@ impl<T: Attenuation> Policy for T {
     type Of = <T as Attenuation>::Of;
 
     fn attenuation() -> Option<&'static str> {
-        Some(<T as Attenuation>::attenuation())
+        <T as Attenuation>::attenuation()
     }
 }
 
-// Effect implies Attenuation
+// Effect implies Attenuation. An effect that declines to name itself
+// (`NAMED = false`) contributes nothing, exactly as a silent `Policy`
+// does: where the chain already spells the whole command, the effect on
+// the end has nothing left to add.
 impl<T: Effect> Attenuation for T {
     type Of = <T as Effect>::Of;
 
-    fn attenuation() -> &'static str {
-        T::command()
+    fn attenuation() -> Option<&'static str> {
+        T::NAMED.then(T::segment)
     }
 }

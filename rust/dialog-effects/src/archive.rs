@@ -13,10 +13,11 @@
 //!               └── Import { blocks } → Effect → Result<(), ArchiveError>
 //! ```
 
-use crate::Use;
+use crate::Verb;
 use std::error::Error;
 
 use crate::Rejection;
+pub use dialog_capability::Constraint;
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, DialogCapabilityPerformError, Effect, Policy, StorageError,
     Subject, access::AuthorizeError,
@@ -28,38 +29,92 @@ use serde::de::Error as DeserializationError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-/// Archive ability - restricts to archive operations.
+/// The archive namespace, under a verb: `/use/get/archive/...`.
 ///
-/// Attaches to Subject. Contributes no ability segment of its own: the
-/// effects name the whole command (`/use/get/archive/block`), so the
-/// verb sits above the resource in the path.
+/// Generic over the verb above it, because the same namespace is
+/// reached by reading and by writing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Archive;
+pub struct Archive<V = crate::Get>(#[serde(skip)] core::marker::PhantomData<V>);
 
-impl Policy for Archive {
-    type Of = Use;
+impl<V> Archive<V> {
+    /// The archive namespace under `V`.
+    pub fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+impl<V> Default for Archive<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: Verb> Attenuation for Archive<V>
+where
+    V::Of: Constraint,
+{
+    type Of = V;
+
+    fn attenuation() -> Option<&'static str> {
+        Some("archive")
+    }
 }
 
 /// Catalog policy that scopes operations to a named catalog.
 ///
 /// Does not add to ability path but constrains invocation arguments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Catalog {
+pub struct Catalog<V = crate::Get> {
     /// The catalog name (e.g., "index", "blobs").
     pub catalog: String,
+    #[serde(skip)]
+    verb: core::marker::PhantomData<V>,
 }
 
-impl Catalog {
+impl<V> Catalog<V> {
     /// Create a new Catalog policy.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             catalog: name.into(),
+            verb: core::marker::PhantomData,
         }
     }
 }
 
-impl Policy for Catalog {
-    type Of = Archive;
+impl<V: Verb> Policy for Catalog<V>
+where
+    V::Of: Constraint,
+{
+    type Of = Archive<V>;
+}
+
+/// The block resource: the unit an archive stores, named by content
+/// hash. Completes the command `/use/get/archive/block`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Block<V = crate::Get>(#[serde(skip)] core::marker::PhantomData<V>);
+
+impl<V> Block<V> {
+    /// The block resource under `V`.
+    pub fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+impl<V> Default for Block<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: Verb> Attenuation for Block<V>
+where
+    V::Of: Constraint,
+{
+    type Of = Catalog<V>;
+
+    fn attenuation() -> Option<&'static str> {
+        Some("block")
+    }
 }
 
 /// Get operation - retrieves content by digest.
@@ -82,12 +137,10 @@ impl Get {
 }
 
 impl Effect for Get {
-    type Of = Catalog;
+    type Of = Block<crate::Get>;
     type Output = Result<Option<Vec<u8>>, ArchiveError>;
 
-    fn command() -> &'static str {
-        "get/archive/block"
-    }
+    const NAMED: bool = false;
 }
 
 /// Put operation - stores a single content-addressed block.
@@ -180,12 +233,10 @@ impl Put {
 }
 
 impl Effect for Put {
-    type Of = Catalog;
+    type Of = Block<crate::Put>;
     type Output = Result<(), ArchiveError>;
 
-    fn command() -> &'static str {
-        "put/archive/block"
-    }
+    const NAMED: bool = false;
 }
 
 /// Import operation - stores a batch of content-addressed blocks.
@@ -235,12 +286,10 @@ impl Import {
 }
 
 impl Effect for Import {
-    type Of = Catalog;
+    type Of = Block<crate::Put>;
     type Output = Result<(), ArchiveError>;
 
-    fn command() -> &'static str {
-        "put/archive/block"
-    }
+    const NAMED: bool = false;
 }
 
 pub mod prelude;
@@ -289,50 +338,39 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::prelude::*;
     use dialog_capability::did;
 
-    #[test]
-    fn it_builds_archive_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Archive);
-
-        assert_eq!(claim.subject(), &did!("key:zSpace"));
-        assert_eq!(claim.ability(), "/use");
-    }
-
-    #[test]
-    fn it_builds_catalog_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"));
-
-        assert_eq!(claim.subject(), &did!("key:zSpace"));
-        // Catalog is Policy, not Ability, so it doesn't add to path
-        assert_eq!(claim.ability(), "/use");
-    }
-
-    #[test]
+    #[dialog_common::test]
     fn it_builds_get_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new([0u8; 32]));
+            .archive()
+            .catalog("index")
+            .get([0u8; 32]);
 
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
         assert_eq!(claim.ability(), "/use/get/archive/block");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_put_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(Vec::new())));
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(Vec::new()));
 
         assert_eq!(claim.ability(), "/use/put/archive/block");
+    }
+
+    /// The catalog name scopes the capability without appearing in the
+    /// path.
+    #[dialog_common::test]
+    fn it_scopes_by_catalog_without_changing_the_path() {
+        let subject = Subject::from(did!("key:zSpace"));
+        let index = subject.clone().archive().catalog("index").get([0u8; 32]);
+        let other = subject.archive().catalog("other").get([0u8; 32]);
+
+        assert_eq!(index.ability(), other.ability());
     }
 
     #[dialog_common::test]

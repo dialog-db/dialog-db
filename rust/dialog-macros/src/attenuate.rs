@@ -307,7 +307,7 @@ fn generate_for_named_struct(
         // blanket impl.
         impl ::dialog_capability::Attenuation for #attenuation_name {
             type Of = <#name as ::dialog_capability::Attenuation>::Of;
-            fn attenuation() -> &'static str {
+            fn attenuation() -> ::core::option::Option<&'static str> {
                 <#name as ::dialog_capability::Attenuation>::attenuation()
             }
         }

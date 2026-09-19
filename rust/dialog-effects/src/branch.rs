@@ -21,20 +21,19 @@
 //! ```text
 //! Subject (repository DID)
 //!   ├── Use
-//!   │     └── Branches
-//!   │           ├── List → Effect → Result<Vec<String>, BranchError>
-//!   │           └── Branch { name: String }
-//!   │                 └── Create → Effect → Result<(), BranchError>
+//!   │     ├── Get → Branches → List → Result<Vec<String>, BranchError>
+//!   │     └── Put → Branches → Branch { name } → Create → Result<(), BranchError>
 //!   └── Void
-//!         └── Discard
-//!               └── Doomed { name: String }
-//!                     └── Delete → Effect → Result<(), BranchError>
+//!         └── Discard (spelled `delete`)
+//!               └── Branches
+//!                     └── Branch { name: String }
+//!                           └── Delete → Effect → Result<(), BranchError>
 //! ```
 
 use crate::Rejection;
-use crate::{Use, Void};
+use crate::Verb;
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::{Attenuate, Effect, Policy};
+use dialog_capability::{Attenuate, Attenuation, Constraint, Effect, Policy};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -47,10 +46,30 @@ use crate::memory::MemoryError;
 /// (`get/dialog/branch` — verb, then namespace, then resource,
 /// as in `get/memory/cell`), as they do in [`memory`](crate::memory).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Branches;
+pub struct Branches<V = crate::Get>(#[serde(skip)] core::marker::PhantomData<V>);
 
-impl Policy for Branches {
-    type Of = Use;
+impl<V> Branches<V> {
+    /// The dialog namespace under `V`.
+    pub fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+impl<V> Default for Branches<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: crate::Verb> Attenuation for Branches<V>
+where
+    V::Of: dialog_capability::Constraint,
+{
+    type Of = V;
+
+    fn attenuation() -> Option<&'static str> {
+        Some("dialog")
+    }
 }
 
 /// The branch resource, scoped to one name.
@@ -59,50 +78,32 @@ impl Policy for Branches {
 /// the branch *name* scopes the capability and travels in the
 /// invocation's parameters, as a cell's name does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Branch {
+pub struct Branch<V = crate::Get> {
     /// The branch name, as it appears in `dialog.branch/name`.
     pub name: String,
+    #[serde(skip)]
+    verb: core::marker::PhantomData<V>,
 }
 
-impl Branch {
+impl<V> Branch<V> {
     /// Scope to the branch with this name.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            verb: core::marker::PhantomData,
+        }
     }
 }
 
-impl Policy for Branch {
-    type Of = Branches;
-}
+impl<V: Verb> Attenuation for Branch<V>
+where
+    V::Of: Constraint,
+{
+    type Of = Branches<V>;
 
-/// Root policy for destroying branches, under [`Void`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Discard;
-
-impl Policy for Discard {
-    type Of = Void;
-}
-
-/// Policy scoping a deletion to one named branch.
-///
-/// A distinct type from [`Branch`] because it attaches to a distinct
-/// root: a capability naming a branch to read is not a capability
-/// naming a branch to destroy, and the type system should say so.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Doomed {
-    /// The branch name, as it appears in `dialog.branch/name`.
-    pub name: String,
-}
-
-impl Doomed {
-    /// Scope to the branch with this name.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+    fn attenuation() -> Option<&'static str> {
+        Some("branch")
     }
-}
-
-impl Policy for Doomed {
-    type Of = Discard;
 }
 
 /// List the branches on this replica.
@@ -116,11 +117,16 @@ impl Policy for Doomed {
 pub struct List;
 
 impl Effect for List {
-    type Of = Branches;
+    type Of = Branches<crate::Get>;
     type Output = Result<Vec<String>, BranchError>;
 
-    fn command() -> &'static str {
-        "get/dialog/branch"
+    // `/use/get/dialog/branch` is complete at the namespace: listing
+    // asks about the branches as a set, so there is no one branch to
+    // scope it to.
+    const NAMED: bool = true;
+
+    fn segment() -> &'static str {
+        "branch"
     }
 }
 
@@ -133,12 +139,10 @@ impl Effect for List {
 pub struct Create;
 
 impl Effect for Create {
-    type Of = Branch;
+    type Of = Branch<crate::Put>;
     type Output = Result<(), BranchError>;
 
-    fn command() -> &'static str {
-        "put/dialog/branch"
-    }
+    const NAMED: bool = false;
 }
 
 /// Delete a branch: retract its `dialog.branch/*` facts and retract the
@@ -156,12 +160,10 @@ impl Effect for Create {
 pub struct Delete;
 
 impl Effect for Delete {
-    type Of = Doomed;
+    type Of = Branch<crate::Discard>;
     type Output = Result<(), BranchError>;
 
-    fn command() -> &'static str {
-        "delete/dialog/branch"
-    }
+    const NAMED: bool = false;
 }
 
 pub mod prelude;
@@ -206,15 +208,15 @@ pub enum BranchError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::prelude::*;
     use dialog_capability::{Subject, did};
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     #[dialog_common::test]
     fn it_builds_list_claim_path() {
-        let claim = Subject::from(did!("key:zRepo"))
-            .attenuate(Use)
-            .attenuate(Branches)
-            .invoke(List);
+        let claim = Subject::from(did!("key:zRepo")).branches().list();
 
         assert_eq!(claim.ability(), "/use/get/dialog/branch");
     }
@@ -222,10 +224,9 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_create_claim_path() {
         let claim = Subject::from(did!("key:zRepo"))
-            .attenuate(Use)
-            .attenuate(Branches)
-            .attenuate(Branch::new("main"))
-            .invoke(Create);
+            .branches()
+            .branch("main")
+            .create();
 
         assert_eq!(claim.ability(), "/use/put/dialog/branch");
     }
@@ -236,10 +237,9 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_delete_claim_path() {
         let claim = Subject::from(did!("key:zRepo"))
-            .attenuate(Void)
-            .attenuate(Discard)
-            .attenuate(Doomed::new("main"))
-            .invoke(Delete);
+            .branches()
+            .branch("main")
+            .delete();
 
         assert_eq!(claim.ability(), "/void/delete/dialog/branch");
     }
@@ -249,41 +249,23 @@ mod tests {
     #[dialog_common::test]
     fn it_keeps_deletion_out_of_the_use_root() {
         let subject = Subject::from(did!("key:zRepo"));
-        let write = subject
-            .clone()
-            .attenuate(Use)
-            .attenuate(Branches)
-            .attenuate(Branch::new("main"))
-            .invoke(Create);
-        let destroy = subject
-            .attenuate(Void)
-            .attenuate(Discard)
-            .attenuate(Doomed::new("main"))
-            .invoke(Delete);
+        let write = subject.clone().branches().branch("main").create();
+        let destroy = subject.branches().branch("main").delete();
 
         assert!(write.ability().starts_with("/use/"));
         assert!(destroy.ability().starts_with("/void/"));
     }
 
-    /// The branch name is a policy, so it scopes the capability without
-    /// changing the ability path: two branches differ in what they
-    /// authorize, not in how the command reads.
+    /// The branch name scopes the capability without changing the
+    /// ability path: two branches differ in what they authorize, not in
+    /// how the command reads.
     #[dialog_common::test]
     fn it_scopes_by_name_without_changing_the_path() {
         let subject = Subject::from(did!("key:zRepo"));
-        let main = subject
-            .clone()
-            .attenuate(Void)
-            .attenuate(Discard)
-            .attenuate(Doomed::new("main"))
-            .invoke(Delete);
-        let feature = subject
-            .attenuate(Void)
-            .attenuate(Discard)
-            .attenuate(Doomed::new("feature"))
-            .invoke(Delete);
+        let main = subject.clone().branches().branch("main").delete();
+        let feature = subject.branches().branch("feature").delete();
 
         assert_eq!(main.ability(), feature.ability());
-        assert_ne!(Doomed::of(&main).name, Doomed::of(&feature).name);
+        assert_ne!(main.name(), feature.name());
     }
 }

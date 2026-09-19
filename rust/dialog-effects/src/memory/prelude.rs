@@ -4,11 +4,25 @@
 //! ```
 //! use dialog_effects::memory::prelude::*;
 //! ```
+//!
+//! # Why the builder defers
+//!
+//! A verb is a level of the capability hierarchy, above the namespace it
+//! applies to: `/use/get/memory/cell`. A caller, though, names the
+//! resource before the operation — `.memory().space(s).cell(c)` and only
+//! then `.publish(..)`. The chain therefore cannot be built as it is
+//! written: the verb belongs at the top but is not known until the end.
+//!
+//! So the navigation methods accumulate names without committing to a
+//! chain, and the effect method builds the whole thing at once with its
+//! own verb on top. The caller writes resource-first while the
+//! capability comes out verb-first, and neither has to know about the
+//! other.
 
 use dialog_capability::{Capability, Did, Policy, Subject};
 
 use super::{Cell, Memory, Publish, Resolve, Retract, Space, Version};
-use crate::Use;
+use crate::{AttenuateVerb, Delete, Get, Put};
 
 /// Extension trait to start a memory capability chain.
 pub trait MemorySubjectExt {
@@ -19,17 +33,27 @@ pub trait MemorySubjectExt {
 }
 
 impl MemorySubjectExt for Subject {
-    type Memory = Capability<Memory>;
-    fn memory(self) -> Capability<Memory> {
-        self.attenuate(Use).attenuate(Memory)
+    type Memory = MemoryScope;
+    fn memory(self) -> MemoryScope {
+        MemoryScope { subject: self }
     }
 }
 
 impl MemorySubjectExt for Did {
-    type Memory = Capability<Memory>;
-    fn memory(self) -> Capability<Memory> {
-        Subject::from(self).attenuate(Use).attenuate(Memory)
+    type Memory = MemoryScope;
+    fn memory(self) -> MemoryScope {
+        MemoryScope {
+            subject: Subject::from(self),
+        }
     }
+}
+
+/// A memory chain that has not chosen its verb yet.
+///
+/// Holds the subject until an effect is named; see the module note.
+#[derive(Debug, Clone)]
+pub struct MemoryScope {
+    subject: Subject,
 }
 
 /// Extension methods for scoping memory to a named space.
@@ -40,11 +64,21 @@ pub trait MemoryExt {
     fn space(self, name: impl Into<String>) -> Self::Space;
 }
 
-impl MemoryExt for Capability<Memory> {
-    type Space = Capability<Space>;
-    fn space(self, name: impl Into<String>) -> Capability<Space> {
-        self.attenuate(Space::new(name))
+impl MemoryExt for MemoryScope {
+    type Space = SpaceScope;
+    fn space(self, name: impl Into<String>) -> SpaceScope {
+        SpaceScope {
+            subject: self.subject,
+            space: name.into(),
+        }
     }
+}
+
+/// A space chain that has not chosen its verb yet.
+#[derive(Debug, Clone)]
+pub struct SpaceScope {
+    subject: Subject,
+    space: String,
 }
 
 /// Extension methods for scoping a space to a named cell.
@@ -55,10 +89,41 @@ pub trait SpaceExt {
     fn cell(self, name: impl Into<String>) -> Self::Cell;
 }
 
-impl SpaceExt for Capability<Space> {
-    type Cell = Capability<Cell>;
-    fn cell(self, name: impl Into<String>) -> Capability<Cell> {
-        self.attenuate(Cell::new(name))
+impl SpaceExt for SpaceScope {
+    type Cell = CellScope;
+    fn cell(self, name: impl Into<String>) -> CellScope {
+        CellScope {
+            subject: self.subject,
+            space: self.space,
+            cell: name.into(),
+        }
+    }
+}
+
+/// A cell chain that has not chosen its verb yet.
+///
+/// The names are held until an effect is named, at which point the whole
+/// capability is built with that effect's verb at the top.
+#[derive(Debug, Clone)]
+pub struct CellScope {
+    subject: Subject,
+    space: String,
+    cell: String,
+}
+
+impl CellScope {
+    /// Build the chain under `V`, the verb of the effect about to be
+    /// invoked.
+    fn under<V>(self) -> Capability<Cell<V>>
+    where
+        V: crate::Verb,
+        V::Of: dialog_capability::Constraint,
+        Subject: AttenuateVerb<V>,
+    {
+        AttenuateVerb::verb(self.subject)
+            .attenuate(Memory::<V>::new())
+            .attenuate(Space::<V>::new(self.space))
+            .attenuate(Cell::<V>::new(self.cell))
     }
 }
 
@@ -80,21 +145,21 @@ pub trait CellExt {
     fn retract(self, when: impl Into<Version>) -> Self::Retract;
 }
 
-impl CellExt for Capability<Cell> {
+impl CellExt for CellScope {
     type Resolve = Capability<Resolve>;
     type Publish = Capability<Publish>;
     type Retract = Capability<Retract>;
 
     fn resolve(self) -> Capability<Resolve> {
-        self.invoke(Resolve)
+        self.under::<Get>().invoke(Resolve)
     }
 
     fn publish(self, content: impl Into<Vec<u8>>, when: Option<Version>) -> Capability<Publish> {
-        self.invoke(Publish::new(content, when))
+        self.under::<Put>().invoke(Publish::new(content, when))
     }
 
     fn retract(self, when: impl Into<Version>) -> Capability<Retract> {
-        self.invoke(Retract::new(when))
+        self.under::<Delete>().invoke(Retract::new(when))
     }
 }
 
@@ -108,11 +173,11 @@ pub trait ResolveExt {
 
 impl ResolveExt for Capability<Resolve> {
     fn space(&self) -> &str {
-        &Space::of(self).space
+        &Space::<Get>::of(self).space
     }
 
     fn cell(&self) -> &str {
-        &Cell::of(self).cell
+        &Cell::<Get>::of(self).cell
     }
 }
 
@@ -130,11 +195,11 @@ pub trait PublishExt {
 
 impl PublishExt for Capability<Publish> {
     fn space(&self) -> &str {
-        &Space::of(self).space
+        &Space::<Put>::of(self).space
     }
 
     fn cell(&self) -> &str {
-        &Cell::of(self).cell
+        &Cell::<Put>::of(self).cell
     }
 
     fn content(&self) -> &[u8] {
@@ -158,11 +223,11 @@ pub trait RetractExt {
 
 impl RetractExt for Capability<Retract> {
     fn space(&self) -> &str {
-        &Space::of(self).space
+        &Space::<Delete>::of(self).space
     }
 
     fn cell(&self) -> &str {
-        &Cell::of(self).cell
+        &Cell::<Delete>::of(self).cell
     }
 
     fn when(&self) -> &Version {

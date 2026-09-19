@@ -8,8 +8,8 @@
 use dialog_capability::{Capability, Did, Policy, Subject};
 use dialog_common::{Blake3Hash, Buffer};
 
-use super::{Archive, Catalog, Get, Import, Put};
-use crate::Use;
+use super::{Archive, Block, Catalog, Get, Import, Put};
+use crate::AttenuateVerb;
 
 /// Extension trait to start an archive capability chain.
 pub trait ArchiveSubjectExt {
@@ -20,16 +20,35 @@ pub trait ArchiveSubjectExt {
 }
 
 impl ArchiveSubjectExt for Subject {
-    type Archive = Capability<Archive>;
-    fn archive(self) -> Capability<Archive> {
-        self.attenuate(Use).attenuate(Archive)
+    type Archive = ArchiveScope;
+    fn archive(self) -> ArchiveScope {
+        ArchiveScope { subject: self }
     }
 }
 
 impl ArchiveSubjectExt for Did {
-    type Archive = Capability<Archive>;
-    fn archive(self) -> Capability<Archive> {
-        Subject::from(self).attenuate(Use).attenuate(Archive)
+    type Archive = ArchiveScope;
+    fn archive(self) -> ArchiveScope {
+        ArchiveScope {
+            subject: Subject::from(self),
+        }
+    }
+}
+
+/// An archive chain that has not chosen its verb yet.
+///
+/// See the note in [`memory::prelude`](crate::memory::prelude) for why
+/// the builder defers.
+#[derive(Debug, Clone)]
+pub struct ArchiveScope {
+    subject: Subject,
+}
+
+impl ArchiveScope {
+    /// The subject this scope was started from, for a sibling namespace
+    /// (the blob store) that continues from the same root.
+    pub(crate) fn into_subject(self) -> Subject {
+        self.subject
     }
 }
 
@@ -41,10 +60,35 @@ pub trait ArchiveExt {
     fn catalog(self, name: impl Into<String>) -> Self::Catalog;
 }
 
-impl ArchiveExt for Capability<Archive> {
-    type Catalog = Capability<Catalog>;
-    fn catalog(self, name: impl Into<String>) -> Capability<Catalog> {
-        self.attenuate(Catalog::new(name))
+impl ArchiveExt for ArchiveScope {
+    type Catalog = CatalogScope;
+    fn catalog(self, name: impl Into<String>) -> CatalogScope {
+        CatalogScope {
+            subject: self.subject,
+            catalog: name.into(),
+        }
+    }
+}
+
+/// A catalog chain that has not chosen its verb yet.
+#[derive(Debug, Clone)]
+pub struct CatalogScope {
+    subject: Subject,
+    catalog: String,
+}
+
+impl CatalogScope {
+    /// Build the block chain under `V`.
+    fn under<V>(self) -> Capability<Block<V>>
+    where
+        V: crate::Verb,
+        V::Of: dialog_capability::Constraint,
+        Subject: AttenuateVerb<V>,
+    {
+        AttenuateVerb::verb(self.subject)
+            .attenuate(Archive::<V>::new())
+            .attenuate(Catalog::<V>::new(self.catalog))
+            .attenuate(Block::<V>::new())
     }
 }
 
@@ -64,21 +108,21 @@ pub trait CatalogExt {
     fn import(self, blocks: impl IntoIterator<Item = impl Into<Buffer>>) -> Self::Import;
 }
 
-impl CatalogExt for Capability<Catalog> {
+impl CatalogExt for CatalogScope {
     type Get = Capability<Get>;
     type Put = Capability<Put>;
     type Import = Capability<Import>;
 
     fn get(self, digest: impl Into<Blake3Hash>) -> Capability<Get> {
-        self.invoke(Get::new(digest))
+        self.under::<crate::Get>().invoke(Get::new(digest))
     }
 
     fn put(self, block: impl Into<Buffer>) -> Capability<Put> {
-        self.invoke(Put::new(block))
+        self.under::<crate::Put>().invoke(Put::new(block))
     }
 
     fn import(self, blocks: impl IntoIterator<Item = impl Into<Buffer>>) -> Capability<Import> {
-        self.invoke(Import::new(blocks))
+        self.under::<crate::Put>().invoke(Import::new(blocks))
     }
 }
 
@@ -92,7 +136,7 @@ pub trait ImportExt {
 
 impl ImportExt for Capability<Import> {
     fn catalog(&self) -> &str {
-        &Catalog::of(self).catalog
+        &Catalog::<crate::Put>::of(self).catalog
     }
 
     fn blocks(&self) -> &[Buffer] {
@@ -110,7 +154,7 @@ pub trait GetExt {
 
 impl GetExt for Capability<Get> {
     fn catalog(&self) -> &str {
-        &Catalog::of(self).catalog
+        &Catalog::<crate::Get>::of(self).catalog
     }
 
     fn digest(&self) -> &Blake3Hash {
@@ -130,7 +174,7 @@ pub trait PutExt {
 
 impl PutExt for Capability<Put> {
     fn catalog(&self) -> &str {
-        &Catalog::of(self).catalog
+        &Catalog::<crate::Put>::of(self).catalog
     }
 
     fn digest(&self) -> &Blake3Hash {

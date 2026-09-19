@@ -8,23 +8,26 @@
 //!
 //! - [`storage`]: Location-based storage operations (`Storage`, `Location`, `Mount`, `Load`, `Save`)
 //! - [`memory`]: CAS memory cells (`Memory`, `Space`, `Cell`, `Resolve`, `Publish`, `Retract`)
-//! - [`archive`]: Content-addressed archive (`Archive`, `Catalog`, `Get`, `Put`)
 //! - [`branch`]: Named lines of revisions (`Branches`, `Branch`, `List`, `Create`, `Delete`)
+//! - [`archive`]: Content-addressed archive (`Archive`, `Catalog`, `Get`, `Put`)
 //!
 //! # Example
 //!
 //! ```
-//! use dialog_effects::archive::{Archive, Catalog, Get};
-//! use dialog_effects::Use;
+//! use dialog_effects::prelude::*;
 //! use dialog_capability::{did, Subject};
 //! use dialog_common::Blake3Hash;
 //!
-//! // Build a capability to get content from the "index" catalog
+//! // Build a capability to get content from the "index" catalog.
+//! // The verb comes from the effect and lands above the namespace:
+//! // this reads `/use/get/archive/block`.
 //! let digest = Blake3Hash::hash(b"hello");
 //! let get_capability = Subject::from(did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"))
-//!     .attenuate(Use).attenuate(Archive)              // Domain: archive operations
-//!     .attenuate(Catalog::new("index"))  // Policy: only the "index" catalog
-//!     .invoke(Get::new(digest));         // Effect: get this specific digest
+//!     .archive()             // Namespace: archive operations
+//!     .catalog("index")      // Policy: only the "index" catalog
+//!     .get(digest);          // Effect: get this specific digest
+//!
+//! assert_eq!(get_capability.ability(), "/use/get/archive/block");
 //! ```
 
 #![warn(missing_docs)]
@@ -85,7 +88,7 @@ impl Attenuation for Use {
 /// Separate from [`Use`] because retracting a fact and destroying the
 /// thing that holds facts are different powers. A member of a shared
 /// space holds `/use`, so they may write and retract the subject's
-/// data -- but deleting the branch itself is not something that grant
+/// data — but deleting the branch itself is not something that grant
 /// should carry. Keeping destruction in its own root means it can only
 /// ever be conferred deliberately.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -93,4 +96,106 @@ pub struct Void;
 
 impl Attenuation for Void {
     type Of = Subject;
+}
+
+/// What a namespace hangs from: a verb, or anything else that can carry
+/// one.
+///
+/// A namespace such as [`memory`](crate::memory::Memory) is reached by
+/// reading, by writing and by deleting, so it is generic over the verb
+/// above it. This alias is the bound that generic parameter needs,
+/// named once so the four namespaces do not each restate it.
+pub trait Verb: Attenuation + dialog_capability::Caveat
+where
+    Self::Of: dialog_capability::Constraint,
+{
+}
+
+impl<T> Verb for T
+where
+    T: Attenuation + dialog_capability::Caveat,
+    T::Of: dialog_capability::Constraint,
+{
+}
+
+/// Attaches the root and verb a namespace hangs from.
+///
+/// One impl per verb, so which root a chain gets (`/use` for the
+/// ordinary verbs, `/void` for the destroying one) follows from the verb
+/// itself rather than from anything a caller writes. The deferred
+/// builders in each namespace's prelude call this once the effect --
+/// and therefore the verb -- is known.
+pub trait AttenuateVerb<V: dialog_capability::Constraint> {
+    /// Attach the root, then `V`.
+    fn verb(self) -> Capability<V>;
+}
+
+impl AttenuateVerb<Get> for Subject {
+    fn verb(self) -> Capability<Get> {
+        self.attenuate(Use).attenuate(Get)
+    }
+}
+
+impl AttenuateVerb<Put> for Subject {
+    fn verb(self) -> Capability<Put> {
+        self.attenuate(Use).attenuate(Put)
+    }
+}
+
+impl AttenuateVerb<Delete> for Subject {
+    fn verb(self) -> Capability<Delete> {
+        self.attenuate(Use).attenuate(Delete)
+    }
+}
+
+impl AttenuateVerb<Discard> for Subject {
+    fn verb(self) -> Capability<Discard> {
+        self.attenuate(Void).attenuate(Discard)
+    }
+}
+
+/// Reading, under [`Use`]: `/use/get/...`.
+///
+/// A verb is a level of the hierarchy, not a prefix an effect spells
+/// out for itself. That is what makes `/use/get` a real thing to
+/// delegate -- every read of a subject's data and nothing else -- rather
+/// than a convention each effect's path has to agree to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Get;
+
+impl Attenuation for Get {
+    type Of = Use;
+}
+
+/// Writing, under [`Use`]: `/use/put/...`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Put;
+
+impl Attenuation for Put {
+    type Of = Use;
+}
+
+/// Removing a value while leaving what held it, under [`Use`]:
+/// `/use/delete/...`.
+///
+/// Distinct from [`Void`], which destroys the container itself. Emptying
+/// a cell is an ordinary write; discarding the branch that cell belongs
+/// to is not.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Delete;
+
+impl Attenuation for Delete {
+    type Of = Use;
+}
+
+/// Destroying, under [`Void`]: `/void/delete/...`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Discard;
+
+impl Attenuation for Discard {
+    type Of = Void;
+
+    fn attenuation() -> Option<&'static str> {
+        Some("delete")
+    }
 }

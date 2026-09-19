@@ -36,10 +36,30 @@ pub use dialog_capability::{
 /// Blob store domain under the archive. Contributes no ability segment of
 /// its own: the effects name the whole command (`/use/get/archive/blob`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Blob;
+pub struct Blob<V = crate::Get>(#[serde(skip)] core::marker::PhantomData<V>);
 
-impl Policy for Blob {
-    type Of = Archive;
+impl<V> Blob<V> {
+    /// The blob resource under `V`.
+    pub fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+impl<V> Default for Blob<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: crate::Verb> Attenuation for Blob<V>
+where
+    V::Of: dialog_capability::Constraint,
+{
+    type Of = crate::archive::Archive<V>;
+
+    fn attenuation() -> Option<&'static str> {
+        Some("blob")
+    }
 }
 
 /// A byte range for a ranged read: `length` bytes starting at `offset`, or to
@@ -111,12 +131,10 @@ impl Read {
 }
 
 impl Effect for Read {
-    type Of = Blob;
+    type Of = Blob<crate::Get>;
     type Output = Result<BlobReader, BlobError>;
 
-    fn command() -> &'static str {
-        "get/archive/blob"
-    }
+    const NAMED: bool = false;
 }
 
 /// Ingest a blob whose hash is **discovered** during the write. Carries no
@@ -139,12 +157,10 @@ impl Default for Write {
 }
 
 impl Effect for Write {
-    type Of = Blob;
+    type Of = Blob<crate::Put>;
     type Output = Result<BlobWriter, BlobError>;
 
-    fn command() -> &'static str {
-        "put/archive/blob"
-    }
+    const NAMED: bool = false;
 }
 
 /// Import a blob whose hash is **already known**: a content-bound write used by
@@ -174,12 +190,10 @@ impl Import {
 }
 
 impl Effect for Import {
-    type Of = Blob;
+    type Of = Blob<crate::Put>;
     type Output = Result<BlobWriter, BlobError>;
 
-    fn command() -> &'static str {
-        "put/archive/blob"
-    }
+    const NAMED: bool = false;
 }
 
 pub mod prelude;
@@ -192,16 +206,13 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::prelude::*;
-    use crate::Use;
-    use crate::archive::Archive;
+    use crate::prelude::*;
     use dialog_capability::{Subject, did};
 
     #[dialog_common::test]
     fn it_builds_blob_read_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Archive)
+            .archive()
             .blob()
             .read([0u8; 32]);
         assert_eq!(claim.subject(), &did!("key:zSpace"));
@@ -210,19 +221,14 @@ mod tests {
 
     #[dialog_common::test]
     fn it_builds_blob_write_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Archive)
-            .blob()
-            .write();
+        let claim = Subject::from(did!("key:zSpace")).archive().blob().write();
         assert_eq!(claim.ability(), "/use/put/archive/blob");
     }
 
     #[dialog_common::test]
     fn it_builds_blob_import_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Archive)
+            .archive()
             .blob()
             .import([0u8; 32], 4096);
         assert_eq!(claim.ability(), "/use/put/archive/blob");
