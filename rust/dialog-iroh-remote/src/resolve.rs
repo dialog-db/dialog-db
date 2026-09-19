@@ -103,6 +103,20 @@ pub fn locate(checksum: &Checksum) -> Result<Cid, ResolveError> {
     }
 }
 
+/// The bytes at the address a signed checksum names, with nothing
+/// checked beyond the address.
+///
+/// For material whose attenuation commits to a checksum and nothing
+/// else — `archive::Import`'s per-block checksums, `memory::Publish`'s
+/// content — so there is no second commitment to prove them against.
+/// Prefer [`block`] wherever a digest was signed.
+pub fn at<'a>(bundle: &'a InvocationBundle, checksum: &Checksum) -> Result<&'a [u8], ResolveError> {
+    let link = locate(checksum)?;
+    bundle.block(&link).ok_or(ResolveError::Absent {
+        link: Box::new(link),
+    })
+}
+
 /// The block a verified invocation's arguments name, proven to be that
 /// block.
 ///
