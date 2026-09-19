@@ -11,6 +11,7 @@
 
 mod address;
 mod authorization;
+mod blob;
 mod provider;
 
 pub use address::IrohAddress;
