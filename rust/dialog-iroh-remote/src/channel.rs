@@ -7,7 +7,7 @@
 //! route to be the same code path, which is the whole point of putting
 //! iroh underneath.
 
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 
 use crate::site::IrohAddress;
 
@@ -33,9 +33,57 @@ pub enum ChannelError {
         /// Why, as far as the transport would say.
         detail: String,
     },
+    /// This channel cannot do what was asked of it.
+    ///
+    /// Not a peer problem and not retryable: the transport in hand does
+    /// not carry this kind of exchange, and dialling harder will not
+    /// change that.
+    #[error("this channel cannot {attempted}: {detail}")]
+    Unsupported {
+        /// What was asked for.
+        attempted: &'static str,
+        /// Why it is not available.
+        detail: String,
+    },
 }
 
-/// One request, one response.
+/// One exchange that is bytes in both directions.
+///
+/// What [`Channel::open`] hands back, and the thing a blob rides. The
+/// container has already been sent when a caller gets one; what remains
+/// is the body, in whichever direction the effect runs, and the framed
+/// answer.
+///
+/// Both directions exist on every transfer because which one an effect
+/// uses is the effect's business: a read sends nothing more and receives
+/// until the peer is done, a write sends until it is done and then
+/// receives one answer. A transport implements both and lets the caller
+/// use what it needs.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait Transfer: ConditionalSend {
+    /// Append `bytes` to what this side is sending.
+    async fn send(&mut self, bytes: &[u8]) -> Result<(), ChannelError>;
+
+    /// Signal that this side will send no more.
+    ///
+    /// Separate from dropping the transfer, and required: it is what
+    /// ends the peer's read, so an unfinished transfer is a hang rather
+    /// than a leak. Reading continues afterwards, which is how a write
+    /// gets its answer.
+    async fn finish(&mut self) -> Result<(), ChannelError>;
+
+    /// Exactly `len` more bytes, failing if the peer finished first.
+    ///
+    /// A short read here is the peer having stopped mid-frame, which is
+    /// a broken exchange rather than the end of one.
+    async fn read_exact(&mut self, len: usize) -> Result<Vec<u8>, ChannelError>;
+
+    /// The next of whatever the peer is sending, or `None` at the end.
+    async fn recv(&mut self) -> Result<Option<Vec<u8>>, ChannelError>;
+}
+
+/// One request, one response — and, where the transport can, one stream.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Channel: ConditionalSync {
@@ -45,6 +93,31 @@ pub trait Channel: ConditionalSync {
     /// [`Response`](crate::wire::Response). Neither is interpreted here.
     async fn exchange(&self, peer: &IrohAddress, request: Vec<u8>)
     -> Result<Vec<u8>, ChannelError>;
+
+    /// Start a streamed exchange: send `request`, keep the stream open.
+    ///
+    /// The framing differs from [`Channel::exchange`] and the two never
+    /// mix — see [`crate::wire`]. `request` goes out length-prefixed,
+    /// because unlike an exchange there may be a body behind it and the
+    /// peer has to know where one ends and the other starts. The send
+    /// side is left open: a read finishes it immediately, a write sends
+    /// its blob first.
+    ///
+    /// Defaulted to refusing, because most channels are not transports:
+    /// the loopbacks this crate tests the protocol over have no stream
+    /// to give, and a blob effect asking one for a stream should fail
+    /// where it asked rather than somewhere further in.
+    async fn open(
+        &self,
+        peer: &IrohAddress,
+        request: Vec<u8>,
+    ) -> Result<Box<dyn Transfer>, ChannelError> {
+        let _ = (peer, request);
+        Err(ChannelError::Unsupported {
+            attempted: "stream",
+            detail: "this channel carries whole requests and answers only".into(),
+        })
+    }
 }
 
 /// A channel that reaches nobody.
@@ -69,9 +142,23 @@ impl Channel for Unconfigured {
         peer: &IrohAddress,
         _request: Vec<u8>,
     ) -> Result<Vec<u8>, ChannelError> {
-        Err(ChannelError::Unreachable {
-            peer: peer.to_string(),
-            detail: "no channel was configured for this site, so nothing was dialed".into(),
-        })
+        Err(nothing_was_dialed(peer))
+    }
+
+    /// Also unreachable rather than unsupported: nothing was configured,
+    /// so what it could have carried was never the question.
+    async fn open(
+        &self,
+        peer: &IrohAddress,
+        _request: Vec<u8>,
+    ) -> Result<Box<dyn Transfer>, ChannelError> {
+        Err(nothing_was_dialed(peer))
+    }
+}
+
+fn nothing_was_dialed(peer: &IrohAddress) -> ChannelError {
+    ChannelError::Unreachable {
+        peer: peer.to_string(),
+        detail: "no channel was configured for this site, so nothing was dialed".into(),
     }
 }
