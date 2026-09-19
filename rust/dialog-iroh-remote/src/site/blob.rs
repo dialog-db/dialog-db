@@ -104,13 +104,19 @@ async fn opened(
     address: &IrohAddress,
     container: Vec<u8>,
 ) -> Result<(Box<dyn Transfer>, BlobAnswer), BlobError> {
-    let mut transfer = site
-        .channel()
-        .await
-        .map_err(broken)?
-        .open(address, container)
-        .await
-        .map_err(broken)?;
+    let connection = site.connection().await.map_err(broken)?;
+    // A failure *starting* the transfer drops the link, the way a failed
+    // exchange does. One part way through does not: the site never sees
+    // it, because a `Transfer` outlives this call. That is a gap and a
+    // small one — the next exchange over the same dead link reports it
+    // and the link is rebuilt then, one request later than ideal.
+    let mut transfer = match connection.open(address, container).await {
+        Ok(transfer) => transfer,
+        Err(error) => {
+            site.broke(&connection, &error).await;
+            return Err(broken(error));
+        }
+    };
     let answer = answered(transfer.as_mut()).await?;
     Ok((transfer, answer))
 }
