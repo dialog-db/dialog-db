@@ -93,7 +93,7 @@ use futures_util::TryStreamExt as _;
 use super::session::{Composite, QueryEnv, QueryLayer};
 use crate::repository::source::Source;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Ephemeral, Index, NetworkedIndex, RemoteSite,
+    Branch, Drained, EMPTY_TREE_HASH, Ephemeral, Index, NetworkedIndex, Observer, RemoteSite,
     RepositoryArchiveExt as _, Revision,
 };
 
@@ -213,7 +213,7 @@ impl Demand {
     /// built under the wrong `inline_n` or `spill_prefix` brackets the wrong
     /// keys for a value-constrained selector, so a write inside the real
     /// scanned range would fail to invalidate the reader.
-    pub(crate) fn record(&self, selector: &ArtifactSelector<Constrained>) {
+    pub fn record(&self, selector: &ArtifactSelector<Constrained>) {
         record_range(&self.facts, selector_range(selector, &default_manifest()));
         let metadata = self.metadata.lock().expect("demand metadata lock");
         if selects_head(selector, &metadata) {
@@ -302,45 +302,28 @@ impl<T> Delta<T> {
     }
 }
 
-/// What one layer of a subscription's composite was last evaluated
-/// at: its revision and its session-overlay epoch.
+/// What one tree layer of a subscription's composite was last
+/// evaluated at: its revision. The layer's [`Ephemeral`] store is
+/// off-tree, so its changes are invisible to the tree diff; they reach
+/// the subscription as instants through an [`Observer`] instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Pinned {
     /// The revision the retained results were evaluated at. `None`
     /// until the first poll, or for a branch with no commits.
     revision: Option<Revision>,
-    /// The sequence of the layer's [`Ephemeral`](crate::Ephemeral)
-    /// store the retained results were evaluated at. The store is
-    /// off-tree, so its changes are invisible to the tree diff; the
-    /// instants it minted since this sequence are the delta instead
-    /// ([`Ephemeral::since`](crate::Ephemeral::since)).
-    epoch: u64,
 }
 
 impl Pinned {
     /// Where `source` stands right now.
     fn current(source: &Source) -> Self {
-        let source = source.as_ref();
         Self {
-            revision: source.revision(),
-            epoch: source.overlay().revision().sequence,
-        }
-    }
-
-    /// Where a standalone ephemeral layer stands right now.
-    fn ephemeral(line: &Ephemeral) -> Self {
-        Self {
-            revision: None,
-            epoch: line.revision().sequence,
+            revision: source.as_ref().revision(),
         }
     }
 
     /// A pin no evaluation has set.
     fn unset() -> Self {
-        Self {
-            revision: None,
-            epoch: 0,
-        }
+        Self { revision: None }
     }
 }
 
@@ -349,16 +332,22 @@ impl Pinned {
 /// [`Branch::subscribe`] or [`QueryLayer::subscribe`]; driven by
 /// [`poll`](Subscription::poll).
 ///
-/// Each layer is pinned separately (its revision and its session
-/// overlay's epoch), so a poll re-evaluates exactly when some layer
-/// moved, and the incremental path diffs only the layers that did:
-/// the touched sets of every moved layer union into one maintenance
-/// step over the composite.
+/// Each tree layer is pinned at its revision and every ephemeral
+/// store — each tree layer's session store and every standalone
+/// ephemeral layer — is observed, so a poll re-evaluates exactly when
+/// some layer moved, and the incremental path diffs only the layers
+/// that did: the touched sets of every moved layer union into one
+/// maintenance step over the composite.
 pub struct Subscription<Q: Application> {
     /// The tree layers read, in join order.
     sources: Vec<Source>,
     /// The standalone ephemeral layers read, in join order.
     ephemerals: Vec<Ephemeral>,
+    /// An observer of each tree layer's session store, parallel to
+    /// `sources`, then of each standalone ephemeral layer, parallel
+    /// to `ephemerals`. Registered with the demand cover, so only the
+    /// instants that can change the result are ever queued.
+    observers: Vec<Observer>,
     /// The layer's own overlay facts (`.with(..)`), fixed for the
     /// subscription's lifetime. Each layer's session overlay is read
     /// live at every evaluation instead, so it is not held here.
@@ -366,9 +355,6 @@ pub struct Subscription<Q: Application> {
     query: Q,
     /// One pin per tree layer, parallel to `sources`.
     pins: Vec<Pinned>,
-    /// One pin per standalone ephemeral layer, parallel to
-    /// `ephemerals`.
-    epochs: Vec<Pinned>,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -425,14 +411,15 @@ impl<Q: Application> Subscription<Q> {
             sources,
             ephemerals,
         } = composite;
+        let demand = Demand::new();
         Subscription {
             pins: vec![Pinned::unset(); sources.len()],
-            epochs: vec![Pinned::unset(); ephemerals.len()],
+            observers: observe(&sources, &ephemerals, &demand),
             sources,
             ephemerals,
             changes,
             query,
-            demand: Demand::new(),
+            demand,
             results: Vec::new(),
             fixpoint: Arc::new(Mutex::new(None)),
             initialized: false,
@@ -454,12 +441,23 @@ impl<Q: Application> Subscription<Q> {
         } = composite;
         if sources.len() != self.sources.len() || ephemerals.len() != self.ephemerals.len() {
             self.pins = vec![Pinned::unset(); sources.len()];
-            self.epochs = vec![Pinned::unset(); ephemerals.len()];
+            self.observers = observe(&sources, &ephemerals, &self.demand);
             self.initialized = false;
         }
         self.sources = sources;
         self.ephemerals = ephemerals;
     }
+}
+
+/// An observer of every ephemeral store a composite reads: each tree
+/// layer's session store, then each standalone layer, registered with
+/// `demand`.
+fn observe(sources: &[Source], ephemerals: &[Ephemeral], demand: &Demand) -> Vec<Observer> {
+    sources
+        .iter()
+        .map(|source| source.as_ref().overlay().observe(demand.clone()))
+        .chain(ephemerals.iter().map(|line| line.observe(demand.clone())))
+        .collect()
 }
 
 /// What the in-cover changes between two roots touched.
@@ -641,9 +639,15 @@ where
             + 'static,
     {
         let current: Vec<Pinned> = self.sources.iter().map(Pinned::current).collect();
-        let epochs: Vec<Pinned> = self.ephemerals.iter().map(Pinned::ephemeral).collect();
+        // Drained now, before evaluating: an instant landing while an
+        // evaluation runs stays queued for the next poll, so it is
+        // re-checked rather than missed.
+        let observed: Vec<Drained> = self.observers.iter().map(Observer::drain).collect();
+        let quiet = observed
+            .iter()
+            .all(|observed| matches!(observed, Drained::Instants(instants) if instants.is_empty()));
         if self.initialized {
-            if current == self.pins && epochs == self.epochs {
+            if current == self.pins && quiet {
                 return Ok(None);
             }
             // A head-dependent result — one that read
@@ -670,28 +674,19 @@ where
                             .await?;
                         touched = touched.merge(verdict);
                     }
-                    if current[index].epoch != self.pins[index].epoch {
-                        let verdict = self
-                            .touched_ephemeral(source.as_ref().overlay(), self.pins[index].epoch);
-                        touched = touched.merge(verdict);
-                    }
                     if matches!(touched, Touched::Rules) {
                         break;
                     }
                 }
-                for (index, line) in self.ephemerals.iter().enumerate() {
+                for observed in observed {
                     if matches!(touched, Touched::Rules) {
                         break;
                     }
-                    if epochs[index].epoch != self.epochs[index].epoch {
-                        let verdict = self.touched_ephemeral(line, self.epochs[index].epoch);
-                        touched = touched.merge(verdict);
-                    }
+                    touched = touched.merge(self.touched_observed(observed));
                 }
                 match touched {
                     Touched::Nothing => {
                         self.pins = current;
-                        self.epochs = epochs;
                         return Ok(None);
                     }
                     Touched::Facts {
@@ -706,7 +701,6 @@ where
                         {
                             self.maintenances += 1;
                             self.pins = current;
-                            self.epochs = epochs;
                             return Ok(Some(delta));
                         }
                         // Not maintainable for this query/rule shape:
@@ -719,6 +713,13 @@ where
             }
         }
 
+        // A recompute reads the fold, so the cover it records is what
+        // the observers filter by afterwards. While it runs they admit
+        // everything: an instant landing mid-evaluation inside the new
+        // cover but outside the old one would otherwise be missed.
+        for observer in &self.observers {
+            observer.retarget_everything();
+        }
         let demand = Demand::new();
         let results = self.evaluate(env, &demand, &self.query).await?;
         self.recomputes += 1;
@@ -739,8 +740,10 @@ where
 
         self.results = results;
         self.demand = demand;
+        for observer in &self.observers {
+            observer.retarget(self.demand.clone());
+        }
         self.pins = current;
-        self.epochs = epochs;
         self.initialized = true;
         Ok(Some(delta))
     }
@@ -873,15 +876,17 @@ where
         }
     }
 
-    /// Classify what one layer's ephemeral store changed since the
-    /// pinned `sequence`, within the demand cover: the exact facts its
-    /// instants asserted and retracted, filtered by their index keys
-    /// against the cover, with no diff to compute. A change inside a
-    /// rule-discovery range, or a pin the store's ring no longer
-    /// reaches, is [`Touched::Rules`], which recomputes.
-    fn touched_ephemeral(&self, line: &Ephemeral, sequence: u64) -> Touched {
-        let Some(instants) = line.since(sequence) else {
-            return Touched::Rules;
+    /// Classify what one ephemeral store's observer saw since the last
+    /// poll, within the demand cover: the exact facts its instants
+    /// asserted and retracted, checked by their index keys against the
+    /// cover (the observer already filtered by it, but the cover may
+    /// have narrowed since), with no diff to compute. A change inside
+    /// a rule-discovery range, or a gap the observer fell into, is
+    /// [`Touched::Rules`], which recomputes.
+    fn touched_observed(&self, observed: Drained) -> Touched {
+        let instants = match observed {
+            Drained::Instants(instants) => instants,
+            Drained::Gap { .. } => return Touched::Rules,
         };
         let manifest = dialog_search_tree::Manifest::default();
         let mut subjects = BTreeSet::new();
@@ -4429,10 +4434,12 @@ mod tests {
         Ok(())
     }
 
-    /// A pin the store's ring no longer reaches falls back to a full
-    /// recompute and still lands on the right result.
+    /// Instants outside the cover never reach the subscription's
+    /// queue, however many there are; a queue overflowed by instants
+    /// inside the cover falls back to a full recompute and still lands
+    /// on the right result.
     #[dialog_common::test]
-    async fn it_recomputes_when_the_session_ring_is_exhausted() -> anyhow::Result<()> {
+    async fn it_recomputes_when_its_queue_overflows() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -4444,7 +4451,7 @@ mod tests {
         branch
             .overlay()
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
-        // Push the ring past its capacity with unrelated instants.
+        // Unrelated instants, more than any queue holds: none is queued.
         for index in 0..2048u32 {
             branch.overlay().assert(
                 the!("misc/tag")
@@ -4455,8 +4462,31 @@ mod tests {
         let delta = subscription
             .poll(&operator)
             .await?
-            .expect("the change is reported even though the ring lost it");
+            .expect("the change is reported");
         assert_eq!(names(&delta.asserted), vec![(bob, "Bob".to_string())]);
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "instants outside the cover cost the subscription nothing"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+
+        // Instants inside the cover, past the queue's bound: a gap.
+        let mut people = Vec::new();
+        for index in 0..=crate::repository::ephemeral::QUEUE_CAPACITY {
+            let person = Entity::new()?;
+            branch.overlay().assert(
+                the!("person/name")
+                    .of(person.clone())
+                    .is(format!("person-{index}")),
+            );
+            people.push(person);
+        }
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the changes are reported even though the queue lost them");
+        assert_eq!(delta.asserted.len(), people.len());
         assert_eq!(subscription.recomputes(), 2, "fell back to a recompute");
         assert!(subscription.poll(&operator).await?.is_none());
         Ok(())
