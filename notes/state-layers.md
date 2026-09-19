@@ -187,9 +187,9 @@ pairing lives only in the ephemeral top: gone after a restart, which
 is the case where the chain is the right choice.
 
 Movement that bypasses the stack, a pull on the bottom or a direct
-commit to one layer, is not seen until the next stack commit; the top
-hash is then stale, not wrong. Capturing that is the open question
-on pulls below.
+commit to one layer, is not seen until the stack advances (see
+*Movement enters on advance* below); the top hash is then stale, not
+wrong.
 
 ### Recovery
 
@@ -347,15 +347,25 @@ Consequences:
   publish later fails, the ephemeral layers are ahead until the re-run,
   which re-applies the same facts. An ephemeral layer has no write API
   outside the stack, so this is the only way it gets ahead.
-- **Movement enters on pull, leaves on push.** `stack.pull()`
-  re-resolves every branch layer's head from storage, pulls every layer
-  that tracks an upstream, bottom to top, drops everything staged,
-  takes the live heads as published, and stages and publishes the
-  wiring of every layer above a layer that moved. `stack.push()` pushes
-  every layer with an upstream, bottom to top, so a pushed layer's
-  wiring never names a head its upstream lacks; it pushes published
-  heads only. Reads and subscription polls never write: until the
-  pull, the stack is behind, not wrong, and `behind()` says so.
+- **Movement enters on advance, leaves on push.** `stack.advance()`
+  re-resolves every branch layer's head from storage, drops everything
+  staged, takes the live heads as published, and stages and publishes
+  the wiring of every layer above a layer that moved; it touches no
+  network. `stack.pull()` pulls every layer that tracks an upstream,
+  bottom to top, then advances. `stack.push()` pushes every layer with
+  an upstream, bottom to top, so a pushed layer's wiring never names a
+  head its upstream lacks; it pushes published heads only. Reads and
+  subscription polls never write: until the advance, the stack is
+  behind, not wrong, and `behind()` says so.
+- **Who calls them.** `pull` costs a round trip per upstream, so it
+  belongs to whatever already pulls branches on a schedule: the sync
+  loop, one call per stack per sweep, in place of the per-branch pulls
+  it makes today. `advance` is cheap and is called on a signal: a poll
+  that found `behind()`, a commit made through another handle of a
+  layer, a tab regaining focus. A stack whose layers move only through
+  it never needs either. If a memory cell ever notifies on change, the
+  notification calls `advance`; the semantics do not change, only the
+  latency.
 - **Partial failure.** A publish that fails at layer `i` leaves layers
   beneath it published and drops the chains from `i` up. A pull that
   fails part way leaves the published heads where they were: layers
@@ -521,15 +531,19 @@ names, read as one composite and written by placement.
   at its staged tip or published head, through a new `Source::Pinned`
   (a branch handle read at a fixed revision, keeping its caches,
   remote fallback and session store), and the top live. `Stack::pull`
-  pulls each upstream-tracking layer and captures the live heads;
-  `Stack::push` pushes them bottom to top; `StackSubscription::poll`
-  is a pure read, so an external commit lands as a delta on the first
-  poll after a pull. Standalone- Writes stage: `Stack::transaction().commit()` induces once over the
+  pulls each upstream-tracking layer and advances; `Stack::advance`
+  re-resolves the live heads from storage and captures them without
+  the network; `Stack::push` pushes them bottom to top;
+  `StackSubscription::poll` is a pure read, so an external commit
+  lands as a delta on the first poll after an advance.
+- Writes stage: `Stack::transaction().commit()` induces once over the
   composite at the heads the stack reads at (`induce` takes the view
-  separately from the dispatching layer, which stays the bottom
-  branch: only the bottom's committed rules fire in a stack
-  transaction, and an upper branch's own rules are a gap this
-  increment leaves open), resolves placements from the bottom, routes
+  separately from the layer whose watermark feeds the lag, which stays
+  the bottom branch; rules dispatch from every layer of the view, each
+  tree layer through its own head-cached trigger slice and each
+  ephemeral layer scanned fresh, and a rule's conclusion routes by
+  placement wherever the rule lives), resolves placements from the
+  bottom, routes
   each instruction to the layers its scope is linked under (an
   undeclared or default-scope attribute goes to the bottom; a name no
   link binds falls back to a tree binding on the bottom; a session
@@ -549,6 +563,19 @@ and the routing tests.
 
 Not yet built from the stack section: descriptor blobs in the
 archive, `Stack::open` by hash, `named` and the registry metadata.
+Known limits of what is built, each a deliberate cut rather than an
+oversight:
+
+- The watermark lag is the bottom's. A rule on an upper layer fires
+  on what the commit changes and on the bottom's catch-up, not on
+  what entered its own layer outside the stack; that layer's own
+  transactions catch it up.
+- A layer's session store (the old overlay) does not dispatch rules
+  in a stack transaction; tree layers and standalone ephemeral layers
+  do. Session stores are on their way out with the ephemeral layer.
+- `Ephemeral` has no public write API, so a rule reaches an ephemeral
+  layer only through a stack write whose placements put every
+  `dialog.rule/*` attribute there.
 
 ## Order of work
 
@@ -561,7 +588,7 @@ archive, `Stack::open` by hash, `named` and the registry metadata.
    commit.~~
    Done: increment 4. Still open from this item: descriptor blobs in
    the archive, `Stack::open` by hash, `named`, the registry
-   metadata.
+   metadata; see *Known limits* above for what stays bottom-only.
 4. Tonk migration: `scope:state` and `scope:tab` declared in the
    library, one stack per connection with its own tab layer,
    inspector over the registry, `navigate` as a tab-scope
@@ -570,21 +597,56 @@ archive, `Stack::open` by hash, `named` and the registry metadata.
    `transient:` as sugar.
 6. Channels: replicated ephemeral layers with a peer-offset log.
 
+## Decisions recorded
+
+Choices the code already makes, written down so they are decisions
+and not accidents:
+
+- **Atomicity across layers is composition of heads, not one
+  commit.** A stack transaction stages one chain per branch layer and
+  publishes them bottom to top, each with its own CAS; a failure
+  between publishes leaves the layers beneath it published and the
+  ephemeral shares applied, and the transaction is re-run after an
+  advance. The alternative is one revision carrying per-layer
+  segments, published with a single CAS and filtered by push and pull
+  per segment, which would make a local-durable write and a replicated
+  write all-or-nothing. It was not taken because a layer with its own
+  head is what stays readable, pushable, and recoverable on its own,
+  and links as facts are what make the composite queryable from the
+  top. Revisit if a flow needs a durable-local and a replicated write
+  to succeed or fail together; nothing else here depends on it.
+- **Reads are pinned; movement is captured, never followed.** A read
+  sees what the top's hash names. Movement outside the stack enters
+  on `advance` (local) or `pull` (upstreams), never on a poll, so a
+  poll is a read and a subscriber never writes wiring by looking.
+  The alternative, reads that follow every layer's live head with
+  wiring refreshed by the next commit, was not taken: it would make a
+  stack read differently from what its hash names, and it would make
+  a subscriber's poll the thing that decides when a durable layer
+  captures another.
+- **Rules fire from every layer of the view.** A rule lives where its
+  `dialog.rule/*` facts are placed; dispatch discovers it there, and
+  its conclusion routes by placement like any other write. The bottom
+  is special only for the watermark lag and for the placement
+  declarations.
+
 ## Open questions
 
 - **Per-tab stacks and rules that read across tabs.** A rule premised
   on "any tab's state" must read the join of every tab layer, which
   means induction on one stack's commit reads other stacks' layers.
   Either such rules are disallowed on tab scopes, or the registry is
-  what induction joins. Decide when a rule needs it.
-- **Who calls `stack.pull()`.** Movement lands only on pull, so
-  something has to pull on a schedule or on a signal. If a memory
-  cell ever notifies on change, that is the signal; the semantics do
-  not change, only the latency.
+  what induction joins. Decide when a rule needs it. Leaning: a rule
+  reads the layers of the stack it fires in and nothing else, and
+  "every tab" is a layer the process maintains and every tab stack
+  links, so the join is topology rather than a special case in
+  induction.
 - **Scope name convention.** `memory:shared`, `memory:local`,
   `memory:state`, `memory:tab` are used above as a convention only;
   the repository default fact and the placements are what bind them.
 - **Snapshots in stacks.** A snapshot can be bound as the bottom of a
   read-only stack. Whether a transaction over such a stack should
   advance the snapshot the way `Snapshot::transaction` does today is
-  unresolved.
+  unresolved. Leaning: no. A snapshot in a stack is a pin, and a
+  stack that wants to write opens a branch at that revision instead;
+  `Snapshot::transaction` stays the single-layer way to advance one.
