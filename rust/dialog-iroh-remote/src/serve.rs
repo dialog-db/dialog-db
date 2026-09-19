@@ -64,6 +64,7 @@ pub trait Store:
     + Provider<blob::Write>
     + Provider<blob::Import>
     + Provider<peer::Hello>
+    + Provider<peer::Spaces>
     + ConditionalSync
 {
 }
@@ -79,6 +80,7 @@ impl<T> Store for T where
         + Provider<blob::Write>
         + Provider<blob::Import>
         + Provider<peer::Hello>
+        + Provider<peer::Spaces>
         + ConditionalSync
 {
 }
@@ -206,6 +208,17 @@ where
                     .attenuate(peer::Hello);
                 Ok(Answer::Value(performed(
                     Provider::<peer::Hello>::execute(&self.store, capability).await,
+                )))
+            }
+            // Also a unit effect, and for the same reason: what a peer
+            // holds is not something the caller narrows.
+            ["use", "get", "peer", "space"] => {
+                let capability = Subject::from(subject.clone())
+                    .attenuate(Use)
+                    .attenuate(peer::Peer)
+                    .attenuate(peer::Spaces);
+                Ok(Answer::Value(performed(
+                    Provider::<peer::Spaces>::execute(&self.store, capability).await,
                 )))
             }
             ["use", "get", "archive", "block"] => {
