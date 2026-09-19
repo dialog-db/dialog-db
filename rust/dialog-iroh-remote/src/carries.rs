@@ -11,7 +11,7 @@
 //! the question that would otherwise be answered by silently shipping
 //! nothing and failing at the far end.
 
-use dialog_effects::{archive, memory};
+use dialog_effects::{archive, blob, memory};
 
 /// The blocks an effect's arguments name.
 ///
@@ -55,3 +55,11 @@ impl Carries for memory::Publish {
         vec![self.content.clone()]
     }
 }
+
+// A blob's bytes are the stream, not the container. Every other
+// payload-carrying effect commits to bytes small enough to ride beside
+// their own token; a blob is the case that motivated streaming in the
+// first place, so the container carries its digest and range and the
+// bytes travel on their own. Carrying nothing here is a statement about
+// where they go, not that there are none.
+carries_nothing!(blob::Read, blob::Write, blob::Import);
