@@ -1371,6 +1371,7 @@ version = "0.1.0"
 dependencies = [
  "dialog-capability",
  "dialog-common",
+ "dialog-credentials",
  "dialog-effects",
  "dialog-ucan",
  "dialog-ucan-core",
@@ -1378,6 +1379,7 @@ dependencies = [
  "serde",
  "serde_ipld_dagcbor",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
