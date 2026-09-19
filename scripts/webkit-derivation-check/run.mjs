@@ -1,0 +1,18 @@
+import http from 'node:http'; import fs from 'node:fs';
+const which = process.argv[2];
+const html = fs.readFileSync(process.argv[3]+'/page.html');
+const srv = http.createServer((q,r)=>{r.setHeader('content-type','text/html');r.end(html);});
+await new Promise(res=>srv.listen(0,'127.0.0.1',res));
+const port = srv.address().port;
+const pw = await import('/opt/node22/lib/node_modules/playwright/index.mjs');
+const b = await pw[which].launch();
+const p = await b.newPage();
+p.on('console', m => { if (m.type()==='error') console.log('  console:', m.text()); });
+await p.goto(`http://127.0.0.1:${port}/`);
+await p.waitForFunction(() => window.__R, null, {timeout: 30000});
+const ua = await p.evaluate(()=>navigator.userAgent);
+const R = await p.evaluate(()=>window.__R);
+console.log(`\n=== ${which} ===\n${ua}\n`);
+for (const t of R) console.log(`${t.ok?'  PASS':'  FAIL'}  ${t.name}${t.detail?'  ['+t.detail+']':''}`);
+console.log(`\n${R.filter(t=>t.ok).length}/${R.length} passed`);
+await b.close(); srv.close();

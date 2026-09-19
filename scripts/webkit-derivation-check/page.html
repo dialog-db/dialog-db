@@ -1,0 +1,74 @@
+<!doctype html><meta charset=utf-8><title>derivation check</title><body><pre id=o>running…</pre><script>
+const hex = b => [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
+const unhex = s => new Uint8Array(s.match(/../g).map(h=>parseInt(h,16)));
+const SCALAR = unhex('f20a2613bdbcce990d0a124d6fc4bf97319d0cccf3f67a2c3fe575b5b99864d2');
+const PUBLIC = unhex('55c0506c70233f01c32633ba683b9099c4d4adb209a046c3470b78788ec3c13f');
+const WANT_SHARED = '6ac6dfbb5d5b2f1845ab8c8a71887b86a7d832a9878ee83288bda1f2e1426759';
+const WANT_DERIVED = '14aa7e0e1f4562b6f4dc84dc260c8107ef76b308527eb47b8a2fdc6be77af0a8';
+const pkcs8 = s => { const o = new Uint8Array(48);
+  o.set(unhex('302e020100300506032b656e04220420'),0); o.set(s,16); return o; };
+const importPriv = (s, extractable) => crypto.subtle.importKey('pkcs8', pkcs8(s), {name:'X25519'}, extractable, ['deriveBits']);
+const importPub  = p => crypto.subtle.importKey('raw', p, {name:'X25519'}, true, []);
+// HKDF-SHA256, empty salt: matches Hkdf::new(None, ..) on the native side.
+async function hkdf(shared, info) {
+  const base = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
+  return crypto.subtle.deriveBits({name:'HKDF', hash:'SHA-256', salt:new Uint8Array(0), info}, base, 256);
+}
+// derivation_info(context, identity, label) = label-bytes ‖ 0x01 ‖ identity ‖ label
+const info = (ctx, id, label) => { const c = new TextEncoder().encode(ctx), l = new TextEncoder().encode(label);
+  const o = new Uint8Array(c.length+1+32+l.length); o.set(c,0); o[c.length]=0x01; o.set(id,c.length+1); o.set(l,c.length+33); return o; };
+const INFO = info('dialog/vault/v1', PUBLIC, 'operator');
+async function deriveFrom(priv) {
+  const pub = await importPub(PUBLIC);
+  const shared = await crypto.subtle.deriveBits({name:'X25519', public: pub}, priv, 256);
+  return { shared: hex(shared), derived: hex(await hkdf(shared, INFO)) };
+}
+const idb = (db,mode,fn) => new Promise((res,rej)=>{ const r=indexedDB.open(db,1);
+  r.onupgradeneeded=()=>r.result.createObjectStore('s'); r.onerror=()=>rej(r.error);
+  r.onsuccess=()=>{ const t=r.result.transaction('s',mode); const out=fn(t.objectStore('s'));
+    t.oncomplete=()=>res(out.result!==undefined?out.result:out); t.onerror=()=>rej(t.error); }; });
+const R = [];
+const check = (name, ok, detail='') => R.push({name, ok, detail});
+(async () => { try {
+  if (!crypto.subtle) throw new Error('crypto.subtle unavailable (insecure context?)');
+  const priv = await importPriv(SCALAR, false);
+  const a = await deriveFrom(priv);
+  check('X25519 self-agreement matches Rust', a.shared === WANT_SHARED, a.shared);
+  check('HKDF derivation matches the pinned vector', a.derived === WANT_DERIVED, a.derived);
+  const runs = []; for (let i=0;i<5;i++) runs.push((await deriveFrom(priv)).derived);
+  check('derivation stable across 5 runs', runs.every(v=>v===runs[0]), runs[0]);
+  // Is an X25519 CryptoKey structured-cloneable here? (the Wrapped-archive trigger)
+  let cloneable=false, cloneErr='';
+  try { cloneable = structuredClone(await importPub(PUBLIC)) instanceof CryptoKey; }
+  catch(e){ cloneErr = e.name+': '+e.message; }
+  // Not a pass/fail: WebKit cannot deserialize an X25519 CryptoKey, which is
+  // exactly why the profile archives its agreement key AES-KW wrapped. Record
+  // which shape this engine needs, then assert the derivation survives it.
+  R.push({name:'[engine] X25519 CryptoKey structured-cloneable', ok:true,
+          detail: cloneable ? 'yes -> Keys archive' : 'no -> Wrapped archive required ('+cloneErr+')'});
+  // The archive path the profile actually uses: AES-KW wrap -> IndexedDB -> unwrap -> derive.
+  const wrapping = await crypto.subtle.generateKey({name:'AES-KW',length:256}, false, ['wrapKey','unwrapKey']);
+  const extractable = await importPriv(SCALAR, true);
+  const wrapped = await crypto.subtle.wrapKey('pkcs8', extractable, wrapping, 'AES-KW');
+  await idb('probe','readwrite', s => s.put({wrapping, wrapped, pub: PUBLIC}, 'k'));
+  const back = await idb('probe','readonly', s => s.get('k'));
+  check('wrapped archive survives IndexedDB', !!back && !!back.wrapping && !!back.wrapped,
+        back ? 'read back' : 'got null');
+  const unwrapped = await crypto.subtle.unwrapKey('pkcs8', back.wrapped, back.wrapping,
+        'AES-KW', {name:'X25519'}, false, ['deriveBits']);
+  const b = await deriveFrom(unwrapped);
+  check('derivation after archive round-trip matches', b.derived === WANT_DERIVED, b.derived);
+  check('unwrapped key is non-extractable', unwrapped.extractable === false, String(unwrapped.extractable));
+  // Ed25519 signature determinism: the property the old scheme assumed.
+  try {
+    const kp = await crypto.subtle.generateKey({name:'Ed25519'}, false, ['sign','verify']);
+    const msg = new TextEncoder().encode('dialog-db operator derivation');
+    const s1 = hex(await crypto.subtle.sign({name:'Ed25519'}, kp.privateKey, msg));
+    const s2 = hex(await crypto.subtle.sign({name:'Ed25519'}, kp.privateKey, msg));
+    check('[informational] Ed25519 signatures deterministic', s1===s2, s1===s2?'deterministic':'RANDOMIZED');
+  } catch(e){ check('[informational] Ed25519 available', false, e.name+': '+e.message); }
+} catch (e) { check('harness', false, e.name+': '+e.message); }
+  document.title = 'done';
+  document.getElementById('o').textContent = JSON.stringify(R,null,1);
+  window.__R = R; })();
+</script>

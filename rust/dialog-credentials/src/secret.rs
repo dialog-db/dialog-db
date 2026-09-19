@@ -475,6 +475,115 @@ mod tests {
 // Cross-session tests: the signer is archived, dropped, and restored before
 // revealing. On the browser this is where the agreement key has to survive,
 // since a non-extractable key cannot re-derive it from a seed.
+/// Derivation under the archive shape WebKit forces.
+///
+/// WebKit cannot deserialize an X25519 `CryptoKey` -- `structuredClone`
+/// throws `TypeError: Unable to deserialize data`, verified against a real
+/// WebKit build -- so a profile there archives its agreement key AES-KW
+/// wrapped instead (see [`AgreementArchive::Wrapped`](crate::key::AgreementArchive)).
+/// Derivation reads that key, so it has to come back through the wrap and
+/// derive the same value it did before.
+///
+/// CI runs wasm tests in Chromium, which clones X25519 keys happily and so
+/// never takes this path on its own. `assume_x25519_keys_are_cloneable`
+/// forces it, which is what makes the WebKit-only behaviour testable here.
+#[cfg(all(test, target_arch = "wasm32", target_os = "unknown"))]
+mod web_tests {
+    use super::*;
+    use crate::ed25519::web::assume_x25519_keys_are_cloneable;
+    use crate::key::KeyExport;
+    use js_sys::Reflect;
+    use wasm_bindgen::JsValue;
+
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
+
+    const VAULT: Context = Context::new("dialog/vault/v1");
+
+    /// The vector from `tests::derivation_matches_a_known_vector`, which the
+    /// wrapped path must reach too.
+    const EXPECTED: [u8; 32] = [
+        0x14, 0xaa, 0x7e, 0x0e, 0x1f, 0x45, 0x62, 0xb6, 0xf4, 0xdc, 0x84, 0xdc, 0x26, 0x0c, 0x81,
+        0x07, 0xef, 0x76, 0xb3, 0x08, 0x52, 0x7e, 0xb4, 0x7b, 0x8a, 0x2f, 0xdc, 0x6b, 0xe7, 0x7a,
+        0xf0, 0xa8,
+    ];
+
+    /// Makes this thread behave like WebKit, and probes again once dropped.
+    struct Uncloneable;
+
+    impl Uncloneable {
+        fn assume() -> Self {
+            assume_x25519_keys_are_cloneable(Some(false));
+            Self
+        }
+    }
+
+    impl Drop for Uncloneable {
+        fn drop(&mut self) {
+            assume_x25519_keys_are_cloneable(None);
+        }
+    }
+
+    #[dialog_common::test]
+    async fn derivation_survives_the_wrapped_archive() {
+        let _webkit = Uncloneable::assume();
+
+        let signer = Ed25519Signer::import(&[42u8; 32]).await.unwrap();
+        let before = signer.secret(VAULT).derive(b"operator").await.unwrap();
+        assert_eq!(
+            before, EXPECTED,
+            "the wrapped archive must not change the derived value"
+        );
+
+        // Through the shape storage sees, as IndexedDB would hand it back.
+        let export = signer.export().await.unwrap();
+        assert!(
+            matches!(
+                &export,
+                KeyExport::NonExtractable {
+                    agreement: Some(crate::key::AgreementArchive::Wrapped(_)),
+                    ..
+                }
+            ),
+            "this test is only meaningful if the wrapped path was actually taken"
+        );
+
+        let archived: JsValue = export.into();
+        let restored = Ed25519Signer::import(KeyExport::try_from(archived).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            restored.secret(VAULT).derive(b"operator").await.unwrap(),
+            EXPECTED,
+            "a profile restored from a wrapped archive must derive the same operator"
+        );
+    }
+
+    /// A profile archived before agreement keys existed has no seed to
+    /// re-derive one from, so derivation fails cleanly instead of deriving
+    /// something wrong. The signature-based path this replaced would have
+    /// derived an operator here -- a different one on every call, in Safari.
+    #[dialog_common::test]
+    async fn derivation_without_an_agreement_key_fails_cleanly() {
+        let signer = Ed25519Signer::import(&[42u8; 32]).await.unwrap();
+        let archived: JsValue = signer.export().await.unwrap().into();
+
+        // An export written before the agreement component existed.
+        Reflect::delete_property(&archived.clone().into(), &"agreementKey".into()).unwrap();
+        let restored = Ed25519Signer::import(KeyExport::try_from(archived).unwrap())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                restored.secret(VAULT).derive(b"operator").await,
+                Err(SecretError::AgreementKeyUnavailable)
+            ),
+            "a profile with no agreement key must fail, not derive"
+        );
+    }
+}
+
 #[cfg(test)]
 mod session_tests {
     use super::*;
