@@ -63,19 +63,42 @@ use crate::{CommitError, Ephemeral, RemoteSite, Revision, RuleCache};
 /// recursive trigger depth).
 pub(crate) const MAX_ROUNDS: u32 = 16;
 
+/// Where each induction round's transients are witnessed: minted as an
+/// instant for the observers of some ephemeral store, so a fact that
+/// lives for one round is seen by whoever registered to see it even
+/// though no fold keeps it. A round is one instant.
+pub(crate) trait Witness {
+    /// The transients visible to rule bodies in the round starting now.
+    fn round(&mut self, transients: &Changes);
+}
+
+/// Nothing witnesses: the rounds' transients expire unseen.
+impl Witness for () {
+    fn round(&mut self, _: &Changes) {}
+}
+
+/// One ephemeral store witnesses every round.
+impl Witness for &Ephemeral {
+    fn round(&mut self, transients: &Changes) {
+        self.witness(transients.clone());
+    }
+}
+
 /// Run commit-time induction over `changes` + `transients`, folding
 /// durable novelty into `changes`. Transients never enter `changes`;
-/// they are visible to rule bodies for exactly one round.
+/// they are visible to rule bodies for exactly one round, and each
+/// round's are handed to `witness` as they become visible.
 ///
 /// `source` is the layer whose watermark the lag is measured against;
 /// `view` is every layer a rule body reads and every layer whose rules
 /// dispatch, which is `source` alone for a transaction on one branch
 /// and the whole composite for a [`Stack`](crate::Stack).
-pub(crate) async fn induce<Env>(
+pub(crate) async fn induce<Env, W: Witness>(
     source: SourceRef<'_>,
     view: &Composite,
     changes: &mut Changes,
     transients: Changes,
+    witness: &mut W,
     env: &Env,
 ) -> Result<(), CommitError>
 where
@@ -125,6 +148,9 @@ where
         round += 1;
         if round > MAX_ROUNDS {
             return Err(CommitError::InductionDivergence(MAX_ROUNDS));
+        }
+        if !transient_overlay.is_empty() {
+            witness.round(&transient_overlay);
         }
 
         // Probe keys straight off the instructions — no schema lookup.
@@ -3083,6 +3109,161 @@ mod tests {
         assert!(
             matches!(result, Err(CommitError::Induction(ref message)) if message.contains("Milk")),
             "an uppercase key is not a dictionary key: {result:?}"
+        );
+        Ok(())
+    }
+
+    /// The facts an observer saw asserted, as `(attribute, entity)`,
+    /// in order.
+    fn seen(observer: &crate::Observer) -> Vec<(String, String)> {
+        match observer.drain() {
+            crate::Drained::Instants(instants) => instants
+                .into_iter()
+                .flat_map(|instant| instant.asserted)
+                .map(|fact| (fact.the.to_string(), fact.of.to_string()))
+                .collect(),
+            crate::Drained::Gap { .. } => panic!("the observer gapped"),
+        }
+    }
+
+    /// A dispatched command is witnessed on the branch's session store
+    /// in the commit that consumes it: an observer of the store sees
+    /// it, though the branch never holds it.
+    #[dialog_common::test]
+    async fn it_witnesses_a_dispatched_command_to_the_session_store() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(increment_rule())
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let observer = branch.overlay().observe_everything();
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command.clone())
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            seen(&observer),
+            vec![("cmd.increment/counter".to_string(), "cmd:1".to_string())],
+            "the command is witnessed exactly once"
+        );
+        assert_eq!(
+            values(&branch, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)]
+        );
+        assert!(
+            values(&branch, &operator, "cmd.increment/counter", &command)
+                .await?
+                .is_empty(),
+            "and never held"
+        );
+        assert!(branch.overlay().is_empty(), "nor held by the session store");
+        Ok(())
+    }
+
+    /// Rounds are instants: a transient a rule concluded and the next
+    /// round consumed — folded away, never in any layer — is witnessed
+    /// in its own round, after the command that started the cascade.
+    #[dialog_common::test]
+    async fn it_witnesses_a_folded_intermediate_in_its_own_round() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let intermediate: ConceptDescriptor = serde_json::from_value(json!({
+            "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } }
+        }))?;
+        let stage: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } } },
+            "when": [{
+                "assert": { "with": { "target": { "the": "cmd.start/target", "as": "Entity" } } },
+                "where": { "this": { "?": { "name": "this" } }, "target": { "?": { "name": "target" } } }
+            }]
+        }))?;
+        let finish: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": { "target": { "the": "result/target", "as": "Entity" } } },
+            "when": [{
+                "assert": { "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } } },
+                "where": { "this": { "?": { "name": "this" } }, "target": { "?": { "name": "target" } } }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(Transient(intermediate.this()))
+            .assert(stage)
+            .assert(finish)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let observer = branch.overlay().observe_everything();
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let crate::Drained::Instants(instants) = observer.drain() else {
+            panic!("gapped")
+        };
+        assert_eq!(instants.len(), 2, "one instant per round with transients");
+        assert_eq!(
+            instants[0]
+                .asserted
+                .iter()
+                .map(|f| f.the.to_string())
+                .collect::<Vec<_>>(),
+            vec!["cmd.start/target".to_string()]
+        );
+        assert_eq!(
+            instants[1]
+                .asserted
+                .iter()
+                .map(|f| f.the.to_string())
+                .collect::<Vec<_>>(),
+            vec!["cmd.stage/target".to_string()],
+            "the folded intermediate is witnessed in the round it lived"
+        );
+        assert_eq!(
+            instants[1].retracted, instants[1].asserted,
+            "and gone within its instant"
+        );
+        assert_eq!(
+            values(&branch, &operator, "result/target", &command).await?,
+            vec![Value::Entity(target)]
         );
         Ok(())
     }

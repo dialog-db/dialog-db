@@ -552,7 +552,11 @@ where
         + ConditionalSync
         + 'static,
 {
-    induce(source, view, &mut changes, transients, env).await?;
+    // Each round's transients are witnessed on the layer's session
+    // store: a command that fired a rule is seen by the store's
+    // observers even though the commit folds it away.
+    let mut witness = source.overlay();
+    induce(source, view, &mut changes, transients, &mut witness, env).await?;
     let placements = Placements::resolve(source, &changes, env).await?;
     let Partitioned {
         tree: changes,

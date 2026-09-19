@@ -106,7 +106,7 @@ use thiserror::Error;
 
 use crate::placement::{Placements, Target};
 use crate::repository::branch::session::{Composite, QueryEnv, session_metadata};
-use crate::repository::branch::transaction::induce::induce;
+use crate::repository::branch::transaction::induce::{Witness, induce};
 use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
 use crate::{
@@ -182,6 +182,18 @@ impl AsLayer for Snapshot {
 impl AsLayer for Ephemeral {
     fn as_layer(&self) -> Layer {
         Layer::Ephemeral(self.clone())
+    }
+}
+
+impl Layer {
+    /// The layer's ephemeral store: a tree layer's session store, or
+    /// the ephemeral layer itself. Where its instants are witnessed.
+    pub(crate) fn store(&self) -> &Ephemeral {
+        match self {
+            Layer::Branch(branch) => branch.overlay(),
+            Layer::Snapshot(snapshot) => snapshot.overlay(),
+            Layer::Ephemeral(ephemeral) => ephemeral,
+        }
     }
 }
 
@@ -1123,6 +1135,44 @@ impl Stack {
     }
 }
 
+/// Witnesses a stack transaction's induction rounds: each round's
+/// transients are minted as an instant on the store of every layer
+/// their scope is linked under, or on the bottom's session store when
+/// no link binds the scope, mirroring how the settled batch routes.
+struct StackWitness<'a> {
+    stack: &'a Stack,
+    placements: &'a Placements,
+    default: Option<Entity>,
+    bottom: &'a Ephemeral,
+}
+
+impl Witness for StackWitness<'_> {
+    fn round(&mut self, transients: &Changes) {
+        let mut shares: BTreeMap<Option<usize>, Changes> = BTreeMap::new();
+        for instruction in transients.clone().into_instructions() {
+            let (op, artifact) = split(instruction);
+            let targets: Vec<Option<usize>> = match self.placements.scope_of(&artifact.the) {
+                None => vec![None],
+                Some(scope) if Some(scope) == self.default.as_ref() => vec![None],
+                Some(scope) => match self.stack.bound.get(scope) {
+                    Some(indices) => indices.iter().map(|index| Some(*index)).collect(),
+                    None => vec![None],
+                },
+            };
+            for target in targets {
+                apply(shares.entry(target).or_default(), op, artifact.clone());
+            }
+        }
+        for (target, share) in shares {
+            let store = match target {
+                None => self.bottom,
+                Some(index) => self.stack.layers[index].store(),
+            };
+            store.witness(share);
+        }
+    }
+}
+
 /// A transaction on a [`Stack`]: accumulates facts, then routes each
 /// to the layers its attribute's scope is linked under and stages the
 /// layers bottom to top.
@@ -1218,8 +1268,29 @@ impl<'a> StackCommit<'a> {
             None => SourceRef::from(primary),
         };
 
+        // Each round's transients are witnessed on the store of every
+        // layer their scope is linked under, else the bottom's session
+        // store, so an observer there sees the command that fired a
+        // rule even though the commit folds it away. Resolved from the
+        // declarations as staged before induction; a declaration
+        // induction itself adds routes the settled batch below.
+        let staged = Placements::resolve(source, &self.changes, env).await?;
+        let mut witness = StackWitness {
+            stack,
+            default: staged.default_scope().cloned(),
+            placements: &staged,
+            bottom: primary.overlay(),
+        };
         let mut changes = self.changes;
-        induce(source, &composite, &mut changes, self.transients, env).await?;
+        induce(
+            source,
+            &composite,
+            &mut changes,
+            self.transients,
+            &mut witness,
+            env,
+        )
+        .await?;
 
         // Route by placement: the primary holds the declarations, the
         // stack's links bind the names. A name no link binds falls
@@ -2778,6 +2849,95 @@ mod tests {
             committed(&shared, &operator, "counter/count", &counter).await?,
             vec![Value::UnsignedInt(2)],
             "the ephemeral layer's rule must fire and its conclusion land on the bottom"
+        );
+        Ok(())
+    }
+
+    /// A transient whose attribute is placed on an ephemeral scope is
+    /// witnessed on that layer, not on the bottom's session store; the
+    /// rule it fires still lands its conclusion by placement.
+    #[dialog_common::test]
+    async fn it_witnesses_a_placed_transient_on_its_layer() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::new();
+
+        let counter: Entity = "ctr:1".parse()?;
+        shared
+            .transaction()
+            .assert(Placement::new(
+                "cmd.increment/counter".parse()?,
+                name("state"),
+            ))
+            .assert(increment_rule())
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let stack = Stack::builder()
+            .layer(shared.clone())
+            .layer(state.clone())
+            .link(&shared, name("shared"))
+            .layer(Ephemeral::new())
+            .link(&state, name("state"))
+            .build()
+            .perform(&operator)
+            .await?;
+
+        let commands = || {
+            let demand = crate::Demand::new();
+            demand.record(&ArtifactSelector::new().the("cmd.increment/counter".parse().unwrap()));
+            demand
+        };
+        let on_state = state.observe(commands());
+        let on_bottom = shared.overlay().observe(commands());
+        let command: Entity = "cmd:1".parse()?;
+        stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let crate::Drained::Instants(witnessed) = on_state.drain() else {
+            panic!("gapped")
+        };
+        assert_eq!(
+            witnessed
+                .iter()
+                .flat_map(|instant| instant.asserted.iter())
+                .map(|fact| fact.the.to_string())
+                .collect::<Vec<_>>(),
+            vec!["cmd.increment/counter".to_string()],
+            "the placed command is witnessed on its layer"
+        );
+        assert!(
+            matches!(on_bottom.drain(), crate::Drained::Instants(instants) if instants.is_empty()),
+            "and not on the bottom's session store"
+        );
+        assert!(
+            state
+                .scan(&ArtifactSelector::new().the("cmd.increment/counter".parse()?))
+                .is_empty(),
+            "witnessed, not held"
+        );
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)]
         );
         Ok(())
     }
