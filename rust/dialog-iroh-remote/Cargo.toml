@@ -24,6 +24,13 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
+
+# The async tests run on tokio natively; in wasm `dialog_common::test`
+# expands to wasm-bindgen-test instead. Target-gated because tokio's
+# runtime pulls dependencies that do not build for wasm32.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
