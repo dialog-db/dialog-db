@@ -1457,12 +1457,18 @@ dependencies = [
  "async-trait",
  "dialog-capability",
  "dialog-common",
+ "dialog-did-web",
  "dialog-effects",
+ "dialog-iroh-remote",
+ "dialog-operator",
  "dialog-remote-fs",
  "dialog-remote-s3",
  "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
+ "dialog-storage",
+ "iroh-base",
  "serde",
+ "tokio",
 ]
 
 [[package]]

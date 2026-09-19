@@ -12,7 +12,9 @@ use super::*;
 use crate::channel::{Channel, ChannelError};
 use crate::helpers::Volatile;
 use crate::serve::Responder;
-use dialog_capability::{Ability, Capability, Effect, Fork, Provider, SiteFork, Subject};
+use dialog_capability::{
+    Ability, Capability, Effect, Fork, ForkInvocation, Provider, SiteFork, Subject,
+};
 use dialog_common::Buffer;
 use dialog_did_web::{CachingResolver, WebResolver};
 use dialog_effects::Use;
@@ -79,7 +81,10 @@ where
         .authorize(&operator)
         .await
         .expect("the operator holds a powerline delegation");
-    (Provider::execute(&site, invocation).await, responder)
+    (
+        Provider::<dialog_capability::ForkInvocation<Iroh, Fx>>::execute(&site, invocation).await,
+        responder,
+    )
 }
 
 fn put_of(subject: &dialog_capability::Did, bytes: &[u8]) -> Capability<archive::Put> {
@@ -170,7 +175,8 @@ async fn a_stored_block_reads_back() {
     for capability in [put_of(&subject, &bytes)] {
         let fork: IrohFork<archive::Put> = Fork::<Iroh, _>::new(capability, peer()).into();
         let invocation = fork.authorize(&operator).await.expect("authorized");
-        let outcome: Result<(), ArchiveError> = Provider::execute(&site, invocation).await;
+        let outcome: Result<(), ArchiveError> =
+            Provider::<ForkInvocation<Iroh, archive::Put>>::execute(&site, invocation).await;
         outcome.expect("the put succeeds");
     }
 
@@ -181,7 +187,8 @@ async fn a_stored_block_reads_back() {
         .invoke(archive::Get::new(digest));
     let fork: IrohFork<archive::Get> = Fork::<Iroh, _>::new(read, peer()).into();
     let invocation = fork.authorize(&operator).await.expect("authorized");
-    let found: Result<Option<Vec<u8>>, ArchiveError> = Provider::execute(&site, invocation).await;
+    let found: Result<Option<Vec<u8>>, ArchiveError> =
+        Provider::<ForkInvocation<Iroh, archive::Get>>::execute(&site, invocation).await;
 
     assert_eq!(found.expect("the get succeeds"), Some(bytes));
 }
