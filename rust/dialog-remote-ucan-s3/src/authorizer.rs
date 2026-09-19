@@ -58,7 +58,7 @@ use std::collections::BTreeMap;
 
 use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_did_web::{CachingResolver, PerformingResolver, Resolve, WebResolver};
-use dialog_effects::{Use, archive, blob, memory};
+use dialog_effects::{archive, blob, memory};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
 use dialog_ucan_core::invocation::CheckFailed;
 use dialog_ucan_core::promise::Promised;
@@ -187,7 +187,18 @@ impl FromUcanArgs for memory::Resolve {
         subject: &Did,
         args: &Args,
     ) -> Result<Capability<Self::Attenuation>, S3Error> {
-        memory_claim_from_args::<dialog_effects::Get, _>(subject, args)
+        // `Resolve` is a unit struct: it carries no arguments, so it is
+        // constructed rather than deserialized. Reading it out of the
+        // args map fails, since a map does not deserialize into a unit.
+        let space: memory::Space<dialog_effects::Get> = deserialize_from_args(args)?;
+        let cell: memory::Cell<dialog_effects::Get> = deserialize_from_args(args)?;
+        Ok(dialog_effects::AttenuateVerb::<dialog_effects::Get>::verb(
+            dialog_capability::Subject::from(subject.clone()),
+        )
+        .attenuate(memory::Memory::<dialog_effects::Get>::new())
+        .attenuate(space)
+        .attenuate(cell)
+        .attenuate(memory::Resolve))
     }
 }
 impl FromUcanArgs for memory::Publish {

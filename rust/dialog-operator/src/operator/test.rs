@@ -79,7 +79,12 @@ mod tests {
 
             let result = profile
                 .access()
-                .prove(Subject::from(operator.did()).archive().catalog("index"))
+                .prove(
+                    Subject::from(operator.did())
+                        .archive()
+                        .catalog("index")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await;
@@ -132,7 +137,12 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(Subject::any().archive().catalog("index"))
+                .allow(
+                    Subject::any()
+                        .archive()
+                        .catalog("index")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -140,7 +150,12 @@ mod tests {
 
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("index"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("index")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await;
@@ -163,7 +178,12 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(Subject::any().archive().catalog("index"))
+                .allow(
+                    Subject::any()
+                        .archive()
+                        .catalog("index")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -171,7 +191,12 @@ mod tests {
 
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("secret"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("secret")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await;
@@ -229,7 +254,12 @@ mod tests {
 
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("index"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("index")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await;
@@ -248,7 +278,12 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(Subject::any().archive().catalog("index"))
+                .allow(
+                    Subject::any()
+                        .archive()
+                        .catalog("index")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -256,7 +291,12 @@ mod tests {
 
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("index"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("index")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await;
@@ -308,7 +348,12 @@ mod tests {
             // Delegate with time bounds: valid from 1000 to 5000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).archive().catalog("index"))
+                .claim(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("index")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .not_before(ts(1000))
                 .expires(ts(5000))
                 .delegate(operator.did())
@@ -326,7 +371,12 @@ mod tests {
             // Claim with unbounded duration (I don't care)
             let proof = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("index"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("index")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -345,7 +395,12 @@ mod tests {
             // Delegate with expiration at 1000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .expires(ts(1000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -362,7 +417,12 @@ mod tests {
             // Request authorization valid until 5000 - should fail
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .expires(ts(5000))
                 .perform(&operator)
@@ -381,7 +441,12 @@ mod tests {
             // Delegate with not_before at 5000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .not_before(ts(5000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -398,7 +463,12 @@ mod tests {
             // Request authorization valid from 1000 - should fail
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .not_before(ts(1000))
                 .perform(&operator)
@@ -417,7 +487,12 @@ mod tests {
             // Delegate valid from 100 to 10000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .not_before(ts(100))
                 .expires(ts(10000))
                 .delegate(operator.did())
@@ -435,7 +510,12 @@ mod tests {
             // Request authorization valid from 500 to 5000 - cert covers this
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .not_before(ts(500))
                 .expires(ts(5000))
@@ -456,7 +536,12 @@ mod tests {
             // Delegate with short window
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .not_before(ts(100))
                 .expires(ts(200))
                 .delegate(operator.did())
@@ -474,7 +559,12 @@ mod tests {
             // Request with no time constraints ("I don't care")
             let proof = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -492,7 +582,12 @@ mod tests {
             // Delegate expiring at 1000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .expires(ts(1000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -508,7 +603,12 @@ mod tests {
 
             let proof = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -532,7 +632,12 @@ mod tests {
             // Delegate starting at 1000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .not_before(ts(1000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -548,7 +653,12 @@ mod tests {
 
             let proof = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -572,7 +682,12 @@ mod tests {
             // Delegate valid from 100 to 10000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .not_before(ts(100))
                 .expires(ts(10000))
                 .delegate(operator.did())
@@ -589,7 +704,12 @@ mod tests {
 
             let proof = profile
                 .access()
-                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .archive()
+                        .catalog("data")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -1315,7 +1435,12 @@ mod tests {
             // Only delegate archive access, not memory
             let operator = profile
                 .derive(b"test")
-                .allow(Subject::any().archive().catalog("allowed"))
+                .allow(
+                    Subject::any()
+                        .archive()
+                        .catalog("allowed")
+                        .claim::<dialog_effects::Get>(),
+                )
                 .network(Network::default())
                 .build(storage)
                 .await?;

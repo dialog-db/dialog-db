@@ -59,25 +59,29 @@ impl MemoryStore {
     }
 }
 
-fn block_key<Fx>(capability: &Capability<Fx>, digest: Blake3Hash) -> (String, String, Blake3Hash)
+fn block_key<V, Fx>(capability: &Capability<Fx>, digest: Blake3Hash) -> (String, String, Blake3Hash)
 where
-    Fx: Policy<Of = Catalog>,
+    V: dialog_effects::Verb,
+    V::Of: dialog_capability::Constraint,
+    Fx: Policy<Of = dialog_effects::archive::Block<V>>,
 {
     (
         capability.subject().to_string(),
-        Catalog::of(capability).catalog.clone(),
+        Catalog::<V>::of(capability).catalog.clone(),
         digest,
     )
 }
 
-fn cell_key<Fx>(capability: &Capability<Fx>) -> (String, String, String)
+fn cell_key<V, Fx>(capability: &Capability<Fx>) -> (String, String, String)
 where
-    Fx: Policy<Of = Cell>,
+    V: dialog_effects::Verb,
+    V::Of: dialog_capability::Constraint,
+    Fx: Policy<Of = Cell<V>>,
 {
     (
         capability.subject().to_string(),
-        Space::of(capability).space.clone(),
-        Cell::of(capability).cell.clone(),
+        Space::<V>::of(capability).space.clone(),
+        Cell::<V>::of(capability).cell.clone(),
     )
 }
 

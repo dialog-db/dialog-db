@@ -1,5 +1,5 @@
 use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve};
-use dialog_capability::{Capability, Did, Policy};
+use dialog_capability::{Did, Policy};
 use dialog_common::ConditionalSync;
 use dialog_common::time::{self, Duration, SystemTime};
 use dialog_effects::memory::prelude::CellExt;

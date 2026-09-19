@@ -17,9 +17,8 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
-use dialog_capability::{Capability, Did, Subject};
+use dialog_capability::{Did, Subject};
 use dialog_common::Blake3Hash;
-use dialog_effects::archive::Archive;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_query::query::Application;

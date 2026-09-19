@@ -1,5 +1,4 @@
-use dialog_capability::{Capability, Did, Policy, Subject};
-use dialog_effects::memory::Space;
+use dialog_capability::{Did, Policy, Subject};
 use dialog_effects::memory::prelude::SpaceExt;
 use dialog_effects::memory::prelude::SpaceScope;
 

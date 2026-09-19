@@ -250,7 +250,8 @@ mod tests {
     use crate::request::S3Request;
     use dialog_capability::{Subject, did};
     use dialog_common::Checksum;
-    use dialog_effects::Use;
+    use dialog_effects::prelude::*;
+
     use dialog_effects::archive;
 
     fn test_subject() -> dialog_capability::Did {
@@ -277,10 +278,9 @@ mod tests {
     async fn it_signs_with_public_access() {
         let address = test_address();
         let get = Subject::from(test_subject())
-            .attenuate(Use)
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog::new("blobs"))
-            .invoke(archive::Get::new([0x42; 32]));
+            .archive()
+            .catalog("blobs")
+            .get([0x42; 32]);
         let auth = S3Authorization::public(S3Request::from(&get));
         let descriptor = auth.redeem(&address).await.unwrap();
 
@@ -293,10 +293,9 @@ mod tests {
     async fn it_signs_with_private_credentials() {
         let address = test_address();
         let get = Subject::from(test_subject())
-            .attenuate(Use)
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog::new("blobs"))
-            .invoke(archive::Get::new([0x42; 32]));
+            .archive()
+            .catalog("blobs")
+            .get([0x42; 32]);
         let auth = S3Request::from(&get).attest(S3Credential::new("AKIATEST", "secret123"));
         let descriptor = auth.redeem(&address).await.unwrap();
 
@@ -309,14 +308,16 @@ mod tests {
     async fn it_includes_checksum_header() {
         let address = test_address();
         let checksum = Checksum::Sha256([0u8; 32]);
-        let put = Subject::from(test_subject())
-            .attenuate(Use)
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog::new("index"))
-            .attenuate(archive::PutAttenuation {
-                digest: [0x99; 32].into(),
-                checksum,
-            });
+        let put = dialog_effects::AttenuateVerb::<dialog_effects::Put>::verb(Subject::from(
+            test_subject(),
+        ))
+        .attenuate(archive::Archive::<dialog_effects::Put>::new())
+        .attenuate(archive::Catalog::<dialog_effects::Put>::new("index"))
+        .attenuate(archive::Block::<dialog_effects::Put>::new())
+        .attenuate(archive::PutAttenuation {
+            digest: [0x99; 32].into(),
+            checksum,
+        });
         let auth = S3Authorization::public(S3Request::from(&put));
         let descriptor = auth.redeem(&address).await.unwrap();
 
@@ -332,10 +333,9 @@ mod tests {
     async fn it_uses_path_style_for_localhost() {
         let address = localhost_address();
         let get = Subject::from(test_subject())
-            .attenuate(Use)
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog::new("blobs"))
-            .invoke(archive::Get::new([0x42; 32]));
+            .archive()
+            .catalog("blobs")
+            .get([0x42; 32]);
         let auth = S3Authorization::public(S3Request::from(&get));
         let descriptor = auth.redeem(&address).await.unwrap();
 

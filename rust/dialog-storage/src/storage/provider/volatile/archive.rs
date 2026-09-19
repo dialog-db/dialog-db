@@ -96,8 +96,7 @@ mod tests {
     use super::*;
     use crate::helpers::unique_subject;
     use dialog_common::{Blake3Hash, Buffer};
-    use dialog_effects::Use;
-    use dialog_effects::archive::{Archive, Catalog};
+
     use dialog_effects::prelude::*;
 
     #[dialog_common::test]

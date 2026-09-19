@@ -227,8 +227,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_supports_concurrent_access() -> anyhow::Result<()> {
         use dialog_capability::Subject;
-        use dialog_effects::Use;
-        use dialog_effects::archive::{Archive, Catalog, Get, Put};
+
         use std::sync::Arc;
 
         let provider = Arc::new(Volatile::new());

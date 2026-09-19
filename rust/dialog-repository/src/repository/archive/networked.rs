@@ -3,12 +3,10 @@ use std::sync::Arc;
 use crate::RemoteSite;
 use async_trait::async_trait;
 use dialog_capability::Fork;
-use dialog_capability::{Capability, Provider};
+use dialog_capability::Provider;
 use dialog_common::{Buffer, ConditionalSync, Priority};
-use dialog_effects::archive::prelude::{
-    ArchiveExt, ArchiveScope, ArchiveSubjectExt, CatalogExt, CatalogScope,
-};
-use dialog_effects::archive::{ArchiveError, Catalog, Get, Put};
+use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt, CatalogScope};
+use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::{Debug, Display};

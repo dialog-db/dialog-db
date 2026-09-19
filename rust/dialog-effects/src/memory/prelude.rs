@@ -82,6 +82,19 @@ pub struct SpaceScope {
 }
 
 impl SpaceScope {
+    /// The chain as a capability under `V`, for delegating rather than
+    /// invoking.
+    pub fn claim<V>(self) -> Capability<Space<V>>
+    where
+        V: crate::Verb,
+        V::Of: dialog_capability::Constraint,
+        Subject: AttenuateVerb<V>,
+    {
+        AttenuateVerb::verb(self.subject)
+            .attenuate(Memory::<V>::new())
+            .attenuate(Space::<V>::new(self.space))
+    }
+
     /// The subject this chain is rooted at.
     pub fn subject(&self) -> &dialog_capability::Did {
         self.subject.did()
@@ -124,6 +137,17 @@ pub struct CellScope {
 }
 
 impl CellScope {
+    /// The chain as a capability under `V`, for delegating rather than
+    /// invoking. See [`CatalogScope::claim`](crate::archive::prelude::CatalogScope::claim).
+    pub fn claim<V>(self) -> Capability<Cell<V>>
+    where
+        V: crate::Verb,
+        V::Of: dialog_capability::Constraint,
+        Subject: AttenuateVerb<V>,
+    {
+        self.under::<V>()
+    }
+
     /// The subject this chain is rooted at.
     pub fn subject(&self) -> &dialog_capability::Did {
         self.subject.did()

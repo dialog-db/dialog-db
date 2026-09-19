@@ -146,8 +146,8 @@ impl Provider<Retract> for Volatile {
 mod tests {
     use super::*;
     use crate::helpers::unique_subject;
-    use dialog_effects::Use;
-    use dialog_effects::memory::{Cell, Memory, Space, Version};
+
+    use dialog_effects::memory::Version;
     use dialog_effects::prelude::*;
 
     #[dialog_common::test]

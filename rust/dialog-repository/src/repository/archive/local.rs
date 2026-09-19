@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use dialog_capability::{Capability, Provider};
+use dialog_capability::Provider;
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::prelude::*;
-use dialog_effects::archive::{Catalog, Get, Put};
+use dialog_effects::archive::{Get, Put};
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;

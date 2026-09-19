@@ -33,7 +33,7 @@
 use crate::Rejection;
 use crate::Verb;
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::{Attenuate, Attenuation, Constraint, Effect, Policy};
+use dialog_capability::{Attenuate, Attenuation, Constraint, Effect};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

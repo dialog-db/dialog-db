@@ -2,9 +2,9 @@
 
 use super::cell::Cache;
 use crate::PublishError;
-use dialog_capability::{Capability, Fork, Provider, SiteAddress};
+use dialog_capability::{Fork, Provider, SiteAddress};
 use dialog_common::ConditionalSync;
-use dialog_effects::memory::prelude::{CellScope, SpaceScope};
+use dialog_effects::memory::prelude::CellScope;
 use dialog_effects::memory::{self, prelude::CellExt};
 use dialog_storage::Encoder;
 use parking_lot::RwLock;

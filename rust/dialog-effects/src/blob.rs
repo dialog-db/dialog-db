@@ -27,7 +27,6 @@ use async_trait::async_trait;
 use dialog_common::{Blake3Hash, ConditionalSend};
 use serde::{Deserialize, Serialize};
 
-use crate::archive::Archive;
 pub use dialog_capability::{
     Attenuate, Attenuation, DialogCapabilityPerformError, Effect, Policy, StorageError, Subject,
     access::AuthorizeError,

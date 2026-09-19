@@ -112,12 +112,13 @@ impl Provider<ForkInvocation<S3, Put>> for S3 {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use dialog_effects::prelude::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use dialog_capability::{Provider, Subject, did};
-    use dialog_effects::Use;
-    use dialog_effects::archive::{Archive, Catalog, Get};
+
+    use dialog_effects::archive::Get;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::s3::{Permit, S3, S3Invocation};
@@ -164,10 +165,9 @@ mod tests {
         };
         let capability = || {
             Subject::from(did!("key:zSharedBlockReadTest"))
-                .attenuate(Use)
-                .attenuate(Archive)
-                .attenuate(Catalog::new("index"))
-                .invoke(Get::new([4u8; 32]))
+                .archive()
+                .catalog("index")
+                .get([4u8; 32])
         };
 
         let first = Provider::<S3Invocation<Get>>::execute(

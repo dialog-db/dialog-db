@@ -78,6 +78,25 @@ pub struct CatalogScope {
 }
 
 impl CatalogScope {
+    /// The chain as a capability under `V`, for delegating rather than
+    /// invoking.
+    ///
+    /// A delegation names a level of the hierarchy, not an effect --
+    /// "everything this holder may read in the index catalog" -- so it
+    /// needs the chain without an effect on the end. Invoking goes
+    /// through the effect methods instead, which pick the verb from the
+    /// effect.
+    pub fn claim<V>(self) -> Capability<Catalog<V>>
+    where
+        V: crate::Verb,
+        V::Of: dialog_capability::Constraint,
+        Subject: AttenuateVerb<V>,
+    {
+        AttenuateVerb::verb(self.subject)
+            .attenuate(Archive::<V>::new())
+            .attenuate(Catalog::<V>::new(self.catalog))
+    }
+
     /// The subject this chain is rooted at.
     pub fn subject(&self) -> &dialog_capability::Did {
         self.subject.did()

@@ -60,12 +60,12 @@ use dialog_artifacts::{
     ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, ShipmentRef,
     State, Statement, shipment_ref,
 };
-use dialog_capability::{Capability, Did, Fork, Provider, Subject};
+use dialog_capability::{Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::{
     ArchiveScope, ArchiveSubjectExt as _, CatalogExt as _, CatalogScope,
 };
-use dialog_effects::archive::{Archive, Catalog, Get, Put};
+use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory;

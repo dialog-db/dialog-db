@@ -142,13 +142,13 @@ impl PermitCache {
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::prelude::*;
     use std::time::Duration;
 
     use super::{MAX_ENTRIES, PERMIT_TTL, PermitCache, PermitKey};
-    use dialog_capability::{Capability, Subject, did};
+    use dialog_capability::{Subject, did};
     use dialog_common::{Buffer, time};
-    use dialog_effects::Use;
-    use dialog_effects::archive::{Archive, Catalog, Get, Put};
+
     use dialog_remote_s3::request::{IntoRequest, S3Request};
     use dialog_remote_s3::{Permit, Precondition};
 
@@ -173,15 +173,12 @@ mod tests {
         UcanAddress::new("https://access.example/ucan/")
     }
 
-    fn catalog() -> Capability<Catalog> {
-        Subject::from(did!("key:zPermitCacheTest"))
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("blocks"))
-    }
-
     fn get_request(digest: [u8; 32]) -> S3Request {
-        catalog().invoke(Get::new(digest)).to_request()
+        Subject::from(did!("key:zPermitCacheTest"))
+            .archive()
+            .catalog("blocks")
+            .get(digest)
+            .to_request()
     }
 
     fn key(digest: [u8; 32]) -> PermitKey {
@@ -228,7 +225,10 @@ mod tests {
 
     #[dialog_common::test]
     fn it_has_no_cache_key_for_a_mutating_request() {
-        let put = catalog().invoke(Put::new(Buffer::from(vec![1, 2, 3])));
+        let put = Subject::from(did!("key:zPermitCacheTest"))
+            .archive()
+            .catalog("blocks")
+            .put(Buffer::from(vec![1, 2, 3]));
         assert!(PermitKey::cacheable(&address(), put.to_request()).is_none());
     }
 
