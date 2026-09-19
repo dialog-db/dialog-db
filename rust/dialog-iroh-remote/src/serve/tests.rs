@@ -260,6 +260,69 @@ async fn an_unproven_invocation_is_refused() {
     );
 }
 
+/// A one-block import stays an import: the commands collide
+/// (`put/archive/block` for both), so the arguments are the only thing
+/// telling a peer which effect it is being asked for.
+#[dialog_common::test]
+async fn a_one_block_import_is_not_mistaken_for_a_put() {
+    let (subject, operator) = signers().await;
+    let bytes = b"a single block, imported".to_vec();
+    let capability = Subject::from(subject.did())
+        .attenuate(Use)
+        .attenuate(archive::Archive)
+        .attenuate(archive::Catalog::new("blocks"))
+        .invoke(archive::Import::new([Buffer::from(bytes.clone())]));
+    let container = request(&subject, &operator, &capability, vec![bytes.clone()]).await;
+
+    let responder = responder(Recording::default());
+    let response = responder.answer(&container).await;
+    let Response::Performed(encoded) = response else {
+        panic!("expected the import to run, got {response:?}");
+    };
+    let outcome: Result<(), ArchiveError> =
+        crate::wire::decode("output", &encoded).expect("the output decodes");
+    outcome.expect("the import succeeds");
+    assert_eq!(
+        responder.store.blocks.lock().expect("not poisoned").len(),
+        1
+    );
+}
+
+/// An import commits to a digest per block now, so the same substitution
+/// a put refuses is refused here too.
+#[dialog_common::test]
+async fn an_import_carrying_a_wrong_block_is_refused() {
+    let (subject, operator) = signers().await;
+    let signed_for = b"the block the import names".to_vec();
+    let capability = Subject::from(subject.did())
+        .attenuate(Use)
+        .attenuate(archive::Archive)
+        .attenuate(archive::Catalog::new("blocks"))
+        .invoke(archive::Import::new([Buffer::from(signed_for)]));
+    let container = request(
+        &subject,
+        &operator,
+        &capability,
+        vec![b"a different block entirely".to_vec()],
+    )
+    .await;
+
+    let responder = responder(Recording::default());
+    let response = responder.answer(&container).await;
+    assert!(
+        matches!(response, Response::Refused(_)),
+        "an import whose block was not signed for must be refused, got {response:?}"
+    );
+    assert!(
+        responder
+            .store
+            .blocks
+            .lock()
+            .expect("not poisoned")
+            .is_empty()
+    );
+}
+
 /// Blob effects answer with streams, so they are refused by name rather
 /// than being quietly absent or faked into a buffered response.
 #[dialog_common::test]

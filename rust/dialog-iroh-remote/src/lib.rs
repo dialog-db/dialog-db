@@ -13,6 +13,13 @@
 //! optional here: the wire is open to anyone who can dial, and a
 //! capability is the only thing distinguishing a peer from a stranger.
 
+/// A store and a channel to test against.
+#[cfg(any(test, feature = "helpers"))]
+pub mod helpers;
+
+pub mod carries;
+pub mod channel;
 pub mod resolve;
 pub mod serve;
+pub mod site;
 pub mod wire;
