@@ -13,4 +13,5 @@
 //! optional here: the wire is open to anyone who can dial, and a
 //! capability is the only thing distinguishing a peer from a stranger.
 
+pub mod bind;
 pub mod wire;
