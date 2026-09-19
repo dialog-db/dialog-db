@@ -35,9 +35,9 @@ use dialog_ucan_core::revocation::RevocationChecker;
 
 use crate::channel::{Channel, ChannelError, Transfer};
 
-use crate::serve::{Responder, Store};
+use crate::serve::{Answer, Responder, Store};
 use crate::site::IrohAddress;
-use crate::wire::{encode, frame, read_frame};
+use crate::wire::{BlobAnswer, Response, encode, frame, read_frame};
 
 /// What this protocol is called on the wire.
 ///
@@ -342,21 +342,76 @@ where
     Revocations: RevocationChecker + ConditionalSync + 'static,
 {
     let request = read_frame("request", transfer).await?;
-    let response = responder.answer(&request).await;
 
-    let encoded = match encode("response", &response) {
-        Ok(encoded) => encoded,
-        // The peer's own answer would not encode. That is this peer's
-        // bug rather than the caller's, and there is no honest way to
-        // report it in a protocol the caller can read.
+    match responder.answer(&request).await {
+        Answer::Value(response) => say(transfer, &response).await?,
+
+        Answer::Reading(mut reader) => {
+            // The announcement goes first so the caller knows the rest
+            // of the stream is blob and not another frame.
+            say(transfer, &performed(Ok(BlobAnswer::Reading))).await?;
+            while let Some(chunk) = reader.next().await.map_err(|error| {
+                // The blob broke off mid-transfer. The frame already
+                // promised bytes, so there is no longer a way to say
+                // so in the protocol: the stream is reset instead, and
+                // the caller sees a short read rather than a whole
+                // blob.
+                ChannelError::Interrupted {
+                    peer: String::new(),
+                    detail: format!("the blob stopped part-way: {error}"),
+                }
+            })? {
+                transfer.send(&chunk).await?;
+            }
+        }
+
+        Answer::Writing(mut writer) => {
+            // Accepted first, digest second. The client will not send
+            // the blob until it has heard this, and could not have
+            // heard a digest, because there is nothing to hash yet.
+            say(transfer, &performed(Ok(BlobAnswer::Accepted))).await?;
+
+            while let Some(chunk) = transfer.recv().await? {
+                if let Err(error) = writer.write_all(&chunk).await {
+                    return say(transfer, &performed(Err::<BlobAnswer, _>(error))).await;
+                }
+            }
+            let answer = match writer.finish().await {
+                Ok(digest) => performed(Ok(BlobAnswer::Written(*digest.as_bytes()))),
+                // A digest mismatch lands here, which is the case this
+                // ordering exists for: the peer commits nothing and
+                // says why, rather than having already claimed success.
+                Err(error) => performed(Err::<BlobAnswer, _>(error)),
+            };
+            return say(transfer, &answer).await;
+        }
+    }
+
+    transfer.finish().await
+}
+
+/// Encode a response and send it as one frame.
+async fn say(transfer: &mut QuicTransfer, response: &Response) -> Result<(), ChannelError> {
+    match encode("response", response) {
+        Ok(encoded) => transfer.send(&frame(&encoded)).await,
+        // This peer's own answer would not encode: its bug, not the
+        // caller's, and there is no honest way to report it in a
+        // protocol the caller can read.
         Err(error) => {
             tracing::error!(%error, "an answer could not be encoded");
-            return Ok(());
+            Ok(())
         }
-    };
+    }
+}
 
-    transfer.send(&frame(&encoded)).await?;
-    transfer.finish().await
+/// A blob answer, wrapped the way every performed answer is.
+fn performed(answer: Result<BlobAnswer, dialog_effects::blob::BlobError>) -> Response {
+    match encode("blob answer", &answer) {
+        Ok(encoded) => Response::Performed(encoded),
+        Err(error) => Response::Refused(crate::wire::Refusal::Internal(format!(
+            "could not encode the answer: {error}"
+        ))),
+    }
 }
 
 #[cfg(test)]

@@ -10,10 +10,12 @@
 use std::sync::Arc;
 
 use dialog_capability::{Fork, ForkInvocation, Provider, SiteFork, Subject};
+use dialog_common::Blake3Hash;
 use dialog_common::Buffer;
 use dialog_did_web::{CachingResolver, WebResolver};
 use dialog_effects::Use;
 use dialog_effects::archive::{self, ArchiveError};
+use dialog_effects::blob::{self, BlobError};
 use dialog_operator::helpers::test_operator_with_profile;
 use iroh::Endpoint;
 use iroh::endpoint::presets;
@@ -133,4 +135,109 @@ async fn a_peer_that_is_not_there_is_unreachable() {
     );
 
     dialing.close().await;
+}
+
+/// A blob written to a peer and read back, over one connection.
+///
+/// This is the case the whole streaming layer exists for, and the one a
+/// value-answered protocol cannot express: the bytes never appear in an
+/// invocation's arguments, and the peer's answer is a transfer rather
+/// than a value.
+#[tokio::test]
+async fn a_blob_streams_both_ways() {
+    let (serving, address, responder) = peer().await;
+    let (dialing, channel) = dialer().await;
+    let site = Iroh::new(channel);
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let subject = profile.did();
+
+    // Bigger than one QUIC datagram, so the transfer is genuinely
+    // chunked and a reader that assumed one chunk would fail here.
+    let bytes: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+
+    let write = Subject::from(subject.clone())
+        .attenuate(Use)
+        .attenuate(archive::Archive)
+        .attenuate(blob::Blob)
+        .attenuate(blob::Write);
+    let fork: IrohFork<blob::Write> = Fork::<Iroh, _>::new(write, address.clone()).into();
+    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let mut writer = Provider::<ForkInvocation<Iroh, blob::Write>>::execute(&site, invocation)
+        .await
+        .expect("the peer accepts a blob");
+
+    for chunk in bytes.chunks(64 * 1024) {
+        writer.write_all(chunk).await.expect("the chunk goes out");
+    }
+    let digest = writer.finish().await.expect("the peer commits the blob");
+
+    assert_eq!(
+        responder.store().blob(&digest),
+        Some(bytes.clone()),
+        "every byte arrived, in order, and hashed to what the peer reported"
+    );
+
+    let read = Subject::from(subject)
+        .attenuate(Use)
+        .attenuate(archive::Archive)
+        .attenuate(blob::Blob)
+        .attenuate(blob::Read::new(digest));
+    let fork: IrohFork<blob::Read> = Fork::<Iroh, _>::new(read, address).into();
+    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let mut reader = Provider::<ForkInvocation<Iroh, blob::Read>>::execute(&site, invocation)
+        .await
+        .expect("the peer has the blob");
+
+    let mut read_back = Vec::new();
+    while let Some(chunk) = reader.next().await.expect("the transfer holds") {
+        read_back.extend_from_slice(&chunk);
+    }
+    assert_eq!(read_back, bytes, "the blob came back byte for byte");
+
+    dialing.close().await;
+    serving.close().await;
+}
+
+/// An import declares its digest, and a peer that receives different
+/// bytes must refuse rather than commit them under the declared name.
+#[tokio::test]
+async fn an_import_that_lies_about_its_digest_is_refused() {
+    let (serving, address, responder) = peer().await;
+    let (dialing, channel) = dialer().await;
+    let site = Iroh::new(channel);
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let honest = b"the bytes that were promised".to_vec();
+    let declared = Blake3Hash::from(*blake3::hash(&honest).as_bytes());
+
+    let import = Subject::from(profile.did())
+        .attenuate(Use)
+        .attenuate(archive::Archive)
+        .attenuate(blob::Blob)
+        .attenuate(blob::Import::new(declared.clone(), honest.len() as u64));
+    let fork: IrohFork<blob::Import> = Fork::<Iroh, _>::new(import, address).into();
+    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let mut writer = Provider::<ForkInvocation<Iroh, blob::Import>>::execute(&site, invocation)
+        .await
+        .expect("the peer accepts the import");
+
+    writer
+        .write_all(b"entirely different bytes")
+        .await
+        .expect("the bytes go out");
+
+    match writer.finish().await {
+        Err(BlobError::DigestMismatch { .. }) => {}
+        other => panic!("expected the peer to catch the mismatch, got {other:?}"),
+    }
+
+    assert_eq!(
+        responder.store().blob(&declared),
+        None,
+        "nothing was committed under the digest that was not delivered"
+    );
+
+    dialing.close().await;
+    serving.close().await;
 }

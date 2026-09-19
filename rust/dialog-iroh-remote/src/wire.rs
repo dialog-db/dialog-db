@@ -45,6 +45,40 @@ pub enum Response {
     Refused(Refusal),
 }
 
+/// What a streamed effect answers with, in place of its own output.
+///
+/// The blob effects return `BlobReader` and `BlobWriter` — trait objects
+/// over a live transfer — so unlike every other effect there is nothing
+/// of `Fx::Output` to encode. What crosses the wire is the part that is
+/// actually information: that bytes are coming, or that the bytes sent
+/// were committed and under which digest. The handle itself is built on
+/// each side out of the stream it already holds.
+///
+/// It rides inside [`Response::Performed`] as an encoded
+/// `Result<BlobAnswer, BlobError>`, so a blob store's own failure is
+/// still the peer answering rather than refusing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlobAnswer {
+    /// The blob's bytes follow this frame, until the peer finishes.
+    Reading,
+    /// The invocation is good; send the blob.
+    ///
+    /// A write is answered twice, and this is the first. It exists
+    /// because the alternative deadlocks: a peer cannot report a digest
+    /// it has not computed, so if a client waited for its only answer
+    /// before sending, each side would be waiting for the other. Saying
+    /// so up front also means an unauthorized write is refused before a
+    /// gigabyte travels rather than after.
+    Accepted,
+    /// Every byte sent was received and committed under this digest.
+    ///
+    /// For an ingest this is the hash the peer discovered; for an import
+    /// it is the declared digest, which the peer verified before
+    /// answering — so a client can trust it because the peer refused to
+    /// say it otherwise, not because it sent it.
+    Written([u8; 32]),
+}
+
 /// Why a peer would not perform an invocation.
 ///
 /// Deliberately coarse. A peer talking to a stranger should not narrate

@@ -33,7 +33,7 @@
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_did_web::{PerformingResolver, Resolve};
-use dialog_effects::{Use, archive, memory};
+use dialog_effects::{Use, archive, blob, memory};
 use dialog_ucan_core::container::bundle::InvocationBundle;
 use dialog_ucan_core::{
     Environment, InvocationChain, VerificationContext, revocation::RevocationChecker,
@@ -44,7 +44,7 @@ use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::wire::{Refusal, Response, encode};
+use crate::wire::{BlobAnswer, Refusal, Response, encode};
 use dialog_ucan::Args;
 
 /// What a peer performs invocations against.
@@ -60,6 +60,9 @@ pub trait Store:
     + Provider<memory::Resolve>
     + Provider<memory::Publish>
     + Provider<memory::Retract>
+    + Provider<blob::Read>
+    + Provider<blob::Write>
+    + Provider<blob::Import>
     + ConditionalSync
 {
 }
@@ -71,8 +74,46 @@ impl<T> Store for T where
         + Provider<memory::Resolve>
         + Provider<memory::Publish>
         + Provider<memory::Retract>
+        + Provider<blob::Read>
+        + Provider<blob::Write>
+        + Provider<blob::Import>
         + ConditionalSync
 {
+}
+
+/// What a verified invocation turned into.
+///
+/// Most effects answer with a value and this is a [`Response`]. The blob
+/// effects answer with a transfer, and a peer cannot produce one without
+/// the stream the request arrived on — which this module deliberately
+/// does not know about. So it hands back the store's own handle and
+/// lets the transport move the bytes, keeping verification and
+/// dispatch in one place and sockets out of it.
+pub enum Answer {
+    /// Encode this and send it.
+    Value(Response),
+    /// Announce [`BlobAnswer::Reading`], then send what this yields.
+    Reading(blob::BlobReader),
+    /// Write the body into this, finish it, then answer with the digest
+    /// it returns as [`BlobAnswer::Written`].
+    Writing(blob::BlobWriter),
+}
+
+impl Answer {
+    /// Collapse to a [`Response`] for a caller that cannot stream.
+    ///
+    /// The loopbacks this crate tests the protocol over are whole
+    /// request and whole answer, which is all the value effects need. A
+    /// blob asked of one is refused here rather than part-way through a
+    /// transfer that was never going to happen.
+    pub fn without_stream(self) -> Response {
+        match self {
+            Answer::Value(response) => response,
+            Answer::Reading(_) | Answer::Writing(_) => Response::Refused(Refusal::UnknownCommand(
+                "a blob, which needs a channel that streams".into(),
+            )),
+        }
+    }
 }
 
 /// Answers invocations against a local store.
@@ -133,14 +174,14 @@ where
     /// failed is [`Response::Performed`] carrying that failure, because
     /// the peer did run it; everything that stopped short is a
     /// [`Refusal`].
-    pub async fn answer(&self, container: &[u8]) -> Response {
+    pub async fn answer(&self, container: &[u8]) -> Answer {
         match self.perform(container).await {
-            Ok(response) => response,
-            Err(refusal) => Response::Refused(refusal),
+            Ok(answer) => answer,
+            Err(refusal) => Answer::Value(Response::Refused(refusal)),
         }
     }
 
-    async fn perform(&self, container: &[u8]) -> Result<Response, Refusal> {
+    async fn perform(&self, container: &[u8]) -> Result<Answer, Refusal> {
         let bundle = InvocationBundle::try_from(container)
             .map_err(|error| Refusal::Malformed(format!("not an invocation container: {error}")))?;
         let chain = bundle
@@ -156,39 +197,72 @@ where
         match command.as_slice() {
             ["use", "get", "archive", "block"] => {
                 let capability = archive_claim::<archive::Get>(&subject, args)?;
-                Ok(performed(
+                Ok(Answer::Value(performed(
                     Provider::<archive::Get>::execute(&self.store, capability).await,
-                ))
+                )))
             }
-            ["use", "put", "archive", "block"] => self.put(&bundle, &subject, args).await,
+            ["use", "put", "archive", "block"] => {
+                self.put(&bundle, &subject, args).await.map(Answer::Value)
+            }
             ["use", "get", "memory", "cell"] => {
                 // A unit effect is constructed, never read: there is
                 // nothing in the arguments to read it from, and asking
                 // serde for one fails rather than yielding the only
                 // value it could have had.
                 let capability = memory_leaf(&subject, args, memory::Resolve)?;
-                Ok(performed(
+                Ok(Answer::Value(performed(
                     Provider::<memory::Resolve>::execute(&self.store, capability).await,
-                ))
+                )))
             }
             ["use", "put", "memory", "cell"] => {
                 let capability = self.publish(&bundle, &subject, args)?;
-                Ok(performed(
+                Ok(Answer::Value(performed(
                     Provider::<memory::Publish>::execute(&self.store, capability).await,
-                ))
+                )))
             }
             ["use", "delete", "memory", "cell"] => {
                 let capability = memory_claim::<memory::Retract>(&subject, args)?;
-                Ok(performed(
+                Ok(Answer::Value(performed(
                     Provider::<memory::Retract>::execute(&self.store, capability).await,
-                ))
+                )))
             }
-            ["use", _, "archive", "blob"] => Err(Refusal::UnknownCommand(format!(
-                "/{} answers with a stream, which this protocol does not carry yet",
-                command.join("/")
-            ))),
+            ["use", "get", "archive", "blob"] => {
+                let capability = blob_claim::<blob::Read>(&subject, args)?;
+                Ok(
+                    match Provider::<blob::Read>::execute(&self.store, capability).await {
+                        Ok(reader) => Answer::Reading(reader),
+                        // The store declining is an answer, so it rides
+                        // where a successful one would have.
+                        Err(error) => Answer::Value(performed(Err::<BlobAnswer, _>(error))),
+                    },
+                )
+            }
+            ["use", "put", "archive", "blob"] => self.write_blob(&subject, args).await,
             _ => Err(Refusal::UnknownCommand(format!("/{}", command.join("/")))),
         }
+    }
+
+    /// `blob::Write` and `blob::Import` share `put/archive/blob`, the
+    /// same way `archive::Put` and `archive::Import` share
+    /// `put/archive/block`. An import commits to a `digest` and a
+    /// `size`; an ingest commits to nothing, because its hash is not
+    /// known until the bytes have been read. So the arguments tell them
+    /// apart, and reading for the import first means a declared digest
+    /// is never quietly downgraded to a discovered one — which would
+    /// turn a verified replication into an unverified upload.
+    async fn write_blob(&self, subject: &Did, args: &Args) -> Result<Answer, Refusal> {
+        let outcome = if args.contains_key("digest") {
+            let capability = blob_claim::<blob::Import>(subject, args)?;
+            Provider::<blob::Import>::execute(&self.store, capability).await
+        } else {
+            let capability = blob_leaf(subject, args, blob::Write)?;
+            Provider::<blob::Write>::execute(&self.store, capability).await
+        };
+
+        Ok(match outcome {
+            Ok(writer) => Answer::Writing(writer),
+            Err(error) => Answer::Value(performed(Err::<BlobAnswer, _>(error))),
+        })
     }
 
     async fn verify(
@@ -327,6 +401,31 @@ where
 {
     let leaf: Fx = from_args(args)?;
     archive_leaf(subject, args, leaf)
+}
+
+/// `Subject -> Use -> Archive -> Blob -> leaf`.
+///
+/// One segment shorter than the archive's: a blob is addressed by its
+/// own hash, so there is no catalog naming where it lives.
+fn blob_leaf<Fx>(subject: &Did, _args: &Args, leaf: Fx) -> Result<Capability<Fx>, Refusal>
+where
+    Fx: dialog_capability::Policy<Of = blob::Blob>,
+    <Fx as dialog_capability::Constraint>::Capability: dialog_capability::Ability,
+{
+    Ok(Subject::from(subject.clone())
+        .attenuate(Use)
+        .attenuate(archive::Archive)
+        .attenuate(blob::Blob)
+        .attenuate(leaf))
+}
+
+fn blob_claim<Fx>(subject: &Did, args: &Args) -> Result<Capability<Fx>, Refusal>
+where
+    Fx: dialog_capability::Policy<Of = blob::Blob> + DeserializeOwned,
+    <Fx as dialog_capability::Constraint>::Capability: dialog_capability::Ability,
+{
+    let leaf: Fx = from_args(args)?;
+    blob_leaf(subject, args, leaf)
 }
 
 fn memory_leaf<Fx>(subject: &Did, args: &Args, leaf: Fx) -> Result<Capability<Fx>, Refusal>
