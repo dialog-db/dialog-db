@@ -11,7 +11,7 @@
 //! the question that would otherwise be answered by silently shipping
 //! nothing and failing at the far end.
 
-use dialog_effects::{archive, blob, memory};
+use dialog_effects::{archive, blob, memory, peer};
 
 /// The blocks an effect's arguments name.
 ///
@@ -33,7 +33,7 @@ macro_rules! carries_nothing {
     };
 }
 
-carries_nothing!(archive::Get, memory::Resolve, memory::Retract);
+carries_nothing!(archive::Get, memory::Resolve, memory::Retract, peer::Hello);
 
 impl Carries for archive::Put {
     fn blocks(&self) -> Vec<Vec<u8>> {
