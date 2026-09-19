@@ -14,4 +14,5 @@
 //! capability is the only thing distinguishing a peer from a stranger.
 
 pub mod resolve;
+pub mod serve;
 pub mod wire;
