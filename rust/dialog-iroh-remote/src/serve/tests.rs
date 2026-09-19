@@ -132,6 +132,20 @@ impl Provider<dialog_effects::peer::Hello> for Recording {
     }
 }
 
+/// Nothing held, which is the honest answer for a store that is a block
+/// map. Present so [`Store`] is satisfied; what the effect actually
+/// carries is covered in `site::tests`.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<dialog_effects::peer::Spaces> for Recording {
+    async fn execute(
+        &self,
+        _input: Capability<dialog_effects::peer::Spaces>,
+    ) -> Result<Vec<dialog_effects::peer::Offer>, dialog_effects::peer::PeerError> {
+        Ok(Vec::new())
+    }
+}
+
 async fn signers() -> (Ed25519Signer, Ed25519Signer) {
     (
         Ed25519Signer::import(&[1u8; 32])

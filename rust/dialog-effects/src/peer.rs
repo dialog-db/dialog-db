@@ -15,17 +15,18 @@
 //!         ├── Get → Peers
 //!         │     ├── Find { name } → Result<Vec<Entity>, PeerError>
 //!         │     ├── Connect { peer } → Result<PeerConnection, PeerError>
-//!         │     └── Hello → Result<Greeting, PeerError>
+//!         │     ├── Hello → Result<Greeting, PeerError>
+//!         │     └── Spaces → Result<Vec<Offer>, PeerError>
 //!         └── Put → Peers
 //!               ├── AddAddress { peer, address } → Result<(), PeerError>
 //!               └── SetName { peer, name } → Result<(), PeerError>
 //! ```
 //!
-//! [`Hello`] is the one of these asked across a wire. Every other effect
-//! here is the host consulting its own records; this one asks a peer to
-//! describe itself, which is what a caller needs before it can record
-//! the peer as a contact at all: who answers at an address, and
-//! therefore whether it is the one that was meant.
+//! [`Hello`] and [`Spaces`] are the two of these asked across a wire.
+//! Every other effect here is the host consulting its own records; these
+//! ask a peer to describe itself, which is what a caller needs before it
+//! can record the peer as a contact at all: who answers at an address,
+//! and which spaces are behind it.
 
 use crate::Rejection;
 use crate::memory::MemoryError;
@@ -263,6 +264,58 @@ impl Effect for Hello {
     type Output = Result<Greeting, PeerError>;
 }
 
+/// One space a peer holds.
+///
+/// The subject is the space's own identity: the DID its repository is
+/// named by, and the one a delegation for it would carry. That is the
+/// whole of what a peer can say about a space it has not been asked to
+/// open, and it is what a caller needs to ask for access to one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Offer {
+    /// The space's subject DID.
+    pub subject: Did,
+    /// What this peer calls it, when it calls it anything.
+    ///
+    /// A local label and nothing more: the peer's own, not a fact about
+    /// the space. A space's display name lives on its content branch and
+    /// is only readable once replicated, so this is what labels a space
+    /// a caller has not opened yet. Absent from a peer that knows its
+    /// spaces by DID alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Ask a peer which spaces it holds.
+///
+/// The second half of "who are you": [`Hello`] answers with the
+/// identities a peer answers for, and this with the spaces behind them.
+/// A caller invoking this holds no authority over any space in the
+/// answer, and by definition cannot, because the answer is what tells it
+/// which spaces there are to ask about.
+///
+/// # What this discloses
+///
+/// A peer's whole inventory, to anyone whose invocation it verifies. The
+/// subject of that invocation is the caller's own, not the peer's, so a
+/// peer that answers this answers strangers. What bounds it is the
+/// carrier: today the only one is a loopback rendezvous, which is to say
+/// the disclosure is to processes already on the machine. A peer reached
+/// over anything wider needs a policy here, and does not have one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Attenuate)]
+pub struct Spaces;
+
+impl Attenuation for Spaces {
+    type Of = Peers<method::Get>;
+
+    fn attenuation() -> &'static str {
+        "peer/spaces"
+    }
+}
+
+impl Effect for Spaces {
+    type Output = Result<Vec<Offer>, PeerError>;
+}
+
 /// A host's connection to a peer: the addresses it is reached at, and
 /// which of them answered last.
 ///
@@ -416,8 +469,12 @@ mod tests {
             "/use/get/dialog/peer/connect"
         );
         assert_eq!(
-            host.reader().peers().hello().ability(),
+            host.clone().reader().peers().hello().ability(),
             "/use/get/dialog/peer/hello"
+        );
+        assert_eq!(
+            host.reader().peers().spaces().ability(),
+            "/use/get/dialog/peer/spaces"
         );
     }
 
