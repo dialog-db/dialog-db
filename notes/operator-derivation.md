@@ -184,6 +184,21 @@ on native and wasm:
   label, the seed-to-Ed25519 import and the `did:key` encoding, which is
   the value `Operator::did` returns.
 
+Both were also checked by hand against a real WebKit build (Safari 26 /
+AppleWebKit 605.1.15), computing the browser half in plain WebCrypto and
+comparing it to the Rust fixtures. WebKit produced the same shared secret
+and the same derived bytes as Rust and as Chromium, stably across runs —
+and reached them through a *different archive shape*, since WebKit cannot
+structured-clone an X25519 `CryptoKey` (`TypeError: Unable to deserialize
+data`) and so must archive the agreement key AES-KW wrapped.
+`secret::web_tests` forces that same path on Chromium, so CI covers it
+without needing WebKit.
+
+What no test here reproduces is the Safari bug itself: hedged Ed25519
+nonces come from Apple's CryptoKit, not from WebKit, so a WebKit build on
+Linux signs deterministically. Which is also why the old scheme could not
+have been caught this way. The derivation no longer signs at all.
+
 Either fails the moment the derivation stops being a pure function of
 the key material — a relapse into signing included — and both fail
 identically on native and wasm, which is what keeps the two platform
