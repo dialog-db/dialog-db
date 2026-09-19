@@ -1526,6 +1526,7 @@ name = "dialog-iroh-remote"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base58",
  "blake3",
  "dialog-capability",
  "dialog-common",
@@ -1537,6 +1538,8 @@ dependencies = [
  "dialog-ucan",
  "dialog-ucan-core",
  "dialog-varsig",
+ "ed25519-dalek 2.2.0",
+ "form_urlencoded",
  "ipld-core",
  "iroh",
  "iroh-base",
