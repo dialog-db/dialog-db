@@ -50,7 +50,7 @@ impl OpenBranch {
             record_cache: dialog_search_tree::Cache::new(),
             spine: dialog_artifacts::SpineSlot::new(),
             identity_cache: Arc::new(Mutex::new(None)),
-            overlay: Ephemeral::default(),
+            overlay: Ephemeral::detached(),
             bindings: Bindings::default(),
         })
     }
