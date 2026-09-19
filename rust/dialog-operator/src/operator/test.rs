@@ -29,31 +29,65 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_derives_different_operators_from_different_contexts() {
-        let storage1 = Storage::volatile();
-        let profile1 = Profile::open(unique_name("ctx1"))
-            .perform(&storage1)
-            .await
-            .unwrap();
-        let op1 = profile1
-            .derive(b"context-a")
-            .network(Network::default())
-            .build(storage1)
+        let storage = Storage::volatile();
+        let profile = Profile::open(unique_name("ctx"))
+            .perform(&storage)
             .await
             .unwrap();
 
-        let storage2 = Storage::volatile();
-        let profile2 = Profile::open(unique_name("ctx2"))
-            .perform(&storage2)
+        // One profile, two contexts -- two profiles would prove nothing
+        // about the context seed.
+        let op1 = profile
+            .derive(b"context-a")
+            .network(Network::default())
+            .build(storage.clone())
             .await
             .unwrap();
-        let op2 = profile2
+        let op2 = profile
             .derive(b"context-b")
             .network(Network::default())
-            .build(storage2)
+            .build(storage)
             .await
             .unwrap();
 
         assert_ne!(op1.did(), op2.did());
+    }
+
+    /// The operator key must be a pure function of the profile key and the
+    /// context, on every platform.
+    ///
+    /// The derivation this replaced hashed a signature over a fixed message.
+    /// Ed25519 signatures are not required to be deterministic -- WebKit's
+    /// hedge the nonce -- so in Safari a profile derived a different operator
+    /// on every build, and the operator DID feeds `Origin`, which names a
+    /// sequential actor in the version clock. Every page load became a new
+    /// replica lineage. See `notes/operator-derivation.md`.
+    #[dialog_common::test]
+    async fn it_derives_the_same_operator_every_time() {
+        let storage = Storage::volatile();
+        let profile = Profile::open(unique_name("stable"))
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        let first = profile
+            .derive(b"test")
+            .network(Network::default())
+            .build(storage.clone())
+            .await
+            .unwrap();
+        let second = profile
+            .derive(b"test")
+            .network(Network::default())
+            .build(storage)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first.did(),
+            second.did(),
+            "rebuilding an operator must re-mint the same identity"
+        );
     }
 
     mod delegation_tests {

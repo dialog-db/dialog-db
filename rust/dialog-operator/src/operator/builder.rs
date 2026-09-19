@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use super::{Operator, WalkReach};
 use dialog_capability::{Ability, Capability, Constraint, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_credentials::key::KeyExport;
+use dialog_credentials::secret::Context;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Directory;
 use dialog_effects::{archive, blob, memory};
@@ -17,10 +17,13 @@ use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, UcanCertificate};
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-use dialog_varsig::Signer;
 
-const OPERATOR_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
+/// The domain-separation label operator keys derive under.
+///
+/// Versioned: `v2` is the key-agreement derivation that replaced signing a
+/// fixed message. Bumping it re-derives every operator, which forks each
+/// profile's replica lineage, so it changes only when the derivation does.
+const OPERATOR_DERIVATION_CONTEXT: Context = Context::new("dialog-db/operator/v2");
 
 /// Derive an operator from a profile.
 ///
@@ -217,10 +220,10 @@ impl OperatorBuilder {
 
 /// Extract the ed25519 signer from a credential.
 ///
-/// Operator derivation currently assumes an ed25519 profile key (the blake3
-/// derivation and `did:key` operator identity are ed25519-specific). A profile
-/// backed by another algorithm is rejected here rather than deriving a wrong
-/// operator.
+/// Operator derivation currently assumes an ed25519 profile key (the key
+/// agreement it derives through and the `did:key` operator identity are
+/// ed25519-specific). A profile backed by another algorithm is rejected here
+/// rather than deriving a wrong operator.
 fn ed25519_signer(credential: &SignerCredential) -> Result<Ed25519Signer, OperatorError> {
     credential
         .signer()
@@ -229,42 +232,36 @@ fn ed25519_signer(credential: &SignerCredential) -> Result<Ed25519Signer, Operat
         .ok_or_else(|| OperatorError::Key("operator derivation requires an ed25519 profile".into()))
 }
 
+/// Derive the operator key for `context` from the profile key.
+///
+/// One derivation for every platform, and the same one: the profile's
+/// [`Ed25519Signer::secret`] handle runs a key agreement against the identity's
+/// own agreement key (see [`dialog_credentials::secret::Secret::derive`]) and
+/// the result seeds the operator.
+///
+/// It is NOT a signature, and the distinction is the whole point. The web arm
+/// used to sign a fixed message and hash the signature, which assumes a
+/// signature is a pseudo-random function. Ed25519 does not promise that:
+/// hedged nonces are conforming, WebKit's `Ed25519` uses them, and in Safari
+/// the profile therefore derived a different operator on every page load. That
+/// churns the operator DID through `Origin`, which names a sequential actor in
+/// the version clock, so every session became a new replica lineage. Key
+/// agreement has no nonce to hedge.
+///
+/// See `notes/operator-derivation.md`.
 async fn derive_operator(
     signer: &Ed25519Signer,
     context: &[u8],
 ) -> Result<Ed25519Signer, OperatorError> {
-    let export = signer
-        .export()
+    let seed = signer
+        .secret(OPERATOR_DERIVATION_CONTEXT)
+        .derive(context)
         .await
         .map_err(|e| OperatorError::Key(e.to_string()))?;
 
-    match export {
-        KeyExport::Extractable(ref seed) => {
-            let mut key_material = seed.clone();
-            key_material.extend_from_slice(context);
-
-            let derived = blake3::derive_key(OPERATOR_DERIVATION_CONTEXT, &key_material);
-            Ed25519Signer::import(&derived)
-                .await
-                .map_err(|e| OperatorError::Key(e.to_string()))
-        }
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        KeyExport::NonExtractable { .. } => {
-            let mut derivation_input = OPERATOR_DERIVATION_CONTEXT.as_bytes().to_vec();
-            derivation_input.extend_from_slice(context);
-
-            let signature = signer
-                .sign(&derivation_input)
-                .await
-                .map_err(|e| OperatorError::Key(e.to_string()))?;
-
-            let sig_bytes: [u8; 64] = signature.into();
-            let derived = blake3::derive_key(OPERATOR_DERIVATION_CONTEXT, &sig_bytes);
-            Ed25519Signer::import(&derived)
-                .await
-                .map_err(|e| OperatorError::Key(e.to_string()))
-        }
-    }
+    Ed25519Signer::import(&seed)
+        .await
+        .map_err(|e| OperatorError::Key(e.to_string()))
 }
 
 /// Errors that can occur when building an Operator.

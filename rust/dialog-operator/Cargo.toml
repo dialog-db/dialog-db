@@ -32,7 +32,6 @@ dialog-varsig = { workspace = true }
 anyhow = { workspace = true, optional = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
-blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
