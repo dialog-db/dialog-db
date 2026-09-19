@@ -15,6 +15,10 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
+dialog-ucan = { workspace = true }
+dialog-ucan-core = { workspace = true }
+dialog-varsig = { workspace = true }
+ipld-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
 thiserror = { workspace = true }
