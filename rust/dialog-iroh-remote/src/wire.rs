@@ -1,17 +1,25 @@
 //! What travels on a stream.
 //!
-//! One exchange is one QUIC stream: the dialer writes a [`Request`],
-//! finishes its side, and reads a [`Response`]. Streams are cheap and
-//! independently cancellable, so there is no multiplexing, framing or
-//! correlation id here — QUIC already supplies all three.
+//! One exchange is one QUIC stream: the dialer writes a `ctn-v1` UCAN
+//! container, finishes its side, and reads a [`Response`]. Streams are
+//! cheap and independently cancellable, so there is no multiplexing,
+//! framing or correlation id here — QUIC already supplies all three.
 //!
-//! # Why the payloads are opaque bytes
+//! # The request has no type of its own
 //!
-//! A [`Request`] has to be decodable *before* the receiver knows which
-//! effect it carries, because the command is what selects the type. So
-//! the frame decodes first and the payload decodes second, against the
-//! type the command names. The nesting is not an encoding accident;
-//! it is the type-erasure boundary.
+//! An earlier shape here was a struct carrying a command, a capability
+//! payload and an authorization, which was a mistake worth recording:
+//! it put the payload beside the signature rather than under it, so two
+//! things claimed to be the invocation's arguments and only one of them
+//! was signed. Keeping them honest then needed a comparison, and a
+//! comparison is a thing that can be got wrong.
+//!
+//! The container already solves this. Its root token is the invocation —
+//! which carries the command, the subject and the arguments, all signed —
+//! its `prf` blocks are the proofs, and material that is neither proof
+//! nor argument rides as its own block, addressed by the hash of its
+//! bytes. So the request *is* the container, and [`crate::resolve`] is
+//! how a peer reaches what it names.
 //!
 //! # Refusal is not failure
 //!
@@ -23,25 +31,6 @@
 //! a peer that never stored it. [`Response`] keeps them apart.
 
 use serde::{Deserialize, Serialize};
-
-/// One invocation, addressed to whichever effect `command` names.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Request {
-    /// The effect's command path, as [`Effect::command`] reports it —
-    /// `get/archive/block` and so on.
-    ///
-    /// This is the same string a delegation attenuates on, so the
-    /// receiver's dispatch table and its authorization check agree by
-    /// construction rather than by a parallel mapping kept in step.
-    ///
-    /// [`Effect::command`]: dialog_capability::Effect::command
-    pub command: String,
-    /// The encoded `Capability<Fx>` for that command.
-    pub capability: Vec<u8>,
-    /// The encoded authorization the peer must check before performing
-    /// anything.
-    pub authorization: Vec<u8>,
-}
 
 /// What comes back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,35 +104,13 @@ pub fn decode<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::{Capability, Effect, Subject, did};
-    use dialog_effects::Use;
-    use dialog_effects::archive::{Archive, Blake3Hash, Catalog, Get};
+    use dialog_capability::Effect;
+    use dialog_effects::archive::Get;
 
-    /// The premise of the whole design: an invocation survives the trip.
-    ///
-    /// If `Capability<Fx>` did not round-trip through the encoding, the
-    /// peer could not be sent an effect at all and this crate would have
-    /// to invent a parallel request shape per effect. It does, so the
-    /// dispatch is mechanical.
-    #[dialog_common::test]
-    fn a_capability_survives_the_wire() {
-        let capability = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("blocks"))
-            .invoke(Get::new(Blake3Hash::from([7u8; 32])));
-
-        let bytes = encode("capability", &capability).unwrap();
-        let back: Capability<Get> = decode("capability", &bytes).unwrap();
-        assert_eq!(
-            encode("capability", &back).unwrap(),
-            bytes,
-            "re-encoding a decoded capability must be byte-identical"
-        );
-    }
-
-    /// The command is the discriminant, so it has to be the effect's own
-    /// string rather than a name chosen here.
+    /// The command a peer dispatches on is the effect's own string,
+    /// taken from the signed invocation rather than from a field beside
+    /// it, so its dispatch table and its authorization check cannot
+    /// disagree.
     #[dialog_common::test]
     fn the_command_is_the_effects_own() {
         assert_eq!(Get::command(), "get/archive/block");
