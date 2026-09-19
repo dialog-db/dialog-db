@@ -31,7 +31,7 @@
 //! refused by name rather than silently missing.
 
 use dialog_capability::{Capability, Provider, Subject};
-use dialog_common::{Buffer, ConditionalSync};
+use dialog_common::ConditionalSync;
 use dialog_did_web::{PerformingResolver, Resolve};
 use dialog_effects::{Use, archive, memory};
 use dialog_ucan_core::container::bundle::InvocationBundle;
@@ -102,6 +102,11 @@ impl<S, Resolver> Responder<S, Resolver> {
 }
 
 impl<S, Resolver, Revocations> Responder<S, Resolver, Revocations> {
+    /// What invocations are performed against.
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
     /// Check every proof against `revocations` while verifying.
     pub fn with_revocations<Checked>(
         self,
@@ -157,7 +162,11 @@ where
             }
             ["use", "put", "archive", "block"] => self.put(&bundle, &subject, args).await,
             ["use", "get", "memory", "cell"] => {
-                let capability = memory_claim::<memory::Resolve>(&subject, args)?;
+                // A unit effect is constructed, never read: there is
+                // nothing in the arguments to read it from, and asking
+                // serde for one fails rather than yielding the only
+                // value it could have had.
+                let capability = memory_leaf(&subject, args, memory::Resolve)?;
                 Ok(performed(
                     Provider::<memory::Resolve>::execute(&self.store, capability).await,
                 ))
@@ -215,16 +224,19 @@ where
     ) -> Result<Response, Refusal> {
         if args.contains_key("checksums") {
             let committed: archive::ImportAttenuation = from_args(args)?;
+            // The two lists are read as pairs, so a sender that signed a
+            // different number of each has not described anything and is
+            // refused before a single block is looked up.
+            if committed.digests.len() != committed.checksums.len() {
+                return Err(Refusal::Malformed(format!(
+                    "import signed {} digests and {} checksums",
+                    committed.digests.len(),
+                    committed.checksums.len()
+                )));
+            }
             let mut blocks = Vec::with_capacity(committed.checksums.len());
-            for checksum in &committed.checksums {
-                // An import's attenuation carries no digests, so unlike a
-                // put there is nothing signed to check the bytes against
-                // beyond the address they were found at. The archive keys
-                // blocks by their own hash regardless, so this cannot
-                // store one under the wrong name — but what may be stored
-                // is bounded only by SHA-256 here.
-                let bytes = crate::resolve::at(bundle, checksum).map_err(unresolved)?;
-                blocks.push(Buffer::from(bytes));
+            for (digest, checksum) in committed.digests.iter().zip(&committed.checksums) {
+                blocks.push(crate::resolve::block(bundle, digest, checksum).map_err(unresolved)?);
             }
             let capability = archive_leaf(subject, args, archive::Import { blocks })?;
             return Ok(performed(
