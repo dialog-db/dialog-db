@@ -138,7 +138,7 @@ memchr = "2"
 rkyv = "0.8"
 rsa = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
-s3s = "0.13"
+s3s = "0.16"
 serde = "1"
 serde-value = "0.7"
 serde-big-array = "0.5"
