@@ -86,6 +86,34 @@ unserved!(
 unserved!(memory::Publish, Result<memory::Version, memory::MemoryError>);
 unserved!(memory::Retract, Result<(), memory::MemoryError>);
 
+/// The blob effects likewise: this store has none, and says so rather
+/// than handing back a transfer that would carry nothing.
+macro_rules! no_blobs {
+    ($effect:ty, $output:ty) => {
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        impl Provider<$effect> for Recording {
+            async fn execute(&self, _: Capability<$effect>) -> $output {
+                Err(dialog_effects::blob::BlobError::Storage(
+                    "this store keeps blocks only".into(),
+                ))
+            }
+        }
+    };
+}
+no_blobs!(
+    dialog_effects::blob::Read,
+    Result<dialog_effects::blob::BlobReader, dialog_effects::blob::BlobError>
+);
+no_blobs!(
+    dialog_effects::blob::Write,
+    Result<dialog_effects::blob::BlobWriter, dialog_effects::blob::BlobError>
+);
+no_blobs!(
+    dialog_effects::blob::Import,
+    Result<dialog_effects::blob::BlobWriter, dialog_effects::blob::BlobError>
+);
+
 async fn signers() -> (Ed25519Signer, Ed25519Signer) {
     (
         Ed25519Signer::import(&[1u8; 32])
@@ -170,7 +198,7 @@ async fn a_put_travels_and_is_stored() {
     let container = request(&subject, &operator, &capability, vec![bytes.clone()]).await;
 
     let responder = responder(Recording::default());
-    let response = responder.answer(&container).await;
+    let response = responder.answer(&container).await.without_stream();
 
     let Response::Performed(encoded) = response else {
         panic!("expected the effect to run, got {response:?}");
@@ -205,7 +233,10 @@ async fn a_put_carrying_the_wrong_block_is_refused() {
     )
     .await;
 
-    let response = responder(Recording::default()).answer(&container).await;
+    let response = responder(Recording::default())
+        .answer(&container)
+        .await
+        .without_stream();
     match response {
         // The substituted block is not at the address the signed
         // checksum names, so it is missing rather than wrong — which is
@@ -244,7 +275,7 @@ async fn an_unproven_invocation_is_refused() {
 
     let store = Recording::default();
     let responder = responder(store);
-    let response = responder.answer(&container).await;
+    let response = responder.answer(&container).await.without_stream();
     assert!(
         matches!(response, Response::Refused(Refusal::Unauthorized(_))),
         "an undelegated invocation must be refused, got {response:?}"
@@ -275,7 +306,7 @@ async fn a_one_block_import_is_not_mistaken_for_a_put() {
     let container = request(&subject, &operator, &capability, vec![bytes.clone()]).await;
 
     let responder = responder(Recording::default());
-    let response = responder.answer(&container).await;
+    let response = responder.answer(&container).await.without_stream();
     let Response::Performed(encoded) = response else {
         panic!("expected the import to run, got {response:?}");
     };
@@ -308,7 +339,7 @@ async fn an_import_carrying_a_wrong_block_is_refused() {
     .await;
 
     let responder = responder(Recording::default());
-    let response = responder.answer(&container).await;
+    let response = responder.answer(&container).await.without_stream();
     assert!(
         matches!(response, Response::Refused(_)),
         "an import whose block was not signed for must be refused, got {response:?}"
@@ -326,7 +357,7 @@ async fn an_import_carrying_a_wrong_block_is_refused() {
 /// Blob effects answer with streams, so they are refused by name rather
 /// than being quietly absent or faked into a buffered response.
 #[dialog_common::test]
-async fn a_blob_command_says_why_it_is_not_served() {
+async fn a_blob_command_reaches_the_store() {
     let (subject, operator) = signers().await;
     let capability = Subject::from(subject.did())
         .attenuate(Use)
@@ -335,13 +366,45 @@ async fn a_blob_command_says_why_it_is_not_served() {
         .invoke(dialog_effects::blob::Read::new(Blake3Hash::from([9u8; 32])));
     let container = request(&subject, &operator, &capability, vec![]).await;
 
-    let response = responder(Recording::default()).answer(&container).await;
-    match response {
-        Response::Refused(Refusal::UnknownCommand(reason)) => {
+    // This store has no blobs and says so. What matters is *which* kind
+    // of "no" comes back: an answer from the store, not
+    // `UnknownCommand`. A peer that refused by name would be
+    // indistinguishable from an older one that cannot serve blobs at
+    // all, and a client would stop asking.
+    let answer = responder(Recording::default()).answer(&container).await;
+    let Answer::Value(Response::Performed(encoded)) = answer else {
+        panic!("a blob command should reach the store rather than be refused");
+    };
+    let outcome: Result<crate::wire::BlobAnswer, dialog_effects::blob::BlobError> =
+        crate::wire::decode("blob answer", &encoded).expect("the answer decodes");
+    match outcome {
+        Err(dialog_effects::blob::BlobError::Storage(detail)) => {
             assert!(
-                reason.contains("stream"),
-                "the refusal should say why: {reason}"
+                detail.contains("blocks only"),
+                "the store's own words: {detail}"
             );
+        }
+        other => panic!("expected the store's refusal to survive, got {other:?}"),
+    }
+}
+
+/// A channel that cannot stream is told so by name, rather than being
+/// handed a transfer it has no way to move bytes over.
+#[dialog_common::test]
+async fn a_blob_asked_of_a_whole_answer_channel_is_refused() {
+    struct Empty;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl dialog_effects::blob::BlobSource for Empty {
+        async fn next(&mut self) -> Result<Option<Vec<u8>>, dialog_effects::blob::BlobError> {
+            Ok(None)
+        }
+    }
+
+    match Answer::Reading(Box::new(Empty)).without_stream() {
+        Response::Refused(Refusal::UnknownCommand(reason)) => {
+            assert!(reason.contains("streams"), "the refusal says why: {reason}");
         }
         other => panic!("expected a named refusal, got {other:?}"),
     }

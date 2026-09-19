@@ -19,6 +19,7 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
