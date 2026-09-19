@@ -36,6 +36,7 @@ members = [
     "rust/dialog-remote-ucan-s3",
     "rust/dialog-remote-ucan",
     "rust/dialog-remote-fs",
+    "rust/dialog-iroh-remote",
     "rust/dialog-network",
     "rust/dialog-identity",
     "rust/dialog-operator",
@@ -240,6 +241,9 @@ path = "./rust/dialog-remote-ucan-s3"
 
 [workspace.dependencies.dialog-remote-ucan]
 path = "./rust/dialog-remote-ucan"
+
+[workspace.dependencies.dialog-iroh-remote]
+path = "./rust/dialog-iroh-remote"
 
 [workspace.dependencies.dialog-remote-fs]
 path = "./rust/dialog-remote-fs"
