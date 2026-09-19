@@ -27,6 +27,41 @@ mod tests {
         assert!(!operator.did().to_string().is_empty());
     }
 
+    /// An ephemeral layer is a process resource: created through the
+    /// operator it is registered under its address, opening the address
+    /// yields the same layer, and once every handle is dropped the
+    /// address opens nothing.
+    #[dialog_common::test]
+    async fn it_opens_ephemeral_layers_by_address() {
+        use dialog_repository::{Ephemeral, EphemeralError};
+        let storage = Storage::volatile();
+        let profile = Profile::open(unique_name("test"))
+            .perform(&storage)
+            .await
+            .unwrap();
+        let operator = profile
+            .derive(b"test")
+            .network(Network::default())
+            .build(storage)
+            .await
+            .unwrap();
+
+        let layer = Ephemeral::create().perform(&operator).await;
+        let address = layer.entity().clone();
+        let reopened = Ephemeral::open(address.clone())
+            .perform(&operator)
+            .await
+            .expect("registered");
+        assert!(reopened.is(&layer), "the same store");
+        drop(layer);
+        drop(reopened);
+        let missing = Ephemeral::open(address.clone()).perform(&operator).await;
+        assert!(
+            matches!(&missing, Err(EphemeralError::NotOpen(at)) if *at == address),
+            "gone with its last handle: {missing:?}"
+        );
+    }
+
     #[dialog_common::test]
     async fn it_derives_different_operators_from_different_contexts() {
         let storage1 = Storage::volatile();

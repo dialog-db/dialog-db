@@ -236,7 +236,7 @@ impl Branch {
                 lineage: None,
             }),
             caches: self.caches(),
-            overlay: Ephemeral::default(),
+            overlay: Ephemeral::detached(),
             bindings: self.bindings().clone(),
         })
     }
@@ -252,7 +252,7 @@ impl Snapshot {
                 lineage: None,
             }),
             caches: Caches::new(),
-            overlay: Ephemeral::default(),
+            overlay: Ephemeral::detached(),
             bindings: Bindings::default(),
         }
     }
@@ -277,7 +277,7 @@ impl Snapshot {
                 lineage: Some(line),
             }),
             caches,
-            overlay: Ephemeral::default(),
+            overlay: Ephemeral::detached(),
             bindings: Bindings::default(),
         }
     }

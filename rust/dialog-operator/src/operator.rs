@@ -4,6 +4,7 @@
 
 mod access;
 mod builder;
+mod ephemeral;
 mod fork;
 mod hydrate;
 mod preload;
@@ -123,6 +124,10 @@ pub struct Operator<S: Clone> {
 
     /// Resolved-chain cache (see `operator/access.rs`).
     chains: Arc<Mutex<access::ChainCache>>,
+
+    /// The ephemeral layers open in this process, by address (see
+    /// `operator/ephemeral.rs`).
+    ephemerals: Arc<dialog_repository::EphemeralRegistry>,
 
     /// The authorization walk's remote reach (see [`WalkReach`]).
     /// Deliberately EMPTY on the operator clone captured inside the reach

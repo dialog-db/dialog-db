@@ -12,7 +12,7 @@
 //! ```no_run
 //! # use dialog_repository::{Branch, Ephemeral, Stack};
 //! # fn example(shared: Branch, local: Branch) -> anyhow::Result<()> {
-//! let state = Ephemeral::new();
+//! let state = Ephemeral::detached();
 //! let build = Stack::builder()
 //!     .layer(shared.clone()) // the bottom: placements live here
 //!     .layer(local.clone())
@@ -1603,7 +1603,7 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         shared
             .transaction()
@@ -1621,7 +1621,7 @@ mod tests {
             .layer(shared.clone())
             .layer(state.clone())
             .link(&shared, name("shared"))
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&state, name("state"))
             .build()
             .perform(&operator)
@@ -1723,7 +1723,7 @@ mod tests {
             .layer(shared.clone())
             .layer(local.clone())
             .link(&shared, name("shared"))
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&local, name("local"))
             .build()
             .perform(&operator)
@@ -1821,7 +1821,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         let stack = Stack::builder()
             .layer(shared.clone())
@@ -1875,7 +1875,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         let stack = Stack::builder()
             .layer(shared.clone())
@@ -1947,7 +1947,7 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         let stack = Stack::builder()
             .layer(shared.clone())
@@ -2009,7 +2009,7 @@ mod tests {
 
         let stack = Stack::builder()
             .layer(shared.clone())
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -2067,7 +2067,7 @@ mod tests {
 
         let stack = Stack::builder()
             .layer(shared.clone())
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -2115,7 +2115,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         let stack = Stack::builder()
             .layer(shared.clone())
@@ -2176,7 +2176,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         shared
             .transaction()
@@ -2192,7 +2192,7 @@ mod tests {
             .layer(shared.clone())
             .layer(state.clone())
             .link(&shared, name("shared"))
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&state, name("state"))
             .build()
             .perform(&operator)
@@ -2267,7 +2267,7 @@ mod tests {
 
         let stack = Stack::builder()
             .layer(shared.clone())
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -2339,7 +2339,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         shared
             .transaction()
@@ -2467,7 +2467,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         shared
             .transaction()
@@ -2484,7 +2484,7 @@ mod tests {
             .link(&shared, name("shared"))
             .layer(state.clone())
             .link(&local, name("local"))
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&state, name("state"))
             .build()
             .perform(&operator)
@@ -2530,7 +2530,7 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         let result = Stack::builder()
             .layer(state.clone())
@@ -2559,11 +2559,11 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let elsewhere = Ephemeral::new();
+        let elsewhere = Ephemeral::detached();
 
         let result = Stack::builder()
             .layer(shared.clone())
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&elsewhere, name("state"))
             .build()
             .perform(&operator)
@@ -2583,7 +2583,7 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         let alone = Stack::builder()
             .layer(shared.clone())
@@ -2627,7 +2627,7 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let (left, right) = (Ephemeral::new(), Ephemeral::new());
+        let (left, right) = (Ephemeral::detached(), Ephemeral::detached());
 
         shared
             .transaction()
@@ -2642,7 +2642,7 @@ mod tests {
             .layer(shared.clone())
             .layer(left.clone())
             .layer(right.clone())
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&left, name("state"))
             .link(&right, name("state"))
             .build()
@@ -2673,7 +2673,7 @@ mod tests {
     async fn it_refuses_to_transact_without_a_branch_bottom() -> Result<()> {
         let (operator, _profile) = test_operator_with_profile().await;
         let stack = Stack::builder()
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .build()
             .perform(&operator)
             .await?;
@@ -2805,7 +2805,7 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         let counter: Entity = "ctr:1".parse()?;
         shared
@@ -2862,7 +2862,7 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::detached();
 
         let counter: Entity = "ctr:1".parse()?;
         shared
@@ -2887,7 +2887,7 @@ mod tests {
             .layer(shared.clone())
             .layer(state.clone())
             .link(&shared, name("shared"))
-            .layer(Ephemeral::new())
+            .layer(Ephemeral::detached())
             .link(&state, name("state"))
             .build()
             .perform(&operator)

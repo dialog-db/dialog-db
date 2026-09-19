@@ -148,6 +148,7 @@ impl OperatorBuilder {
             session: Arc::new(session),
             delegations: Arc::new(OnceLock::new()),
             chains: Arc::default(),
+            ephemerals: Arc::default(),
             reach: Arc::new(OnceLock::new()),
             hydration: Arc::default(),
             speculation: Arc::default(),

@@ -53,6 +53,9 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
+use dialog_capability::Command;
+use thiserror::Error;
+
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
@@ -110,13 +113,120 @@ pub struct Ephemeral {
     state: Arc<RwLock<State>>,
 }
 
-impl Default for Ephemeral {
-    fn default() -> Self {
-        Self {
-            entity: Entity::new().expect("the platform can mint a random entity"),
-            state: Arc::default(),
-        }
+/// A handle to an ephemeral layer that does not keep it alive: what
+/// an [`EphemeralRegistry`] holds, so a layer dies with the last
+/// [`Ephemeral`] handle to it, as a closing tab's should.
+#[derive(Clone, Debug)]
+pub struct WeakEphemeral {
+    entity: Entity,
+    state: Weak<RwLock<State>>,
+}
+
+impl WeakEphemeral {
+    /// The layer, if some strong handle still holds it.
+    pub fn upgrade(&self) -> Option<Ephemeral> {
+        self.state.upgrade().map(|state| Ephemeral {
+            entity: self.entity.clone(),
+            state,
+        })
     }
+}
+
+/// The ephemeral layers open in a process, by address. An environment
+/// holds one and provides [`CreateEphemeral`] and [`OpenEphemeral`]
+/// from it, so a layer is a process resource opened through the
+/// environment like a branch, never constructed. Entries are weak: a
+/// layer whose every handle was dropped is gone, and opening its
+/// address afterwards fails rather than reviving an empty store under
+/// a name something else may still record.
+#[derive(Debug, Default)]
+pub struct EphemeralRegistry {
+    entries: Mutex<HashMap<Entity, WeakEphemeral>>,
+}
+
+impl EphemeralRegistry {
+    /// Mint a fresh layer and register it under its address.
+    pub fn create(&self) -> Ephemeral {
+        let layer = Ephemeral::detached();
+        let mut entries = self.entries.lock();
+        entries.retain(|_, weak| weak.upgrade().is_some());
+        entries.insert(layer.entity.clone(), layer.downgrade());
+        layer
+    }
+
+    /// The layer registered at `address`, if it is still alive.
+    pub fn open(&self, address: &Entity) -> Option<Ephemeral> {
+        self.entries
+            .lock()
+            .get(address)
+            .and_then(WeakEphemeral::upgrade)
+    }
+
+    /// How many registered layers are alive.
+    pub fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .values()
+            .filter(|weak| weak.upgrade().is_some())
+            .count()
+    }
+
+    /// Whether no registered layer is alive.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Command minting a fresh ephemeral layer, registered with the
+/// environment under its address. Built by [`Ephemeral::create`].
+#[derive(Debug, Clone, Copy)]
+pub struct CreateEphemeral;
+
+impl Command for CreateEphemeral {
+    type Input = ();
+    type Output = Ephemeral;
+}
+
+impl CreateEphemeral {
+    /// Mint and register the layer.
+    pub async fn perform<Env>(self, env: &Env) -> Ephemeral
+    where
+        Env: Provider<CreateEphemeral>,
+    {
+        Provider::<CreateEphemeral>::execute(env, ()).await
+    }
+}
+
+/// Command opening the ephemeral layer the environment holds at an
+/// address. Built by [`Ephemeral::open`].
+#[derive(Debug, Clone)]
+pub struct OpenEphemeral {
+    /// The layer's address: the nonce entity it was created under.
+    pub address: Entity,
+}
+
+impl Command for OpenEphemeral {
+    type Input = Entity;
+    type Output = Result<Ephemeral, EphemeralError>;
+}
+
+impl OpenEphemeral {
+    /// Resolve the layer, or fail if nothing holds one at the address.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Ephemeral, EphemeralError>
+    where
+        Env: Provider<OpenEphemeral>,
+    {
+        Provider::<OpenEphemeral>::execute(env, self.address).await
+    }
+}
+
+/// Why an ephemeral layer could not be opened.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum EphemeralError {
+    /// No live layer is registered at the address: it was never
+    /// created in this process, or its last handle was dropped.
+    #[error("No ephemeral layer is open at {0}")]
+    NotOpen(Entity),
 }
 
 #[derive(Debug)]
@@ -427,9 +537,34 @@ impl Observer {
 }
 
 impl Ephemeral {
-    /// An empty layer.
-    pub fn new() -> Self {
-        Self::default()
+    /// An empty layer belonging to nothing: a tree layer's session
+    /// store, which the layer owns and nothing else addresses. A
+    /// standalone layer is created through the environment instead
+    /// ([`create`](Self::create)), so it has an address others can open.
+    pub(crate) fn detached() -> Self {
+        Self {
+            entity: Entity::new().expect("the platform can mint a random entity"),
+            state: Arc::default(),
+        }
+    }
+
+    /// Mint a fresh layer through the environment, registered under
+    /// its address so [`open`](Self::open) finds it.
+    pub fn create() -> CreateEphemeral {
+        CreateEphemeral
+    }
+
+    /// Open the layer the environment holds at `address`.
+    pub fn open(address: Entity) -> OpenEphemeral {
+        OpenEphemeral { address }
+    }
+
+    /// A handle that does not keep the layer alive.
+    pub fn downgrade(&self) -> WeakEphemeral {
+        WeakEphemeral {
+            entity: self.entity.clone(),
+            state: Arc::downgrade(&self.state),
+        }
     }
 
     /// Assert a statement: its asserts and replaces land in the store
@@ -695,7 +830,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_asserts_idempotently_and_replaces_per_cell() {
-        let line = Ephemeral::new();
+        let line = Ephemeral::detached();
         let observer = line.observe_everything();
         line.assert(
             the!("person/name")
@@ -742,7 +877,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_removes_held_facts_and_tombstones_absent_ones() {
-        let line = Ephemeral::new();
+        let line = Ephemeral::detached();
         line.assert(
             the!("person/name")
                 .of("id:a".parse().unwrap())
@@ -789,7 +924,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_scans_in_tree_order_for_every_selector_shape() {
-        let line = Ephemeral::new();
+        let line = Ephemeral::detached();
         for (of, the_, is) in [
             ("id:b", "person/name", "Bob"),
             ("id:a", "person/name", "Alice"),
@@ -839,7 +974,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_queues_matched_instants_per_observer_and_gaps_past_the_bound() {
-        let line = Ephemeral::new();
+        let line = Ephemeral::detached();
         let everything = line.observe_everything();
         let names = {
             let demand = Demand::new();
@@ -895,7 +1030,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_filters_an_instant_to_the_covered_facts() {
-        let line = Ephemeral::new();
+        let line = Ephemeral::detached();
         let demand = Demand::new();
         demand.record(&ArtifactSelector::new().the("person/name".parse().unwrap()));
         let names = line.observe(demand);
@@ -910,7 +1045,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_unregisters_a_dropped_observer() {
-        let line = Ephemeral::new();
+        let line = Ephemeral::detached();
         let observer = line.observe_everything();
         assert_eq!(line.observers(), 1);
         drop(observer);
@@ -920,7 +1055,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_witnesses_without_changing_the_store() {
-        let line = Ephemeral::new();
+        let line = Ephemeral::detached();
         let observer = line.observe_everything();
         let before = line.revision();
         let mut transient = Changes::new();
@@ -941,8 +1076,8 @@ mod tests {
 
     #[dialog_common::test]
     fn it_chains_the_hash_through_instants() {
-        let a = Ephemeral::new();
-        let b = Ephemeral::new();
+        let a = Ephemeral::detached();
+        let b = Ephemeral::detached();
         assert_eq!(a.revision(), b.revision());
         a.assert(claim("id:a", "person/name", "A"));
         b.assert(claim("id:a", "person/name", "A"));
@@ -956,7 +1091,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_retains_entities_and_reports_the_drop() {
-        let line = Ephemeral::new();
+        let line = Ephemeral::detached();
         line.assert(claim("site:1", "site/path", "/a"));
         line.assert(claim("site:2", "site/path", "/b"));
         line.retract(claim("doc:1", "doc/title", "T"));
@@ -978,10 +1113,32 @@ mod tests {
 
     #[dialog_common::test]
     fn it_shares_the_store_across_clones() {
-        let line = Ephemeral::new();
+        let line = Ephemeral::detached();
         let handle = line.clone();
         handle.assert(claim("id:a", "person/name", "A"));
         assert_eq!(line.len(), 1);
         assert_eq!(line.revision(), handle.revision());
+    }
+
+    #[dialog_common::test]
+    fn it_registers_layers_weakly_by_address() {
+        let registry = EphemeralRegistry::default();
+        let layer = registry.create();
+        let address = layer.entity().clone();
+        assert!(registry.open(&address).expect("registered").is(&layer));
+        assert_eq!(registry.len(), 1);
+        let other = registry.create();
+        assert!(
+            !registry
+                .open(other.entity())
+                .expect("registered")
+                .is(&layer)
+        );
+        drop(layer);
+        assert!(
+            registry.open(&address).is_none(),
+            "a layer dies with its last handle"
+        );
+        assert_eq!(registry.len(), 1);
     }
 }
