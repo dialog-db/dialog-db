@@ -70,6 +70,9 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::Demand;
 
+mod channel;
+pub use channel::*;
+
 /// How many matched instants an observer's queue holds before it
 /// gaps. An observer that drains less often than this many matching
 /// writes land recomputes from the fold instead of maintaining.
@@ -86,8 +89,9 @@ pub struct EphemeralRevision {
     pub hash: Blake3Hash,
 }
 
-/// One change to what readers of the layer see.
-#[derive(Clone, Debug, PartialEq)]
+/// One change to what readers of the layer see. Serializable: it is
+/// what a [`Channel`] carries to a peer.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Instant {
     /// The sequence this instant minted; the store's revision after
     /// it is `(sequence, hash)`.
@@ -766,6 +770,20 @@ impl Ephemeral {
     pub fn len(&self) -> usize {
         // Every fact sits under exactly three keys.
         self.state.read().facts.len() / 3
+    }
+
+    /// Every fact held, each once, in entity order: the fold a peer
+    /// that cannot be caught up from instants applies instead.
+    pub fn facts(&self) -> Vec<Artifact> {
+        let state = self.state.read();
+        state
+            .facts
+            .iter()
+            .filter(|(key, fact)| {
+                **key == EntityKey::from_artifact(fact, &state.manifest).into_key()
+            })
+            .map(|(_, fact)| fact.clone())
+            .collect()
     }
 
     /// The facts a selector matches, in the order a tree scan of the
