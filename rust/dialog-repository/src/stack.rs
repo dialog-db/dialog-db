@@ -1285,6 +1285,7 @@ impl<'a> StackCommit<'a> {
         induce(
             source,
             &composite,
+            &staged,
             &mut changes,
             self.transients,
             &mut witness,

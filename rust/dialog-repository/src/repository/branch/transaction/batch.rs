@@ -556,7 +556,17 @@ where
     // store: a command that fired a rule is seen by the store's
     // observers even though the commit folds it away.
     let mut witness = source.overlay();
-    induce(source, view, &mut changes, transients, &mut witness, env).await?;
+    let staged = Placements::resolve(source, &changes, env).await?;
+    induce(
+        source,
+        view,
+        &staged,
+        &mut changes,
+        transients,
+        &mut witness,
+        env,
+    )
+    .await?;
     let placements = Placements::resolve(source, &changes, env).await?;
     let Partitioned {
         tree: changes,

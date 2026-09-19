@@ -256,9 +256,11 @@ impl TransactionCommit<&Snapshot> {
         let source = SourceRef::Snapshot(snapshot);
         let view = Composite::of(source.to_source());
         let mut witness = source.overlay();
+        let staged = Placements::resolve(source, &changes, env).await?;
         induce::induce(
             source,
             &view,
+            &staged,
             &mut changes,
             self.transients,
             &mut witness,

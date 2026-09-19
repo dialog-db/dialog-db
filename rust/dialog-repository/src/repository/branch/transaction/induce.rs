@@ -36,7 +36,7 @@ use std::sync::Arc;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Attribute, Change, Changes, Entity, Instruction, Select, Statement,
-    Value,
+    Update as _, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -49,6 +49,7 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
+use crate::placement::Placements;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::source::SourceRef;
@@ -96,8 +97,9 @@ impl Witness for &Ephemeral {
 pub(crate) async fn induce<Env, W: Witness>(
     source: SourceRef<'_>,
     view: &Composite,
+    placements: &Placements,
     changes: &mut Changes,
-    transients: Changes,
+    mut transients: Changes,
     witness: &mut W,
     env: &Env,
 ) -> Result<(), CommitError>
@@ -113,6 +115,11 @@ where
         + ConditionalSync
         + 'static,
 {
+    // A fact asserted under a transient attribute is a dispatched
+    // command: it moves to the transient bucket before anything reads
+    // the batch, so `assert` and `dispatch` say the same thing for it.
+    take_transient(changes, placements).assert(&mut transients);
+
     // Round 1 stimulus: everything the commit changes, plus the
     // watermark lag — facts that entered the branch since the last
     // inducing instant (a pull, a raw commit, a crash between publish
@@ -275,7 +282,8 @@ where
             };
             let transient_head = dispatch
                 .is_transient(&rule.conclusion().this(), &overlay, env)
-                .await?;
+                .await?
+                || concludes_transient(&rule, placements);
 
             // Delta restriction: bind stimulus rows into the premises
             // they match and evaluate with those bindings fixed, so
@@ -328,6 +336,47 @@ where
     }
 
     Ok(())
+}
+
+/// Move the facts asserted under transient attributes out of
+/// `changes`, as the transients they are. A retract of one has nothing
+/// durable to remove and is dropped.
+fn take_transient(changes: &mut Changes, placements: &Placements) -> Changes {
+    let mut kept = Changes::new();
+    let mut taken = Changes::new();
+    for instruction in std::mem::replace(changes, Changes::new()).into_instructions() {
+        let transient = match &instruction {
+            Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
+                placements.is_transient(&a.the)
+            }
+        };
+        let into = if transient { &mut taken } else { &mut kept };
+        match instruction {
+            Instruction::Assert(a) => into.associate(a.the, a.of, a.is),
+            Instruction::Replace(a) => into.associate_unique(a.the, a.of, a.is),
+            Instruction::Retract(a) if !transient => into.dissociate(a.the, a.of, a.is),
+            Instruction::Retract(_) => {}
+        }
+    }
+    *changes = kept;
+    taken
+}
+
+/// Whether a rule's conclusion is transient attributes alone: its
+/// head then lives one round, as if its concept carried the marker.
+fn concludes_transient(rule: &InductiveRule, placements: &Placements) -> bool {
+    let mut any = false;
+    let all = rule.conclusion().with().iter().all(|(_, field)| {
+        any = true;
+        match field.descriptor().the() {
+            Relation::Attribute(the) => {
+                let attribute: Attribute = the.into();
+                placements.is_transient(&attribute)
+            }
+            Relation::Collection { .. } => false,
+        }
+    });
+    any && all
 }
 
 /// One tree layer's committed trigger slice: the layer, the head
@@ -3265,6 +3314,132 @@ mod tests {
             values(&branch, &operator, "result/target", &command).await?,
             vec![Value::Entity(target)]
         );
+        Ok(())
+    }
+
+    /// A fact asserted under a transient attribute is a dispatched
+    /// command: it fires the rule, is witnessed for the round it
+    /// lives, and is never held — `assert` and `dispatch` say the same
+    /// thing for it.
+    #[dialog_common::test]
+    async fn it_treats_an_asserted_transient_attribute_as_dispatched() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(crate::TransientAttribute::new(
+                "cmd.increment/counter".parse()?,
+            ))
+            .assert(increment_rule())
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let observer = branch.overlay().observe_everything();
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command.clone())
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            seen(&observer),
+            vec![("cmd.increment/counter".to_string(), "cmd:1".to_string())]
+        );
+        assert_eq!(
+            values(&branch, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the asserted command fires the rule"
+        );
+        assert!(
+            values(&branch, &operator, "cmd.increment/counter", &command)
+                .await?
+                .is_empty(),
+            "and is never held"
+        );
+        Ok(())
+    }
+
+    /// A rule whose conclusion is transient attributes alone has a
+    /// transient head, with no concept marker: the intermediate
+    /// cascades to the next round and never lands.
+    #[dialog_common::test]
+    async fn it_gives_a_rule_a_transient_head_by_attribute() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let stage: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } } },
+            "when": [{
+                "assert": { "with": { "target": { "the": "cmd.start/target", "as": "Entity" } } },
+                "where": { "this": { "?": { "name": "this" } }, "target": { "?": { "name": "target" } } }
+            }]
+        }))?;
+        let finish: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": { "target": { "the": "result/target", "as": "Entity" } } },
+            "when": [{
+                "assert": { "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } } },
+                "where": { "this": { "?": { "name": "this" } }, "target": { "?": { "name": "target" } } }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(crate::TransientAttribute::new("cmd.start/target".parse()?))
+            .assert(crate::TransientAttribute::new("cmd.stage/target".parse()?))
+            .assert(stage)
+            .assert(finish)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            values(&branch, &operator, "result/target", &command).await?,
+            vec![Value::Entity(target)],
+            "the cascade lands the durable head"
+        );
+        for attribute in ["cmd.start/target", "cmd.stage/target"] {
+            assert!(
+                values(&branch, &operator, attribute, &command)
+                    .await?
+                    .is_empty(),
+                "{attribute} is transient by declaration"
+            );
+        }
         Ok(())
     }
 }
