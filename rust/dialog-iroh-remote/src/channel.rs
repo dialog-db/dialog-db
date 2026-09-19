@@ -167,6 +167,23 @@ impl Connect for Ready {
     }
 }
 
+impl ChannelError {
+    /// Whether this says the channel is gone rather than unsuitable.
+    ///
+    /// A transport that could not reach the peer, or an exchange that
+    /// broke off, is a link that may be down — worth dropping and
+    /// rebuilding. [`ChannelError::Unsupported`] is not: it is a
+    /// permanent property of the channel in hand, and a fresh one of the
+    /// same kind would refuse the same thing. Reconnecting on it would
+    /// turn one honest refusal into a rebuild on every blob.
+    pub fn is_broken_link(&self) -> bool {
+        matches!(
+            self,
+            ChannelError::Unreachable { .. } | ChannelError::Interrupted { .. }
+        )
+    }
+}
+
 /// A channel that reaches nobody.
 ///
 /// What an [`Iroh`](crate::site::Iroh) site holds when it was built by
