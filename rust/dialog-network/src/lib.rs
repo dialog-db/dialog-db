@@ -77,6 +77,7 @@ mod tests {
     use dialog_iroh_remote::helpers::Volatile;
     use dialog_iroh_remote::serve::Responder;
     use dialog_iroh_remote::site::IrohAddress;
+    use dialog_iroh_remote::wire::encode;
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address as S3Address;
@@ -155,10 +156,7 @@ mod tests {
             request: Vec<u8>,
         ) -> Result<Vec<u8>, ChannelError> {
             let response = self.0.answer(&request).await;
-            Ok(
-                dialog_iroh_remote::wire::encode("response", &response)
-                    .expect("a response encodes"),
-            )
+            Ok(encode("response", &response).expect("a response encodes"))
         }
     }
 

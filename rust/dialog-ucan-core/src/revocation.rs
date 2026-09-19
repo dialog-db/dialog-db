@@ -67,10 +67,16 @@ pub trait RevocationChecker {
     /// delegation stood.
     ///
     /// Async because the answer generally lives across a network boundary.
+    ///
+    /// The future is [`ConditionalSend`] for the same reason [`Self::Error`]
+    /// already is: a peer or an access service answers many requests at once,
+    /// and a check that cannot move between threads makes every server built
+    /// on this single-threaded. The bound is nothing on wasm, where there are
+    /// no threads to move between.
     fn query(
         &self,
         selector: RevocationSelector<'_>,
-    ) -> impl Future<Output = Result<Option<RevocationMatch>, Self::Error>>;
+    ) -> impl Future<Output = Result<Option<RevocationMatch>, Self::Error>> + ConditionalSend;
 
     /// Treat an unavailable service as "no revocation found".
     ///
@@ -138,7 +144,7 @@ impl<T: RevocationChecker + ConditionalSync> RevocationChecker for &T {
     }
 }
 
-impl<T: RevocationChecker> RevocationChecker for TolerateUnavailability<T> {
+impl<T: RevocationChecker + ConditionalSync> RevocationChecker for TolerateUnavailability<T> {
     type Error = Never;
 
     async fn query(
