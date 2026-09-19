@@ -57,12 +57,31 @@ only one of them is real.
    device can hold the profile, so there is nothing for cross-device
    reproducibility to buy.
 
-Native profiles are still an extractable seed in a file, which is a
-separate matter being addressed on its own terms. Note the consequence
-while it lasts: copying a native profile directory to a second machine
-gives both machines the same operator key, hence the same `Origin`, hence
-colliding `Version`s. That is a property of a copyable profile, not of
-this derivation.
+Native profiles are still an extractable seed in a file, so copying a
+profile directory to a second machine gives both machines the same
+profile and hence the same operator key, `Origin` and `Version`s. That
+is a property of a copyable profile, not of this derivation, and
+**per-device uniqueness of the profile key is assumed here rather than
+enforced**. The fix is to back native profile keys with the OS keystore
+so they are non-extractable the way browser keys already are — not to
+derive them from a device identifier, which was considered and dropped:
+a serial is an identifier rather than a secret, and the identifiers
+available without root on Linux (`/etc/machine-id`) are both regenerated
+on reinstall and copied with disk images, failing in both directions at
+once.
+
+Worth knowing before that work starts: every platform keystore —
+Secure Enclave, Windows CNG/TPM, TPM 2.0 — offers NIST P-256, not
+Ed25519. So an OS-backed profile key is a P-256 key, and this derivation
+needs a P-256 arm: `es256` has signing and verification but no agreement
+module, and its `p256` dependency enables `ecdsa` and `pkcs8` but not
+`ecdh`.
+
+The derivation carries over unchanged in shape. Secure Enclave and TPM
+keys do ECDH, so self-agreement works there exactly as it does here. A
+signature-based derivation would not have: Secure Enclave ECDSA
+randomizes `k`, so the scheme this replaced would have broken on OS-backed
+keys for the same reason it broke in Safari.
 
 ## The scheme
 
