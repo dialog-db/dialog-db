@@ -27,6 +27,7 @@ use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
 use dialog_effects::credential::Secret;
+use dialog_effects::peer as peer_fx;
 use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, blob, credential, memory};
 use dialog_identity::Authority;
@@ -100,7 +101,8 @@ pub struct Operator<S: Clone> {
         credential::Retract<Secret>,
         memory::Resolve,
         memory::Publish,
-        memory::Retract
+        memory::Retract,
+        peer_fx::Spaces
     )]
     /// Storage — routes DID-based effects.
     storage: Storage<S>,

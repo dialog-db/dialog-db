@@ -33,7 +33,13 @@ macro_rules! carries_nothing {
     };
 }
 
-carries_nothing!(archive::Get, memory::Resolve, memory::Retract, peer::Hello);
+carries_nothing!(
+    archive::Get,
+    memory::Resolve,
+    memory::Retract,
+    peer::Hello,
+    peer::Spaces
+);
 
 impl Carries for archive::Put {
     fn blocks(&self) -> Vec<Vec<u8>> {

@@ -5,13 +5,18 @@
 //! ```text
 //! Subject
 //!   └── Peer (/peer)
-//!         └── Hello → Result<Greeting, PeerError>
+//!         ├── Hello  → Result<Greeting, PeerError>
+//!         └── Spaces → Result<Vec<Offer>, PeerError>
 //! ```
 //!
 //! Every other effect asks a peer to do something with data. This one
 //! asks it to describe itself, which is what a client needs before it
 //! can do anything else useful: which identities a peer answers for,
 //! and therefore whether it is the one you meant to reach.
+//!
+//! [`Hello`] answers with the identities a peer holds; [`Spaces`] with
+//! the spaces behind them. Together they are everything a peer will say
+//! about itself before it is asked to do anything.
 //!
 //! It is a capability rather than an unauthenticated banner on purpose.
 //! A peer's identity is not a secret, but reachability is not permission
@@ -83,6 +88,69 @@ impl Effect for Hello {
 
     fn command() -> &'static str {
         "get/peer"
+    }
+}
+
+/// One space a peer holds.
+///
+/// The subject is the space's own identity — the DID its repository is
+/// named by, and the one a delegation for it would carry. That is the
+/// whole of what a peer can say about a space it has not been asked to
+/// open, and it is what a caller needs to ask for access to one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Offer {
+    /// The space's subject DID.
+    pub subject: Did,
+    /// What this peer calls it, when it calls it anything.
+    ///
+    /// A local label and nothing more: the peer's own, not a fact about
+    /// the space. A space's display name lives on its content branch and
+    /// is only readable once replicated, so this is what labels a space
+    /// a caller has not opened yet. Absent from a peer that knows its
+    /// spaces by DID alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Ask a peer which spaces it holds.
+///
+/// The second half of "who are you": [`Hello`] answers with the
+/// identities a peer answers for, and this with the spaces behind them.
+/// Both are self-description, which is why both hang off [`Peer`] — a
+/// caller invoking this holds no authority over any space in the answer,
+/// and by definition cannot, because the answer is what tells it which
+/// spaces there are to ask about.
+///
+/// # What this discloses
+///
+/// A peer's whole inventory, to anyone whose invocation it verifies. The
+/// subject of that invocation is the caller's own, not the peer's, so a
+/// peer that answers this answers strangers. What bounds it is the
+/// carrier: today the only one is a loopback rendezvous, which is to say
+/// the disclosure is to processes already on the machine. A peer reached
+/// over anything wider needs a policy here, and does not have one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Attenuate)]
+pub struct Spaces;
+
+impl Default for Spaces {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Spaces {
+    /// Ask.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Effect for Spaces {
+    type Of = Peer;
+    type Output = Result<Vec<Offer>, PeerError>;
+
+    fn command() -> &'static str {
+        "get/peer/space"
     }
 }
 

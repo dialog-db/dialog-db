@@ -5,6 +5,11 @@
 //! routed to a space: there is no subject to look up, only the identity
 //! already held.
 //!
+//! Its sibling [`Spaces`](dialog_effects::peer::Spaces) goes the other
+//! way and is not here: what spaces an operator has is exactly what its
+//! storage has mounted, so it forwards there like every other stored
+//! effect.
+//!
 //! The subject is taken from the invocation rather than reported from
 //! this side. An operator answers *for* a subject, and the one it was
 //! asked about is the one the caller proved a delegation for — so
