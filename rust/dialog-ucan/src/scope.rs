@@ -138,6 +138,25 @@ fn ability_to_command(ability: &str) -> Command {
     }
 }
 
+/// Build a scope by serializing the capability chain as it stands.
+///
+/// <div class="warning">
+///
+/// **This is not the constructor for an invocation.** It serializes
+/// every caveat directly, so an effect that carries a payload puts that
+/// payload into the scope — `archive::Put`'s block and
+/// `memory::Publish`'s content land in the parameters, and from there in
+/// a signed invocation's arguments and on the wire to whoever redeems
+/// it. Use [`Scope::invoke`], which projects payload fields through
+/// [`Attenuate`](dialog_capability::Attenuate) so a block becomes a
+/// digest and a checksum. That is what
+/// [`FromCapability::from_capability`](dialog_capability::access::FromCapability)
+/// calls, and what every authorizer parses.
+///
+/// This impl remains for scopes built from a capability that carries no
+/// payload, where the two agree.
+///
+/// </div>
 impl<T: Ability> From<&T> for Scope {
     fn from(capability: &T) -> Self {
         let ability = capability.ability();
