@@ -9,6 +9,7 @@
 //! - [`storage`]: Location-based storage operations (`Storage`, `Location`, `Mount`, `Load`, `Save`)
 //! - [`memory`]: CAS memory cells (`Memory`, `Space`, `Cell`, `Resolve`, `Publish`, `Retract`)
 //! - [`archive`]: Content-addressed archive (`Archive`, `Catalog`, `Get`, `Put`)
+//! - [`branch`]: Named lines of revisions (`Branches`, `Branch`, `List`, `Create`, `Delete`)
 //!
 //! # Example
 //!
@@ -41,6 +42,7 @@ pub mod access;
 pub mod archive;
 pub mod authority;
 pub mod blob;
+pub mod branch;
 pub mod credential;
 pub mod memory;
 pub mod rejection;
@@ -55,6 +57,7 @@ pub mod storage;
 pub mod prelude {
     pub use crate::archive::prelude::*;
     pub use crate::blob::prelude::*;
+    pub use crate::branch::prelude::*;
     pub use crate::credential::prelude::*;
     pub use crate::memory::prelude::*;
 }
@@ -68,11 +71,26 @@ use serde::{Deserialize, Serialize};
 /// every write (`/use/get/...`, `/use/put/...`, `/use/delete/...`). A delegation
 /// attenuated to `Use` lets its holder read and write the subject's data
 /// without holding `/ucan` (delegation and revocation), which is what a
-/// member of a shared space is given. `/void` is reserved beside it for
-/// operations that destroy rather than change; nothing lives there yet.
+/// member of a shared space is given. [`Void`] sits beside it for
+/// operations that destroy rather than change.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Use;
 
 impl Attenuation for Use {
+    type Of = Subject;
+}
+
+/// Operations that destroy rather than change (`/void/delete/...`).
+///
+/// Separate from [`Use`] because retracting a fact and destroying the
+/// thing that holds facts are different powers. A member of a shared
+/// space holds `/use`, so they may write and retract the subject's
+/// data -- but deleting the branch itself is not something that grant
+/// should carry. Keeping destruction in its own root means it can only
+/// ever be conferred deliberately.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Void;
+
+impl Attenuation for Void {
     type Of = Subject;
 }
