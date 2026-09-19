@@ -601,6 +601,66 @@ oversight:
   layer only through a stack write whose placements put every
   `dialog.rule/*` attribute there.
 
+**Increment 5** (instants for observers, `ephemeral.rs`, `induce.rs`,
+`placement.rs`): the ephemeral layer's shared ring is gone.
+
+- An observer registers with a layer under a demand
+  (`Ephemeral::observe(demand)`, `observe_everything()`) and owns a
+  bounded queue; every instant is fanned out at write time into each
+  observer's queue, filtered to the facts its demand covers. An
+  instant nobody demanded costs nothing. A queue that overflows
+  (1024 matched instants) yields a gap on the next drain and the
+  observer recomputes from the fold; dropping the observer
+  unregisters it. Subscriptions observe every session store and
+  standalone ephemeral layer of their composite instead of pinning
+  sequences, widen to everything during a recompute, and narrow to
+  the new cover after.
+- Induction takes a witness per round. Each round's transients are
+  minted as an instant (`Ephemeral::witness`: asserted and retracted
+  in one instant, store untouched), so a command consumed by a rule
+  in the same commit, and a rule-concluded intermediate that folded
+  away, are seen by whoever observes the layer. A branch or snapshot
+  commit witnesses to its session store; a stack commit routes each
+  transient to the layer its placement names, else the bottom's
+  session store. This is the #483 case closed.
+- `transient:` is sugar. `dialog.attribute/transient` beside an
+  attribute's `dialog.attribute/scope` (`TransientAttribute`) makes
+  facts asserted under it move to the transient bucket before
+  induction, so `assert` and `dispatch` converge; a rule whose
+  conclusion is all transient attributes has a transient head.
+
+**Increment 6** (channels, `ephemeral/channel.rs`): a replicated
+ephemeral layer, as far as the transport allows.
+
+- `Channel::over(layer, capacity)` keeps a bounded log of the layer's
+  instants with a per-peer offset. `since(peer)` is "the instants past
+  your offset that you did not send", moving the offset;
+  `receive(peer, sync)` applies a peer's instants as writes and logs
+  them as that peer's, so two channels exchanging syncs converge
+  rather than echo. Retention is the lowest peer offset under the
+  ring bound; a peer whose offset fell off the log gets a `Resync`
+  carrying the fold, and a channel whose own observer gapped resyncs
+  every peer. `Sync` is serializable: the wire shape is fixed here.
+- What remains is the transport binding: carrying a `Sync` between
+  processes over the remote site, and a scope's `replicated` property
+  resolving to a channel. In-process peers exercise the log and the
+  offsets today.
+
+**The tonk side** (order-of-work item 4, in `tonk-labs/tonk`): the
+reactor holds every branch as a stack `[branch, state, top]` with the
+process's state layer linked under `memory:state`; reads,
+subscriptions, and writes go through it; the analyzer lowers a
+concept's `scope:` to one `dialog.attribute/scope` placement per
+attribute, and the library declares its session-only concepts and
+commands on `memory:state`; the post-commit dispatcher runs the
+commands the commit *witnessed* rather than the request's pre-commit
+bucket, so a rule-concluded command reaches its provider; and a
+worker command's redirect is a `tonk:site` `target` fact on the tab's
+site that the tab's own stamp subscription follows, in place of the
+`navigate` client message. Per-tab layers above the state layer and
+the inspector over the registry are not built; the note's per-tab
+decision (topology, not induction) stands.
+
 ## Order of work
 
 1. ~~Ephemeral layer.~~ Done: increment 2.
@@ -615,13 +675,32 @@ oversight:
    blobs in the archive and open by identity alone, `named`, the
    registry metadata; see *Known limits* above for what stays
    bottom-only.
-4. Tonk migration: `scope:state` and `scope:tab` declared in the
-   library, one stack per connection with its own tab layer,
-   inspector over the registry, `navigate` as a tab-scope
-   conclusion.
-5. Per-observer instant queues on the ephemeral layer, then
-   `transient:` as sugar.
-6. Channels: replicated ephemeral layers with a peer-offset log.
+4. ~~Tonk migration: `scope:state` declared in the library, the
+   reactor over stacks, commands as what the commit witnessed,
+   `navigate` as a tab-scope conclusion.~~ Done, see *The tonk side*
+   above. Still open: `scope:tab` with one tab layer per connection,
+   the inspector over the registry.
+5. ~~Per-observer instant queues on the ephemeral layer, then
+   `transient:` as sugar.~~ Done: increment 5.
+6. ~~Channels: replicated ephemeral layers with a peer-offset log.~~
+   Done in-process: increment 6. Still open: the transport binding.
+
+## What remains
+
+- Descriptor blobs in the archive, `Stack::open` by a stack identity
+  alone, `named`, the registry metadata.
+- The upper-layer watermark lag, and rule dispatch from a layer's
+  session store (both listed under *Known limits*).
+- Per-tab layers in tonk (`memory:tab`, one layer per connection
+  linked above the state layer) and the inspector over the operator's
+  ephemeral registry.
+- The channel transport: a `Sync` carried over the remote site, and
+  a scope's `replicated` property resolving to a channel.
+- In tonk, a commit made through the branch handle rather than the
+  stack (the evaluate route) routes `memory:state` facts to the
+  branch's own session store, which the stack reads but a stack
+  `forget` or `clear` of the scope does not reach; moving the
+  evaluate route onto the stack removes the second home.
 
 ## Decisions recorded
 
@@ -655,6 +734,22 @@ and not accidents:
   its conclusion routes by placement like any other write. The bottom
   is special only for the watermark lag and for the placement
   declarations.
+- **Observers own their queues; there is no shared log on a local
+  layer.** Fan-out at write time, filtered by demand, bounded per
+  observer with a gap on overflow. The shared ring with pinned
+  sequences was not kept: it made every observer pay for every
+  instant and made "all have seen it" a question the layer had to
+  answer. A channel keeps a log because its observers are peers with
+  offsets; that is the one place a log is the right shape.
+- **A command is what a commit witnessed.** Every round's transients
+  are minted as instants on the layer their placement names, and the
+  dispatcher drains those; the pre-commit bucket is a floor, not the
+  source. A rule-concluded command is therefore run, which the bucket
+  alone could never do (dialog-db #483).
+- **A worker's redirect is a fact on the tab's site.** The desired
+  location is asserted on `memory:state`; the tab's stamp
+  subscription follows it and the next `tonk:load` clears it. No
+  worker-to-client message carries a location.
 
 ## Open questions
 
