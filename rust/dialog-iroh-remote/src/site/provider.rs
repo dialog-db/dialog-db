@@ -115,11 +115,19 @@ where
         ..
     } = invocation;
 
-    let answer = match site
-        .channel()
-        .exchange(&address, authorization.into_bytes())
-        .await
-    {
+    // Connecting is part of reaching the peer, so a failure here is the
+    // same kind of answer as a dial that did not land: nothing was sent,
+    // and the request stands as retryable.
+    let channel = match site.channel().await {
+        Ok(channel) => channel,
+        Err(error) => {
+            return Err(E::from(Rejection::Unavailable {
+                reason: error.to_string(),
+            }));
+        }
+    };
+
+    let answer = match channel.exchange(&address, authorization.into_bytes()).await {
         Ok(answer) => answer,
         // The peer never answered, so nothing is known about the
         // request: retryable as it stands.
