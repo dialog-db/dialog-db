@@ -39,6 +39,29 @@ use crate::serve::{Answer, Responder, Store};
 use crate::site::IrohAddress;
 use crate::wire::{BlobAnswer, Response, encode, frame, read_frame};
 
+/// Run `future` to completion alongside this one.
+///
+/// Detached rather than joined: a connection and a stream outlive the
+/// loop that accepted them, and nothing is waiting on their outcome.
+/// `dialog_common::r#async::spawn` is the joining kind, so this is the
+/// same two-line shape `dialog-query` keeps for the same reason.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn detach<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn detach<F>(future: F)
+where
+    // bare-send-ok: native-only fn feeding tokio::spawn, which requires real Send
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future);
+}
+
 /// What this protocol is called on the wire.
 ///
 /// Versioned, and checked by iroh during the handshake rather than by
@@ -120,7 +143,8 @@ impl IrohChannel {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Channel for IrohChannel {
     async fn exchange(
         &self,
@@ -207,7 +231,8 @@ impl QuicTransfer {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Transfer for QuicTransfer {
     async fn send(&mut self, bytes: &[u8]) -> Result<(), ChannelError> {
         self.send
@@ -274,7 +299,7 @@ pub async fn accept<S, Resolver, Revocations>(
         let responder = responder.clone();
         // Per connection, so one peer that stalls mid-request does not
         // hold up every other peer behind it.
-        tokio::spawn(async move {
+        detach(async move {
             let connection = match incoming.await {
                 Ok(connection) => connection,
                 // A handshake that failed produced no request, so there
@@ -323,7 +348,7 @@ async fn serve_connection<S, Resolver, Revocations>(
         // Per stream, because a blob transfer can outlast many small
         // exchanges and holding the connection's accept loop for its
         // duration would serialize everything behind it.
-        tokio::spawn(async move {
+        detach(async move {
             if let Err(error) = serve_stream(&mut transfer, responder).await {
                 tracing::debug!(%error, "an exchange did not complete");
             }
@@ -414,5 +439,8 @@ fn performed(answer: Result<BlobAnswer, dialog_effects::blob::BlobError>) -> Res
     }
 }
 
-#[cfg(test)]
+// Native-only: these bind real endpoints and drive them from a tokio
+// runtime. What the browser path needs proving against is a data
+// channel, which no runner here has.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
