@@ -17,6 +17,7 @@ use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Rejection;
 use dialog_effects::authority::{self, OperatorExt as _};
+use dialog_effects::{archive, blob, memory};
 use dialog_ucan::Ucan;
 use dialog_ucan_core::container::Container;
 use dialog_ucan_core::container::bundle::InvocationBundle;
@@ -93,9 +94,13 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Fx, T, E> Provider<ForkInvocation<Iroh, Fx>> for Iroh
+/// Send an invocation and read its answer as a value.
+///
+/// The shared body of every [`Provider`] impl below. It is a free
+/// function rather than a blanket impl because the impls have to be
+/// enumerated — see [`performs_by_value`] for why — and because the
+/// blob effects need a different body entirely.
+async fn perform<Fx, T, E>(site: &Iroh, invocation: ForkInvocation<Iroh, Fx>) -> Result<T, E>
 where
     Fx: Effect<Output = Result<T, E>> + 'static,
     Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
@@ -104,42 +109,109 @@ where
     E: From<AuthorizeError> + From<Rejection> + ConditionalSend,
     Result<T, E>: DeserializeOwned,
 {
-    async fn execute(&self, invocation: ForkInvocation<Iroh, Fx>) -> Result<T, E> {
-        let ForkInvocation {
-            address,
-            authorization,
-            ..
-        } = invocation;
+    let ForkInvocation {
+        address,
+        authorization,
+        ..
+    } = invocation;
 
-        let answer = match self
-            .channel()
-            .exchange(&address, authorization.into_bytes())
-            .await
-        {
-            Ok(answer) => answer,
-            // The peer never answered, so nothing is known about the
-            // request: retryable as it stands.
-            Err(error) => {
-                return Err(E::from(Rejection::Unavailable {
-                    reason: error.to_string(),
-                }));
-            }
-        };
-
-        match decode::<Response>("response", &answer) {
-            Ok(Response::Performed(output)) => match decode::<Result<T, E>>("output", &output) {
-                Ok(outcome) => outcome,
-                Err(error) => Err(E::from(Rejection::Unclassified {
-                    detail: format!("the peer's answer did not fit the command: {error}"),
-                })),
-            },
-            Ok(Response::Refused(refusal)) => Err(refused(refusal)),
-            Err(error) => Err(E::from(Rejection::Unclassified {
-                detail: format!("the peer did not answer in this protocol: {error}"),
-            })),
+    let answer = match site
+        .channel()
+        .exchange(&address, authorization.into_bytes())
+        .await
+    {
+        Ok(answer) => answer,
+        // The peer never answered, so nothing is known about the
+        // request: retryable as it stands.
+        Err(error) => {
+            return Err(E::from(Rejection::Unavailable {
+                reason: error.to_string(),
+            }));
         }
+    };
+
+    match decode::<Response>("response", &answer) {
+        Ok(Response::Performed(output)) => match decode::<Result<T, E>>("output", &output) {
+            Ok(outcome) => outcome,
+            Err(error) => Err(E::from(Rejection::Unclassified {
+                detail: format!("the peer's answer did not fit the command: {error}"),
+            })),
+        },
+        Ok(Response::Refused(refusal)) => Err(refused(refusal)),
+        Err(error) => Err(E::from(Rejection::Unclassified {
+            detail: format!("the peer did not answer in this protocol: {error}"),
+        })),
     }
 }
+
+/// The effects whose answer is a value, listed rather than derived.
+///
+/// A blanket `impl<Fx> Provider<ForkInvocation<Iroh, Fx>> for Iroh`
+/// would be shorter and would claim more than is true: that this site
+/// performs *any* effect whose output deserializes, when
+/// [`Responder`](crate::serve::Responder) serves exactly the set below.
+/// Enumerating makes the two halves agree by construction — an effect
+/// added to one and not the other does not compile — and it is what
+/// makes room for the blob effects, whose answers are streaming handles
+/// that no deserializing body can produce and which coherence will not
+/// let a blanket impl share a type with.
+macro_rules! performs_by_value {
+    ($($effect:ty),+ $(,)?) => {
+        $(
+            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+            impl Provider<ForkInvocation<Iroh, $effect>> for Iroh {
+                async fn execute(
+                    &self,
+                    invocation: ForkInvocation<Iroh, $effect>,
+                ) -> <$effect as Effect>::Output {
+                    perform(self, invocation).await
+                }
+            }
+        )+
+    };
+}
+
+performs_by_value!(
+    archive::Get,
+    archive::Put,
+    archive::Import,
+    memory::Resolve,
+    memory::Publish,
+    memory::Retract,
+);
+
+/// The blob effects answer with a streaming handle, not a value.
+///
+/// [`BlobReader`] and [`BlobWriter`] are trait objects over a live
+/// transfer, so there is nothing for a one-request-one-response
+/// [`Channel`](crate::channel::Channel) to encode and nothing this body
+/// could decode. Buffering a whole blob into a response would make them
+/// compile and would misrepresent a blob store as a block store, so
+/// they are refused by name — the same stance
+/// [`Responder`](crate::serve::Responder) takes on the serving side,
+/// and for the same reason.
+macro_rules! not_streamed_yet {
+    ($($effect:ty),+ $(,)?) => {
+        $(
+            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+            impl Provider<ForkInvocation<Iroh, $effect>> for Iroh {
+                async fn execute(
+                    &self,
+                    _invocation: ForkInvocation<Iroh, $effect>,
+                ) -> <$effect as Effect>::Output {
+                    Err(blob::BlobError::Storage(format!(
+                        "{} is a streaming transfer, which this peer transport does not carry yet",
+                        <$effect as Effect>::command(),
+                    )))
+                }
+            }
+        )+
+    };
+}
+
+not_streamed_yet!(blob::Read, blob::Write, blob::Import);
 
 /// A peer's refusal, in the caller's own vocabulary.
 ///

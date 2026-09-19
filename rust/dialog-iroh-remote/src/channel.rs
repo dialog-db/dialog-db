@@ -46,3 +46,32 @@ pub trait Channel: ConditionalSync {
     async fn exchange(&self, peer: &IrohAddress, request: Vec<u8>)
     -> Result<Vec<u8>, ChannelError>;
 }
+
+/// A channel that reaches nobody.
+///
+/// What an [`Iroh`](crate::site::Iroh) site holds when it was built by
+/// [`Default`] rather than handed a channel. It exists because a
+/// composite site is a struct of sites and every field must be a site,
+/// so there is no representing "this transport was not configured" by
+/// leaving it out — only by a channel that says so.
+///
+/// It says so precisely. A misconfigured client and an offline peer are
+/// different bugs with the same symptom, so the failure names the
+/// missing configuration rather than reporting the peer down.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Unconfigured;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Channel for Unconfigured {
+    async fn exchange(
+        &self,
+        peer: &IrohAddress,
+        _request: Vec<u8>,
+    ) -> Result<Vec<u8>, ChannelError> {
+        Err(ChannelError::Unreachable {
+            peer: peer.to_string(),
+            detail: "no channel was configured for this site, so nothing was dialed".into(),
+        })
+    }
+}
