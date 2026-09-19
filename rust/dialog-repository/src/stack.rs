@@ -718,23 +718,23 @@ impl Stack {
     }
 
     /// Whether some layer's live head differs from the head the stack
-    /// last published or pulled: it moved outside the stack, and a
-    /// publish of that layer would fail until a [`pull`](Self::pull).
+    /// last published or pulled: it moved outside the stack, through
+    /// this handle, and a publish of that layer would fail until an
+    /// [`advance`](Self::advance) (or a [`pull`](Self::pull), which
+    /// advances). Movement through another handle is not visible here
+    /// until an advance re-resolves the heads.
     pub fn behind(&self) -> bool {
         self.heads() != self.published()
     }
 
-    /// Bring movement in: re-resolve every branch layer's head from
-    /// storage, pull every layer that tracks an upstream, bottom to
-    /// top, then take the live heads as the published base and stage
-    /// and publish the wiring of every layer above a layer that moved.
+    /// Bring movement in: pull every layer that tracks an upstream,
+    /// bottom to top, then [`advance`](Self::advance) over the result.
     ///
-    /// Anything staged and not yet published is dropped: its chain
-    /// built on heads the pull supersedes, so it is stale wholesale,
-    /// and the transaction that staged it is re-run on the fresh
-    /// heads. A pull that fails part way leaves the published heads
-    /// where they were: layers beneath the failure may have reconciled
-    /// with their upstreams, and the next pull captures them.
+    /// This is the network half of keeping a stack current, and it
+    /// costs a round trip per upstream, so it belongs to whatever
+    /// already pulls branches on a schedule: the same sync loop, one
+    /// call per stack. Movement this process can already see needs no
+    /// pull; `advance` captures it alone.
     pub async fn pull<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Get>
@@ -751,12 +751,49 @@ impl Stack {
             + 'static,
     {
         for layer in &self.layers {
-            let Layer::Branch(branch) = layer else {
-                continue;
-            };
-            branch.refresh(env).await?;
-            if branch.upstream().is_some() {
+            if let Layer::Branch(branch) = layer
+                && branch.upstream().is_some()
+            {
+                branch.refresh(env).await?;
                 Box::pin(branch.pull().perform(env)).await?;
+            }
+        }
+        self.advance(env).await
+    }
+
+    /// Capture movement this process can see, without the network:
+    /// re-resolve every branch layer's head from storage, take the
+    /// live heads as the published base, and stage and publish the
+    /// wiring of every layer above a layer that moved.
+    ///
+    /// Anything staged and not yet published is dropped: its chain
+    /// built on heads this supersedes, so it is stale wholesale, and
+    /// the transaction that staged it is re-run on the fresh heads. An
+    /// advance that fails part way leaves the published heads where
+    /// they were, and the next one captures them.
+    ///
+    /// Cheap enough to call on a signal: a poll that found
+    /// [`behind`](Self::behind), a commit made through another handle
+    /// of a layer, a tab regaining focus. A stack whose layers only
+    /// ever move through it never needs one.
+    pub async fn advance<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
+            + ConditionalSync
+            + 'static,
+    {
+        for layer in &self.layers {
+            if let Layer::Branch(branch) = layer {
+                branch.refresh(env).await?;
             }
         }
         let previous = self.captured();
@@ -1994,6 +2031,65 @@ mod tests {
             "pull re-resolved the head and captured it"
         );
         assert_eq!(shared.revision(), other.revision());
+        Ok(())
+    }
+
+    /// `advance` captures a commit made through another handle
+    /// without the network: it re-resolves the head from storage and
+    /// captures it, exactly as `pull` does after its upstream pulls.
+    #[dialog_common::test]
+    async fn it_captures_movement_through_another_handle_on_advance() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::new();
+
+        let stack = Stack::builder()
+            .layer(shared.clone())
+            .layer(state.clone())
+            .link(&shared, name("shared"))
+            .build()
+            .perform(&operator)
+            .await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert!(
+            values::<String>(&stack, &operator, "doc/title", &doc)
+                .await?
+                .is_empty(),
+            "the stack's handle has not seen the other handle's commit"
+        );
+
+        let heads = stack.advance(&operator).await?;
+        assert_eq!(heads, stack.captured());
+        assert!(!stack.behind());
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "advance re-resolved the head and captured it"
+        );
+        let link = link_entity(&state.entity().clone(), &stack.identities()[0]);
+        let selector = ArtifactSelector::new()
+            .the("dialog.link/revision".parse()?)
+            .of(link);
+        let seen: Vec<Value> = state.scan(&selector).into_iter().map(|a| a.is).collect();
+        assert_eq!(
+            seen,
+            vec![Value::Bytes(Head::Tree(shared.revision()).bytes())],
+            "and refreshed the wiring above it"
+        );
         Ok(())
     }
 
