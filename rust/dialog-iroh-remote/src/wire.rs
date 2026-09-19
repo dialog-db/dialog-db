@@ -32,6 +32,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::channel::{ChannelError, Transfer};
+
 /// What comes back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
@@ -80,6 +82,52 @@ pub enum CodecError {
         /// The underlying reason.
         detail: String,
     },
+}
+
+/// The largest header a framed exchange will read.
+///
+/// Only the container and the [`Response`] are framed — a blob's bytes
+/// are not, and follow the frame rather than sitting inside it — so this
+/// bounds a proof chain, not a payload. A peer is a stranger, and a
+/// length it chose is how much memory this process reserves before it
+/// has read anything.
+pub const MAX_FRAME: usize = 16 * 1024 * 1024;
+
+/// A length-prefixed frame: four big-endian bytes, then the payload.
+///
+/// Every container and every [`Response`] is framed, including the ones
+/// that have no body behind them. An earlier shape here framed only the
+/// streamed exchanges and left a plain one as "the whole stream", which
+/// is worth recording as a mistake: both kinds share a connection, and a
+/// peer reads a stream *before* it knows which effect is on it, so there
+/// was no point at which it could have chosen the right framing. The
+/// uniform prefix is what makes the command — which only the verified
+/// invocation inside the frame reveals — something the peer can learn
+/// without having already guessed it.
+pub fn frame(payload: &[u8]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(payload.len() + 4);
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(payload);
+    framed
+}
+
+/// Read one frame from `transfer`.
+///
+/// Refuses a length past [`MAX_FRAME`] before reading a byte of it,
+/// which is the point of checking here rather than after.
+pub async fn read_frame(
+    what: &'static str,
+    transfer: &mut dyn Transfer,
+) -> Result<Vec<u8>, ChannelError> {
+    let prefix = transfer.read_exact(4).await?;
+    let len = u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize;
+    if len > MAX_FRAME {
+        return Err(ChannelError::Unsupported {
+            attempted: "read a frame",
+            detail: format!("{what} claims {len} bytes, past the {MAX_FRAME} this reads"),
+        });
+    }
+    transfer.read_exact(len).await
 }
 
 /// Encode a value for the wire.
