@@ -123,6 +123,35 @@ impl Secret<'_> {
         platform::reveal(&key, self.signer.ed25519_did(), self.context, sealed).await
     }
 
+    /// Derive a deterministic 32-byte secret from this identity.
+    ///
+    /// The same identity, context and `label` always yield the same bytes, on
+    /// every platform. Use it wherever a stable key has to come out of an
+    /// identity rather than out of storage -- an operator key, a per-purpose
+    /// subkey -- and run the result through whatever import the consumer needs.
+    ///
+    /// The derivation is a key agreement against this identity's own agreement
+    /// public key, NOT a signature. A signature is not a pseudo-random
+    /// function: RFC 8032 specifies a deterministic nonce, but hedged variants
+    /// that fold in fresh entropy are conforming and deployed (Apple's
+    /// CryptoKit, and so WebKit's `Ed25519`), and a key held in an enclave or
+    /// on a token is likely to do the same. Agreement has no nonce to hedge.
+    ///
+    /// `label` is hashed into the derivation after the fixed-width identity
+    /// key, so distinct labels give unrelated secrets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecretError::AgreementKeyUnavailable`] when this identity
+    /// carries no agreement key -- reachable only in the browser, for a key
+    /// restored from an archive written before agreement keys were stored,
+    /// whose seed is gone and cannot be re-derived. Otherwise returns an error
+    /// if a platform crypto operation fails.
+    pub async fn derive(&self, label: &[u8]) -> Result<[u8; 32], SecretError> {
+        let key: X25519SecretKey = self.signer.agreement_key().await?;
+        platform::derive(&key, self.context, label).await
+    }
+
     /// Conceal `plain` to this same identity.
     ///
     /// Useful for sealing something only you can read back later.
@@ -246,6 +275,71 @@ mod tests {
             ),
             "context is domain separation: the wrong label must not reveal"
         );
+    }
+
+    #[dialog_common::test]
+    async fn derivation_is_deterministic() {
+        let profile = signer(10).await;
+
+        let first = profile.secret(VAULT).derive(b"operator").await.unwrap();
+        let second = profile.secret(VAULT).derive(b"operator").await.unwrap();
+
+        assert_eq!(
+            first, second,
+            "the same identity, context and label must derive the same secret"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn derivation_separates_labels_contexts_and_identities() {
+        let profile = signer(11).await;
+        let other = signer(12).await;
+
+        let base = profile.secret(VAULT).derive(b"operator").await.unwrap();
+
+        assert_ne!(
+            base,
+            profile.secret(VAULT).derive(b"other").await.unwrap(),
+            "a different label must derive an unrelated secret"
+        );
+        assert_ne!(
+            base,
+            profile.secret(OTHER).derive(b"operator").await.unwrap(),
+            "a different context must derive an unrelated secret"
+        );
+        assert_ne!(
+            base,
+            other.secret(VAULT).derive(b"operator").await.unwrap(),
+            "a different identity must derive an unrelated secret"
+        );
+    }
+
+    /// A known-answer vector, and the structural guard on this derivation.
+    ///
+    /// Determinism alone is not enough: a signature-based derivation is
+    /// deterministic too, on every platform whose Ed25519 does not hedge the
+    /// nonce. This test pins the derivation to one value asserted by the same
+    /// code on native AND wasm, so it fails the moment the derivation stops
+    /// being a pure function of the key material -- including a relapse into
+    /// signing, and including the two platform arms silently diverging, which
+    /// is what the derivation this replaced actually did.
+    ///
+    /// Do not delete it as redundant with the determinism tests. If the
+    /// derivation changes on purpose, bump the context label (which re-derives
+    /// every operator and forks each profile's replica lineage) and record the
+    /// new vector deliberately.
+    #[dialog_common::test]
+    async fn derivation_matches_a_known_vector() {
+        const EXPECTED: [u8; 32] = [
+            0x14, 0xaa, 0x7e, 0x0e, 0x1f, 0x45, 0x62, 0xb6, 0xf4, 0xdc, 0x84, 0xdc, 0x26, 0x0c,
+            0x81, 0x07, 0xef, 0x76, 0xb3, 0x08, 0x52, 0x7e, 0xb4, 0x7b, 0x8a, 0x2f, 0xdc, 0x6b,
+            0xe7, 0x7a, 0xf0, 0xa8,
+        ];
+
+        let profile = Ed25519Signer::import(&[42u8; 32]).await.unwrap();
+        let derived = profile.secret(VAULT).derive(b"operator").await.unwrap();
+
+        assert_eq!(derived, EXPECTED);
     }
 
     #[dialog_common::test]
