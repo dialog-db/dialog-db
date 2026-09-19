@@ -37,6 +37,81 @@ pub async fn test_repo(
         .expect("test_repo: failed to open repository")
 }
 
+/// The environment this crate's own tests run stacks against: the test
+/// operator for every effect, and this crate's own
+/// [`EphemeralRegistry`](crate::EphemeralRegistry) for creating and
+/// opening ephemeral layers. The operator sits above this crate, so
+/// through the dev-dependency cycle its `Ephemeral` is not
+/// `crate::Ephemeral` and its ephemeral providers cannot serve tests
+/// written against this crate's types; the effects that cross the
+/// boundary are all leaf-crate types and delegate straight through.
+#[cfg(test)]
+#[derive(dialog_capability::Provider, Clone)]
+pub struct TestEnv {
+    #[provide(
+        Get,
+        Put,
+        Import,
+        Resolve,
+        Publish,
+        Identify,
+        Attest,
+        Write,
+        dialog_effects::blob::Read,
+        dialog_effects::blob::Import,
+        dialog_effects::memory::Retract,
+        crate::Hydrate,
+        dialog_artifacts::Preload,
+        dialog_artifacts::Speculation,
+        Fork<Network, Get>,
+        Fork<Network, Put>,
+        Fork<Network, Resolve>,
+        Fork<Network, Publish>,
+        Fork<Network, dialog_effects::blob::Import>,
+        Fork<Network, dialog_effects::blob::Read>
+    )]
+    operator: dialog_operator::Operator<VolatileSpaceForTests>,
+    #[provide(crate::CreateEphemeral, crate::OpenEphemeral)]
+    ephemerals: Arc<crate::EphemeralRegistry>,
+}
+
+#[cfg(test)]
+impl TestEnv {
+    /// Wrap a test operator with a fresh ephemeral registry.
+    pub fn new(operator: dialog_operator::Operator<VolatileSpaceForTests>) -> Self {
+        Self {
+            operator,
+            ephemerals: Arc::default(),
+        }
+    }
+
+    /// The ephemeral layers this environment holds.
+    pub fn ephemerals(&self) -> &crate::EphemeralRegistry {
+        &self.ephemerals
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<crate::CreateEphemeral> for Arc<crate::EphemeralRegistry> {
+    async fn execute(&self, input: ()) -> crate::Ephemeral {
+        Provider::<crate::CreateEphemeral>::execute(self.as_ref(), input).await
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<crate::OpenEphemeral> for Arc<crate::EphemeralRegistry> {
+    async fn execute(
+        &self,
+        input: dialog_artifacts::Entity,
+    ) -> Result<crate::Ephemeral, crate::EphemeralError> {
+        Provider::<crate::OpenEphemeral>::execute(self.as_ref(), input).await
+    }
+}
+
 /// Fill `branch` with what a tonk profile's account branch carries, at a
 /// scale that makes a cold clone do real work.
 ///

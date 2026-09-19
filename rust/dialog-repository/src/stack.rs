@@ -1602,8 +1602,9 @@ mod tests {
     async fn it_routes_by_name_across_lines() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         shared
             .transaction()
@@ -1621,7 +1622,7 @@ mod tests {
             .layer(shared.clone())
             .layer(state.clone())
             .link(&shared, name("shared"))
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&state, name("state"))
             .build()
             .perform(&operator)
@@ -1707,6 +1708,7 @@ mod tests {
     async fn it_records_links_and_refreshes_them_when_the_target_moves() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
 
@@ -1723,7 +1725,7 @@ mod tests {
             .layer(shared.clone())
             .layer(local.clone())
             .link(&shared, name("shared"))
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&local, name("local"))
             .build()
             .perform(&operator)
@@ -1819,9 +1821,10 @@ mod tests {
     async fn it_refreshes_only_the_lines_above_a_moved_one() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         let stack = Stack::builder()
             .layer(shared.clone())
@@ -1873,9 +1876,10 @@ mod tests {
     async fn it_keeps_wiring_where_it_is_made() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         let stack = Stack::builder()
             .layer(shared.clone())
@@ -1946,8 +1950,9 @@ mod tests {
     async fn it_reads_at_captured_heads_until_pulled() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         let stack = Stack::builder()
             .layer(shared.clone())
@@ -2005,11 +2010,12 @@ mod tests {
     async fn it_lands_external_movement_on_pull() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
 
         let stack = Stack::builder()
             .layer(shared.clone())
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -2062,12 +2068,13 @@ mod tests {
     async fn it_notices_movement_through_another_handle_on_pull() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
 
         let stack = Stack::builder()
             .layer(shared.clone())
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -2113,9 +2120,10 @@ mod tests {
     async fn it_captures_movement_through_another_handle_on_advance() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         let stack = Stack::builder()
             .layer(shared.clone())
@@ -2174,9 +2182,10 @@ mod tests {
     async fn it_fails_a_stale_publish_and_recovers_on_pull() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         shared
             .transaction()
@@ -2192,7 +2201,7 @@ mod tests {
             .layer(shared.clone())
             .layer(state.clone())
             .link(&shared, name("shared"))
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&state, name("state"))
             .build()
             .perform(&operator)
@@ -2263,11 +2272,12 @@ mod tests {
     async fn it_stages_commits_and_publishes_the_chain() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
 
         let stack = Stack::builder()
             .layer(shared.clone())
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&shared, name("shared"))
             .build()
             .perform(&operator)
@@ -2337,9 +2347,10 @@ mod tests {
     async fn it_stages_on_captured_heads_and_publishes_against_them() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         shared
             .transaction()
@@ -2465,9 +2476,10 @@ mod tests {
     async fn it_leaves_a_moved_line_alone_when_the_write_misses_it() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         shared
             .transaction()
@@ -2484,7 +2496,7 @@ mod tests {
             .link(&shared, name("shared"))
             .layer(state.clone())
             .link(&local, name("local"))
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&state, name("state"))
             .build()
             .perform(&operator)
@@ -2529,8 +2541,9 @@ mod tests {
     async fn it_rejects_an_audience_violation() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         let result = Stack::builder()
             .layer(state.clone())
@@ -2558,12 +2571,13 @@ mod tests {
     async fn it_rejects_a_link_to_an_unknown_line() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let elsewhere = Ephemeral::detached();
+        let elsewhere = Ephemeral::create().perform(&operator).await;
 
         let result = Stack::builder()
             .layer(shared.clone())
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&elsewhere, name("state"))
             .build()
             .perform(&operator)
@@ -2582,8 +2596,9 @@ mod tests {
     async fn it_derives_identities_from_shape() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         let alone = Stack::builder()
             .layer(shared.clone())
@@ -2626,8 +2641,12 @@ mod tests {
     async fn it_fans_out_a_name_bound_twice() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let (left, right) = (Ephemeral::detached(), Ephemeral::detached());
+        let (left, right) = (
+            Ephemeral::create().perform(&operator).await,
+            Ephemeral::create().perform(&operator).await,
+        );
 
         shared
             .transaction()
@@ -2642,7 +2661,7 @@ mod tests {
             .layer(shared.clone())
             .layer(left.clone())
             .layer(right.clone())
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&left, name("state"))
             .link(&right, name("state"))
             .build()
@@ -2672,8 +2691,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_refuses_to_transact_without_a_branch_bottom() -> Result<()> {
         let (operator, _profile) = test_operator_with_profile().await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let stack = Stack::builder()
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .build()
             .perform(&operator)
             .await?;
@@ -2742,6 +2762,7 @@ mod tests {
     async fn it_fires_a_rule_committed_on_an_upper_layer() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
 
@@ -2804,8 +2825,9 @@ mod tests {
     async fn it_fires_a_rule_held_in_an_ephemeral_layer() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         let counter: Entity = "ctr:1".parse()?;
         shared
@@ -2861,8 +2883,9 @@ mod tests {
     async fn it_witnesses_a_placed_transient_on_its_layer() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = crate::helpers::TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::detached();
+        let state = Ephemeral::create().perform(&operator).await;
 
         let counter: Entity = "ctr:1".parse()?;
         shared
@@ -2887,7 +2910,7 @@ mod tests {
             .layer(shared.clone())
             .layer(state.clone())
             .link(&shared, name("shared"))
-            .layer(Ephemeral::detached())
+            .layer(Ephemeral::create().perform(&operator).await)
             .link(&state, name("state"))
             .build()
             .perform(&operator)

@@ -177,6 +177,22 @@ impl EphemeralRegistry {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<CreateEphemeral> for EphemeralRegistry {
+    async fn execute(&self, _: ()) -> Ephemeral {
+        self.create()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<OpenEphemeral> for EphemeralRegistry {
+    async fn execute(&self, address: Entity) -> Result<Ephemeral, EphemeralError> {
+        self.open(&address).ok_or(EphemeralError::NotOpen(address))
+    }
+}
+
 /// Command minting a fresh ephemeral layer, registered with the
 /// environment under its address. Built by [`Ephemeral::create`].
 #[derive(Debug, Clone, Copy)]
