@@ -62,7 +62,9 @@ use dialog_artifacts::{
 };
 use dialog_capability::{Capability, Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveSubjectExt as _, CatalogExt as _};
+use dialog_effects::archive::prelude::{
+    ArchiveScope, ArchiveSubjectExt as _, CatalogExt as _, CatalogScope,
+};
 use dialog_effects::archive::{Archive, Catalog, Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
@@ -294,12 +296,12 @@ impl Snapshot {
     }
 
     /// Archive capability for this snapshot's subject.
-    pub fn archive(&self) -> Capability<Archive> {
+    pub fn archive(&self) -> ArchiveScope {
         self.subject().archive()
     }
 
     /// The archive catalog this snapshot's blocks live in.
-    pub(crate) fn index(&self) -> Capability<Catalog> {
+    pub(crate) fn index(&self) -> CatalogScope {
         self.subject.clone().archive().index()
     }
 

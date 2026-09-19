@@ -3,6 +3,7 @@ use crate::rules::SharedRuleCache;
 use crate::{ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
@@ -259,7 +260,7 @@ impl Branch {
     }
 
     /// Archive capability for this branch's subject.
-    pub fn archive(&self) -> Capability<Archive> {
+    pub fn archive(&self) -> ArchiveScope {
         self.subject().archive()
     }
 

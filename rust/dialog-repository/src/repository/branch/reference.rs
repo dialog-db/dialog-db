@@ -1,18 +1,19 @@
 use dialog_capability::{Capability, Did, Policy, Subject};
 use dialog_effects::memory::Space;
 use dialog_effects::memory::prelude::SpaceExt;
+use dialog_effects::memory::prelude::SpaceScope;
 
 use crate::{Cell, LoadBranch, OpenBranch, Revision, Upstreams};
 
 /// A reference to a named branch within a repository's memory.
 ///
-/// Wraps `Capability<Space>` scoped to `branch/{name}`.
+/// Wraps `SpaceScope` scoped to `branch/{name}`.
 /// Use `.open()` or `.load()` to create a command, then `.perform(&env)`.
 #[derive(Debug, Clone)]
-pub struct BranchReference(Capability<Space>);
+pub struct BranchReference(SpaceScope);
 
-impl From<Capability<Space>> for BranchReference {
-    fn from(space: Capability<Space>) -> Self {
+impl From<SpaceScope> for BranchReference {
+    fn from(space: SpaceScope) -> Self {
         Self(space)
     }
 }
@@ -30,10 +31,7 @@ impl BranchReference {
 
     /// The branch name, extracted from the space path.
     pub fn name(&self) -> &str {
-        Space::of(&self.0)
-            .space
-            .strip_prefix("branch/")
-            .unwrap_or("")
+        self.0.space_name().strip_prefix("branch/").unwrap_or("")
     }
 
     /// Open the branch, creating it if it doesn't exist.

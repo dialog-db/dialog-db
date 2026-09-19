@@ -98,6 +98,7 @@ mod tests {
     use dialog_common::{Blake3Hash, Buffer};
     use dialog_effects::Use;
     use dialog_effects::archive::{Archive, Catalog};
+    use dialog_effects::prelude::*;
 
     #[dialog_common::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
@@ -105,11 +106,7 @@ mod tests {
         let subject = unique_subject("archive-get-none");
         let digest = Blake3Hash::hash(b"nonexistent");
 
-        let effect = subject
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new(digest));
+        let effect = subject.archive().catalog("index").get(digest);
 
         let result = effect.perform(&provider).await?;
         assert!(result.is_none());
@@ -127,19 +124,14 @@ mod tests {
         // Put content
         let put_effect = subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(content.clone())));
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content.clone()));
 
         put_effect.perform(&provider).await?;
 
         // Get content
-        let get_effect = subject
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new(digest));
+        let get_effect = subject.archive().catalog("index").get(digest);
 
         let result = get_effect.perform(&provider).await?;
         assert_eq!(result, Some(content));
@@ -159,29 +151,26 @@ mod tests {
         // Store in different catalogs
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog1"))
-            .invoke(Put::new(Buffer::from(content1.clone())))
+            .archive()
+            .catalog("catalog1")
+            .put(Buffer::from(content1.clone()))
             .perform(&provider)
             .await?;
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog2"))
-            .invoke(Put::new(Buffer::from(content2.clone())))
+            .archive()
+            .catalog("catalog2")
+            .put(Buffer::from(content2.clone()))
             .perform(&provider)
             .await?;
 
         // Retrieve from catalog1
         let result1 = subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog1"))
-            .invoke(Get::new(digest1))
+            .archive()
+            .catalog("catalog1")
+            .get(digest1)
             .perform(&provider)
             .await?;
         assert_eq!(result1, Some(content1));
@@ -189,20 +178,18 @@ mod tests {
         // Retrieve from catalog2
         let result2 = subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog2"))
-            .invoke(Get::new(digest2.clone()))
+            .archive()
+            .catalog("catalog2")
+            .get(digest2.clone())
             .perform(&provider)
             .await?;
         assert_eq!(result2, Some(content2));
 
         // Cross-catalog lookup should return None
         let cross = subject
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog1"))
-            .invoke(Get::new(digest2))
+            .archive()
+            .catalog("catalog1")
+            .get(digest2)
             .perform(&provider)
             .await?;
         assert!(cross.is_none());
@@ -220,28 +207,25 @@ mod tests {
         // Put twice - should succeed both times
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(content.clone())))
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content.clone()))
             .perform(&provider)
             .await?;
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(content.clone())))
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content.clone()))
             .perform(&provider)
             .await?;
 
         // Should still be retrievable
         let result = subject
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new(digest))
+            .archive()
+            .catalog("index")
+            .get(digest)
             .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
@@ -258,18 +242,16 @@ mod tests {
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(content.clone())))
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content.clone()))
             .perform(&provider)
             .await?;
 
         let result = subject
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new(digest))
+            .archive()
+            .catalog("index")
+            .get(digest)
             .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
@@ -287,18 +269,16 @@ mod tests {
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(content.clone())))
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content.clone()))
             .perform(&provider)
             .await?;
 
         let result = subject
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new(digest))
+            .archive()
+            .catalog("index")
+            .get(digest)
             .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
@@ -319,20 +299,18 @@ mod tests {
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Import::new(blocks))
+            .archive()
+            .catalog("index")
+            .import(blocks)
             .perform(&provider)
             .await?;
 
         for (i, digest) in digests.into_iter().enumerate() {
             let content = subject
                 .clone()
-                .attenuate(Use)
-                .attenuate(Archive)
-                .attenuate(Catalog::new("index"))
-                .invoke(Get::new(digest))
+                .archive()
+                .catalog("index")
+                .get(digest)
                 .perform(&provider)
                 .await?;
             assert_eq!(content, Some(vec![i as u8; 64]));
@@ -348,10 +326,9 @@ mod tests {
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Import::new(Vec::<Buffer>::new()))
+            .archive()
+            .catalog("index")
+            .import(Vec::<Buffer>::new())
             .perform(&provider)
             .await?;
 
@@ -360,20 +337,18 @@ mod tests {
         for _ in 0..2 {
             subject
                 .clone()
-                .attenuate(Use)
-                .attenuate(Archive)
-                .attenuate(Catalog::new("index"))
-                .invoke(Import::new([block.clone()]))
+                .archive()
+                .catalog("index")
+                .import([block.clone()])
                 .perform(&provider)
                 .await?;
         }
 
         let content = subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new(digest))
+            .archive()
+            .catalog("index")
+            .get(digest)
             .perform(&provider)
             .await?;
         assert_eq!(content, Some(vec![7u8; 32]));

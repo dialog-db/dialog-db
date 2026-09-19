@@ -55,22 +55,27 @@ fn it_preserves_memory_parameters() {
     );
 }
 
-/// The scoping names come from the chain alone: a chain carries them
-/// before any effect is invoked on it, which is why an effect's path
-/// spelling cannot affect them.
+/// The scoping names come from the links the caller named, not from
+/// the effect: every effect on the same cell carries the same space and
+/// cell, whichever verb it is reached through.
 #[dialog_common::test]
 fn it_derives_parameters_from_the_chain_not_the_effect() {
     let cell = || subject().memory().space("branch/main").cell("revision");
 
-    let without_effect = parameters(&cell());
-    let with_effect = parameters(&cell().resolve());
+    let read = parameters(&cell().resolve());
+    let write = parameters(&cell().publish(b"x".to_vec(), None));
+    let delete = parameters(&cell().retract(b"v1"));
+
+    for prm in [&read, &write, &delete] {
+        assert_eq!(prm.get("space").unwrap(), &"branch/main".into());
+        assert_eq!(prm.get("cell").unwrap(), &"revision".into());
+    }
 
     assert_eq!(
-        without_effect, with_effect,
-        "Resolve carries no fields, so invoking it adds nothing to prm"
+        read.len(),
+        2,
+        "a resolve carries only what it is scoped to: {read:?}"
     );
-    assert_eq!(without_effect.get("space").unwrap(), &"branch/main".into());
-    assert_eq!(without_effect.get("cell").unwrap(), &"revision".into());
 }
 
 /// Links that name themselves in the ability path do not thereby appear

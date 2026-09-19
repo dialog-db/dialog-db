@@ -93,53 +93,73 @@ fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, S3Error>
         .map_err(|e| S3Error::Serialization(format!("Failed to deserialize: {}", e)))
 }
 
-/// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Attenuation`.
-fn memory_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
+/// Build a memory capability from UCAN args:
+/// `Subject -> Use -> V -> Memory -> Space -> Cell -> Attenuation`.
+///
+/// `V` is the verb the claim sits under, which the leaf's own `Of`
+/// fixes: a claim reconstructed here lands under the same verb the
+/// client invoked it through, so the ability matched against the
+/// delegation is the one that was granted.
+fn memory_claim_from_args<V, C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
-    C: Policy<Of = memory::Cell> + DeserializeOwned,
+    V: dialog_effects::Verb,
+    V::Of: Constraint,
+    dialog_capability::Subject: dialog_effects::AttenuateVerb<V>,
+    C: Policy<Of = memory::Cell<V>> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
 {
-    let space: memory::Space = deserialize_from_args(args)?;
-    let cell: memory::Cell = deserialize_from_args(args)?;
+    let space: memory::Space<V> = deserialize_from_args(args)?;
+    let cell: memory::Cell<V> = deserialize_from_args(args)?;
     let claim: C = deserialize_from_args(args)?;
-    Ok(dialog_capability::Subject::from(subject.clone())
-        .attenuate(Use)
-        .attenuate(memory::Memory)
-        .attenuate(space)
-        .attenuate(cell)
-        .attenuate(claim))
+    Ok(
+        dialog_effects::AttenuateVerb::verb(dialog_capability::Subject::from(subject.clone()))
+            .attenuate(memory::Memory::<V>::new())
+            .attenuate(space)
+            .attenuate(cell)
+            .attenuate(claim),
+    )
 }
 
-/// Build an archive capability from UCAN args: `Subject -> Archive -> Catalog -> Attenuation`.
-fn archive_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
+/// Build an archive capability from UCAN args:
+/// `Subject -> Use -> V -> Archive -> Catalog -> Block -> Attenuation`.
+fn archive_claim_from_args<V, C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
-    C: Policy<Of = archive::Catalog> + DeserializeOwned,
+    V: dialog_effects::Verb,
+    V::Of: Constraint,
+    dialog_capability::Subject: dialog_effects::AttenuateVerb<V>,
+    C: Policy<Of = archive::Block<V>> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
 {
-    let catalog: archive::Catalog = deserialize_from_args(args)?;
+    let catalog: archive::Catalog<V> = deserialize_from_args(args)?;
     let claim: C = deserialize_from_args(args)?;
-    Ok(dialog_capability::Subject::from(subject.clone())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(catalog)
-        .attenuate(claim))
+    Ok(
+        dialog_effects::AttenuateVerb::verb(dialog_capability::Subject::from(subject.clone()))
+            .attenuate(archive::Archive::<V>::new())
+            .attenuate(catalog)
+            .attenuate(archive::Block::<V>::new())
+            .attenuate(claim),
+    )
 }
 
 /// Build a blob capability from UCAN args: `Subject -> Archive -> Blob -> Attenuation`.
 ///
 /// `Blob` is a unit ability segment (no arguments), so only the leaf
 /// attenuation is deserialized from the args map.
-fn blob_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
+fn blob_claim_from_args<V, C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
-    C: Policy<Of = blob::Blob> + DeserializeOwned,
+    V: dialog_effects::Verb,
+    V::Of: Constraint,
+    dialog_capability::Subject: dialog_effects::AttenuateVerb<V>,
+    C: Policy<Of = blob::Blob<V>> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
 {
     let claim: C = deserialize_from_args(args)?;
-    Ok(dialog_capability::Subject::from(subject.clone())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(blob::Blob)
-        .attenuate(claim))
+    Ok(
+        dialog_effects::AttenuateVerb::verb(dialog_capability::Subject::from(subject.clone()))
+            .attenuate(archive::Archive::<V>::new())
+            .attenuate(blob::Blob::<V>::new())
+            .attenuate(claim),
+    )
 }
 
 /// Maps an execution effect type to its attenuation type that can be
@@ -167,14 +187,7 @@ impl FromUcanArgs for memory::Resolve {
         subject: &Did,
         args: &Args,
     ) -> Result<Capability<Self::Attenuation>, S3Error> {
-        let space: memory::Space = deserialize_from_args(args)?;
-        let cell: memory::Cell = deserialize_from_args(args)?;
-        Ok(dialog_capability::Subject::from(subject.clone())
-            .attenuate(Use)
-            .attenuate(memory::Memory)
-            .attenuate(space)
-            .attenuate(cell)
-            .attenuate(memory::Resolve))
+        memory_claim_from_args::<dialog_effects::Get, _>(subject, args)
     }
 }
 impl FromUcanArgs for memory::Publish {

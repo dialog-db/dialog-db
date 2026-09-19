@@ -89,7 +89,7 @@ where
         // a cold replica.
         tracing::debug!(
             target: "dialog::remote::ucan",
-            command = Fx::command(),
+            command = std::any::type_name::<Fx>(),
             permit_cache_hit = from_cache,
             redeem_ms = redeemed
                 .duration_since(now)
@@ -108,7 +108,7 @@ where
                 cache.invalidate(&key, &permit);
                 tracing::debug!(
                     target: "dialog::remote::ucan",
-                    command = Fx::command(),
+                    command = std::any::type_name::<Fx>(),
                     "cached permit rejected; re-redeeming"
                 );
                 match retry {

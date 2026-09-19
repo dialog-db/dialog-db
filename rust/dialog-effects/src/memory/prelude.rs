@@ -81,6 +81,18 @@ pub struct SpaceScope {
     space: String,
 }
 
+impl SpaceScope {
+    /// The subject this chain is rooted at.
+    pub fn subject(&self) -> &dialog_capability::Did {
+        self.subject.did()
+    }
+
+    /// The space name.
+    pub fn space_name(&self) -> &str {
+        &self.space
+    }
+}
+
 /// Extension methods for scoping a space to a named cell.
 pub trait SpaceExt {
     /// The resulting cell chain type.
@@ -112,6 +124,21 @@ pub struct CellScope {
 }
 
 impl CellScope {
+    /// The subject this chain is rooted at.
+    pub fn subject(&self) -> &dialog_capability::Did {
+        self.subject.did()
+    }
+
+    /// The space name this cell lives in.
+    pub fn space_name(&self) -> &str {
+        &self.space
+    }
+
+    /// The cell name.
+    pub fn cell_name(&self) -> &str {
+        &self.cell
+    }
+
     /// Build the chain under `V`, the verb of the effect about to be
     /// invoked.
     fn under<V>(self) -> Capability<Cell<V>>

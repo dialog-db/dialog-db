@@ -15,6 +15,7 @@ use dialog_artifacts::tree::{SpillCache, spill_cache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Archive, Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
@@ -110,7 +111,7 @@ impl<'a> SourceRef<'a> {
     }
 
     /// The archive capability for this line's repository.
-    pub(crate) fn archive(self) -> Capability<Archive> {
+    pub(crate) fn archive(self) -> ArchiveScope {
         self.subject().archive()
     }
 

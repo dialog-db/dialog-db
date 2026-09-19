@@ -4,7 +4,9 @@ use crate::{RemoteRepository, RemoteSite, UploadError};
 use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
+use dialog_effects::archive::prelude::{
+    ArchiveExt, ArchiveScope, ArchiveSubjectExt, CatalogExt, CatalogScope,
+};
 use dialog_effects::archive::{ArchiveError, Catalog, Get, Put};
 use dialog_search_tree::{DialogSearchTreeError, PersistentNode};
 use dialog_storage::Blake3Hash;
@@ -31,7 +33,7 @@ impl<'a> RemoteArchive<'a> {
 /// Remote archive index for tree node uploads.
 pub struct RemoteArchiveIndex<'a> {
     repository: &'a RemoteRepository,
-    catalog: Capability<Catalog>,
+    catalog: CatalogScope,
 }
 
 impl RemoteArchiveIndex<'_> {

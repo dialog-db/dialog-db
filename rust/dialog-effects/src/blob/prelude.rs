@@ -40,6 +40,20 @@ pub struct BlobScope {
 }
 
 impl BlobScope {
+    /// Invoke a pre-built effect on this scope.
+    ///
+    /// The builder methods cover the common cases; this is for a caller
+    /// that already holds the effect value, such as one reconstructing a
+    /// read with an explicit byte range.
+    pub fn invoke<Fx>(self, effect: Fx) -> Capability<Fx>
+    where
+        Fx: dialog_capability::Effect,
+        Fx::Of: dialog_capability::Constraint,
+        Self: InvokeOn<Fx>,
+    {
+        InvokeOn::invoke_on(self, effect)
+    }
+
     /// Build the chain under `V`.
     fn under<V>(self) -> Capability<Blob<V>>
     where
@@ -127,5 +141,35 @@ impl BlobImportExt for Capability<Import> {
 
     fn chunks(&self) -> &[[u8; 32]] {
         &Import::of(self).chunks
+    }
+}
+
+/// How a scope builds the chain for one effect.
+///
+/// One impl per effect, so the verb a scope attenuates under is fixed
+/// by the effect being invoked rather than by the caller.
+pub trait InvokeOn<Fx: dialog_capability::Effect>
+where
+    Fx::Of: dialog_capability::Constraint,
+{
+    /// Build this scope's chain and invoke `effect` on it.
+    fn invoke_on(self, effect: Fx) -> Capability<Fx>;
+}
+
+impl InvokeOn<Read> for BlobScope {
+    fn invoke_on(self, effect: Read) -> Capability<Read> {
+        self.under::<crate::Get>().invoke(effect)
+    }
+}
+
+impl InvokeOn<Write> for BlobScope {
+    fn invoke_on(self, effect: Write) -> Capability<Write> {
+        self.under::<crate::Put>().invoke(effect)
+    }
+}
+
+impl InvokeOn<Import> for BlobScope {
+    fn invoke_on(self, effect: Import) -> Capability<Import> {
+        self.under::<crate::Put>().invoke(effect)
     }
 }

@@ -3,6 +3,7 @@ use dialog_capability::{Capability, Did, Policy};
 use dialog_common::ConditionalSync;
 use dialog_common::time::{self, Duration, SystemTime};
 use dialog_effects::memory::prelude::CellExt;
+use dialog_effects::memory::prelude::CellScope;
 use dialog_effects::memory::{self, Edition, Version};
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
 use parking_lot::RwLock;
@@ -220,14 +221,14 @@ where
 /// - [`publish`](Cell::publish) returns a [`Publish`] command to write a value
 #[derive(Debug, Clone)]
 pub struct Cell<T, Codec: Clone = CborEncoder> {
-    capability: Capability<memory::Cell>,
+    capability: CellScope,
     cache: Cache<T, Codec>,
 }
 
 impl<T> Cell<T> {
     /// Returns the name of this cell.
     pub fn name(&self) -> &str {
-        &memory::Cell::of(&self.capability).cell
+        self.capability.cell_name()
     }
 
     /// How long ago this replica confirmed this cell's value.
@@ -240,8 +241,8 @@ impl<T> Cell<T> {
     }
 }
 
-impl<T> From<Capability<memory::Cell>> for Cell<T> {
-    fn from(capability: Capability<memory::Cell>) -> Self {
+impl<T> From<CellScope> for Cell<T> {
+    fn from(capability: CellScope) -> Self {
         Self {
             capability,
             cache: Cache {

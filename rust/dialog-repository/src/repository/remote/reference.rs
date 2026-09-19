@@ -2,21 +2,22 @@ use crate::{Cell, CreateRemote, LoadRemote, RemoteAddress, SiteAddress};
 use dialog_capability::{Capability, Did, Policy};
 use dialog_effects::memory::Space;
 use dialog_effects::memory::prelude::SpaceExt;
+use dialog_effects::memory::prelude::SpaceScope;
 
 /// A reference to a named remote within a repository.
 ///
-/// Wraps a `Capability<Space>` scoped to `remote/{name}`.
+/// Wraps a `SpaceScope` scoped to `remote/{name}`.
 /// The subject DID is derived from the capability chain.
 #[derive(Debug, Clone)]
-pub struct RemoteReference(Capability<Space>);
+pub struct RemoteReference(SpaceScope);
 
-impl From<Capability<Space>> for RemoteReference {
-    fn from(space: Capability<Space>) -> Self {
+impl From<SpaceScope> for RemoteReference {
+    fn from(space: SpaceScope) -> Self {
         Self(space)
     }
 }
 
-impl From<RemoteReference> for Capability<Space> {
+impl From<RemoteReference> for SpaceScope {
     fn from(reference: RemoteReference) -> Self {
         reference.0
     }
@@ -30,10 +31,7 @@ impl RemoteReference {
 
     /// Name of this remote, extracted from the space path.
     pub fn name(&self) -> &str {
-        Space::of(&self.0)
-            .space
-            .strip_prefix("remote/")
-            .unwrap_or("")
+        self.0.space_name().strip_prefix("remote/").unwrap_or("")
     }
 
     /// Cell for the remote address configuration.

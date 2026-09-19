@@ -78,6 +78,16 @@ pub struct CatalogScope {
 }
 
 impl CatalogScope {
+    /// The subject this chain is rooted at.
+    pub fn subject(&self) -> &dialog_capability::Did {
+        self.subject.did()
+    }
+
+    /// The catalog name.
+    pub fn catalog_name(&self) -> &str {
+        &self.catalog
+    }
+
     /// Build the block chain under `V`.
     fn under<V>(self) -> Capability<Block<V>>
     where

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::{Buffer, ConditionalSync};
+use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::prelude::*;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
@@ -15,7 +16,7 @@ use std::fmt::Debug;
 pub struct LocalIndex<'a, Env> {
     env: &'a Env,
     encoder: CborEncoder,
-    catalog: Capability<Catalog>,
+    catalog: CatalogScope,
 }
 
 impl<Env> Clone for LocalIndex<'_, Env> {
@@ -30,7 +31,7 @@ impl<Env> Clone for LocalIndex<'_, Env> {
 
 impl<'a, Env> LocalIndex<'a, Env> {
     /// Create a local index for the given catalog capability.
-    pub fn new(env: &'a Env, catalog: Capability<Catalog>) -> Self {
+    pub fn new(env: &'a Env, catalog: CatalogScope) -> Self {
         Self {
             env,
             encoder: CborEncoder,
@@ -39,7 +40,7 @@ impl<'a, Env> LocalIndex<'a, Env> {
     }
 
     /// The catalog capability this index operates on.
-    pub fn catalog(&self) -> &Capability<Catalog> {
+    pub fn catalog(&self) -> &CatalogScope {
         &self.catalog
     }
 
@@ -121,7 +122,7 @@ mod tests {
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    fn test_catalog(name: &str) -> Capability<Catalog> {
+    fn test_catalog(name: &str) -> CatalogScope {
         Subject::from(did!("key:zArchiveCasTest"))
             .archive()
             .catalog(name)

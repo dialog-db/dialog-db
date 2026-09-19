@@ -6,6 +6,7 @@ use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_effects::memory::Resolve;
 use dialog_search_tree::{Buffer, DialogSearchTreeError};
@@ -43,7 +44,7 @@ impl<'a> Select<'a> {
     }
 
     /// The catalog (archive index) scoped to this line's subject.
-    pub fn catalog(&self) -> Capability<Catalog> {
+    pub fn catalog(&self) -> CatalogScope {
         self.source.subject().archive().index()
     }
 }
@@ -254,7 +255,7 @@ pub struct SelectOwned<'a>(Select<'a>);
 
 impl SelectOwned<'_> {
     /// The catalog (archive index) scoped to this line's subject.
-    pub fn catalog(&self) -> Capability<Catalog> {
+    pub fn catalog(&self) -> CatalogScope {
         self.0.catalog()
     }
 

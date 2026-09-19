@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Provider};
 use dialog_common::{Buffer, ConditionalSync, Priority};
-use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
+use dialog_effects::archive::prelude::{
+    ArchiveExt, ArchiveScope, ArchiveSubjectExt, CatalogExt, CatalogScope,
+};
 use dialog_effects::archive::{ArchiveError, Catalog, Get, Put};
 use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
@@ -108,11 +110,7 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
     /// Create a networked index. With [`RemoteFallback::Remote`] (or a
     /// `Some(remote)`), reads that miss locally fall back to the remote
     /// and cache the result; see [`RemoteFallback`] for the other modes.
-    pub fn new(
-        env: &'a Env,
-        index: Capability<Catalog>,
-        remote: impl Into<RemoteFallback>,
-    ) -> Self {
+    pub fn new(env: &'a Env, index: CatalogScope, remote: impl Into<RemoteFallback>) -> Self {
         Self {
             local: LocalIndex::new(env, index),
             remote: remote.into(),

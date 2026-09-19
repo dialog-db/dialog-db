@@ -21,11 +21,11 @@ pub use networked::*;
 /// helpers.
 pub trait RepositoryArchiveExt: ArchiveExt {
     /// The index catalog used for search tree node storage.
-    fn index(self) -> Capability<Catalog>;
+    fn index(self) -> Self::Catalog;
 }
 
-impl RepositoryArchiveExt for Capability<Archive> {
-    fn index(self) -> Capability<Catalog> {
+impl<T: ArchiveExt> RepositoryArchiveExt for T {
+    fn index(self) -> Self::Catalog {
         self.catalog("index")
     }
 }
