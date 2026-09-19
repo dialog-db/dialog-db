@@ -8,7 +8,7 @@ use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobSource, BlobWriter};
-use dialog_effects::{archive, blob, memory};
+use dialog_effects::{archive, blob, memory, peer};
 
 /// A store that keeps blocks in memory and records nothing else.
 ///
@@ -193,6 +193,24 @@ impl Provider<archive::Import> for Volatile {
             blocks.insert(block.blake3_hash().clone(), block.as_ref().to_vec());
         }
         Ok(())
+    }
+}
+
+/// A store has no identity of its own, so it answers with the subject
+/// it was asked about and names itself in the rest. Enough to satisfy
+/// [`Store`](crate::serve::Store) without inventing a profile.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<peer::Hello> for Volatile {
+    async fn execute(
+        &self,
+        input: Capability<peer::Hello>,
+    ) -> Result<peer::Greeting, peer::PeerError> {
+        Ok(peer::Greeting {
+            subject: input.subject().clone(),
+            profile: dialog_capability::did!("key:zVolatileProfile"),
+            operator: dialog_capability::did!("key:zVolatileOperator"),
+        })
     }
 }
 

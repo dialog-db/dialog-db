@@ -17,7 +17,7 @@ use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Rejection;
 use dialog_effects::authority::{self, OperatorExt as _};
-use dialog_effects::{archive, memory};
+use dialog_effects::{archive, memory, peer};
 use dialog_ucan::Ucan;
 use dialog_ucan_core::container::Container;
 use dialog_ucan_core::container::bundle::InvocationBundle;
@@ -173,6 +173,7 @@ macro_rules! performs_by_value {
 }
 
 performs_by_value!(
+    peer::Hello,
     archive::Get,
     archive::Put,
     archive::Import,
