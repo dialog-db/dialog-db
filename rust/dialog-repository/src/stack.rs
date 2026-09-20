@@ -1593,8 +1593,15 @@ impl Stack {
     /// built on the old shape is stale wholesale. Returns the link
     /// entities to retract on their enclosers.
     fn edit(&self, mut edits: Vec<LinkEdit>) -> Result<Vec<(Layer, Entity)>, StackError> {
-        let mut state = self.state.write();
-        let mut retractions = Vec::new();
+        let mut live = self.state.write();
+        // Validate the entire edit batch on a detached shape. A rejected
+        // edit must preserve both the live topology and its staged chains.
+        let mut state = State {
+            topology: live.topology.clone(),
+            published: live.published.clone(),
+            versions: live.versions.clone(),
+            staged: live.topology.layers.iter().map(|_| None).collect(),
+        };
         // An edit applies once its encloser is in the stack, so a
         // transaction may name its links in any order: a layer that a
         // later edit enters beneath the top can be the encloser of an
@@ -1640,14 +1647,11 @@ impl Stack {
                             .topology
                             .index_of(&from)
                             .expect("the encloser is in the stack");
-                        let Some(entity) = state.topology.unlink(from_index, to_index, &name)
-                        else {
+                        if state.topology.unlink(from_index, to_index, &name).is_none() {
                             return Err(StackError::UnknownLayer {
                                 from: from.address_entity(),
                             });
-                        };
-                        retractions.push((from, entity));
-                        state.leave_unreachable()?;
+                        }
                     }
                 }
             }
@@ -1661,7 +1665,27 @@ impl Stack {
             }
             edits = deferred;
         }
+        // Keep enclosers available until every edit has been applied.
+        // Detached layers leave with their own stored wiring untouched.
+        state.leave_unreachable()?;
+        let mut retractions = Vec::new();
+        for (from, links) in live.topology.layers.iter().zip(&live.topology.links) {
+            let Some(index) = state.topology.index_of(from) else {
+                continue;
+            };
+            for link in links {
+                if !state.topology.links[index]
+                    .iter()
+                    .any(|current| current.entity == link.entity)
+                {
+                    // A descendant's shape change also changes the link
+                    // entity of its ancestors, even without an unlink.
+                    retractions.push((from.clone(), link.entity.clone()));
+                }
+            }
+        }
         state.staged = state.topology.layers.iter().map(|_| None).collect();
+        *live = state;
         Ok(retractions)
     }
 }
@@ -3258,6 +3282,56 @@ mod tests {
         Ok(())
     }
 
+    /// A failed wiring batch preserves its original shape and staged data.
+    #[dialog_common::test]
+    async fn it_preserves_a_stack_after_rejected_wiring() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let doc: Entity = "doc:staged".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Pending".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let identity = stack.identity();
+        let heads = stack.captured();
+        let result = stack
+            .transaction()
+            .link(&top, &state, name("state"))
+            .link(&shared, &state, name("invalid"))
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(result.is_err(), "the second link must be refused");
+        assert_eq!(stack.identity(), identity);
+        assert_eq!(stack.layers().len(), 2);
+        assert_eq!(stack.captured(), heads);
+        assert!(
+            stack.is_staged(),
+            "a rejected edit keeps the pending commit"
+        );
+        stack.publish(&operator).await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Pending".into())]
+        );
+        Ok(())
+    }
+
     /// A link must name a layer already beneath the linking one.
     #[dialog_common::test]
     async fn it_rejects_a_link_to_an_unknown_line() -> Result<()> {
@@ -3718,7 +3792,9 @@ mod tests {
         }
 
         let state = Ephemeral::create().perform(&operator).await;
-        let stack = Stack::open(state.clone())
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
             .link(&state, &main, name("main"))
             .link(&state, &seed_v1, name("seed"))
             .perform(&operator)
@@ -3737,7 +3813,7 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        assert_eq!(stack.layers().len(), 3, "the old seed left");
+        assert_eq!(stack.layers().len(), 4, "the old seed left");
         assert!(
             stack
                 .layers()
@@ -3757,7 +3833,25 @@ mod tests {
             "the old link's facts are gone from the encloser"
         );
 
-        let reopened = Stack::open(state.clone()).perform(&operator).await?;
+        assert_eq!(
+            top.scan(&link).len(),
+            1,
+            "the old ancestor link is retracted"
+        );
+        let reopened = Stack::open(top.clone()).perform(&operator).await?;
+        assert_eq!(reopened.identities(), stack.identities());
+
+        stack
+            .transaction()
+            .unlink(&top, &state, name("state"))
+            .unlink(&state, &seed_v2, name("seed"))
+            .link(&top, &main, name("main"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(stack.layers().len(), 2);
+        let reopened = Stack::open(top.clone()).perform(&operator).await?;
         assert_eq!(reopened.identities(), stack.identities());
         Ok(())
     }

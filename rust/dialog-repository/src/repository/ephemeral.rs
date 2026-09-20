@@ -85,7 +85,7 @@ pub(crate) const QUEUE_CAPACITY: usize = 1024;
 pub struct EphemeralRevision {
     /// Instants minted so far; zero for a store nothing has changed.
     pub sequence: u64,
-    /// `blake3(previous ‖ sequence ‖ transient ‖ delta)`, chained from zero.
+    /// `blake3(previous ‖ sequence ‖ transient ‖ delta ‖ mutations)`, chained from zero.
     pub hash: Blake3Hash,
 }
 
@@ -102,11 +102,38 @@ pub struct Instant {
     /// changing the store. Replicas must preserve this distinction.
     #[serde(default)]
     pub transient: bool,
+    /// Exact store mutations, distinct from the reader-visible delta.
+    /// Empty for transient witnesses. Replicas replay these so lifting a
+    /// tombstone never turns a fact from a lower layer into stored state.
+    pub changes: Vec<StoreChange>,
     /// Facts that became readable: stored, or un-shadowed beneath.
     pub asserted: Vec<Artifact>,
     /// Facts that stopped being readable: removed, or shadowed
     /// beneath by a tombstone.
     pub retracted: Vec<Artifact>,
+}
+
+/// One mutation of an ephemeral store, carried by an [`Instant`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum StoreChange {
+    /// Store a fact in this layer.
+    Insert(Artifact),
+    /// Remove a held fact without hiding it in lower layers.
+    Remove(Artifact),
+    /// Hide a fact in lower layers.
+    Shadow(Artifact),
+    /// Lift a tombstone without storing the fact it hid.
+    Unshadow(Artifact),
+}
+
+impl StoreChange {
+    fn fact(&self) -> &Artifact {
+        match self {
+            Self::Insert(fact) | Self::Remove(fact) | Self::Shadow(fact) | Self::Unshadow(fact) => {
+                fact
+            }
+        }
+    }
 }
 
 /// A memory-backed layer. Cheap to clone: clones share the store, so a
@@ -303,6 +330,7 @@ fn index_keys(fact: &Artifact, manifest: &Manifest) -> [Key; 3] {
 #[derive(Default)]
 struct Delta {
     transient: bool,
+    changes: Vec<StoreChange>,
     asserted: Vec<Artifact>,
     retracted: Vec<Artifact>,
     tombstones_changed: bool,
@@ -328,6 +356,7 @@ impl State {
         for key in index_keys(&fact, &self.manifest) {
             self.facts.insert(key, fact.clone());
         }
+        delta.changes.push(StoreChange::Insert(fact.clone()));
         delta.asserted.push(fact);
     }
 
@@ -338,6 +367,7 @@ impl State {
         for key in index_keys(fact, &self.manifest) {
             self.facts.remove(&key);
         }
+        delta.changes.push(StoreChange::Remove(fact.clone()));
         delta.retracted.push(fact.clone());
         true
     }
@@ -374,12 +404,25 @@ impl State {
                 // Not held here: hide it beneath. A tombstone is a
                 // change readers see (the fact disappears), so it is
                 // reported as retracted.
-                if let Entry::Vacant(slot) = self.shadowed.entry(default_sort_key(&fact)) {
-                    slot.insert(fact.clone());
-                    delta.tombstones_changed = true;
-                    delta.retracted.push(fact);
-                }
+                self.shadow(fact, delta);
             }
+        }
+    }
+
+    fn shadow(&mut self, fact: Artifact, delta: &mut Delta) {
+        if let Entry::Vacant(slot) = self.shadowed.entry(default_sort_key(&fact)) {
+            slot.insert(fact.clone());
+            delta.tombstones_changed = true;
+            delta.changes.push(StoreChange::Shadow(fact.clone()));
+            delta.retracted.push(fact);
+        }
+    }
+
+    fn unshadow(&mut self, key: &SortKey, delta: &mut Delta) {
+        if let Some(fact) = self.shadowed.remove(key) {
+            delta.tombstones_changed = true;
+            delta.changes.push(StoreChange::Unshadow(fact.clone()));
+            delta.asserted.push(fact);
         }
     }
 
@@ -412,11 +455,28 @@ impl State {
                 chunks.push(chunk);
             }
         }
+        for change in &delta.changes {
+            let tag = match change {
+                StoreChange::Insert(_) => b'i',
+                StoreChange::Remove(_) => b'r',
+                StoreChange::Shadow(_) => b's',
+                StoreChange::Unshadow(_) => b'u',
+            };
+            let (the, of, tail) = default_sort_key(change.fact());
+            let mut chunk = vec![tag];
+            chunk.extend(the);
+            chunk.push(0);
+            chunk.extend(of);
+            chunk.push(0);
+            chunk.extend(tail);
+            chunks.push(chunk);
+        }
         self.hash = Blake3Hash::hash_iter(chunks.iter().map(Vec::as_slice));
         let instant = Instant {
             sequence: self.sequence,
             hash: self.hash.clone(),
             transient: delta.transient,
+            changes: delta.changes,
             asserted: delta.asserted,
             retracted: delta.retracted,
         };
@@ -489,6 +549,12 @@ impl Filter {
                     sequence: instant.sequence,
                     hash: instant.hash.clone(),
                     transient: instant.transient,
+                    changes: instant
+                        .changes
+                        .iter()
+                        .filter(|change| covers(change.fact()))
+                        .cloned()
+                        .collect(),
                     asserted,
                     retracted,
                 })
@@ -660,10 +726,7 @@ impl Ephemeral {
             .map(|(key, _)| key.clone())
             .collect();
         for key in lifted {
-            if let Some(fact) = state.shadowed.remove(&key) {
-                delta.tombstones_changed = true;
-                delta.asserted.push(fact);
-            }
+            state.unshadow(&key, &mut delta);
         }
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
@@ -696,10 +759,7 @@ impl Ephemeral {
             .map(|(key, _)| key.clone())
             .collect();
         for key in lifted {
-            if let Some(fact) = state.shadowed.remove(&key) {
-                delta.tombstones_changed = true;
-                delta.asserted.push(fact);
-            }
+            state.unshadow(&key, &mut delta);
         }
         state.mint(delta).is_some()
     }
@@ -713,10 +773,9 @@ impl Ephemeral {
         for fact in held {
             state.remove(&fact, &mut delta);
         }
-        let lifted: Vec<Artifact> = state.shadowed.drain().map(|(_, fact)| fact).collect();
-        if !lifted.is_empty() {
-            delta.tombstones_changed = true;
-            delta.asserted.extend(lifted);
+        let lifted: Vec<SortKey> = state.shadowed.keys().cloned().collect();
+        for key in lifted {
+            state.unshadow(&key, &mut delta);
         }
         state.mint(delta);
         self
@@ -833,6 +892,11 @@ impl Ephemeral {
     /// Capture the fold and its sequence together, so a peer never skips a
     /// write that arrived between reading the facts and reading the revision.
     fn fold(&self) -> (Vec<Artifact>, u64) {
+        let (facts, _, sequence) = self.snapshot();
+        (facts, sequence)
+    }
+
+    fn snapshot(&self) -> (Vec<Artifact>, Vec<Artifact>, u64) {
         let state = self.state.read();
         let facts = state
             .facts
@@ -842,7 +906,11 @@ impl Ephemeral {
             })
             .map(|(_, fact)| fact.clone())
             .collect();
-        (facts, state.sequence)
+        (
+            facts,
+            state.shadowed.values().cloned().collect(),
+            state.sequence,
+        )
     }
 
     /// The facts a selector matches, in the order a tree scan of the

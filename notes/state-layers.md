@@ -517,7 +517,10 @@ names, read as one composite and written by placement.
   `link(&local, &shared, "memory:shared")` routes `memory:shared` to
   `shared`. A name may be bound by several links; a write to it lands
   in every layer so bound and the composite read dedups the fact.
-  `unlink` drops a link and whatever the top no longer reaches.
+  `unlink` drops a link and whatever the top no longer reaches. Wiring
+  batches validate on a detached topology, so a rejected edit preserves
+  staged work. Pruning waits until all edits apply; retained ancestors
+  retract obsolete link entities when a descendant's identity changes.
 - A commit with edits checks the shape: a link must name a layer
   beneath the linking one, a snapshot cannot hold links, and the
   audience rule holds (a layer may link a layer beneath it only if
@@ -640,7 +643,11 @@ ephemeral layer, as far as the transport allows.
   rather than echo. Retention is the lowest peer offset under the
   ring bound; a peer whose offset fell off the log gets a `Resync`
   carrying the fold, and a channel whose own observer gapped resyncs
-  every peer. `Sync` is serializable: the wire shape is fixed here.
+  every peer. `Sync` is serializable. Instants distinguish transient
+  witnesses from store mutations, and preserve insert, remove, tombstone,
+  and tombstone-lift operations separately. `Channel::snapshot()` captures
+  both held facts and tombstones with one sequence; resync replaces them
+  atomically and does not echo superseded local writes back to its sender.
 - What remains is the transport binding: carrying a `Sync` between
   processes over the remote site, and a scope's `replicated` property
   resolving to a channel. In-process peers exercise the log and the
