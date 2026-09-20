@@ -144,6 +144,46 @@ given them.
 One `deriveBits` and one HKDF per `build()`, replacing one signature and
 one hash.
 
+### The API
+
+Derivation hangs off the same `Secret` handle that seals and reveals, so
+the context is given once:
+
+```rust
+let operator = signer.secret(OPERATOR_DERIVATION_CONTEXT)
+    .derive(b"my-app")
+    .await?;
+```
+
+Derivation returns a signer rather than key material. `derive` gives an
+`Ed25519Signer<Sealed>`, whose seed cannot be read back. A consumer that
+is built from raw bytes and cannot take a signer — `iroh::SecretKey`,
+whose QUIC stack needs the material in process — asks for the extractable
+form by type:
+
+```rust
+let peer: Ed25519Signer<Extractable> =
+    signer.secret(PEER_CONTEXT).derive_as(b"peer").await?;
+```
+
+`derive_as` is generic over `ExtractableKey`, the same trait that already
+described keys `WebCrypto` will hand material back for. So which kind of
+key comes out is decided by the type, not by a differently named method,
+and both derive the same key under the same label.
+
+Extractability being a type parameter is what keeps a leak from being a
+runtime question: a consumer that needs material asks for
+`&Ed25519Signer<Extractable>` and a sealed key cannot reach it. In the
+browser sealed is also physical, since a non-extractable `CryptoKey` has
+no seed to give; on native `ed25519_dalek` holds the seed whatever the
+type says.
+
+`export` follows the key rather than the caller: an extractable one
+yields its seed, a sealed one in the browser yields opaque `CryptoKey`
+handles that carry no material and restore still sealed. That is how a
+profile is persisted, and it is why the type parameter records what a
+key *is* rather than gating a method.
+
 ## What this changes
 
 Both arms of `derive_operator` collapse into one derivation that agrees
@@ -183,6 +223,12 @@ on native and wasm:
   secret becomes: the agreement key, the agreement, the KDF, the context
   label, the seed-to-Ed25519 import and the `did:key` encoding, which is
   the value `Operator::did` returns.
+
+Two more cover the extractable arm, since it is a second door onto one
+scheme: `extractable_derivation_is_the_same_key` asserts both arms give
+the same DID, and `an_extractable_derivation_exports` asserts the
+extractable one can actually be read back — a real assertion only in the
+browser, where the default import refuses.
 
 Both were also checked by hand against a real WebKit build (Safari 26 /
 AppleWebKit 605.1.15), computing the browser half in plain WebCrypto and
