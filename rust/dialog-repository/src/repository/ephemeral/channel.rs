@@ -24,11 +24,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use dialog_artifacts::{Artifact, Changes, Entity, Update as _};
+use dialog_artifacts::{Artifact, Changes, Entity, Update as _, default_sort_key};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::{Ephemeral, Instant, Observer};
+use super::{Delta, Ephemeral, Instant, Observer, StoreChange};
 
 /// How many instants a channel's log holds at most, whatever its
 /// slowest peer has seen. A peer further behind than this resyncs.
@@ -60,6 +60,8 @@ pub enum Sync {
     Resync {
         /// Every fact the layer holds.
         facts: Vec<Artifact>,
+        /// Every tombstone hiding a fact in a lower layer.
+        shadowed: Vec<Artifact>,
         /// The offset the peer stands at once the fold is applied.
         sequence: u64,
     },
@@ -124,7 +126,7 @@ impl Channel {
 
     /// Admit `peer` at the layer's current sequence: its first sync
     /// delivers only what happens from now on. A peer that needs the
-    /// fold too takes it with [`fold`](Self::fold), or is admitted
+    /// fold too takes it with [`snapshot`](Self::snapshot), or is admitted
     /// behind with [`join_at`](Self::join_at).
     pub fn join(&self, peer: Entity) -> u64 {
         let sequence = self.layer.revision().sequence;
@@ -171,6 +173,17 @@ impl Channel {
         self.layer.fold()
     }
 
+    /// A complete replication snapshot: held facts, tombstones, and a
+    /// sequence captured together. Use this to initialize a peer.
+    pub fn snapshot(&self) -> Sync {
+        let (facts, shadowed, sequence) = self.layer.snapshot();
+        Sync::Resync {
+            facts,
+            shadowed,
+            sequence,
+        }
+    }
+
     /// What `peer` needs to be current: the instants past its offset
     /// that it did not itself send, or the fold if its offset fell off
     /// the log. Moves the peer's offset to the sequence the sync
@@ -200,8 +213,7 @@ impl Channel {
                 sequence: current,
             }
         } else {
-            let (facts, sequence) = self.fold();
-            Sync::Resync { facts, sequence }
+            self.snapshot()
         };
         log.offsets.insert(peer.clone(), sync.sequence());
         drop(log);
@@ -218,20 +230,34 @@ impl Channel {
             Sync::Instants { instants, .. } => {
                 let mut applied = 0;
                 for instant in instants {
-                    let mut changes = Changes::new();
-                    for fact in instant.retracted {
-                        if !instant.transient || !instant.asserted.contains(&fact) {
-                            changes.dissociate(fact.the, fact.of, fact.is);
-                        }
-                    }
-                    for fact in instant.asserted {
-                        changes.associate(fact.the, fact.of, fact.is);
-                    }
                     let mut log = self.log.lock();
                     let minted = if instant.transient {
+                        let mut changes = Changes::new();
+                        for fact in instant.retracted {
+                            if !instant.asserted.contains(&fact) {
+                                changes.dissociate(fact.the, fact.of, fact.is);
+                            }
+                        }
+                        for fact in instant.asserted {
+                            changes.associate(fact.the, fact.of, fact.is);
+                        }
                         self.layer.witness(changes)
                     } else {
-                        self.layer.apply(changes)
+                        let mut state = self.layer.state.write();
+                        let mut delta = Delta::default();
+                        for change in instant.changes {
+                            match change {
+                                StoreChange::Insert(fact) => state.insert(fact, &mut delta),
+                                StoreChange::Remove(fact) => {
+                                    state.remove(&fact, &mut delta);
+                                }
+                                StoreChange::Shadow(fact) => state.shadow(fact, &mut delta),
+                                StoreChange::Unshadow(fact) => {
+                                    state.unshadow(&default_sort_key(&fact), &mut delta)
+                                }
+                            }
+                        }
+                        state.mint(delta)
                     };
                     if let Some(minted) = minted {
                         log.received.insert(minted.sequence, peer.clone());
@@ -241,29 +267,42 @@ impl Channel {
                 self.absorb(&mut self.log.lock());
                 applied
             }
-            Sync::Resync { facts, .. } => {
-                self.resync(peer, facts);
+            Sync::Resync {
+                facts, shadowed, ..
+            } => {
+                self.resync(peer, facts, shadowed);
                 1
             }
         }
     }
 
     /// Replace the layer's facts with `facts`, as `peer`'s fold.
-    fn resync(&self, peer: &Entity, facts: Vec<Artifact>) {
-        let held = self.layer.facts();
-        let mut changes = Changes::new();
+    fn resync(&self, peer: &Entity, facts: Vec<Artifact>, shadowed: Vec<Artifact>) {
+        let mut log = self.log.lock();
+        let mut state = self.layer.state.write();
+        let mut delta = Delta::default();
+        let held: Vec<_> = state.facts.values().cloned().collect();
         for fact in held {
-            changes.dissociate(fact.the, fact.of, fact.is);
+            state.remove(&fact, &mut delta);
+        }
+        let hidden: Vec<_> = state.shadowed.keys().cloned().collect();
+        for key in hidden {
+            state.unshadow(&key, &mut delta);
         }
         for fact in facts {
-            changes.associate(fact.the, fact.of, fact.is);
+            state.insert(fact, &mut delta);
         }
-        let mut log = self.log.lock();
-        if let Some(minted) = self.layer.apply(changes) {
+        for fact in shadowed {
+            state.shadow(fact, &mut delta);
+        }
+        if let Some(minted) = state.mint(delta) {
             log.received.insert(minted.sequence, peer.clone());
         }
-        drop(log);
-        self.absorb(&mut self.log.lock());
+        // This snapshot supersedes our earlier writes. Sending those back
+        // to its author would resurrect facts its snapshot just removed.
+        log.offsets.insert(peer.clone(), state.sequence);
+        drop(state);
+        self.absorb(&mut log);
     }
 
     /// Drain the layer's instants into the log, tagging the ones that
@@ -485,7 +524,10 @@ mod tests {
             );
         }
         let sync = a.since(&pb);
-        let Sync::Resync { facts, sequence } = &sync else {
+        let Sync::Resync {
+            facts, sequence, ..
+        } = &sync
+        else {
             panic!("b fell off the log: {sync:?}");
         };
         assert_eq!(*sequence, 13);
@@ -497,6 +539,49 @@ mod tests {
 
         // b is current now: the next sync is an empty instants list.
         assert!(matches!(a.since(&pb), Sync::Instants { instants, .. } if instants.is_empty()));
+    }
+
+    /// Tombstone maintenance is distinct from storing or retracting a
+    /// held fact, both in incremental replication and after a resync.
+    #[dialog_common::test]
+    async fn it_replicates_tombstones_and_their_removal() {
+        let (a, b, _env) = two_channels().await;
+        let (pa, pb) = (peer("a"), peer("b"));
+        a.join(pb.clone());
+        b.join(pa.clone());
+        let hidden = fact("doc:lower", "doc/title", "Below");
+        let mut changes = Changes::new();
+        changes.dissociate(hidden.the.clone(), hidden.of.clone(), hidden.is.clone());
+        a.layer().apply(changes);
+        b.receive(&pa, a.since(&pb));
+        assert_eq!(a.layer().tombstones(), b.layer().tombstones());
+        assert_eq!(b.layer().tombstones().len(), 1);
+        a.layer().clear();
+        b.receive(&pa, a.since(&pb));
+        assert!(
+            b.layer().is_empty(),
+            "lifting a tombstone must not store its fact"
+        );
+        assert!(b.layer().tombstones().is_empty());
+
+        let mut changes = Changes::new();
+        changes.dissociate(hidden.the.clone(), hidden.of.clone(), hidden.is.clone());
+        a.layer().apply(changes);
+        write(&b, vec![fact("doc:stale", "doc/title", "Stale")]);
+        b.receive(&pa, a.snapshot());
+        assert_eq!(a.layer().tombstones(), b.layer().tombstones());
+        assert!(b.layer().is_empty());
+        a.receive(&pb, b.since(&pa));
+        assert!(
+            a.layer().is_empty(),
+            "a resync cannot echo superseded writes"
+        );
+        a.layer().clear();
+        b.receive(&pa, a.snapshot());
+        assert!(
+            b.layer().tombstones().is_empty(),
+            "a resync clears stale tombstones"
+        );
     }
 
     /// Retention: what every peer has seen leaves the log, the slowest
