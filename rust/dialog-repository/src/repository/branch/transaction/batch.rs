@@ -281,8 +281,11 @@ impl TransactionPublish<&Branch> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {
@@ -303,8 +306,11 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {
@@ -341,8 +347,11 @@ impl TransactionCommit<&Branch> {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {
@@ -435,8 +444,11 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {
@@ -503,8 +515,11 @@ where
         + Provider<Resolve>
         + Provider<Identify>
         + Provider<Attest>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<Fork<RemoteSite, Get>>
         + ConditionalSync
         + 'static,
 {
@@ -531,10 +546,27 @@ where
         + Provider<Identify>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<crate::Hydrate>
         + ConditionalSync
         + 'static,
 {
-    induce(source, view, &mut changes, transients, env).await?;
+    // Each round's transients are witnessed on the layer's session
+    // store: a command that fired a rule is seen by the store's
+    // observers even though the commit folds it away.
+    let mut witness = source.overlay();
+    let staged = Placements::resolve(source, &changes, env).await?;
+    induce(
+        source,
+        view,
+        &staged,
+        &mut changes,
+        transients,
+        &mut witness,
+        env,
+    )
+    .await?;
     let placements = Placements::resolve(source, &changes, env).await?;
     let Partitioned {
         tree: changes,
@@ -565,6 +597,7 @@ where
         + Provider<Attest>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<crate::Hydrate>
         + ConditionalSync
         + 'static,
 {
@@ -612,6 +645,7 @@ impl TransactionBatch {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -693,6 +727,7 @@ impl TransactionBatch {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {

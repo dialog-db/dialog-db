@@ -417,7 +417,9 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -442,6 +444,43 @@ impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<dialog_artifacts::Estimate> for JoinEnv<'_, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(
+        &self,
+        input: ArtifactSelector<Constrained>,
+    ) -> Result<Option<u64>, DialogArtifactsError> {
+        // Route the estimate's root read through the same counting store as
+        // the scans, so a bench sees the block it costs.
+        let select = self.branch.claims().select(input);
+        let store = NetworkedIndex::new(self.operator, select.catalog(), None);
+        let counting = CountingStore::new(store, self.journal.clone());
+        select.estimate(counting).await
+    }
+}
+
+// Preload hints have no listener in the bench env: refuse them so the
+// measured read counts stay exactly the demand reads.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, Env> {
+    async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
+        false
+    }
+}
+
 // Raw node loads for resolver premises: read the branch's archive
 // catalog through the same counting store scans use, so resolver
 // block reads land in the shared read journal too.
@@ -452,7 +491,9 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -568,8 +609,11 @@ where
         + Provider<Attest>
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<Fork<RemoteSite, Get>>
         + ConditionalSync
         + 'static,
 {
@@ -1679,8 +1723,11 @@ mod test {
             + Provider<Attest>
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<dialog_repository::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {
@@ -1797,8 +1844,11 @@ mod test {
             + Provider<Attest>
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<dialog_repository::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {
@@ -1924,8 +1974,11 @@ mod test {
             + Provider<Attest>
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<dialog_repository::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {

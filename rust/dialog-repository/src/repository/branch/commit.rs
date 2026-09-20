@@ -151,7 +151,7 @@ where
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -179,7 +179,7 @@ where
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -264,7 +264,7 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -388,7 +388,7 @@ where
             + Provider<Resolve>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -847,7 +847,7 @@ mod history_tests {
             .await?;
 
         branch.refresh(&operator).await?;
-        let history = branch.history(&operator);
+        let history = branch.history(&operator).await;
 
         // Both claims are recorded, and the replacement's cause lists the
         // version of the claim it superseded.
@@ -905,7 +905,7 @@ mod history_tests {
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
-        let history = branch.history(&operator);
+        let history = branch.history(&operator).await;
         let record = history
             .revision_record(&third.version())
             .await?
@@ -1034,7 +1034,7 @@ mod history_tests {
         );
 
         branch.refresh(&operator).await?;
-        let history = branch.history(&operator);
+        let history = branch.history(&operator).await;
         let record = history
             .revision_record(&empty.version())
             .await?

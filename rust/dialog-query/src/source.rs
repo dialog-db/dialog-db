@@ -73,6 +73,31 @@ pub(crate) mod test {
         }
     }
 
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<dialog_artifacts::Estimate> for TestEnv<'_> {
+        async fn execute(
+            &self,
+            input: ArtifactSelector<Constrained>,
+        ) -> Result<Option<u64>, DialogArtifactsError> {
+            self.branch
+                .claims()
+                .select(input)
+                .estimate_perform(self.operator)
+                .await
+        }
+    }
+
+    // Preload hints have no listener in the test env: refuse them so
+    // evaluation stops composing hints after the first.
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<dialog_artifacts::Preload> for TestEnv<'_> {
+        async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
+            false
+        }
+    }
+
     // Raw node loads for resolver premises, local archive only.
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

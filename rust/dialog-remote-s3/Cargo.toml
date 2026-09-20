@@ -76,7 +76,7 @@ dialog-common = { workspace = true, features = ["helpers"] }
 ipld-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 wasm-bindgen-test = { workspace = true }
 
 

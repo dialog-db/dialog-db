@@ -8,7 +8,7 @@ use dialog_query::concept::query::PlanCache;
 
 use crate::placement::{Bindings, Target};
 use crate::repository::source::{Caches, SourceRef};
-use crate::{Ephemeral, NetworkedIndex, RemoteSite};
+use crate::{Ephemeral, NetworkedIndex};
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::Entity;
 use dialog_artifacts::history::Origin;
@@ -17,7 +17,6 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
-use dialog_capability::Fork;
 use dialog_capability::{Capability, Did, Subject};
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::Archive;
@@ -293,18 +292,21 @@ impl Branch {
     /// [`dialog_artifacts::history::causality`]).
     ///
     /// History records live in the same tree as the data, so this reads the
-    /// history region of the current revision's tree. Reads that miss
-    /// locally are not fetched from a remote — traversal over unreplicated
-    /// history surfaces as `IncompleteHistory`.
-    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    /// history region of the current revision's tree. A read that misses
+    /// locally hydrates from the branch's tracked remote exactly as a fact
+    /// read does, so a replica that materialized only the operational
+    /// regions fetches the history it turns out to need. A branch tracking
+    /// no remote reads purely locally.
+    pub async fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
-            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + Provider<memory::Resolve>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        SourceRef::from(self).history(env)
+        SourceRef::from(self).history(env).await
     }
 
     /// The branch's committed history, newest first — at most `limit`
@@ -321,7 +323,8 @@ impl Branch {
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
-            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + Provider<memory::Resolve>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {

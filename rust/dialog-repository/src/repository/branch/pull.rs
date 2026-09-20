@@ -16,6 +16,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
+use futures_util::future::Either;
 
 use crate::{
     Branch, Checkpoint, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError,
@@ -112,7 +113,7 @@ impl<'a> Pull<'a> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -138,7 +139,7 @@ impl<'a> Pull<'a> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -281,13 +282,27 @@ impl<'a> Pull<'a> {
                         context.clone()
                     }
                     None => {
-                        let history = branch.history(env);
+                        let history = branch.history(env).await;
                         contexts.context_of(&revision.version(), &history).await?
                     }
                 },
             },
             None => Context::new(),
         };
+
+        // Replicas that have never observed one another (no origin in
+        // common, see `merge::unacquainted`) integrate each other's
+        // changes unscreened: every screen is provably a no-op, and the
+        // history screen in particular would otherwise scan the other
+        // tree once per covering record, the first of them a root-to-
+        // leaf descent, before the integrate can begin. This is the
+        // shape of a device joining an account it was seeded apart
+        // from. Decided from the two watermarks at zero reads; an
+        // upstream that published no watermark is screened as before.
+        let unacquainted = upstream_revision
+            .context
+            .as_ref()
+            .is_some_and(|theirs| merge::unacquainted(&local_context, theirs));
 
         // The upstream published its watermark with its head: two frugal
         // paths can short-circuit the tree merge entirely, both gated on
@@ -437,13 +452,23 @@ impl<'a> Pull<'a> {
                     } else {
                         (&upstream_tree, local_context.clone())
                     };
-                    let changes = base_tree.differentiate_within(
+                    // Every one of pull's differentials is streamed to
+                    // completion, so the eager prefetch fetches each
+                    // frontier level in one round trip instead of one
+                    // per node; against a hydrating store that turns a
+                    // per-block network chain into a per-level one.
+                    let changes = base_tree.differentiate_within_with(
                         changed_side,
                         &contested,
                         &tree_store,
                         &tree_store,
+                        dialog_search_tree::Prefetch::Eager,
                     );
-                    let screened = merge::screen_data(changes, screen_context);
+                    let screened = if unacquainted {
+                        Either::Left(changes)
+                    } else {
+                        Either::Right(merge::screen_data(changes, screen_context))
+                    };
                     stitched = Box::pin(stitched.integrate(screened, &tree_store)).await?;
                 }
 
@@ -457,8 +482,13 @@ impl<'a> Pull<'a> {
                 // fresh version no coverage names.
                 let coverage_scope = merge::coverage_scope();
                 for (from, to) in [(&base_tree, &local_tree), (&base_tree, &upstream_tree)] {
-                    let coverage =
-                        from.differentiate_within(to, &coverage_scope, &tree_store, &tree_store);
+                    let coverage = from.differentiate_within_with(
+                        to,
+                        &coverage_scope,
+                        &tree_store,
+                        &tree_store,
+                        dialog_search_tree::Prefetch::Eager,
+                    );
                     futures_util::pin_mut!(coverage);
                     while let Some(change) = futures_util::StreamExt::next(&mut coverage).await {
                         let dialog_search_tree::Change::Add(entry) = change? else {
@@ -651,22 +681,35 @@ impl<'a> Pull<'a> {
 
                 let history_scope = merge::history_scope();
                 let data_scope = merge::data_scope();
-                let history_changes = base_tree.differentiate_within(
+                let history_changes = base_tree.differentiate_within_with(
                     &local_tree,
                     &history_scope,
                     &tree_store,
                     &tree_store,
+                    dialog_search_tree::Prefetch::Eager,
                 );
-                let data_changes = base_tree.differentiate_within(
+                let data_changes = base_tree.differentiate_within_with(
                     &local_tree,
                     &data_scope,
                     &tree_store,
                     &tree_store,
+                    dialog_search_tree::Prefetch::Eager,
                 );
                 let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-                let screened_history =
-                    merge::screen_history(history_changes, upstream_snapshot, screen_store);
-                let screened_data = merge::screen_data(data_changes, theirs.clone());
+                let screened_history = if unacquainted {
+                    Either::Left(history_changes)
+                } else {
+                    Either::Right(merge::screen_history(
+                        history_changes,
+                        upstream_snapshot,
+                        screen_store,
+                    ))
+                };
+                let screened_data = if unacquainted {
+                    Either::Left(data_changes)
+                } else {
+                    Either::Right(merge::screen_data(data_changes, theirs.clone()))
+                };
                 let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
                 let mut delta = Delta::zero();
@@ -777,15 +820,33 @@ impl<'a> Pull<'a> {
         // in stream order.
         let history_scope = merge::history_scope();
         let data_scope = merge::data_scope();
-        let history_changes = base_tree.differentiate_within(
+        // Streamed to completion over a hydrating store: eager prefetch
+        // fetches each frontier level in one network round trip instead
+        // of one per block (the serial chain a fresh clone otherwise
+        // degenerates into).
+        let history_changes = base_tree.differentiate_within_with(
             &upstream_tree,
             &history_scope,
             &tree_store,
             &tree_store,
+            dialog_search_tree::Prefetch::Eager,
         );
-        let data_changes =
-            base_tree.differentiate_within(&upstream_tree, &data_scope, &tree_store, &tree_store);
-        let screened_history = merge::screen_history(history_changes, local_snapshot, screen_store);
+        let data_changes = base_tree.differentiate_within_with(
+            &upstream_tree,
+            &data_scope,
+            &tree_store,
+            &tree_store,
+            dialog_search_tree::Prefetch::Eager,
+        );
+        let screened_history = if unacquainted {
+            Either::Left(history_changes)
+        } else {
+            Either::Right(merge::screen_history(
+                history_changes,
+                local_snapshot,
+                screen_store,
+            ))
+        };
         // Collect the version of every revision record riding the delta
         // into `observed` while the data differential streams anyway.
         // Those records are exactly the upstream-ancestry revisions we
@@ -796,7 +857,11 @@ impl<'a> Pull<'a> {
         // ancestry walk.
         let observed = Arc::new(Mutex::new(BTreeSet::new()));
         let observed_data = merge::observe_revisions(data_changes, observed.clone());
-        let screened_data = merge::screen_data(observed_data, local_context.clone());
+        let screened_data = if unacquainted {
+            Either::Left(observed_data)
+        } else {
+            Either::Right(merge::screen_data(observed_data, local_context.clone()))
+        };
         let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
         let mut delta = Delta::zero();
@@ -1884,7 +1949,7 @@ mod history_tests {
             .await?
             .expect("pull merges");
 
-        let history = feature.history(&operator);
+        let history = feature.history(&operator).await;
 
         // Main's concurrent claim was adopted into feature's history.
         assert_eq!(
@@ -1976,7 +2041,7 @@ mod history_tests {
             .perform(&operator)
             .await?;
         feature.refresh(&operator).await?;
-        let history = feature.history(&operator);
+        let history = feature.history(&operator).await;
         for version in [after_merge.version(), next.version()] {
             let skips = history
                 .revision_record(&version)
@@ -2274,7 +2339,7 @@ mod history_tests {
         );
 
         // ... and the recorded lineage proves they are concurrent.
-        let history = feature.history(&operator);
+        let history = feature.history(&operator).await;
         let ours_claims = history
             .claims_at(&ours.version(), &"post:1".parse()?, &"post/title".parse()?)
             .await?;
@@ -2761,7 +2826,7 @@ mod history_tests {
                     .cached(&head.version())
                     .await
                     .expect("the memo is primed");
-                let history = branch.history(operator);
+                let history = branch.history(operator).await;
                 let walked = context_of(&head.version(), &history).await?;
                 anyhow::Ok((memo, walked))
             }
@@ -2825,7 +2890,7 @@ mod history_tests {
             .context
             .clone()
             .expect("a freshly minted head publishes its context");
-        let history = main.history(&operator);
+        let history = main.history(&operator).await;
         let walked = context_of(&head.version(), &history).await?;
         assert_eq!(
             published, walked,

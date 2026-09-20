@@ -23,8 +23,9 @@
 //! # Declarations, as facts on the layer
 //!
 //! ```text
-//! <repository did>       dialog.attribute/default  memory:shared   # the implicit scope
-//! attribute:ui/selected  dialog.attribute/scope    memory:session  # an override
+//! <repository did>          dialog.attribute/default    memory:shared   # the implicit scope
+//! attribute:ui/selected     dialog.attribute/scope      memory:session  # an override
+//! attribute:cmd.rename/name dialog.attribute/transient  true            # lives one round
 //! ```
 //!
 //! The default names the scope an attribute with no placement belongs
@@ -40,16 +41,27 @@
 //! ([`CommitError::UnboundScope`]) rather than routing elsewhere. The
 //! fix is in the binding, which is local, not in the schema.
 //!
+//! # Transient attributes
+//!
+//! An attribute declared transient ([`TransientAttribute`]) never
+//! settles anywhere: a fact asserted under it is a command. At commit
+//! it moves into the transaction's transient bucket before induction —
+//! so `assert` and `dispatch` say the same thing for it — and a rule
+//! whose conclusion is transient attributes alone has a transient
+//! head, exactly as if its concept carried the
+//! [`Transient`](crate::Transient) marker. Each round's transients are
+//! witnessed on the store of the scope they are placed under, so an
+//! observer of that store sees them.
+//!
 //! # Observability
 //!
 //! A scope bound to the ephemeral store is folded into every read of
 //! the layer and every standing subscription maintains from its
 //! instants. So a rule concluding a session-scoped head writes
-//! something a subscriber sees — the observable ephemeral conclusion
-//! a transient (one induction round, never written anywhere) cannot
-//! be.
+//! something a subscriber sees; a transient conclusion is seen only by
+//! the store's observers, for the one round it lives.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
@@ -75,6 +87,11 @@ pub(crate) fn scope_attr() -> Attribute {
 /// The `dialog.attribute/default` declaration attribute.
 pub(crate) fn default_attr() -> Attribute {
     the!("dialog.attribute/default").into()
+}
+
+/// The `dialog.attribute/transient` declaration attribute.
+pub(crate) fn transient_placement_attr() -> Attribute {
+    the!("dialog.attribute/transient").into()
 }
 
 /// The URI scheme attribute entities are minted under.
@@ -143,6 +160,52 @@ impl Statement for Placement {
             scope_attr(),
             attribute_entity(&self.attribute),
             Value::Entity(self.scope),
+        );
+    }
+}
+
+/// [`Statement`] declaring an attribute transient: a fact asserted
+/// under it lives for one induction round and is never held, so
+/// asserting it is dispatching a command. Retracting the declaration
+/// makes the attribute ordinary again.
+///
+/// ```no_run
+/// # use dialog_repository::{Branch, TransientAttribute};
+/// # async fn example(branch: &Branch) -> anyhow::Result<()> {
+/// let tx = branch
+///     .transaction()
+///     .assert(TransientAttribute::new("cmd.rename/name".parse()?));
+/// # let _ = tx;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransientAttribute {
+    /// The attribute declared transient.
+    pub attribute: Attribute,
+}
+
+impl TransientAttribute {
+    /// Declare that facts under `attribute` live one round.
+    pub fn new(attribute: Attribute) -> Self {
+        Self { attribute }
+    }
+}
+
+impl Statement for TransientAttribute {
+    fn assert(self, update: &mut impl Update) {
+        update.associate_unique(
+            transient_placement_attr(),
+            attribute_entity(&self.attribute),
+            Value::Boolean(true),
+        );
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        update.dissociate(
+            transient_placement_attr(),
+            attribute_entity(&self.attribute),
+            Value::Boolean(true),
         );
     }
 }
@@ -235,6 +298,7 @@ impl Bindings {
 pub(crate) struct Declared {
     attributes: HashMap<Attribute, Entity>,
     default: Option<Entity>,
+    transient: HashSet<Attribute>,
 }
 
 /// A shared handle to the committed declarations at a head.
@@ -250,6 +314,8 @@ pub(crate) struct Placements {
     retracted: HashMap<Attribute, Entity>,
     default: Option<Entity>,
     default_retracted: Option<Entity>,
+    transient: HashSet<Attribute>,
+    untransient: HashSet<Attribute>,
 }
 
 /// Read a declaration value as a scope entity, or fail the commit.
@@ -277,6 +343,7 @@ impl Placements {
             + Provider<Resolve>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -287,8 +354,17 @@ impl Placements {
         };
         let scope = scope_attr();
         let default = default_attr();
+        let transient = transient_placement_attr();
         for (entity, the, change) in changes.iter() {
-            if *the == scope {
+            if *the == transient {
+                let Some(placed) = entity_attribute(entity) else {
+                    continue;
+                };
+                match change {
+                    Change::Retract(_) => placements.untransient.insert(placed),
+                    _ => placements.transient.insert(placed),
+                };
+            } else if *the == scope {
                 let Some(placed) = entity_attribute(entity) else {
                     continue;
                 };
@@ -321,6 +397,16 @@ impl Placements {
             Some(scope) if self.default_retracted.as_ref() != Some(scope) => Some(scope),
             _ => None,
         }
+    }
+
+    /// Whether facts under `attribute` live one round: declared
+    /// transient, in this commit or at the head, and not undeclared in
+    /// this commit.
+    pub(crate) fn is_transient(&self, attribute: &Attribute) -> bool {
+        if self.transient.contains(attribute) {
+            return true;
+        }
+        self.committed.transient.contains(attribute) && !self.untransient.contains(attribute)
     }
 
     /// The scope `attribute`'s facts live in, or `None` for the tree
@@ -398,7 +484,12 @@ fn defaults_selector() -> ArtifactSelector<Constrained> {
     ArtifactSelector::new().the(default_attr())
 }
 
-/// The committed declarations at `source`'s head — two range scans,
+/// Selector for every committed `dialog.attribute/transient` declaration.
+fn transients_selector() -> ArtifactSelector<Constrained> {
+    ArtifactSelector::new().the(transient_placement_attr())
+}
+
+/// The committed declarations at `source`'s head — three range scans,
 /// cached per head.
 async fn committed_placements<Env>(
     source: SourceRef<'_>,
@@ -410,6 +501,7 @@ where
         + Provider<Resolve>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<crate::Hydrate>
         + ConditionalSync
         + 'static,
 {
@@ -439,6 +531,11 @@ where
             declared.default = Some(scope_value("dialog.attribute/default", &claim.is)?);
         }
     }
+    for claim in committed(source, transients_selector(), env).await? {
+        if let (Some(attribute), Value::Boolean(true)) = (entity_attribute(&claim.of), &claim.is) {
+            declared.transient.insert(attribute);
+        }
+    }
     let placements = Arc::new(declared);
     cache.record_placements(head, placements.clone());
     Ok(placements)
@@ -457,6 +554,7 @@ where
         + Provider<Resolve>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<crate::Hydrate>
         + ConditionalSync
         + 'static,
 {
@@ -513,6 +611,9 @@ mod tests {
             + Provider<Identify>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -538,6 +639,7 @@ mod tests {
             + Provider<Resolve>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {

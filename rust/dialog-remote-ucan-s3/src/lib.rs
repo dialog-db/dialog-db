@@ -17,7 +17,10 @@ mod permit_cache;
 mod provider;
 pub mod site;
 
-pub use authorizer::{DefaultResolver, UcanAuthorizer};
+pub use authorizer::{
+    Args, DefaultResolver, FromUcanArgs, UcanAuthorizer, check_failed_to_authorize_error,
+    verify_invocation,
+};
 pub use site::{Ucan, UcanAddress, UcanAuthorization, UcanFork, UcanInvocation, UcanSite};
 
 // Re-export container types from dialog-ucan

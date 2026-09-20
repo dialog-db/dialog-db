@@ -1,6 +1,8 @@
 use std::any::type_name;
 use std::collections::BTreeMap;
+use std::future::poll_fn;
 use std::sync::Arc;
+use std::task::Poll;
 
 use dialog_capability::{Command, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -35,6 +37,183 @@ pub async fn test_repo(
         .expect("test_repo: failed to open repository")
 }
 
+/// The environment this crate's own tests run stacks against: the test
+/// operator for every effect, and this crate's own
+/// [`EphemeralRegistry`](crate::EphemeralRegistry) for creating and
+/// opening ephemeral layers. The operator sits above this crate, so
+/// through the dev-dependency cycle its `Ephemeral` is not
+/// `crate::Ephemeral` and its ephemeral providers cannot serve tests
+/// written against this crate's types; the effects that cross the
+/// boundary are all leaf-crate types and delegate straight through.
+#[cfg(test)]
+#[derive(dialog_capability::Provider, Clone)]
+pub struct TestEnv {
+    #[provide(
+        Get,
+        Put,
+        Import,
+        Resolve,
+        Publish,
+        Identify,
+        Attest,
+        Write,
+        BlobRead,
+        BlobImport,
+        Retract,
+        Hydrate,
+        Preload,
+        Speculation,
+        Fork<Network, Get>,
+        Fork<Network, Put>,
+        Fork<Network, Resolve>,
+        Fork<Network, Publish>,
+        Fork<Network, BlobImport>,
+        Fork<Network, BlobRead>
+    )]
+    operator: Operator<VolatileSpaceForTests>,
+    #[provide(CreateEphemeral, OpenEphemeral)]
+    ephemerals: Arc<EphemeralRegistry>,
+}
+
+#[cfg(test)]
+impl TestEnv {
+    /// Wrap a test operator with a fresh ephemeral registry.
+    pub fn new(operator: Operator<VolatileSpaceForTests>) -> Self {
+        Self {
+            operator,
+            ephemerals: Arc::default(),
+        }
+    }
+
+    /// The ephemeral layers this environment holds.
+    pub fn ephemerals(&self) -> &EphemeralRegistry {
+        &self.ephemerals
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<CreateEphemeral> for Arc<EphemeralRegistry> {
+    async fn execute(&self, input: ()) -> Ephemeral {
+        Provider::<CreateEphemeral>::execute(self.as_ref(), input).await
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<OpenEphemeral> for Arc<EphemeralRegistry> {
+    async fn execute(&self, input: Entity) -> Result<Ephemeral, EphemeralError> {
+        Provider::<OpenEphemeral>::execute(self.as_ref(), input).await
+    }
+}
+
+/// Fill `branch` with what a tonk profile's account branch carries, at a
+/// scale that makes a cold clone do real work.
+///
+/// Modelled on what a real profile carries (see `tonk-account` and
+/// `onboarding.rs`), which is SMALL: a few delegations -- passkey
+/// recovery, account recovery, device grants -- each decomposing into
+/// facts plus a signed envelope blob, alongside a handful of device-link
+/// rows. A profile is not a data store; its branch holds definitions and
+/// authority, not bulk.
+///
+/// `scale` of 1 targets the shape the app's own `/diagnose` view reports
+/// for a real profile: ONE index node with ~68 children (fanout 256,
+/// max-segment 65536), i.e. a root plus a wide child level. That shape is
+/// the whole point -- the download walks the root, then a level of ~68
+/// siblings whose reads are independent. Fetched together they cost one
+/// round trip; fetched one at a time they cost 68, which over a 2s link
+/// is the difference between a second and a minute.
+///
+/// Returns the number of delegations retained, so a caller can assert
+/// the envelope blobs actually shipped.
+#[cfg(test)]
+pub async fn fill_account_branch<Env>(
+    branch: &crate::Branch,
+    scale: usize,
+    env: &Env,
+) -> anyhow::Result<usize>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Publish>
+        + Provider<Identify>
+        + Provider<Attest>
+        + Provider<Import>
+        + Provider<Write>
+        + Provider<crate::Hydrate>
+        + Provider<Fork<Network, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_credentials::Ed25519Signer;
+    use dialog_ucan_core::subject::Subject;
+    use dialog_varsig::Principal as _;
+    use futures_util::stream;
+
+    let space = Ed25519Signer::generate().await?;
+    let delegations = 3 * scale;
+    // Sized so the tree reaches a wide child level rather than a single
+    // leaf: the siblings are what must overlap.
+    for _ in 0..delegations {
+        let holder = Ed25519Signer::generate().await?;
+        let delegation = dialog_ucan_core::DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&holder.did())
+            .subject(Subject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await?;
+        branch
+            .delegations()
+            .retain(dialog_ucan::UcanDelegation::new(
+                dialog_ucan_core::DelegationChain::new(delegation),
+            ))
+            .perform(env)
+            .await?;
+    }
+
+    for round in 0..(6 * scale) {
+        let rows: Vec<_> = (0..150)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "device/link".parse().expect("valid attribute"),
+                    of: format!("device:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("device-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        branch.commit(stream::iter(rows)).perform(env).await?;
+    }
+
+    Ok(delegations)
+}
+
+#[cfg(test)]
+use crate::{
+    CreateEphemeral, Ephemeral, EphemeralError, EphemeralRegistry, Hydrate, OpenEphemeral,
+};
+#[cfg(test)]
+use dialog_artifacts::{Entity, Preload, Speculation};
+#[cfg(test)]
+use dialog_capability::Fork;
+#[cfg(test)]
+use dialog_effects::archive::{Get, Import, Put};
+#[cfg(test)]
+use dialog_effects::authority::{Attest, Identify};
+#[cfg(test)]
+use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Write};
+#[cfg(test)]
+use dialog_effects::memory::{Publish, Resolve, Retract};
+#[cfg(test)]
+use dialog_network::Network;
+#[cfg(test)]
+use dialog_operator::Operator;
 /// The volatile space type test operators run over.
 #[cfg(test)]
 use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;
@@ -44,11 +223,49 @@ use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;
 /// dispatches rather than wall time. Archive `Get` carries one digest
 /// per call, so its tally is exactly the number of block reads.
 ///
+/// It also measures how many block reads are in flight AT ONCE. That is
+/// the quantity that decides wall time over a remote archive: n reads
+/// awaited one after another cost n round trips, while n overlapped reads
+/// cost one. A tally cannot tell those apart — both count n — so
+/// [`peak_block_reads_in_flight`](Self::peak_block_reads_in_flight)
+/// reports the overlap directly. Every read yields once before it is
+/// answered, so reads issued by concurrently polled work are genuinely in
+/// flight together.
+///
 /// Clones share the tally.
 #[derive(Debug, Clone)]
 pub struct Counting<P> {
     inner: P,
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
+    reads: Arc<Mutex<InFlight>>,
+    forks: Arc<Mutex<InFlight>>,
+}
+
+/// How many reads are open now, and the most that were ever open at once.
+#[derive(Debug, Default)]
+struct InFlight {
+    current: usize,
+    peak: usize,
+    /// The effects of the consecutive opens that were alone in flight, and
+    /// the longest such run seen. See [`Counting::longest_serial_fetch_run`].
+    alone: Vec<&'static str>,
+    longest_alone: Vec<&'static str>,
+}
+
+/// Yields to the executor exactly once, so work polled alongside the
+/// caller gets a chance to run before the caller resumes.
+async fn yield_once() {
+    let mut yielded = false;
+    poll_fn(move |context| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 impl<P> Counting<P> {
@@ -57,7 +274,50 @@ impl<P> Counting<P> {
         Self {
             inner,
             counts: Arc::new(Mutex::new(BTreeMap::new())),
+            reads: Arc::new(Mutex::new(InFlight::default())),
+            forks: Arc::new(Mutex::new(InFlight::default())),
         }
+    }
+
+    /// The greatest number of block reads ever in flight at once since
+    /// the last [`reset`](Self::reset).
+    ///
+    /// 1 means strictly serial: each read was awaited before the next was
+    /// issued, so over a remote archive each cost its own round trip.
+    pub fn peak_block_reads_in_flight(&self) -> usize {
+        self.reads.lock().peak
+    }
+
+    /// The most REMOTE fetches ever in flight at once: `Hydrate` (a block
+    /// read that missed locally and went to the remote) and forked
+    /// effects (a push's uploads).
+    ///
+    /// A local read is cheap and its overlap does not matter; what decides
+    /// wall time is how many round trips are open together, so this is the
+    /// quantity a HAR reports and the one an assertion should use.
+    pub fn peak_forks_in_flight(&self) -> usize {
+        self.forks.lock().peak
+    }
+
+    /// The longest run of remote fetches that were each ALONE in flight.
+    ///
+    /// A peak hides this. One phase that fans out lifts the peak above 1
+    /// while another is still strictly serial, so a run whose download
+    /// makes thirty one-at-a-time round trips and whose upload then
+    /// overlaps eleven reports a healthy peak and a serial download at the
+    /// same time -- which is exactly the shape a HAR of the app shows.
+    ///
+    /// This counts the serialization directly: how many fetches in a row
+    /// had no company.
+    pub fn longest_serial_fetch_run(&self) -> usize {
+        self.forks.lock().longest_alone.len()
+    }
+
+    /// The effects that made up the longest serial run, in order: which
+    /// reader issued each solo fetch, so a run can be attributed to the
+    /// loop that owns it rather than guessed at.
+    pub fn longest_serial_fetch_run_effects(&self) -> Vec<&'static str> {
+        self.forks.lock().longest_alone.clone()
     }
 
     /// Total executions of effects whose type name contains `needle`
@@ -76,9 +336,11 @@ impl<P> Counting<P> {
         self.count("archive::Get")
     }
 
-    /// Clear the tally.
+    /// Clear the tally and the observed concurrency.
     pub fn reset(&self) {
         self.counts.lock().clear();
+        *self.reads.lock() = InFlight::default();
+        *self.forks.lock() = InFlight::default();
     }
 
     /// The full tally, keyed by effect type name.
@@ -96,7 +358,50 @@ where
     P: Provider<C> + ConditionalSync,
 {
     async fn execute(&self, input: C::Input) -> C::Output {
-        *self.counts.lock().entry(type_name::<C>()).or_insert(0) += 1;
-        self.inner.execute(input).await
+        let name = type_name::<C>();
+        *self.counts.lock().entry(name).or_insert(0) += 1;
+
+        // What costs a round trip, and what does not.
+        //
+        // A block read that misses locally becomes a `Hydrate` -- that
+        // effect IS the remote fetch (it resolves the route, fetches, and
+        // writes back), so it is the download's round trip. A push's
+        // uploads cross as `Fork<RemoteSite, Put>`. A bare `archive::Get`
+        // is the local store: those overlap for free and say nothing
+        // about wall time, which is why an earlier peak taken over all
+        // block reads read healthy while every fetch was serial.
+        //
+        // Both remote forms feed one gauge, so the two directions report
+        // the same quantity the HAR does: fetches open at once.
+        let gauge = if name.contains("hydrate::Hydrate") || name.contains("fork::Fork") {
+            &self.forks
+        } else if name.contains("archive::Get") {
+            &self.reads
+        } else {
+            return self.inner.execute(input).await;
+        };
+
+        {
+            let mut open = gauge.lock();
+            open.current += 1;
+            open.peak = open.peak.max(open.current);
+            if open.current == 1 {
+                open.alone.push(name);
+                if open.alone.len() > open.longest_alone.len() {
+                    open.longest_alone = open.alone.clone();
+                }
+            } else {
+                open.alone.clear();
+            }
+        }
+        // Yield before answering, so a read issued by work polled
+        // alongside this one is in flight together with it. Without this
+        // a same-tick read could complete before its sibling is polled,
+        // and genuinely concurrent work would measure as serial.
+        yield_once().await;
+        let output = self.inner.execute(input).await;
+        gauge.lock().current -= 1;
+
+        output
     }
 }

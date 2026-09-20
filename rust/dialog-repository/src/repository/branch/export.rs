@@ -35,7 +35,7 @@ impl<E: Exporter> Export<'_, E> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,

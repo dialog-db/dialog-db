@@ -27,6 +27,41 @@ mod tests {
         assert!(!operator.did().to_string().is_empty());
     }
 
+    /// An ephemeral layer is a process resource: created through the
+    /// operator it is registered under its address, opening the address
+    /// yields the same layer, and once every handle is dropped the
+    /// address opens nothing.
+    #[dialog_common::test]
+    async fn it_opens_ephemeral_layers_by_address() {
+        use dialog_repository::{Ephemeral, EphemeralError};
+        let storage = Storage::volatile();
+        let profile = Profile::open(unique_name("test"))
+            .perform(&storage)
+            .await
+            .unwrap();
+        let operator = profile
+            .derive(b"test")
+            .network(Network::default())
+            .build(storage)
+            .await
+            .unwrap();
+
+        let layer = Ephemeral::create().perform(&operator).await;
+        let address = layer.entity().clone();
+        let reopened = Ephemeral::open(address.clone())
+            .perform(&operator)
+            .await
+            .expect("registered");
+        assert!(reopened.is(&layer), "the same store");
+        drop(layer);
+        drop(reopened);
+        let missing = Ephemeral::open(address.clone()).perform(&operator).await;
+        assert!(
+            matches!(&missing, Err(EphemeralError::NotOpen(at)) if *at == address),
+            "gone with its last handle: {missing:?}"
+        );
+    }
+
     #[dialog_common::test]
     async fn it_derives_different_operators_from_different_contexts() {
         let storage1 = Storage::volatile();
@@ -1005,7 +1040,7 @@ mod tests {
         use dialog_effects::archive::prelude::*;
         use dialog_effects::memory::prelude::*;
         use dialog_network::NetworkAddress as SiteAddress;
-        use dialog_remote_ucan_s3::UcanAddress;
+        use dialog_remote_ucan::{Exchange, UcanAddress};
         use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
         fn ucan_address(s3: &UcanS3Address) -> SiteAddress {
@@ -1343,6 +1378,113 @@ mod tests {
                 .await?;
 
             assert_eq!(retrieved, Some(content));
+            Ok(())
+        }
+
+        /// How the helper service answered so far: invocations it
+        /// performed in the request that proved them, invocations it
+        /// answered with a permit, and requests it received in all.
+        async fn answered(s3: &UcanS3Address) -> anyhow::Result<(u64, u64, u64)> {
+            let response = dialog_remote_s3::http_client()
+                .get(format!(
+                    "{}/stats",
+                    s3.access_service_url.trim_end_matches('/')
+                ))
+                .send()
+                .await?;
+            let stats: serde_json::Value = serde_json::from_slice(&response.bytes().await?)?;
+            let count = |field: &str| stats[field].as_u64().unwrap_or_default();
+            Ok((count("performed"), count("redeemed"), count("requests")))
+        }
+
+        /// A service that performs operations gets each one in the
+        /// request that proves it: the write's body is the bytes it
+        /// stores, the read answers with the bytes, and no permit is
+        /// ever redeemed.
+        #[dialog_common::test]
+        async fn fork_performs_in_the_request_that_proves_it(
+            s3: UcanS3Address,
+        ) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-direct"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let content = b"one request, proved and performed".to_vec();
+            let digest = Blake3Hash::hash(&content);
+            Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .put(Buffer::from(content.clone()))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            let retrieved = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            assert_eq!(retrieved, Some(content));
+
+            let (performed, redeemed, requests) = answered(&s3).await?;
+            assert_eq!(performed, 2, "the put and the get were performed");
+            assert_eq!(redeemed, 0, "nothing was redeemed for a permit");
+            assert_eq!(requests, 2, "one request each");
+            Ok(())
+        }
+
+        /// An address that asks for the permit exchange goes through the
+        /// permit-based site: every invocation is redeemed for a permit
+        /// the site performs itself, and the service performs nothing.
+        #[dialog_common::test]
+        async fn fork_goes_through_permits_when_the_address_asks(
+            s3: UcanS3Address,
+        ) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-permits"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = SiteAddress::Ucan(
+                UcanAddress::new(&s3.access_service_url).with_exchange(Exchange::Permit),
+            );
+            let content = b"redeemed, then performed by the site".to_vec();
+            let digest = Blake3Hash::hash(&content);
+            Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .put(Buffer::from(content.clone()))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            let retrieved = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("direct")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            assert_eq!(retrieved, Some(content));
+
+            let (performed, redeemed, requests) = answered(&s3).await?;
+            assert_eq!(performed, 0, "the service performed nothing");
+            assert_eq!(redeemed, 2, "the put and the get were each redeemed once");
+            assert_eq!(requests, 2, "one redeem each");
             Ok(())
         }
     }

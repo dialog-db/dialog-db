@@ -11,19 +11,25 @@
 //!
 //! ```no_run
 //! # use dialog_repository::{Branch, Ephemeral, Stack};
-//! # fn example(shared: Branch, local: Branch) -> anyhow::Result<()> {
-//! let state = Ephemeral::new();
-//! let build = Stack::builder()
-//!     .layer(shared.clone()) // the bottom: placements live here
-//!     .layer(local.clone())
-//!     .link(&shared, "memory:shared".parse()?)
-//!     .layer(state.clone())
-//!     .link(&local, "memory:local".parse()?)
-//!     .build(); // `.perform(&env).await?` checks the shape and writes the links
-//! # let _ = build;
+//! # fn example(shared: Branch, local: Branch, state: Ephemeral) -> anyhow::Result<()> {
+//! // `state` was created through the environment: `Ephemeral::create()`.
+//! let open = Stack::open(state.clone())
+//!     .link(&state, &local, "memory:local".parse()?)
+//!     .link(&local, &shared, "memory:shared".parse()?); // the bottom: placements live here
+//! // `.perform(&env).await?` walks the links `state` already records,
+//! // then commits the new ones, checking the shape as it goes.
+//! # let _ = open;
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! A stack is opened from a layer, never built: `Stack::open(layer)`
+//! walks the `dialog.link/*` facts the layer holds, resolves each target
+//! through the environment (a branch by repository and name, a snapshot
+//! by its recorded revision, an ephemeral layer by its address), and
+//! goes on downward. Wiring changes are transaction edits
+//! ([`StackTransaction::link`], [`StackTransaction::unlink`]) that land
+//! as link facts on the enclosing layer with the rest of the commit.
 //!
 //! # Links, as facts
 //!
@@ -37,12 +43,12 @@
 //! <link> dialog.link/revision  <head of the enclosed layer, as last seen>
 //! ```
 //!
-//! plus the enclosed layer's address (`dialog.link/repository` and
-//! `dialog.link/branch` for a branch, `dialog.link/ephemeral` for an
-//! ephemeral layer). Wiring lifts: an encloser also holds a copy of
-//! every link fact its enclosed layers hold, verbatim, so the top layer
-//! carries the whole stack's wiring and every edge is queryable from
-//! it alone.
+//! plus `dialog.link/order` (the link's position among the encloser's
+//! links, which fixes the order layers are read in) and the enclosed
+//! layer's address (`dialog.link/repository` and `dialog.link/branch`
+//! for a branch, `dialog.link/snapshot` with the encoded revision for
+//! a snapshot, `dialog.link/ephemeral` for an ephemeral layer). Each
+//! layer holds only its own links; an opener walks them downward.
 //!
 //! A stack commit refreshes the wiring on every layer above a layer it
 //! moved, bottom to top, so after the commit the top layer's head
@@ -84,13 +90,16 @@
 //! branch may not link a process-local store; the store may link the
 //! branch.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
+use std::{mem, slice};
 
 use base58::ToBase58 as _;
+use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, Changes, DialogArtifactsError, Entity, Instruction, Statement, Update as _, Value,
+    Artifact, ArtifactSelector, Changes, DialogArtifactsError, Entity, Instruction, Statement,
+    Update as _, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, ConditionalSync};
@@ -106,12 +115,13 @@ use thiserror::Error;
 
 use crate::placement::{Placements, Target};
 use crate::repository::branch::session::{Composite, QueryEnv, session_metadata};
-use crate::repository::branch::transaction::induce::induce;
+use crate::repository::branch::transaction::induce::{Witness, induce};
 use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
 use crate::{
-    Branch, CommitError, Delta, Ephemeral, EphemeralRevision, PullError, PushError, RemoteSite,
-    ResolveError, Revision, Snapshot, Subscription, TransactionBatch,
+    Branch, CommitError, Delta, Ephemeral, EphemeralError, EphemeralRevision, OpenEphemeral,
+    PullError, PushError, RemoteSite, ResolveError, Revision, Snapshot, Subscription,
+    TransactionBatch,
 };
 
 /// Who can read a layer: the set of principals its facts reach.
@@ -182,6 +192,18 @@ impl AsLayer for Snapshot {
 impl AsLayer for Ephemeral {
     fn as_layer(&self) -> Layer {
         Layer::Ephemeral(self.clone())
+    }
+}
+
+impl Layer {
+    /// The layer's ephemeral store: a tree layer's session store, or
+    /// the ephemeral layer itself. Where its instants are witnessed.
+    pub(crate) fn store(&self) -> &Ephemeral {
+        match self {
+            Layer::Branch(branch) => branch.overlay(),
+            Layer::Snapshot(snapshot) => snapshot.overlay(),
+            Layer::Ephemeral(ephemeral) => ephemeral,
+        }
     }
 }
 
@@ -314,6 +336,14 @@ impl Layer {
                     link.clone(),
                     Value::Bytes(snapshot.revision().tree.hash().to_vec()),
                 );
+                changes.associate_unique(
+                    link_attr("snapshot"),
+                    link.clone(),
+                    Value::Bytes(
+                        serde_ipld_dagcbor::to_vec(&snapshot.revision())
+                            .expect("a revision encodes"),
+                    ),
+                );
             }
             Layer::Ephemeral(ephemeral) => {
                 changes.associate_unique(
@@ -360,11 +390,11 @@ pub enum StackError {
     #[error("Layer {from} ({from_audience:?}) may not link {to} ({to_audience:?})")]
     Audience {
         /// The address entity of the linking layer.
-        from: Entity,
+        from: Box<Entity>,
         /// Its audience.
         from_audience: Audience,
         /// The address entity of the linked layer.
-        to: Entity,
+        to: Box<Entity>,
         /// Its audience.
         to_audience: Audience,
     },
@@ -378,6 +408,44 @@ pub enum StackError {
     /// A descriptor could not be encoded.
     #[error("Failed to encode a stack descriptor: {0}")]
     Encode(String),
+    /// A link's facts do not name a target and a scope.
+    #[error("Link {link} is malformed")]
+    Link {
+        /// The link entity.
+        link: Entity,
+    },
+    /// A link's address could not be resolved to a layer.
+    #[error("Cannot resolve a layer at {address}")]
+    Address {
+        /// The address as the link records it.
+        address: String,
+    },
+    /// A link records an identity that is not the identity of the
+    /// shape found beneath it: the wiring changed under the encloser.
+    #[error("Layer {layer} links a layer whose shape differs from what it recorded")]
+    Identity {
+        /// The address entity of the encloser.
+        layer: Entity,
+    },
+    /// Reading a layer's link facts failed.
+    #[error("Failed to read link facts: {0}")]
+    Read(String),
+    /// A write or maintenance names a scope no link of this stack binds.
+    #[error("No layer is linked under scope {scope}")]
+    UnboundScope {
+        /// The scope named.
+        scope: Entity,
+    },
+    /// Maintenance names a scope a tree layer is linked under; only
+    /// ephemeral layers are cleared or forgotten.
+    #[error("Scope {scope} binds a tree layer, which cannot be cleared")]
+    NotEphemeral {
+        /// The scope named.
+        scope: Entity,
+    },
+    /// An ephemeral layer a link names is not open in this process.
+    #[error(transparent)]
+    Ephemeral(#[from] EphemeralError),
     /// Writing a layer's link facts failed.
     #[error("Failed to write link facts: {0}")]
     Commit(#[from] CommitError),
@@ -396,171 +464,11 @@ pub enum StackError {
     #[error("Failed to publish layer {layer}: {source}")]
     Publish {
         /// The address entity of the layer whose publish failed.
-        layer: Entity,
+        layer: Box<Entity>,
         /// Why.
         #[source]
         source: CommitError,
     },
-}
-
-/// A layer as the builder holds it: with the links declared so far.
-#[derive(Debug, Clone)]
-struct Pending {
-    layer: Layer,
-    links: Vec<(usize, Entity)>,
-}
-
-/// Builder for a [`Stack`]: add layers bottom first, link each upper
-/// layer to layers beneath it under scope names, then
-/// [`build`](StackBuilder::build).
-#[derive(Debug, Default)]
-pub struct StackBuilder {
-    layers: Vec<Pending>,
-}
-
-impl StackBuilder {
-    /// Add a layer above every layer added so far.
-    pub fn layer(mut self, layer: impl Into<Layer>) -> Self {
-        self.layers.push(Pending {
-            layer: layer.into(),
-            links: Vec::new(),
-        });
-        self
-    }
-
-    /// Link the most recently added layer to `to`, which must already
-    /// be in the stack beneath it, under `name`. A name may be bound
-    /// by several links from one layer; a write to it then lands in
-    /// every layer so bound.
-    pub fn link<L: AsLayer>(mut self, to: &L, name: Entity) -> Self {
-        let to = to.as_layer();
-        let Some(last) = self.layers.len().checked_sub(1) else {
-            return self;
-        };
-        // An unknown target is recorded as a link to the linking layer
-        // itself, which `build` rejects with the right error.
-        let index = self.layers[..last]
-            .iter()
-            .position(|pending| pending.layer.same(&to))
-            .unwrap_or(last);
-        self.layers[last].links.push((index, name));
-        self
-    }
-
-    /// Validate and assemble the stack, writing every enclosing layer's
-    /// link facts.
-    pub fn build(self) -> Build {
-        Build {
-            layers: self.layers,
-        }
-    }
-}
-
-/// Command assembling a stack; see [`StackBuilder::build`].
-#[derive(Debug)]
-pub struct Build {
-    layers: Vec<Pending>,
-}
-
-impl Build {
-    /// Check the shape, derive identities, write link facts, and
-    /// return the stack.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Stack, StackError>
-    where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + ConditionalSync
-            + 'static,
-    {
-        let mut ids: Vec<Entity> = Vec::with_capacity(self.layers.len());
-        let mut links: Vec<Vec<Link>> = Vec::with_capacity(self.layers.len());
-        for (index, pending) in self.layers.iter().enumerate() {
-            let from = pending.layer.address_entity();
-            if !pending.links.is_empty() && matches!(pending.layer, Layer::Snapshot(_)) {
-                return Err(StackError::SnapshotEncloser { from });
-            }
-            let mut own: Vec<Link> = Vec::with_capacity(pending.links.len());
-            let mut descriptor_links: Vec<(String, String)> = Vec::new();
-            for (to, name) in &pending.links {
-                if *to >= index {
-                    return Err(StackError::UnknownLayer { from });
-                }
-                let target = &self.layers[*to].layer;
-                let (from_audience, to_audience) = (pending.layer.audience(), target.audience());
-                if to_audience < from_audience {
-                    return Err(StackError::Audience {
-                        from,
-                        from_audience,
-                        to: target.address_entity(),
-                        to_audience,
-                    });
-                }
-                descriptor_links.push((name.to_string(), ids[*to].to_string()));
-                own.push(Link {
-                    to: *to,
-                    name: name.clone(),
-                    entity: link_entity(&from, &ids[*to]),
-                });
-            }
-            descriptor_links.sort();
-            let descriptor = Descriptor {
-                address: pending.layer.address(),
-                links: descriptor_links,
-            };
-            let bytes = serde_ipld_dagcbor::to_vec(&descriptor)
-                .map_err(|error| StackError::Encode(error.to_string()))?;
-            ids.push(identity(&bytes));
-            links.push(own);
-        }
-
-        // A name binds the layers *linked under it*, not the linking
-        // layers: `local.link(&shared, "memory:shared")` makes
-        // `memory:shared` route to shared.
-        let mut bound: HashMap<Entity, Vec<usize>> = HashMap::new();
-        for own in &links {
-            for link in own {
-                let targets = bound.entry(link.name.clone()).or_default();
-                if !targets.contains(&link.to) {
-                    targets.push(link.to);
-                }
-            }
-        }
-
-        let layers: Vec<Layer> = self
-            .layers
-            .into_iter()
-            .map(|pending| pending.layer)
-            .collect();
-        let published: Vec<Head> = layers.iter().map(Layer::head).collect();
-        let stack = Stack {
-            state: Arc::new(RwLock::new(State {
-                published,
-                versions: Vec::new(),
-                staged: layers.iter().map(|_| None).collect(),
-            })),
-            layers,
-            ids,
-            links,
-            bound,
-        };
-        stack.state.write().versions = stack.versions();
-        // Every encloser records its wiring now, at the heads it sees,
-        // and publishes it, so the stack reads at those heads from
-        // here on. Nothing beneath has moved yet, so every layer with
-        // links is treated as reaching a move.
-        let heads = stack.heads();
-        let never: Vec<Head> = Vec::new();
-        stack.capture(BTreeMap::new(), heads, &never, env).await?;
-        stack.publish(env).await?;
-        Ok(stack)
-    }
 }
 
 /// What a link entity hashes: the encloser's address entity and the
@@ -594,8 +502,556 @@ fn identity(descriptor: &[u8]) -> Entity {
     .expect("a base58 hash is an opaque URI path")
 }
 
+/// The shape of a stack: its layers bottom first, their stack
+/// identities, their links, and the scope names the links bind. Held
+/// in the stack's shared state, so a link committed through one handle
+/// is the shape every clone reads from then on.
+#[derive(Debug, Clone, Default)]
+struct Topology {
+    /// Bottom first.
+    layers: Vec<Layer>,
+    /// Each layer's stack identity, parallel to `layers`.
+    ids: Vec<Entity>,
+    /// Each layer's links, parallel to `layers`, in declaration order.
+    links: Vec<Vec<Link>>,
+    /// Scope name → the layers linked under it.
+    bound: HashMap<Entity, Vec<usize>>,
+}
+
+impl Topology {
+    /// Where `layer` sits, if it is in the stack.
+    fn index_of(&self, layer: &Layer) -> Option<usize> {
+        self.layers.iter().position(|held| held.same(layer))
+    }
+
+    /// Put `layer` at position `at`, beneath whatever was there, and
+    /// shift every link past it.
+    fn insert(&mut self, at: usize, layer: Layer) {
+        self.layers.insert(at, layer);
+        self.links.insert(at, Vec::new());
+        for own in &mut self.links {
+            for link in own {
+                if link.to >= at {
+                    link.to += 1;
+                }
+            }
+        }
+    }
+
+    /// Link layer `from` to layer `to` beneath it under `name`. A
+    /// link that already exists is left alone.
+    fn link(&mut self, from: usize, to: usize, name: Entity) -> Result<(), StackError> {
+        let encloser = &self.layers[from];
+        let address = encloser.address_entity();
+        if matches!(encloser, Layer::Snapshot(_)) {
+            return Err(StackError::SnapshotEncloser { from: address });
+        }
+        if to >= from {
+            return Err(StackError::UnknownLayer { from: address });
+        }
+        let target = &self.layers[to];
+        let (from_audience, to_audience) = (encloser.audience(), target.audience());
+        if to_audience < from_audience {
+            return Err(StackError::Audience {
+                from: Box::new(address),
+                from_audience,
+                to: Box::new(target.address_entity()),
+                to_audience,
+            });
+        }
+        if self.links[from]
+            .iter()
+            .any(|link| link.to == to && link.name == name)
+        {
+            return Ok(());
+        }
+        self.links[from].push(Link {
+            to,
+            name,
+            // Settled by `identify`, once the target's identity is known.
+            entity: address,
+        });
+        self.identify()
+    }
+
+    /// Drop the link from layer `from` to layer `to` under `name`,
+    /// returning its entity so its facts can be retracted.
+    fn unlink(&mut self, from: usize, to: usize, name: &Entity) -> Option<Entity> {
+        let position = self.links[from]
+            .iter()
+            .position(|link| link.to == to && link.name == *name)?;
+        let link = self.links[from].remove(position);
+        Some(link.entity)
+    }
+
+    /// Drop every layer the top does not reach through its links.
+    fn prune(&mut self) -> Result<(), StackError> {
+        let top = self.layers.len().saturating_sub(1);
+        let mut reachable = vec![false; self.layers.len()];
+        let mut frontier = vec![top];
+        while let Some(index) = frontier.pop() {
+            if mem::replace(&mut reachable[index], true) {
+                continue;
+            }
+            frontier.extend(self.links[index].iter().map(|link| link.to));
+        }
+        if reachable.iter().all(|kept| *kept) {
+            return self.identify();
+        }
+        let mut remap: Vec<Option<usize>> = Vec::with_capacity(self.layers.len());
+        let mut kept = 0;
+        for keep in &reachable {
+            remap.push(keep.then(|| {
+                kept += 1;
+                kept - 1
+            }));
+        }
+        let layers = mem::take(&mut self.layers);
+        let links = mem::take(&mut self.links);
+        for (index, (layer, own)) in layers.into_iter().zip(links).enumerate() {
+            if !reachable[index] {
+                continue;
+            }
+            self.layers.push(layer);
+            self.links.push(
+                own.into_iter()
+                    .map(|mut link| {
+                        link.to = remap[link.to].expect("a reachable layer links reachable layers");
+                        link
+                    })
+                    .collect(),
+            );
+        }
+        self.identify()
+    }
+
+    /// Recompute every layer's identity bottom up, every link's entity,
+    /// and the names the links bind. Identity is a pure function of
+    /// shape: `stack:<hash of {address, sorted (name, id(to))}>`.
+    fn identify(&mut self) -> Result<(), StackError> {
+        self.ids.clear();
+        for index in 0..self.layers.len() {
+            let from = self.layers[index].address_entity();
+            let mut descriptor_links: Vec<(String, String)> = Vec::new();
+            for link in &mut self.links[index] {
+                descriptor_links.push((link.name.to_string(), self.ids[link.to].to_string()));
+                link.entity = link_entity(&from, &self.ids[link.to]);
+            }
+            descriptor_links.sort();
+            let descriptor = Descriptor {
+                address: self.layers[index].address(),
+                links: descriptor_links,
+            };
+            let bytes = serde_ipld_dagcbor::to_vec(&descriptor)
+                .map_err(|error| StackError::Encode(error.to_string()))?;
+            self.ids.push(identity(&bytes));
+        }
+        // A name binds the layers *linked under it*, not the linking
+        // layers: `local.link(&shared, "memory:shared")` makes
+        // `memory:shared` route to shared.
+        self.bound.clear();
+        for own in &self.links {
+            for link in own {
+                let targets = self.bound.entry(link.name.clone()).or_default();
+                if !targets.contains(&link.to) {
+                    targets.push(link.to);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The link facts layer `index` holds at `heads`, folded into
+    /// `changes`: one entity per layer it links, naming the target's
+    /// identity, the scope name, the link's position, the target's
+    /// head, and its address.
+    fn link_facts(&self, index: usize, heads: &[Head], changes: &mut Changes) {
+        let from = self.layers[index].address_entity();
+        for (order, link) in self.links[index].iter().enumerate() {
+            let target = &self.layers[link.to];
+            changes.associate_unique(
+                link_attr("from"),
+                link.entity.clone(),
+                Value::Entity(from.clone()),
+            );
+            changes.associate_unique(
+                link_attr("to"),
+                link.entity.clone(),
+                Value::Entity(self.ids[link.to].clone()),
+            );
+            changes.associate_unique(
+                link_attr("name"),
+                link.entity.clone(),
+                Value::Entity(link.name.clone()),
+            );
+            changes.associate_unique(
+                link_attr("order"),
+                link.entity.clone(),
+                Value::UnsignedInt(order as u128),
+            );
+            changes.associate_unique(
+                link_attr("revision"),
+                link.entity.clone(),
+                Value::Bytes(heads[link.to].bytes()),
+            );
+            target.address_facts(&link.entity, changes);
+        }
+    }
+
+    /// Whether any layer reachable through `index`'s links moved.
+    fn reaches_moved(&self, index: usize, moved: &[bool]) -> bool {
+        self.links[index]
+            .iter()
+            .any(|link| moved[link.to] || self.reaches_moved(link.to, moved))
+    }
+}
+
+/// A change to a stack's wiring, queued on a transaction and applied
+/// when it commits.
+#[derive(Debug, Clone)]
+enum LinkEdit {
+    /// Link `from` to `to` under `name`. A `from` not yet in the stack
+    /// is placed beneath the top; a `to` not yet in the stack is
+    /// placed beneath `from`.
+    Link {
+        from: Layer,
+        to: Layer,
+        name: Entity,
+    },
+    /// Drop the link from `from` to `to` under `name`; layers the top
+    /// no longer reaches leave the stack.
+    Unlink {
+        from: Layer,
+        to: Layer,
+        name: Entity,
+    },
+}
+
+/// A link as its facts record it, read back from an enclosing layer.
+struct Recorded {
+    name: Entity,
+    order: u128,
+    to: Entity,
+    address: Address,
+    revision: Option<Vec<u8>>,
+}
+
+/// Command opening a stack from a layer: walk its recorded links
+/// downward, resolving every target through the environment, then
+/// apply any wiring queued on the way. Built by [`Stack::open`].
+pub struct OpenStack {
+    top: Layer,
+    edits: Vec<LinkEdit>,
+}
+
+impl OpenStack {
+    /// Link `from` to `to` under `name` once the stack is open, as
+    /// [`StackTransaction::link`] would.
+    pub fn link<F: AsLayer, T: AsLayer>(mut self, from: &F, to: &T, name: Entity) -> Self {
+        self.edits.push(LinkEdit::Link {
+            from: from.as_layer(),
+            to: to.as_layer(),
+            name,
+        });
+        self
+    }
+
+    /// Walk the links, resolve the layers, verify the identities the
+    /// links record against the shape found, and apply the queued
+    /// wiring in one commit published bottom to top.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Stack, StackError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<OpenEphemeral>
+            + ConditionalSync
+            + 'static,
+    {
+        let topology = walk(self.top, env).await?;
+        let stack = Stack::from_topology(topology);
+        if !self.edits.is_empty() {
+            let mut transaction = stack.transaction();
+            transaction.edits = self.edits;
+            transaction.commit().publish().perform(env).await?;
+        }
+        Ok(stack)
+    }
+}
+
+/// Read every link `layer` holds, in declaration order.
+async fn recorded_links<Env>(layer: &Layer, env: &Env) -> Result<Vec<Recorded>, StackError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<crate::Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let address = layer.address_entity();
+    let from = ArtifactSelector::new()
+        .the(link_attr("from"))
+        .is(Value::Entity(address));
+    let entities: Vec<Entity> = held(layer, from, env)
+        .await?
+        .into_iter()
+        .map(|fact| fact.of)
+        .collect();
+    let mut recorded = Vec::with_capacity(entities.len());
+    for entity in entities {
+        let facts = held(layer, ArtifactSelector::new().of(entity.clone()), env).await?;
+        let field = |name: &str| -> Option<&Value> {
+            let attribute = link_attr(name);
+            facts
+                .iter()
+                .find(|fact| fact.the == attribute)
+                .map(|fact| &fact.is)
+        };
+        let malformed = || StackError::Link {
+            link: entity.clone(),
+        };
+        let (Some(Value::Entity(name)), Some(Value::Entity(to))) = (field("name"), field("to"))
+        else {
+            return Err(malformed());
+        };
+        let order = match field("order") {
+            Some(Value::UnsignedInt(order)) => *order,
+            _ => u128::MAX,
+        };
+        let address = match (
+            field("repository"),
+            field("branch"),
+            field("snapshot"),
+            field("ephemeral"),
+        ) {
+            (Some(Value::Entity(repository)), Some(Value::String(branch)), _, _) => {
+                Address::Branch {
+                    repository: repository.to_string(),
+                    branch: branch.clone(),
+                }
+            }
+            (Some(Value::Entity(repository)), _, Some(Value::Bytes(snapshot)), _) => {
+                let revision: Revision =
+                    serde_ipld_dagcbor::from_slice(snapshot).map_err(|_| malformed())?;
+                Address::Snapshot {
+                    repository: repository.to_string(),
+                    tree: revision.tree.hash().to_base58(),
+                }
+            }
+            (_, _, _, Some(Value::Entity(id))) => Address::Ephemeral { id: id.to_string() },
+            _ => return Err(malformed()),
+        };
+        let revision = match field("snapshot") {
+            Some(Value::Bytes(bytes)) => Some(bytes.clone()),
+            _ => None,
+        };
+        recorded.push(Recorded {
+            name: name.clone(),
+            order,
+            to: to.clone(),
+            address,
+            revision,
+        });
+    }
+    recorded.sort_by_key(|link| link.order);
+    Ok(recorded)
+}
+
+/// The facts a selector matches on a layer's own store: its tree for a
+/// tree layer, the store itself for an ephemeral layer.
+async fn held<Env>(
+    layer: &Layer,
+    selector: ArtifactSelector<Constrained>,
+    env: &Env,
+) -> Result<Vec<Artifact>, StackError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<crate::Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    use futures_util::{StreamExt as _, TryStreamExt as _};
+    let source = match layer {
+        Layer::Branch(branch) => SourceRef::from(branch),
+        Layer::Snapshot(snapshot) => SourceRef::Snapshot(snapshot),
+        Layer::Ephemeral(ephemeral) => return Ok(ephemeral.scan(&selector)),
+    };
+    let stream = crate::Select::from_source(source, selector)
+        .perform(env)
+        .await
+        .map_err(|error| StackError::Read(error.to_string()))?;
+    stream
+        .map(|item| item.and_then(|view| view.to_owned()))
+        .try_collect()
+        .await
+        .map_err(|error| StackError::Read(error.to_string()))
+}
+
+/// Resolve the layer a link's address names, through the environment.
+async fn resolve_layer<Env>(link: &Recorded, env: &Env) -> Result<Layer, StackError>
+where
+    Env: Provider<Resolve> + Provider<OpenEphemeral> + ConditionalSync,
+{
+    use crate::RepositoryMemoryExt as _;
+    use dialog_capability::{Did, Subject};
+    let subject = |repository: &str| -> Result<Subject, StackError> {
+        repository
+            .parse::<Did>()
+            .map(Subject::from)
+            .map_err(|_| StackError::Address {
+                address: repository.to_string(),
+            })
+    };
+    match &link.address {
+        Address::Branch { repository, branch } => {
+            let branch = subject(repository)?
+                .branch(branch.clone())
+                .open()
+                .perform(env)
+                .await?;
+            Ok(Layer::Branch(branch))
+        }
+        Address::Snapshot { repository, .. } => {
+            let bytes = link.revision.as_ref().ok_or_else(|| StackError::Address {
+                address: repository.clone(),
+            })?;
+            let revision: Revision =
+                serde_ipld_dagcbor::from_slice(bytes).map_err(|_| StackError::Address {
+                    address: repository.clone(),
+                })?;
+            Ok(Layer::Snapshot(Snapshot::new(
+                subject(repository)?,
+                revision,
+            )))
+        }
+        Address::Ephemeral { id } => {
+            let address: Entity = id.parse().map_err(|_| StackError::Address {
+                address: id.clone(),
+            })?;
+            Ok(Layer::Ephemeral(
+                Ephemeral::open(address).perform(env).await?,
+            ))
+        }
+    }
+}
+
+/// A link as the walk resolved it: the target's position among the
+/// expanded layers, the scope name, and the identity the link recorded.
+type Edge = (usize, Entity, Entity);
+
+/// A layer the walk expanded, with its resolved links.
+type Expanded = (Layer, Vec<Edge>);
+
+/// Walk `top`'s links downward into a topology, bottom first, every
+/// layer's links in their recorded order, and verify that each link's
+/// recorded identity is the identity of the shape found beneath it.
+async fn walk<Env>(top: Layer, env: &Env) -> Result<Topology, StackError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<crate::Hydrate>
+        + Provider<OpenEphemeral>
+        + ConditionalSync
+        + 'static,
+{
+    // Expand every reachable layer once, keyed by address; each keeps
+    // the addresses its links name, in recorded order.
+    let mut expanded: Vec<Expanded> = Vec::new();
+    let mut edges: Vec<Vec<(Entity, Entity, Entity)>> = Vec::new();
+    let mut index_of: HashMap<Entity, usize> = HashMap::new();
+    let mut pending: Vec<Layer> = vec![top];
+    while let Some(layer) = pending.pop() {
+        let address = layer.address_entity();
+        if index_of.contains_key(&address) {
+            continue;
+        }
+        let mut own = Vec::new();
+        for link in recorded_links(&layer, env).await? {
+            let target = resolve_layer(&link, env).await?;
+            own.push((target.address_entity(), link.name, link.to));
+            pending.push(target);
+        }
+        index_of.insert(address, expanded.len());
+        expanded.push((layer, Vec::new()));
+        edges.push(own);
+    }
+    for (index, own) in edges.into_iter().enumerate() {
+        expanded[index].1 = own
+            .into_iter()
+            .map(|(address, name, to)| (index_of[&address], name, to))
+            .collect();
+    }
+
+    // Bottom first: post-order from the top, links in recorded order.
+    let mut order: Vec<usize> = Vec::with_capacity(expanded.len());
+    let mut visited = vec![false; expanded.len()];
+    fn visit(index: usize, expanded: &[Expanded], visited: &mut [bool], order: &mut Vec<usize>) {
+        if mem::replace(&mut visited[index], true) {
+            return;
+        }
+        for (to, _, _) in &expanded[index].1 {
+            visit(*to, expanded, visited, order);
+        }
+        order.push(index);
+    }
+    visit(0, &expanded, &mut visited, &mut order);
+    let placed: HashMap<usize, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(position, index)| (*index, position))
+        .collect();
+
+    let mut topology = Topology {
+        layers: order
+            .iter()
+            .map(|index| expanded[*index].0.clone())
+            .collect(),
+        ids: Vec::new(),
+        links: vec![Vec::new(); order.len()],
+        bound: HashMap::new(),
+    };
+    for (index, (_, targets)) in expanded.iter().enumerate() {
+        let from = placed[&index];
+        for (to, name, _) in targets {
+            topology.link(from, placed[to], name.clone())?;
+        }
+    }
+    topology.identify()?;
+    // Every recorded identity must be the identity of the shape found.
+    for (index, (_, targets)) in expanded.iter().enumerate() {
+        for (to, _, recorded) in targets {
+            if topology.ids[placed[to]] != *recorded {
+                return Err(StackError::Identity {
+                    layer: expanded[index].0.address_entity(),
+                });
+            }
+        }
+    }
+    Ok(topology)
+}
+
 /// Layers linked under scope names, read as one composite and written
-/// by placement. Built by [`Stack::builder`]; cheap to clone.
+/// by placement. Opened by [`Stack::open`]; cheap to clone, and every
+/// clone shares the wiring and the heads.
 ///
 /// A stack holds, per layer, the head it last **published** or pulled,
 /// and for branch layers a **staged** chain of commits not yet
@@ -604,20 +1060,13 @@ fn identity(descriptor: &[u8]) -> Entity {
 /// moves every branch layer's head to its staged tip, bottom to top.
 #[derive(Debug, Clone)]
 pub struct Stack {
-    /// Bottom first.
-    layers: Vec<Layer>,
-    /// Each layer's stack identity, parallel to `layers`.
-    ids: Vec<Entity>,
-    /// Each layer's links, parallel to `layers`.
-    links: Vec<Vec<Link>>,
-    /// Scope name → the layers linked under it.
-    bound: HashMap<Entity, Vec<usize>>,
-    /// Heads and staged chains, shared by clones.
+    /// Wiring, heads, and staged chains, shared by clones.
     state: Arc<RwLock<State>>,
 }
 
-/// What a stack knows about its layers' heads.
+/// What a stack knows: its shape, and its layers' heads.
 struct State {
+    topology: Topology,
     /// Per layer, the head the stack last published or pulled: the
     /// base every staged chain builds on. An ephemeral layer's head
     /// moves here directly, since it has nothing to publish.
@@ -638,6 +1087,7 @@ impl fmt::Debug for State {
             .map(|chain| chain.as_ref().map(TransactionBatch::revision))
             .collect();
         f.debug_struct("State")
+            .field("topology", &self.topology)
             .field("published", &self.published)
             .field("versions", &self.versions)
             .field("staged", &staged)
@@ -656,35 +1106,86 @@ impl State {
     }
 }
 
+/// Every branch layer's head cell version now.
+fn versions_of(layers: &[Layer]) -> Vec<Option<MemoryVersion>> {
+    layers
+        .iter()
+        .map(|layer| match layer {
+            Layer::Branch(branch) => branch
+                .revision_cell()
+                .edition()
+                .map(|edition| edition.version),
+            _ => None,
+        })
+        .collect()
+}
+
 impl Stack {
-    /// Start building a stack.
-    pub fn builder() -> StackBuilder {
-        StackBuilder::default()
+    /// Open the stack `layer` heads: its recorded links are walked
+    /// downward and every target resolved through the environment. A
+    /// layer that links nothing opens as a stack of one; link more
+    /// through the returned command or a later transaction.
+    pub fn open(layer: impl Into<Layer>) -> OpenStack {
+        OpenStack {
+            top: layer.into(),
+            edits: Vec::new(),
+        }
+    }
+
+    fn from_topology(topology: Topology) -> Self {
+        let published: Vec<Head> = topology.layers.iter().map(Layer::head).collect();
+        let versions = versions_of(&topology.layers);
+        let staged = topology.layers.iter().map(|_| None).collect();
+        Stack {
+            state: Arc::new(RwLock::new(State {
+                topology,
+                published,
+                versions,
+                staged,
+            })),
+        }
+    }
+
+    /// The shape now.
+    fn topology(&self) -> Topology {
+        self.state.read().topology.clone()
     }
 
     /// The layers, bottom first.
-    pub fn layers(&self) -> &[Layer] {
-        &self.layers
+    pub fn layers(&self) -> Vec<Layer> {
+        self.state.read().topology.layers.clone()
     }
 
     /// The stack's identity: the top layer's, which covers every layer
     /// beneath it.
-    pub fn identity(&self) -> &Entity {
-        self.ids
+    pub fn identity(&self) -> Entity {
+        self.state
+            .read()
+            .topology
+            .ids
             .last()
-            .expect("a built stack holds at least one layer")
+            .cloned()
+            .expect("an open stack holds at least one layer")
     }
 
     /// Every layer's stack identity, bottom first.
-    pub fn identities(&self) -> &[Entity] {
-        &self.ids
+    pub fn identities(&self) -> Vec<Entity> {
+        self.state.read().topology.ids.clone()
     }
 
     /// The layers linked under `name`.
-    pub fn scope(&self, name: &Entity) -> Vec<&Layer> {
-        self.bound
+    pub fn scope(&self, name: &Entity) -> Vec<Layer> {
+        let state = self.state.read();
+        state
+            .topology
+            .bound
             .get(name)
-            .map(|indices| indices.iter().map(|index| &self.layers[*index]).collect())
+            .map(|indices| {
+                indices
+                    .iter()
+                    .map(|index| state.topology.layers[*index].clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -692,7 +1193,13 @@ impl Stack {
     /// own handle reports, whatever the stack has published or
     /// staged.
     pub fn heads(&self) -> Vec<Head> {
-        self.layers.iter().map(Layer::head).collect()
+        self.state
+            .read()
+            .topology
+            .layers
+            .iter()
+            .map(Layer::head)
+            .collect()
     }
 
     /// The heads the stack reads each layer at, bottom first: the
@@ -700,7 +1207,7 @@ impl Stack {
     /// otherwise.
     pub fn captured(&self) -> Vec<Head> {
         let state = self.state.read();
-        (0..self.layers.len())
+        (0..state.topology.layers.len())
             .map(|index| state.captured(index))
             .collect()
     }
@@ -717,23 +1224,23 @@ impl Stack {
     }
 
     /// Whether some layer's live head differs from the head the stack
-    /// last published or pulled: it moved outside the stack, and a
-    /// publish of that layer would fail until a [`pull`](Self::pull).
+    /// last published or pulled: it moved outside the stack, through
+    /// this handle, and a publish of that layer would fail until an
+    /// [`advance`](Self::advance) (or a [`pull`](Self::pull), which
+    /// advances). Movement through another handle is not visible here
+    /// until an advance re-resolves the heads.
     pub fn behind(&self) -> bool {
         self.heads() != self.published()
     }
 
-    /// Bring movement in: re-resolve every branch layer's head from
-    /// storage, pull every layer that tracks an upstream, bottom to
-    /// top, then take the live heads as the published base and stage
-    /// and publish the wiring of every layer above a layer that moved.
+    /// Bring movement in: pull every layer that tracks an upstream,
+    /// bottom to top, then [`advance`](Self::advance) over the result.
     ///
-    /// Anything staged and not yet published is dropped: its chain
-    /// built on heads the pull supersedes, so it is stale wholesale,
-    /// and the transaction that staged it is re-run on the fresh
-    /// heads. A pull that fails part way leaves the published heads
-    /// where they were: layers beneath the failure may have reconciled
-    /// with their upstreams, and the next pull captures them.
+    /// This is the network half of keeping a stack current, and it
+    /// costs a round trip per upstream, so it belongs to whatever
+    /// already pulls branches on a schedule: the same sync loop, one
+    /// call per stack. Movement this process can already see needs no
+    /// pull; `advance` captures it alone.
     pub async fn pull<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Get>
@@ -745,27 +1252,67 @@ impl Stack {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        for layer in &self.layers {
-            let Layer::Branch(branch) = layer else {
-                continue;
-            };
-            branch.refresh(env).await?;
-            if branch.upstream().is_some() {
+        for layer in self.layers() {
+            if let Layer::Branch(branch) = &layer
+                && branch.upstream().is_some()
+            {
+                branch.refresh(env).await?;
                 Box::pin(branch.pull().perform(env)).await?;
             }
         }
+        self.advance(env).await
+    }
+
+    /// Capture movement this process can see, without the network:
+    /// re-resolve every branch layer's head from storage, take the
+    /// live heads as the published base, and stage and publish the
+    /// wiring of every layer above a layer that moved.
+    ///
+    /// Anything staged and not yet published is dropped: its chain
+    /// built on heads this supersedes, so it is stale wholesale, and
+    /// the transaction that staged it is re-run on the fresh heads. An
+    /// advance that fails part way leaves the published heads where
+    /// they were, and the next one captures them.
+    ///
+    /// Cheap enough to call on a signal: a poll that found
+    /// [`behind`](Self::behind), a commit made through another handle
+    /// of a layer, a tab regaining focus. A stack whose layers only
+    /// ever move through it never needs one.
+    pub async fn advance<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
+            + ConditionalSync
+            + 'static,
+    {
+        let topology = self.topology();
+        for layer in &topology.layers {
+            if let Layer::Branch(branch) = layer {
+                branch.refresh(env).await?;
+            }
+        }
         let previous = self.captured();
-        let live = self.heads();
+        let live: Vec<Head> = topology.layers.iter().map(Layer::head).collect();
         {
             let mut state = self.state.write();
             state.published = live.clone();
-            state.versions = self.versions();
-            state.staged = self.layers.iter().map(|_| None).collect();
+            state.versions = versions_of(&topology.layers);
+            state.staged = topology.layers.iter().map(|_| None).collect();
         }
-        self.capture(BTreeMap::new(), live, &previous, env).await?;
+        self.capture(&topology, BTreeMap::new(), live, &previous, env)
+            .await?;
         self.publish(env).await
     }
 
@@ -786,11 +1333,12 @@ impl Stack {
             + Provider<Fork<RemoteSite, Publish>>
             + Provider<Fork<RemoteSite, BlobImport>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        for layer in &self.layers {
-            if let Layer::Branch(branch) = layer
+        for layer in self.layers() {
+            if let Layer::Branch(branch) = &layer
                 && branch.upstream().is_some()
             {
                 Box::pin(branch.push().perform(env)).await?;
@@ -810,13 +1358,14 @@ impl Stack {
     where
         Env: Provider<Publish> + Provider<Resolve> + ConditionalSync,
     {
-        for index in 0..self.layers.len() {
+        let layers = self.layers();
+        for (index, layer) in layers.iter().enumerate() {
             let Some(batch) = self.state.write().staged[index].take() else {
                 continue;
             };
             match batch.publish().perform(env).await {
                 Ok(revision) => {
-                    let version = match &self.layers[index] {
+                    let version = match layer {
                         Layer::Branch(branch) => branch
                             .revision_cell()
                             .edition()
@@ -833,7 +1382,7 @@ impl Stack {
                         *stale = None;
                     }
                     return Err(StackError::Publish {
-                        layer: self.layers[index].address_entity(),
+                        layer: Box::new(layer.address_entity()),
                         source,
                     });
                 }
@@ -842,26 +1391,12 @@ impl Stack {
         Ok(self.captured())
     }
 
-    /// Every branch layer's head cell version now.
-    fn versions(&self) -> Vec<Option<MemoryVersion>> {
-        self.layers
-            .iter()
-            .map(|layer| match layer {
-                Layer::Branch(branch) => branch
-                    .revision_cell()
-                    .edition()
-                    .map(|edition| edition.version),
-                _ => None,
-            })
-            .collect()
-    }
-
     /// The bottom layer as a branch: where placements live and where
     /// undeclared attributes go. `None` when the bottom is not a
     /// branch, in which case the stack is read-only.
-    fn primary(&self) -> Option<&Branch> {
-        match self.layers.first() {
-            Some(Layer::Branch(branch)) => Some(branch),
+    fn primary(&self) -> Option<Branch> {
+        match self.state.read().topology.layers.first() {
+            Some(Layer::Branch(branch)) => Some(branch.clone()),
             _ => None,
         }
     }
@@ -869,17 +1404,17 @@ impl Stack {
     /// The composite a read sees: every layer beneath the top at the
     /// head the stack reads it at, the top live.
     pub(crate) fn composite(&self) -> Composite {
-        self.composite_at(&self.captured())
+        self.composite_at(&self.topology(), &self.captured())
     }
 
     /// The composite with every branch beneath the top read at the
     /// given heads. Ephemeral layers are always live: they are
     /// process-local, written only through the stack, and cannot be
     /// read at an older sequence.
-    fn composite_at(&self, heads: &[Head]) -> Composite {
-        let top = self.layers.len().saturating_sub(1);
+    fn composite_at(&self, topology: &Topology, heads: &[Head]) -> Composite {
+        let top = topology.layers.len().saturating_sub(1);
         let mut composite = Composite::default();
-        for (index, layer) in self.layers.iter().enumerate() {
+        for (index, layer) in topology.layers.iter().enumerate() {
             match layer {
                 Layer::Branch(branch)
                     if index == top && self.state.read().staged[index].is_none() =>
@@ -921,37 +1456,9 @@ impl Stack {
             stack: self,
             changes: Changes::new(),
             transients: Changes::new(),
-        }
-    }
-
-    /// The link facts layer `index` holds at `heads`, folded into
-    /// `changes`: one entity per layer it links, naming the target's
-    /// identity, the scope name, the target's head, and its address.
-    fn link_facts(&self, index: usize, heads: &[Head], changes: &mut Changes) {
-        let from = self.layers[index].address_entity();
-        for link in &self.links[index] {
-            let target = &self.layers[link.to];
-            changes.associate_unique(
-                link_attr("from"),
-                link.entity.clone(),
-                Value::Entity(from.clone()),
-            );
-            changes.associate_unique(
-                link_attr("to"),
-                link.entity.clone(),
-                Value::Entity(self.ids[link.to].clone()),
-            );
-            changes.associate_unique(
-                link_attr("name"),
-                link.entity.clone(),
-                Value::Entity(link.name.clone()),
-            );
-            changes.associate_unique(
-                link_attr("revision"),
-                link.entity.clone(),
-                Value::Bytes(heads[link.to].bytes()),
-            );
-            target.address_facts(&link.entity, changes);
+            edits: Vec::new(),
+            into: BTreeMap::new(),
+            stores: Vec::new(),
         }
     }
 
@@ -963,6 +1470,7 @@ impl Stack {
     /// no-op and keeps its head.
     async fn refresh_links<Env>(
         &self,
+        topology: &Topology,
         index: usize,
         heads: &[Head],
         mut batch: Changes,
@@ -977,14 +1485,15 @@ impl Stack {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        if batch.is_empty() && self.links[index].is_empty() {
+        if batch.is_empty() && topology.links[index].is_empty() {
             return Ok(None);
         }
-        self.link_facts(index, heads, &mut batch);
-        match &self.layers[index] {
+        topology.link_facts(index, heads, &mut batch);
+        match &topology.layers[index] {
             Layer::Branch(branch) => {
                 let staged = self.state.write().staged[index].take();
                 let (chain, tip) = match staged {
@@ -1036,6 +1545,7 @@ impl Stack {
     /// stack. Returns the heads the stack reads at afterwards.
     async fn capture<Env>(
         &self,
+        topology: &Topology,
         mut batches: BTreeMap<usize, Changes>,
         mut heads: Vec<Head>,
         previous: &[Head],
@@ -1050,6 +1560,7 @@ impl Stack {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1058,12 +1569,15 @@ impl Stack {
             .enumerate()
             .map(|(index, head)| previous.get(index) != Some(head))
             .collect();
-        for index in 0..self.layers.len() {
+        for index in 0..topology.layers.len() {
             let batch = batches.remove(&index).unwrap_or_default();
-            if batch.is_empty() && !self.reaches_moved(index, &moved) {
+            if batch.is_empty() && !topology.reaches_moved(index, &moved) {
                 continue;
             }
-            if let Some(head) = self.refresh_links(index, &heads, batch, env).await? {
+            if let Some(head) = self
+                .refresh_links(topology, index, &heads, batch, env)
+                .await?
+            {
                 if heads[index] != head {
                     moved[index] = true;
                 }
@@ -1073,21 +1587,208 @@ impl Stack {
         Ok(heads)
     }
 
-    /// Whether any layer reachable through `index`'s links moved.
-    fn reaches_moved(&self, index: usize, moved: &[bool]) -> bool {
-        self.links[index]
-            .iter()
-            .any(|link| moved[link.to] || self.reaches_moved(link.to, moved))
+    /// Apply queued wiring edits to the shape: layers that enter bring
+    /// their heads with them, layers the top no longer reaches leave
+    /// with theirs, and every staged chain is dropped, since a chain
+    /// built on the old shape is stale wholesale. Returns the link
+    /// entities to retract on their enclosers.
+    fn edit(&self, mut edits: Vec<LinkEdit>) -> Result<Vec<(Layer, Entity)>, StackError> {
+        let mut live = self.state.write();
+        // Validate the entire edit batch on a detached shape. A rejected
+        // edit must preserve both the live topology and its staged chains.
+        let mut state = State {
+            topology: live.topology.clone(),
+            published: live.published.clone(),
+            versions: live.versions.clone(),
+            staged: live.topology.layers.iter().map(|_| None).collect(),
+        };
+        // An edit applies once its encloser is in the stack, so a
+        // transaction may name its links in any order: a layer that a
+        // later edit enters beneath the top can be the encloser of an
+        // earlier one. An encloser nothing enters is refused.
+        while !edits.is_empty() {
+            let mut deferred = Vec::with_capacity(edits.len());
+            let mut applied = false;
+            for edit in edits {
+                let from = match &edit {
+                    LinkEdit::Link { from, .. } | LinkEdit::Unlink { from, .. } => from,
+                };
+                if state.topology.index_of(from).is_none() {
+                    deferred.push(edit);
+                    continue;
+                }
+                applied = true;
+                match edit {
+                    LinkEdit::Link { from, to, name } => {
+                        if state.topology.index_of(&to).is_none() {
+                            let at = state
+                                .topology
+                                .index_of(&from)
+                                .expect("the encloser is in the stack");
+                            state.enter(at, to.clone());
+                        }
+                        let from_index = state
+                            .topology
+                            .index_of(&from)
+                            .expect("the encloser is in the stack");
+                        let to_index = state
+                            .topology
+                            .index_of(&to)
+                            .expect("the target is in the stack");
+                        state.topology.link(from_index, to_index, name)?;
+                    }
+                    LinkEdit::Unlink { from, to, name } => {
+                        let Some(to_index) = state.topology.index_of(&to) else {
+                            return Err(StackError::UnknownLayer {
+                                from: from.address_entity(),
+                            });
+                        };
+                        let from_index = state
+                            .topology
+                            .index_of(&from)
+                            .expect("the encloser is in the stack");
+                        if state.topology.unlink(from_index, to_index, &name).is_none() {
+                            return Err(StackError::UnknownLayer {
+                                from: from.address_entity(),
+                            });
+                        }
+                    }
+                }
+            }
+            if !applied {
+                let from = match &deferred[0] {
+                    LinkEdit::Link { from, .. } | LinkEdit::Unlink { from, .. } => from,
+                };
+                return Err(StackError::UnknownLayer {
+                    from: from.address_entity(),
+                });
+            }
+            edits = deferred;
+        }
+        // Keep enclosers available until every edit has been applied.
+        // Detached layers leave with their own stored wiring untouched.
+        state.leave_unreachable()?;
+        let mut retractions = Vec::new();
+        for (from, links) in live.topology.layers.iter().zip(&live.topology.links) {
+            let Some(index) = state.topology.index_of(from) else {
+                continue;
+            };
+            for link in links {
+                if !state.topology.links[index]
+                    .iter()
+                    .any(|current| current.entity == link.entity)
+                {
+                    // A descendant's shape change also changes the link
+                    // entity of its ancestors, even without an unlink.
+                    retractions.push((from.clone(), link.entity.clone()));
+                }
+            }
+        }
+        state.staged = state.topology.layers.iter().map(|_| None).collect();
+        *live = state;
+        Ok(retractions)
     }
 }
 
-/// A transaction on a [`Stack`]: accumulates facts, then routes each
-/// to the layers its attribute's scope is linked under and stages the
-/// layers bottom to top.
+impl State {
+    /// Put `layer` at position `at` with its live head.
+    fn enter(&mut self, at: usize, layer: Layer) {
+        let head = layer.head();
+        let version = versions_of(slice::from_ref(&layer)).remove(0);
+        self.topology.insert(at, layer);
+        self.published.insert(at, head);
+        self.versions.insert(at, version);
+        self.staged.insert(at, None);
+    }
+
+    /// Drop the layers the top no longer reaches, with their heads.
+    fn leave_unreachable(&mut self) -> Result<(), StackError> {
+        let before: Vec<Entity> = self
+            .topology
+            .layers
+            .iter()
+            .map(Layer::address_entity)
+            .collect();
+        self.topology.prune()?;
+        let after: Vec<Entity> = self
+            .topology
+            .layers
+            .iter()
+            .map(Layer::address_entity)
+            .collect();
+        let published = mem::take(&mut self.published);
+        let versions = mem::take(&mut self.versions);
+        for (index, address) in before.iter().enumerate() {
+            if after.contains(address) {
+                self.published.push(published[index].clone());
+                self.versions.push(versions[index].clone());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Witnesses a stack transaction's induction rounds: each round's
+/// transients are minted as an instant on the store of every layer
+/// their scope is linked under, or on the bottom's session store when
+/// no link binds the scope, mirroring how the settled batch routes.
+struct StackWitness<'a> {
+    topology: &'a Topology,
+    placements: &'a Placements,
+    default: Option<Entity>,
+    bottom: &'a Ephemeral,
+}
+
+impl Witness for StackWitness<'_> {
+    fn round(&mut self, transients: &Changes) {
+        let mut shares: BTreeMap<Option<usize>, Changes> = BTreeMap::new();
+        for instruction in transients.clone().into_instructions() {
+            let (op, artifact) = split(instruction);
+            let targets: Vec<Option<usize>> = match self.placements.scope_of(&artifact.the) {
+                None => vec![None],
+                Some(scope) if Some(scope) == self.default.as_ref() => vec![None],
+                Some(scope) => match self.topology.bound.get(scope) {
+                    Some(indices) => indices.iter().map(|index| Some(*index)).collect(),
+                    None => vec![None],
+                },
+            };
+            for target in targets {
+                apply(shares.entry(target).or_default(), op, artifact.clone());
+            }
+        }
+        for (target, share) in shares {
+            let store = match target {
+                None => self.bottom,
+                Some(index) => self.topology.layers[index].store(),
+            };
+            store.witness(share);
+        }
+    }
+}
+
+/// A transaction on a [`Stack`]: accumulates facts and wiring, then
+/// routes each fact to the layers its attribute's scope is linked
+/// under, applies the wiring, and stages the layers bottom to top.
 pub struct StackTransaction<'a> {
     stack: &'a Stack,
     changes: Changes,
     transients: Changes,
+    edits: Vec<LinkEdit>,
+    /// Facts bound for a named scope regardless of their attributes'
+    /// placements, by scope.
+    into: BTreeMap<Entity, Changes>,
+    /// Maintenance of the ephemeral layers under a scope, in order.
+    stores: Vec<(Entity, Maintenance)>,
+}
+
+/// What a transaction does to the ephemeral layers under a scope,
+/// besides writing facts.
+#[derive(Debug, Clone)]
+enum Maintenance {
+    /// Drop every fact and tombstone.
+    Clear,
+    /// Drop every fact and tombstone recorded for these entities.
+    Forget(Vec<Entity>),
 }
 
 impl<'a> StackTransaction<'a> {
@@ -1110,6 +1811,68 @@ impl<'a> StackTransaction<'a> {
         self
     }
 
+    /// Assert a claim into the layers linked under `scope`, whatever
+    /// its attributes' placements say. The explicit form of placement,
+    /// for a writer that knows where a fact belongs when the schema
+    /// does not say: session facts a process keeps for itself. Induction
+    /// does not see these facts; they are written as given.
+    pub fn assert_into<C: Statement>(mut self, scope: Entity, claim: C) -> Self {
+        claim.assert(self.into.entry(scope).or_default());
+        self
+    }
+
+    /// Retract a claim from the layers linked under `scope`; see
+    /// [`assert_into`](Self::assert_into).
+    pub fn retract_from<C: Statement>(mut self, scope: Entity, claim: C) -> Self {
+        claim.retract(self.into.entry(scope).or_default());
+        self
+    }
+
+    /// Drop every fact the ephemeral layers under `scope` hold. A
+    /// tree layer under the scope is refused at commit.
+    pub fn clear(mut self, scope: Entity) -> Self {
+        self.stores.push((scope, Maintenance::Clear));
+        self
+    }
+
+    /// Drop every fact the ephemeral layers under `scope` hold for
+    /// `entities`: the garbage-collection form, for per-client facts
+    /// keyed by short-lived entities. A tree layer under the scope is
+    /// refused at commit.
+    pub fn forget(mut self, scope: Entity, entities: Vec<Entity>) -> Self {
+        self.stores.push((scope, Maintenance::Forget(entities)));
+        self
+    }
+
+    /// Link `from` to `to` under `name`: `from` records `to`'s head
+    /// and the name routes to `to`. A `from` not yet in the stack
+    /// enters beneath the top; a `to` not yet in the stack enters
+    /// beneath `from`. The audience rule, the ordering, and a
+    /// snapshot's inability to link are checked when the transaction
+    /// commits, and the link facts land on `from` with the rest of
+    /// the commit.
+    pub fn link<F: AsLayer, T: AsLayer>(mut self, from: &F, to: &T, name: Entity) -> Self {
+        self.edits.push(LinkEdit::Link {
+            from: from.as_layer(),
+            to: to.as_layer(),
+            name,
+        });
+        self
+    }
+
+    /// Drop the link from `from` to `to` under `name`. Its facts are
+    /// retracted from `from`, and any layer the top no longer reaches
+    /// leaves the stack: unlinking one seed branch and linking another
+    /// in the same transaction swaps them.
+    pub fn unlink<F: AsLayer, T: AsLayer>(mut self, from: &F, to: &T, name: Entity) -> Self {
+        self.edits.push(LinkEdit::Unlink {
+            from: from.as_layer(),
+            to: to.as_layer(),
+            name,
+        });
+        self
+    }
+
     /// Finalize into a commit command. Its `perform` stages; chain
     /// [`publish`](StackCommit::publish) to stage and publish in one
     /// step.
@@ -1118,6 +1881,9 @@ impl<'a> StackTransaction<'a> {
             stack: self.stack,
             changes: self.changes,
             transients: self.transients,
+            edits: self.edits,
+            into: self.into,
+            stores: self.stores,
         }
     }
 }
@@ -1127,6 +1893,9 @@ pub struct StackCommit<'a> {
     stack: &'a Stack,
     changes: Changes,
     transients: Changes,
+    edits: Vec<LinkEdit>,
+    into: BTreeMap<Entity, Changes>,
+    stores: Vec<(Entity, Maintenance)>,
 }
 
 impl<'a> StackCommit<'a> {
@@ -1135,12 +1904,12 @@ impl<'a> StackCommit<'a> {
         StackPublish { commit: self }
     }
 
-    /// Induce against the composite at the heads the stack reads at,
-    /// route by placement, and stage the layers bottom to top. Never
-    /// moves a branch head: the staged chains wait for
+    /// Apply the wiring, induce against the composite at the heads the
+    /// stack reads at, route by placement, and stage the layers bottom
+    /// to top. Never moves a branch head: the staged chains wait for
     /// [`Stack::publish`]. Returns the heads the stack reads at
     /// afterwards, bottom first.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Head>, CommitError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -1150,31 +1919,127 @@ impl<'a> StackCommit<'a> {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
         let stack = self.stack;
-        let captured = stack.captured();
         let mut batches: BTreeMap<usize, Changes> = BTreeMap::new();
-        if self.changes.is_empty() && self.transients.is_empty() {
-            return stack
-                .capture(batches, captured.clone(), &captured, env)
-                .await;
+
+        // Wiring first: a re-shaped stack reads and routes as re-shaped.
+        // With no edits the previous heads are the captured ones and
+        // nothing counts as moved; with edits every layer counts as
+        // moved, so every encloser rewrites its wiring (a no-op where
+        // it already holds).
+        let rewired = !self.edits.is_empty();
+        let previous = if rewired {
+            let retractions = stack.edit(self.edits)?;
+            let topology = stack.topology();
+            for (from, entity) in retractions {
+                let index = topology
+                    .index_of(&from)
+                    .expect("an unlinked encloser stays in the stack");
+                let facts = held(&from, ArtifactSelector::new().of(entity), env).await?;
+                let batch = batches.entry(index).or_default();
+                for fact in facts {
+                    batch.dissociate(fact.the, fact.of, fact.is);
+                }
+            }
+            Vec::new()
+        } else {
+            stack.captured()
+        };
+        let topology = stack.topology();
+
+        // Resolve and validate every explicit scope before touching any store.
+        let mut maintenance: BTreeMap<usize, (bool, HashSet<Entity>)> = BTreeMap::new();
+        for (scope, operation) in self.stores {
+            let Some(indices) = topology.bound.get(&scope) else {
+                return Err(StackError::UnboundScope { scope });
+            };
+            for index in indices {
+                if !matches!(&topology.layers[*index], Layer::Ephemeral(_)) {
+                    return Err(StackError::NotEphemeral { scope });
+                }
+                let (clear, forgotten) = maintenance.entry(*index).or_default();
+                match &operation {
+                    Maintenance::Clear => *clear = true,
+                    Maintenance::Forget(entities) => forgotten.extend(entities.iter().cloned()),
+                }
+            }
+        }
+        // Facts placed by the writer land where the scope's links say,
+        // untouched by induction or the declarations.
+        for (scope, changes) in self.into {
+            let Some(indices) = topology.bound.get(&scope) else {
+                return Err(StackError::UnboundScope { scope });
+            };
+            for instruction in changes.into_instructions() {
+                let (op, artifact) = split(instruction);
+                for index in indices {
+                    apply(batches.entry(*index).or_default(), op, artifact.clone());
+                }
+            }
+        }
+        // Maintenance and explicitly placed replacement facts land together:
+        // readers and observers never see an entity between forget and assert.
+        for (index, (clear, forgotten)) in maintenance {
+            let Layer::Ephemeral(ephemeral) = &topology.layers[index] else {
+                unreachable!("maintenance targets were validated above");
+            };
+            let mut batch = batches.remove(&index).unwrap_or_default();
+            // Scope maintenance clears user state, while the stack retains
+            // its declared wiring. Re-stamp it in the same atomic instant.
+            topology.link_facts(index, &stack.captured(), &mut batch);
+            ephemeral.maintain(batch, clear, &forgotten);
+            stack.state.write().published[index] = Head::Ephemeral(ephemeral.revision());
+        }
+        // Maintenance moved ephemeral heads: re-read what the stack reads at.
+        let captured = stack.captured();
+
+        if self.changes.is_empty() && self.transients.is_empty() && !rewired {
+            return Ok(stack
+                .capture(&topology, batches, captured.clone(), &previous, env)
+                .await?);
         }
         let Some(primary) = stack.primary() else {
-            return Err(CommitError::Detached);
+            return Err(CommitError::Detached.into());
         };
         // A write builds on the heads the stack reads at, like a
         // branch commit builds on its handle's head: induction reads
         // them, and each layer stages on top of its own.
-        let composite = stack.composite_at(&captured);
+        let composite = stack.composite_at(&topology, &captured);
         let source = match composite.sources.first() {
             Some(source) => source.as_ref(),
-            None => SourceRef::from(primary),
+            None => SourceRef::from(&primary),
         };
 
+        // Each round's transients are witnessed on the store of every
+        // layer their scope is linked under, else the bottom's session
+        // store, so an observer there sees the command that fired a
+        // rule even though the commit folds it away. Resolved from the
+        // declarations as staged before induction; a declaration
+        // induction itself adds routes the settled batch below.
+        let staged = Placements::resolve(source, &self.changes, env).await?;
+        let mut witness = StackWitness {
+            topology: &topology,
+            default: staged.default_scope().cloned(),
+            placements: &staged,
+            bottom: primary.overlay(),
+        };
         let mut changes = self.changes;
-        induce(source, &composite, &mut changes, self.transients, env).await?;
+        induce(
+            source,
+            &composite,
+            &staged,
+            &mut changes,
+            self.transients,
+            &mut witness,
+            env,
+        )
+        .await?;
 
         // Route by placement: the primary holds the declarations, the
         // stack's links bind the names. A name no link binds falls
@@ -1188,7 +2053,7 @@ impl<'a> StackCommit<'a> {
             let targets: Vec<usize> = match placements.scope_of(&artifact.the) {
                 None => vec![0],
                 Some(scope) if Some(scope) == default.as_ref() => vec![0],
-                Some(scope) => match stack.bound.get(scope) {
+                Some(scope) => match topology.bound.get(scope) {
                     Some(indices) => indices.clone(),
                     None => match primary.bindings().target(scope) {
                         Some(Target::Tree) => vec![0],
@@ -1196,7 +2061,8 @@ impl<'a> StackCommit<'a> {
                             return Err(CommitError::UnboundScope {
                                 attribute: artifact.the.to_string(),
                                 scope: scope.to_string(),
-                            });
+                            }
+                            .into());
                         }
                     },
                 },
@@ -1206,9 +2072,9 @@ impl<'a> StackCommit<'a> {
             }
         }
 
-        stack
-            .capture(batches, captured.clone(), &captured, env)
-            .await
+        Ok(stack
+            .capture(&topology, batches, captured.clone(), &previous, env)
+            .await?)
     }
 }
 
@@ -1231,6 +2097,9 @@ impl StackPublish<'_> {
             + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1293,6 +2162,8 @@ impl<Q: Application> StackSelect<Q> {
             + Provider<Identify>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1345,6 +2216,9 @@ where
             + Provider<Identify>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
@@ -1356,6 +2230,11 @@ where
     /// [`Stack::behind`].
     pub fn behind(&self) -> bool {
         self.stack.behind()
+    }
+
+    /// The last evaluation's full result.
+    pub fn results(&self) -> &[Q::Conclusion] {
+        self.inner.results()
     }
 
     /// Full evaluations performed so far.
@@ -1400,7 +2279,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::helpers::TestEnv;
     use crate::helpers::test_repo;
+    use crate::{Demand, Drained};
     use crate::{Placement, RemoteSite};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Value};
@@ -1422,6 +2303,9 @@ mod tests {
              + Provider<Put>
              + Provider<Resolve>
              + Provider<Identify>
+             + Provider<crate::Hydrate>
+             + Provider<dialog_artifacts::Preload>
+             + Provider<dialog_artifacts::Speculation>
              + Provider<Fork<RemoteSite, Get>>
              + Provider<Fork<RemoteSite, Resolve>>
              + ConditionalSync
@@ -1446,6 +2330,7 @@ mod tests {
              impl Provider<Get>
              + Provider<Put>
              + Provider<Resolve>
+             + Provider<crate::Hydrate>
              + Provider<Fork<RemoteSite, Get>>
              + Provider<Fork<RemoteSite, Resolve>>
              + ConditionalSync
@@ -1473,8 +2358,9 @@ mod tests {
     async fn it_routes_by_name_across_lines() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::create().perform(&operator).await;
 
         shared
             .transaction()
@@ -1488,13 +2374,10 @@ mod tests {
         // A name binds where its link points: `memory:shared` is the
         // bottom, and `memory:state` needs a layer above state to link
         // it under that name.
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(state.clone())
-            .link(&shared, name("shared"))
-            .layer(Ephemeral::new())
-            .link(&state, name("state"))
-            .build()
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&state, &shared, name("shared"))
+            .link(&top, &state, name("state"))
             .perform(&operator)
             .await?;
         assert_eq!(stack.layers().len(), 3);
@@ -1578,6 +2461,7 @@ mod tests {
     async fn it_records_links_and_refreshes_them_when_the_target_moves() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
 
@@ -1590,13 +2474,10 @@ mod tests {
             .await?;
         shared.refresh(&operator).await?;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(local.clone())
-            .link(&shared, name("shared"))
-            .layer(Ephemeral::new())
-            .link(&local, name("local"))
-            .build()
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&local, &shared, name("shared"))
+            .link(&top, &local, name("local"))
             .perform(&operator)
             .await?;
         local.refresh(&operator).await?;
@@ -1690,17 +2571,14 @@ mod tests {
     async fn it_refreshes_only_the_lines_above_a_moved_one() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::create().perform(&operator).await;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(local.clone())
-            .layer(state.clone())
-            .link(&shared, name("shared"))
-            .link(&local, name("local"))
-            .build()
+        let stack = Stack::open(state.clone())
+            .link(&state, &shared, name("shared"))
+            .link(&state, &local, name("local"))
             .perform(&operator)
             .await?;
         local.refresh(&operator).await?;
@@ -1744,17 +2622,14 @@ mod tests {
     async fn it_keeps_wiring_where_it_is_made() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::create().perform(&operator).await;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(local.clone())
-            .link(&shared, name("shared"))
-            .layer(state.clone())
-            .link(&local, name("local"))
-            .build()
+        let stack = Stack::open(state.clone())
+            .link(&local, &shared, name("shared"))
+            .link(&state, &local, name("local"))
             .perform(&operator)
             .await?;
         local.refresh(&operator).await?;
@@ -1817,14 +2692,12 @@ mod tests {
     async fn it_reads_at_captured_heads_until_pulled() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::create().perform(&operator).await;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(state.clone())
-            .link(&shared, name("shared"))
-            .build()
+        let stack = Stack::open(state.clone())
+            .link(&state, &shared, name("shared"))
             .perform(&operator)
             .await?;
 
@@ -1876,13 +2749,12 @@ mod tests {
     async fn it_lands_external_movement_on_pull() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(Ephemeral::new())
-            .link(&shared, name("shared"))
-            .build()
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
             .perform(&operator)
             .await?;
 
@@ -1933,14 +2805,13 @@ mod tests {
     async fn it_notices_movement_through_another_handle_on_pull() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(Ephemeral::new())
-            .link(&shared, name("shared"))
-            .build()
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
             .perform(&operator)
             .await?;
 
@@ -1977,6 +2848,63 @@ mod tests {
         Ok(())
     }
 
+    /// `advance` captures a commit made through another handle
+    /// without the network: it re-resolves the head from storage and
+    /// captures it, exactly as `pull` does after its upstream pulls.
+    #[dialog_common::test]
+    async fn it_captures_movement_through_another_handle_on_advance() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+
+        let stack = Stack::open(state.clone())
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert!(
+            values::<String>(&stack, &operator, "doc/title", &doc)
+                .await?
+                .is_empty(),
+            "the stack's handle has not seen the other handle's commit"
+        );
+
+        let heads = stack.advance(&operator).await?;
+        assert_eq!(heads, stack.captured());
+        assert!(!stack.behind());
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "advance re-resolved the head and captured it"
+        );
+        let link = link_entity(&state.entity().clone(), &stack.identities()[0]);
+        let selector = ArtifactSelector::new()
+            .the("dialog.link/revision".parse()?)
+            .of(link);
+        let seen: Vec<Value> = state.scan(&selector).into_iter().map(|a| a.is).collect();
+        assert_eq!(
+            seen,
+            vec![Value::Bytes(Head::Tree(shared.revision()).bytes())],
+            "and refreshed the wiring above it"
+        );
+        Ok(())
+    }
+
     /// A chain staged on a head another handle moved past stages
     /// fine and fails to publish; the ephemeral share of the same
     /// transaction is already in place, and re-running the
@@ -1986,9 +2914,10 @@ mod tests {
     async fn it_fails_a_stale_publish_and_recovers_on_pull() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::create().perform(&operator).await;
 
         shared
             .transaction()
@@ -2000,13 +2929,10 @@ mod tests {
         shared.refresh(&operator).await?;
         other.refresh(&operator).await?;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(state.clone())
-            .link(&shared, name("shared"))
-            .layer(Ephemeral::new())
-            .link(&state, name("state"))
-            .build()
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&state, &shared, name("shared"))
+            .link(&top, &state, name("state"))
             .perform(&operator)
             .await?;
 
@@ -2075,13 +3001,12 @@ mod tests {
     async fn it_stages_commits_and_publishes_the_chain() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(Ephemeral::new())
-            .link(&shared, name("shared"))
-            .build()
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
             .perform(&operator)
             .await?;
         let published = shared.revision();
@@ -2149,9 +3074,10 @@ mod tests {
     async fn it_stages_on_captured_heads_and_publishes_against_them() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::create().perform(&operator).await;
 
         shared
             .transaction()
@@ -2162,13 +3088,9 @@ mod tests {
             .await?;
         shared.refresh(&operator).await?;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(local.clone())
-            .link(&shared, name("shared"))
-            .layer(state.clone())
-            .link(&local, name("state"))
-            .build()
+        let stack = Stack::open(state.clone())
+            .link(&local, &shared, name("shared"))
+            .link(&state, &local, name("state"))
             .perform(&operator)
             .await?;
         // `memory:state` is bound where its link points: local.
@@ -2277,9 +3199,10 @@ mod tests {
     async fn it_leaves_a_moved_line_alone_when_the_write_misses_it() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::create().perform(&operator).await;
 
         shared
             .transaction()
@@ -2290,15 +3213,11 @@ mod tests {
             .await?;
         shared.refresh(&operator).await?;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(local.clone())
-            .link(&shared, name("shared"))
-            .layer(state.clone())
-            .link(&local, name("local"))
-            .layer(Ephemeral::new())
-            .link(&state, name("state"))
-            .build()
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&local, &shared, name("shared"))
+            .link(&state, &local, name("local"))
+            .link(&top, &state, name("state"))
             .perform(&operator)
             .await?;
         local.refresh(&operator).await?;
@@ -2341,14 +3260,12 @@ mod tests {
     async fn it_rejects_an_audience_violation() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::create().perform(&operator).await;
 
-        let result = Stack::builder()
-            .layer(state.clone())
-            .layer(shared.clone())
-            .link(&state, name("state"))
-            .build()
+        let result = Stack::open(shared.clone())
+            .link(&shared, &state, name("state"))
             .perform(&operator)
             .await;
         assert!(
@@ -2365,19 +3282,68 @@ mod tests {
         Ok(())
     }
 
+    /// A failed wiring batch preserves its original shape and staged data.
+    #[dialog_common::test]
+    async fn it_preserves_a_stack_after_rejected_wiring() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let doc: Entity = "doc:staged".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Pending".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let identity = stack.identity();
+        let heads = stack.captured();
+        let result = stack
+            .transaction()
+            .link(&top, &state, name("state"))
+            .link(&shared, &state, name("invalid"))
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(result.is_err(), "the second link must be refused");
+        assert_eq!(stack.identity(), identity);
+        assert_eq!(stack.layers().len(), 2);
+        assert_eq!(stack.captured(), heads);
+        assert!(
+            stack.is_staged(),
+            "a rejected edit keeps the pending commit"
+        );
+        stack.publish(&operator).await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Pending".into())]
+        );
+        Ok(())
+    }
+
     /// A link must name a layer already beneath the linking one.
     #[dialog_common::test]
     async fn it_rejects_a_link_to_an_unknown_line() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let elsewhere = Ephemeral::new();
+        let elsewhere = Ephemeral::create().perform(&operator).await;
 
-        let result = Stack::builder()
-            .layer(shared.clone())
-            .layer(Ephemeral::new())
-            .link(&elsewhere, name("state"))
-            .build()
+        let top = Ephemeral::create().perform(&operator).await;
+        let result = Stack::open(top.clone())
+            .link(&elsewhere, &shared, name("state"))
             .perform(&operator)
             .await;
         assert!(
@@ -2394,19 +3360,13 @@ mod tests {
     async fn it_derives_identities_from_shape() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let state = Ephemeral::new();
+        let state = Ephemeral::create().perform(&operator).await;
 
-        let alone = Stack::builder()
-            .layer(shared.clone())
-            .build()
-            .perform(&operator)
-            .await?;
-        let over = Stack::builder()
-            .layer(shared.clone())
-            .layer(state.clone())
-            .link(&shared, name("shared"))
-            .build()
+        let alone = Stack::open(shared.clone()).perform(&operator).await?;
+        let over = Stack::open(state.clone())
+            .link(&state, &shared, name("shared"))
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -2417,11 +3377,8 @@ mod tests {
         assert_ne!(over.identities()[1], over.identities()[0]);
         assert!(over.identity().to_string().starts_with("stack:"));
 
-        let renamed = Stack::builder()
-            .layer(shared.clone())
-            .layer(state.clone())
-            .link(&shared, name("base"))
-            .build()
+        let renamed = Stack::open(state.clone())
+            .link(&state, &shared, name("base"))
             .perform(&operator)
             .await?;
         assert_ne!(
@@ -2438,8 +3395,12 @@ mod tests {
     async fn it_fans_out_a_name_bound_twice() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
         let shared = repo.branch("main").open().perform(&operator).await?;
-        let (left, right) = (Ephemeral::new(), Ephemeral::new());
+        let (left, right) = (
+            Ephemeral::create().perform(&operator).await,
+            Ephemeral::create().perform(&operator).await,
+        );
 
         shared
             .transaction()
@@ -2450,14 +3411,12 @@ mod tests {
             .await?;
         shared.refresh(&operator).await?;
 
-        let stack = Stack::builder()
-            .layer(shared.clone())
-            .layer(left.clone())
-            .layer(right.clone())
-            .layer(Ephemeral::new())
-            .link(&left, name("state"))
-            .link(&right, name("state"))
-            .build()
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &left, name("state"))
+            .link(&top, &right, name("state"))
+            .link(&left, &shared, name("shared"))
+            .link(&right, &shared, name("shared"))
             .perform(&operator)
             .await?;
 
@@ -2469,8 +3428,9 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        assert_eq!(left.len(), 1);
-        assert_eq!(right.len(), 1);
+        let cursor = ArtifactSelector::new().the("ui/cursor".parse()?);
+        assert_eq!(left.scan(&cursor).len(), 1);
+        assert_eq!(right.scan(&cursor).len(), 1);
         assert_eq!(
             values::<u64>(&stack, &operator, "ui/cursor", &doc).await?,
             vec![Value::UnsignedInt(3)],
@@ -2484,11 +3444,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_refuses_to_transact_without_a_branch_bottom() -> Result<()> {
         let (operator, _profile) = test_operator_with_profile().await;
-        let stack = Stack::builder()
-            .layer(Ephemeral::new())
-            .build()
-            .perform(&operator)
-            .await?;
+        let operator = TestEnv::new(operator);
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone()).perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         let result = stack
             .transaction()
@@ -2496,7 +3454,551 @@ mod tests {
             .commit()
             .perform(&operator)
             .await;
-        assert!(matches!(result, Err(CommitError::Detached)));
+        assert!(matches!(
+            result,
+            Err(StackError::Commit(CommitError::Detached))
+        ));
+        Ok(())
+    }
+
+    /// The increment rule the induction tests use: `assert!
+    /// counter{count: ?prev + 1} when increment{counter: ?this},
+    /// counter{this: ?this, count: ?prev}`.
+    fn increment_rule() -> dialog_query::InductiveRule {
+        serde_json::from_value(serde_json::json!({
+            "description": "Increment a counter on an increment command",
+            "assert!": {
+                "with": {
+                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "counter": { "the": "cmd.increment/counter", "as": "Entity" }
+                        }
+                    },
+                    "where": {
+                        "counter": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/sum",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "with": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                }
+            ]
+        }))
+        .expect("increment rule compiles")
+    }
+
+    /// A rule committed on an upper branch layer fires in a stack
+    /// transaction: the command dispatched through the stack reaches
+    /// it, and its durable conclusion routes by placement to the
+    /// bottom, where the counter lives.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_committed_on_an_upper_layer() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let local = repo.branch("main.local").open().perform(&operator).await?;
+
+        let counter: Entity = "ctr:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        local
+            .transaction()
+            .assert(increment_rule())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        local.refresh(&operator).await?;
+
+        let stack = Stack::open(local.clone())
+            .link(&local, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the upper layer's rule must fire and its conclusion land on the bottom"
+        );
+        Ok(())
+    }
+
+    /// A rule held in an ephemeral layer fires in a stack transaction
+    /// too: the layer is part of the view a rule body reads, so it is
+    /// part of the slice dispatch discovers rules in.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_held_in_an_ephemeral_layer() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+
+        let counter: Entity = "ctr:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let mut rule = Changes::new();
+        increment_rule().assert(&mut rule);
+        state.apply(rule);
+
+        let stack = Stack::open(state.clone())
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the ephemeral layer's rule must fire and its conclusion land on the bottom"
+        );
+        Ok(())
+    }
+
+    /// A transient whose attribute is placed on an ephemeral scope is
+    /// witnessed on that layer, not on the bottom's session store; the
+    /// rule it fires still lands its conclusion by placement.
+    #[dialog_common::test]
+    async fn it_witnesses_a_placed_transient_on_its_layer() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+
+        let counter: Entity = "ctr:1".parse()?;
+        shared
+            .transaction()
+            .assert(Placement::new(
+                "cmd.increment/counter".parse()?,
+                name("state"),
+            ))
+            .assert(increment_rule())
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&state, &shared, name("shared"))
+            .link(&top, &state, name("state"))
+            .perform(&operator)
+            .await?;
+
+        let commands = || {
+            let demand = Demand::new();
+            demand.record(&ArtifactSelector::new().the("cmd.increment/counter".parse().unwrap()));
+            demand
+        };
+        let on_state = state.observe(commands());
+        let on_bottom = shared.overlay().observe(commands());
+        let command: Entity = "cmd:1".parse()?;
+        stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let Drained::Instants(witnessed) = on_state.drain() else {
+            panic!("gapped")
+        };
+        assert_eq!(
+            witnessed
+                .iter()
+                .flat_map(|instant| instant.asserted.iter())
+                .map(|fact| fact.the.to_string())
+                .collect::<Vec<_>>(),
+            vec!["cmd.increment/counter".to_string()],
+            "the placed command is witnessed on its layer"
+        );
+        assert!(
+            matches!(on_bottom.drain(), Drained::Instants(instants) if instants.is_empty()),
+            "and not on the bottom's session store"
+        );
+        assert!(
+            state
+                .scan(&ArtifactSelector::new().the("cmd.increment/counter".parse()?))
+                .is_empty(),
+            "witnessed, not held"
+        );
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)]
+        );
+        Ok(())
+    }
+
+    /// A stack reopens from its top layer alone: the links it recorded
+    /// resolve every layer beneath it through the environment — the
+    /// branch by repository and name, the ephemeral layer by the
+    /// address the process still holds it under — and the shape found
+    /// carries the identities the links recorded.
+    #[dialog_common::test]
+    async fn it_reopens_a_stack_from_its_top_layer() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let tab = Ephemeral::create().perform(&operator).await;
+
+        let built = Stack::open(tab.clone())
+            .link(&tab, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let doc: Entity = "doc:1".parse()?;
+        built
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let reopened = Stack::open(tab.clone()).perform(&operator).await?;
+        assert_eq!(reopened.identities(), built.identities());
+        assert_eq!(reopened.layers().len(), 3);
+        assert!(reopened.layers()[0].same(&Layer::Branch(shared.clone())));
+        assert!(reopened.layers()[1].same(&Layer::Ephemeral(state.clone())));
+        assert_eq!(
+            values::<String>(&reopened, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "the reopened stack reads the same composite"
+        );
+
+        drop(state);
+        drop(built);
+        drop(reopened);
+        let gone = Stack::open(tab.clone()).perform(&operator).await;
+        assert!(
+            matches!(gone, Err(StackError::Ephemeral(_))),
+            "an ephemeral layer no handle holds cannot be reopened: {gone:?}"
+        );
+        Ok(())
+    }
+
+    /// Swapping a seed branch is one transaction: unlink the old one,
+    /// link the new one under the same name. The old branch leaves the
+    /// stack, its facts leave the composite, the new one's arrive, and
+    /// the encloser's identity changes with its shape.
+    #[dialog_common::test]
+    async fn it_swaps_a_linked_branch_by_unlinking_and_linking() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let seed_v1 = repo.branch("seed.v1").open().perform(&operator).await?;
+        let seed_v2 = repo.branch("seed.v2").open().perform(&operator).await?;
+        let doc: Entity = "seed:doc".parse()?;
+        for (seed, version) in [(&seed_v1, "one"), (&seed_v2, "two")] {
+            seed.transaction()
+                .assert(
+                    dialog_query::the!("seed/version")
+                        .of(doc.clone())
+                        .is(version.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            seed.refresh(&operator).await?;
+        }
+
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &main, name("main"))
+            .link(&state, &seed_v1, name("seed"))
+            .perform(&operator)
+            .await?;
+        let before = stack.identity();
+        assert_eq!(
+            values::<String>(&stack, &operator, "seed/version", &doc).await?,
+            vec![Value::String("one".into())]
+        );
+
+        stack
+            .transaction()
+            .unlink(&state, &seed_v1, name("seed"))
+            .link(&state, &seed_v2, name("seed"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(stack.layers().len(), 4, "the old seed left");
+        assert!(
+            stack
+                .layers()
+                .iter()
+                .all(|layer| !layer.same(&Layer::Branch(seed_v1.clone()))),
+        );
+        assert_eq!(
+            values::<String>(&stack, &operator, "seed/version", &doc).await?,
+            vec![Value::String("two".into())],
+            "the composite reads the new seed"
+        );
+        assert_ne!(stack.identity(), before, "the shape changed");
+        let link = ArtifactSelector::new().the("dialog.link/name".parse()?);
+        assert_eq!(
+            state.scan(&link).len(),
+            2,
+            "the old link's facts are gone from the encloser"
+        );
+
+        assert_eq!(
+            top.scan(&link).len(),
+            1,
+            "the old ancestor link is retracted"
+        );
+        let reopened = Stack::open(top.clone()).perform(&operator).await?;
+        assert_eq!(reopened.identities(), stack.identities());
+
+        stack
+            .transaction()
+            .unlink(&top, &state, name("state"))
+            .unlink(&state, &seed_v2, name("seed"))
+            .link(&top, &main, name("main"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(stack.layers().len(), 2);
+        let reopened = Stack::open(top.clone()).perform(&operator).await?;
+        assert_eq!(reopened.identities(), stack.identities());
+        Ok(())
+    }
+
+    /// A writer that knows where a fact belongs says so: `assert_into`
+    /// lands it under the scope regardless of placements, `forget`
+    /// drops an entity's facts from the scope's layer, `clear` empties
+    /// it, and none of it touches the tree.
+    #[dialog_common::test]
+    async fn it_writes_and_maintains_a_scope_explicitly() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let operator = TestEnv::new(operator);
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        let site: Entity = "site:1".parse()?;
+        let other: Entity = "site:2".parse()?;
+        stack
+            .transaction()
+            .assert_into(
+                name("state"),
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/a".to_string()),
+            )
+            .assert_into(
+                name("state"),
+                dialog_query::the!("site/path")
+                    .of(other.clone())
+                    .is("/b".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "site/path", &site).await?,
+            vec![Value::String("/a".into())],
+            "the composite reads the placed fact"
+        );
+        assert!(
+            committed(&shared, &operator, "site/path", &site)
+                .await?
+                .is_empty(),
+            "the tree never sees it"
+        );
+        let paths = ArtifactSelector::new().the("site/path".parse()?);
+        assert_eq!(state.scan(&paths).len(), 2);
+
+        let demand = crate::Demand::new();
+        demand.record(&paths);
+        let observer = state.observe(demand);
+        stack
+            .transaction()
+            .forget(name("state"), vec![site.clone()])
+            .assert_into(
+                name("state"),
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/restamped".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let crate::Drained::Instants(instants) = observer.drain() else {
+            panic!("one restamp cannot overflow");
+        };
+        assert_eq!(instants.len(), 1, "forget and replacement are one instant");
+        assert_eq!(instants[0].retracted[0].is, Value::String("/a".into()));
+        assert_eq!(
+            instants[0].asserted[0].is,
+            Value::String("/restamped".into())
+        );
+        let refused = stack
+            .transaction()
+            .clear(name("state"))
+            .clear(name("shared"))
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(matches!(refused, Err(StackError::NotEphemeral { .. })));
+        assert_eq!(
+            state.scan(&paths).len(),
+            2,
+            "invalid maintenance changes no store"
+        );
+
+        stack
+            .transaction()
+            .forget(name("state"), vec![site.clone()])
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(state.scan(&paths).len(), 1, "one site forgotten");
+        assert!(
+            values::<String>(&stack, &operator, "site/path", &site)
+                .await?
+                .is_empty()
+        );
+
+        stack
+            .transaction()
+            .clear(name("state"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(state.scan(&paths).len(), 0, "cleared");
+        let reopened = Stack::open(top.clone()).perform(&operator).await?;
+        assert_eq!(
+            reopened.identities(),
+            stack.identities(),
+            "clearing state preserves stack wiring"
+        );
+        assert_eq!(reopened.layers().len(), 3);
+
+        let refused = stack
+            .transaction()
+            .clear(name("shared"))
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(refused, Err(StackError::NotEphemeral { .. })),
+            "a tree layer is never cleared: {refused:?}"
+        );
+        let unbound = stack
+            .transaction()
+            .assert_into(
+                name("nowhere"),
+                dialog_query::the!("site/path")
+                    .of(site)
+                    .is("/c".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(matches!(unbound, Err(StackError::UnboundScope { .. })));
         Ok(())
     }
 }
