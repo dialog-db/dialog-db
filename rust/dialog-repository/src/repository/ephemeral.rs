@@ -1149,30 +1149,31 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn it_drains_overflow_while_another_thread_writes() {
+        use std::{sync::mpsc, thread, time::Duration};
         let line = Ephemeral::detached();
         let observer = line.observe_everything();
         for i in 0..=QUEUE_CAPACITY {
             line.assert(claim(&format!("id:{i}"), "person/name", "Before"));
         }
         let writer = line.clone();
-        let (done, completion) = std::sync::mpsc::channel();
+        let (done, completion) = mpsc::channel();
         let writing = done.clone();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             for i in 0..2048 {
                 writer.assert(claim(&format!("next:{i}"), "person/name", "After"));
             }
             writing.send(()).unwrap();
         });
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             for _ in 0..2048 {
                 observer.drain();
-                std::thread::yield_now();
+                thread::yield_now();
             }
             done.send(()).unwrap();
         });
         for _ in 0..2 {
             completion
-                .recv_timeout(std::time::Duration::from_secs(10))
+                .recv_timeout(Duration::from_secs(10))
                 .expect("overflow draining and writes must not deadlock");
         }
     }

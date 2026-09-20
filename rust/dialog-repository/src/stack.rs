@@ -90,7 +90,7 @@
 //! branch may not link a process-local store; the store may link the
 //! branch.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::{mem, slice};
@@ -1930,8 +1930,7 @@ impl<'a> StackCommit<'a> {
         let topology = stack.topology();
 
         // Resolve and validate every explicit scope before touching any store.
-        let mut maintenance: BTreeMap<usize, (bool, std::collections::HashSet<Entity>)> =
-            BTreeMap::new();
+        let mut maintenance: BTreeMap<usize, (bool, HashSet<Entity>)> = BTreeMap::new();
         for (scope, operation) in self.stores {
             let Some(indices) = topology.bound.get(&scope) else {
                 return Err(StackError::UnboundScope { scope });
