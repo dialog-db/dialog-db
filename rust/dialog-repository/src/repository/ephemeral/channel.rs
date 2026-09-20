@@ -593,24 +593,25 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn it_does_not_acknowledge_concurrent_writes_before_draining_them() {
+        use std::thread;
         let a = Channel::new(Ephemeral::detached());
         let b = Channel::new(Ephemeral::detached());
         let (pa, pb) = (peer("a"), peer("b"));
         a.join(pb.clone());
         b.join(pa.clone());
         let writer = a.clone();
-        let writing = std::thread::spawn(move || {
+        let writing = thread::spawn(move || {
             for i in 0..2048 {
                 write(
                     &writer,
                     vec![fact(&format!("doc:{i}"), "doc/title", "Concurrent")],
                 );
-                std::thread::yield_now();
+                thread::yield_now();
             }
         });
         while !writing.is_finished() {
             b.receive(&pa, a.since(&pb));
-            std::thread::yield_now();
+            thread::yield_now();
         }
         writing.join().unwrap();
         b.receive(&pa, a.since(&pb));
