@@ -66,6 +66,37 @@ impl Ed25519Signer {
         Ok(self.signer.export().await?)
     }
 
+    /// Derive another signer from this one.
+    ///
+    /// Credentials in, credentials out: the derived key material is imported
+    /// here and never handed back, so a caller gets something it can sign
+    /// with rather than bytes it has to look after. The same identity,
+    /// `context` and `label` always yield the same signer, on every platform,
+    /// which is what lets an operator DID stay put across sessions and across
+    /// native and the browser.
+    ///
+    /// The derivation is a key agreement against this identity's own agreement
+    /// key, not a signature -- see
+    /// [`Secret::derive_bytes`](crate::secret::Secret::derive_bytes) for why
+    /// that distinction is the whole point.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this identity carries no agreement key, or when a
+    /// platform crypto operation fails.
+    pub async fn derive(
+        &self,
+        context: crate::secret::Context,
+        label: &[u8],
+    ) -> Result<Self, Ed25519SignerError> {
+        let seed = self
+            .secret(context)
+            .derive_bytes(label)
+            .await
+            .map_err(Ed25519SignerError::Derive)?;
+        Self::import(&seed).await
+    }
+
     /// Get the associated Ed25519 DID (verifier).
     #[must_use]
     pub const fn ed25519_did(&self) -> &Ed25519Verifier {

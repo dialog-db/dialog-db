@@ -125,10 +125,16 @@ impl Secret<'_> {
 
     /// Derive a deterministic 32-byte secret from this identity.
     ///
+    /// Prefer [`Ed25519Signer::derive`], which returns a SIGNER and never puts
+    /// the material in a caller's hands. This is the escape hatch for a
+    /// consumer that cannot take one: a key type built only from raw bytes,
+    /// such as `iroh::SecretKey`, whose QUIC stack needs the material
+    /// in-process and offers no external-signer hook. Reach for it when the
+    /// alternative is not having the key at all, and keep the bytes as
+    /// short-lived as the consumer allows.
+    ///
     /// The same identity, context and `label` always yield the same bytes, on
-    /// every platform. Use it wherever a stable key has to come out of an
-    /// identity rather than out of storage -- an operator key, a per-purpose
-    /// subkey -- and run the result through whatever import the consumer needs.
+    /// every platform.
     ///
     /// The derivation is a key agreement against this identity's own agreement
     /// public key, NOT a signature. A signature is not a pseudo-random
@@ -147,7 +153,7 @@ impl Secret<'_> {
     /// restored from an archive written before agreement keys were stored,
     /// whose seed is gone and cannot be re-derived. Otherwise returns an error
     /// if a platform crypto operation fails.
-    pub async fn derive(&self, label: &[u8]) -> Result<[u8; 32], SecretError> {
+    pub async fn derive_bytes(&self, label: &[u8]) -> Result<[u8; 32], SecretError> {
         let key: X25519SecretKey = self.signer.agreement_key().await?;
         platform::derive(&key, self.context, label).await
     }
@@ -202,6 +208,28 @@ mod tests {
 
     async fn signer(seed: u8) -> Ed25519Signer {
         Ed25519Signer::import(&[seed; 32]).await.unwrap()
+    }
+
+    /// The credential-returning derivation is the byte one, imported.
+    ///
+    /// Pinned because they are two entry points to one scheme: production
+    /// takes `Ed25519Signer::derive` and never sees the material, while
+    /// `derive_bytes` is the escape hatch for a consumer that can only take
+    /// raw bytes. A change that moved one without the other would give the
+    /// same identity two different operators.
+    #[dialog_common::test]
+    async fn derive_returns_a_signer_over_the_same_bytes() {
+        let profile = signer(1).await;
+
+        let bytes = profile
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
+        let expected = Ed25519Signer::import(&bytes).await.unwrap();
+        let derived = profile.derive(VAULT, b"operator").await.unwrap();
+
+        assert_eq!(derived.ed25519_did(), expected.ed25519_did());
     }
 
     #[dialog_common::test]
@@ -281,8 +309,16 @@ mod tests {
     async fn derivation_is_deterministic() {
         let profile = signer(10).await;
 
-        let first = profile.secret(VAULT).derive(b"operator").await.unwrap();
-        let second = profile.secret(VAULT).derive(b"operator").await.unwrap();
+        let first = profile
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
+        let second = profile
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
 
         assert_eq!(
             first, second,
@@ -295,21 +331,29 @@ mod tests {
         let profile = signer(11).await;
         let other = signer(12).await;
 
-        let base = profile.secret(VAULT).derive(b"operator").await.unwrap();
+        let base = profile
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
 
         assert_ne!(
             base,
-            profile.secret(VAULT).derive(b"other").await.unwrap(),
+            profile.secret(VAULT).derive_bytes(b"other").await.unwrap(),
             "a different label must derive an unrelated secret"
         );
         assert_ne!(
             base,
-            profile.secret(OTHER).derive(b"operator").await.unwrap(),
+            profile
+                .secret(OTHER)
+                .derive_bytes(b"operator")
+                .await
+                .unwrap(),
             "a different context must derive an unrelated secret"
         );
         assert_ne!(
             base,
-            other.secret(VAULT).derive(b"operator").await.unwrap(),
+            other.secret(VAULT).derive_bytes(b"operator").await.unwrap(),
             "a different identity must derive an unrelated secret"
         );
     }
@@ -337,7 +381,11 @@ mod tests {
         ];
 
         let profile = Ed25519Signer::import(&[42u8; 32]).await.unwrap();
-        let derived = profile.secret(VAULT).derive(b"operator").await.unwrap();
+        let derived = profile
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
 
         assert_eq!(derived, EXPECTED);
     }
@@ -528,7 +576,11 @@ mod web_tests {
         let _webkit = Uncloneable::assume();
 
         let signer = Ed25519Signer::import(&[42u8; 32]).await.unwrap();
-        let before = signer.secret(VAULT).derive(b"operator").await.unwrap();
+        let before = signer
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
         assert_eq!(
             before, EXPECTED,
             "the wrapped archive must not change the derived value"
@@ -553,7 +605,11 @@ mod web_tests {
             .unwrap();
 
         assert_eq!(
-            restored.secret(VAULT).derive(b"operator").await.unwrap(),
+            restored
+                .secret(VAULT)
+                .derive_bytes(b"operator")
+                .await
+                .unwrap(),
             EXPECTED,
             "a profile restored from a wrapped archive must derive the same operator"
         );
@@ -576,7 +632,7 @@ mod web_tests {
 
         assert!(
             matches!(
-                restored.secret(VAULT).derive(b"operator").await,
+                restored.secret(VAULT).derive_bytes(b"operator").await,
                 Err(SecretError::AgreementKeyUnavailable)
             ),
             "a profile with no agreement key must fail, not derive"

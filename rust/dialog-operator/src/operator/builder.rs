@@ -234,10 +234,10 @@ fn ed25519_signer(credential: &SignerCredential) -> Result<Ed25519Signer, Operat
 
 /// Derive the operator key for `context` from the profile key.
 ///
-/// One derivation for every platform, and the same one: the profile's
-/// [`Ed25519Signer::secret`] handle runs a key agreement against the identity's
-/// own agreement key (see [`dialog_credentials::secret::Secret::derive`]) and
-/// the result seeds the operator.
+/// One derivation for every platform, and the same one: [`Ed25519Signer::derive`]
+/// runs a key agreement against the identity's own agreement key and imports
+/// the result, so the operator arrives as a signer and the derived material is
+/// never a value this code holds.
 ///
 /// It is NOT a signature, and the distinction is the whole point. The web arm
 /// used to sign a fixed message and hash the signature, which assumes a
@@ -253,13 +253,8 @@ async fn derive_operator(
     signer: &Ed25519Signer,
     context: &[u8],
 ) -> Result<Ed25519Signer, OperatorError> {
-    let seed = signer
-        .secret(OPERATOR_DERIVATION_CONTEXT)
-        .derive(context)
-        .await
-        .map_err(|e| OperatorError::Key(e.to_string()))?;
-
-    Ed25519Signer::import(&seed)
+    signer
+        .derive(OPERATOR_DERIVATION_CONTEXT, context)
         .await
         .map_err(|e| OperatorError::Key(e.to_string()))
 }
