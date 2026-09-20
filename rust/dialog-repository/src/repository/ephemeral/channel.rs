@@ -155,8 +155,9 @@ impl Channel {
 
     /// The instants the log holds now.
     pub fn len(&self) -> usize {
-        self.absorb();
-        self.log.lock().entries.len()
+        let mut log = self.log.lock();
+        self.absorb(&mut log);
+        log.entries.len()
     }
 
     /// Whether the log holds no instants.
@@ -167,8 +168,7 @@ impl Channel {
     /// Every fact the layer holds, and the sequence it stands at: what
     /// a peer that cannot be caught up from the log applies instead.
     pub fn fold(&self) -> (Vec<Artifact>, u64) {
-        let facts = self.layer.facts();
-        (facts, self.layer.revision().sequence)
+        self.layer.fold()
     }
 
     /// What `peer` needs to be current: the instants past its offset
@@ -176,16 +176,15 @@ impl Channel {
     /// the log. Moves the peer's offset to the sequence the sync
     /// reaches; a peer not admitted is admitted by this.
     pub fn since(&self, peer: &Entity) -> Sync {
-        self.absorb();
         let mut log = self.log.lock();
-        let current = self.layer.revision().sequence;
+        let current = self.absorb(&mut log);
         let offset = log.offsets.get(peer).copied().unwrap_or(0);
         let oldest = log.entries.front().map(|entry| entry.instant.sequence);
         // The log covers the peer when every instant after its offset
         // is still held: the oldest held is at most offset + 1, or the
         // log is empty because nothing happened past the offset.
         let covered = match oldest {
-            Some(oldest) => oldest <= offset + 1,
+            Some(oldest) => oldest <= offset.saturating_add(1),
             None => offset >= current,
         };
         let sync = if covered {
@@ -201,9 +200,7 @@ impl Channel {
                 sequence: current,
             }
         } else {
-            drop(log);
             let (facts, sequence) = self.fold();
-            log = self.log.lock();
             Sync::Resync { facts, sequence }
         };
         log.offsets.insert(peer.clone(), sync.sequence());
@@ -223,18 +220,25 @@ impl Channel {
                 for instant in instants {
                     let mut changes = Changes::new();
                     for fact in instant.retracted {
-                        changes.dissociate(fact.the, fact.of, fact.is);
+                        if !instant.transient || !instant.asserted.contains(&fact) {
+                            changes.dissociate(fact.the, fact.of, fact.is);
+                        }
                     }
                     for fact in instant.asserted {
                         changes.associate(fact.the, fact.of, fact.is);
                     }
                     let mut log = self.log.lock();
-                    if let Some(minted) = self.layer.apply(changes) {
+                    let minted = if instant.transient {
+                        self.layer.witness(changes)
+                    } else {
+                        self.layer.apply(changes)
+                    };
+                    if let Some(minted) = minted {
                         log.received.insert(minted.sequence, peer.clone());
                         applied += 1;
                     }
                 }
-                self.absorb();
+                self.absorb(&mut self.log.lock());
                 applied
             }
             Sync::Resync { facts, .. } => {
@@ -259,14 +263,13 @@ impl Channel {
             log.received.insert(minted.sequence, peer.clone());
         }
         drop(log);
-        self.absorb();
+        self.absorb(&mut self.log.lock());
     }
 
     /// Drain the layer's instants into the log, tagging the ones that
     /// were applied on a peer's behalf, and bound the log.
-    fn absorb(&self) {
-        let drained = self.observer.drain();
-        let mut log = self.log.lock();
+    fn absorb(&self, log: &mut Log) -> u64 {
+        let (drained, sequence) = self.observer.drain_at();
         match drained {
             super::Drained::Instants(instants) => {
                 for instant in instants {
@@ -281,7 +284,8 @@ impl Channel {
                 log.received.clear();
             }
         }
-        Self::bound(&mut log);
+        Self::bound(log);
+        sequence
     }
 
     /// Drop what every peer has and what the ring bound excludes.
@@ -324,10 +328,9 @@ pub(crate) fn assert_all(changes: &mut Changes, facts: impl IntoIterator<Item = 
 impl Channel {
     /// Every instant the log holds, oldest first.
     pub(crate) fn entries(&self) -> Vec<Instant> {
-        self.absorb();
-        self.log
-            .lock()
-            .entries
+        let mut log = self.log.lock();
+        self.absorb(&mut log);
+        log.entries
             .iter()
             .map(|entry| entry.instant.clone())
             .collect()
@@ -556,6 +559,63 @@ mod tests {
         };
         assert_eq!(instants.len(), 2);
         assert_eq!(a.entries().len(), 0, "both peers have everything now");
+    }
+
+    #[dialog_common::test]
+    async fn it_replicates_a_witness_without_storing_or_echoing_it() {
+        let (a, b, _env) = two_channels().await;
+        let (pa, pb) = (peer("a"), peer("b"));
+        a.join(pb.clone());
+        b.join(pa.clone());
+        let observer = b.layer().observe_everything();
+        let command = fact("cmd:1", "cmd/target", "doc:1");
+        let mut changes = Changes::new();
+        assert_all(&mut changes, [command.clone()]);
+        a.layer().witness(changes);
+
+        assert_eq!(b.receive(&pa, a.since(&pb)), 1);
+        assert!(a.layer().is_empty());
+        assert!(
+            b.layer().is_empty(),
+            "a witnessed command must not become stored state"
+        );
+        assert!(b.layer().tombstones().is_empty());
+        let super::super::Drained::Instants(instants) = observer.drain() else {
+            panic!("one command cannot overflow the observer");
+        };
+        assert_eq!(instants.len(), 1);
+        assert!(instants[0].transient);
+        assert_eq!(instants[0].asserted, vec![command.clone()]);
+        assert_eq!(instants[0].retracted, vec![command]);
+        assert!(matches!(b.since(&pa), Sync::Instants { instants, .. } if instants.is_empty()));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn it_does_not_acknowledge_concurrent_writes_before_draining_them() {
+        let a = Channel::new(Ephemeral::detached());
+        let b = Channel::new(Ephemeral::detached());
+        let (pa, pb) = (peer("a"), peer("b"));
+        a.join(pb.clone());
+        b.join(pa.clone());
+        let writer = a.clone();
+        let writing = std::thread::spawn(move || {
+            for i in 0..2048 {
+                write(
+                    &writer,
+                    vec![fact(&format!("doc:{i}"), "doc/title", "Concurrent")],
+                );
+                std::thread::yield_now();
+            }
+        });
+        while !writing.is_finished() {
+            b.receive(&pa, a.since(&pb));
+            std::thread::yield_now();
+        }
+        writing.join().unwrap();
+        b.receive(&pa, a.since(&pb));
+        assert_eq!(a.layer().len(), 2048);
+        assert_eq!(b.layer().facts(), a.layer().facts());
     }
 
     /// The sync is what crosses a wire: it round-trips through JSON.

@@ -85,7 +85,7 @@ pub(crate) const QUEUE_CAPACITY: usize = 1024;
 pub struct EphemeralRevision {
     /// Instants minted so far; zero for a store nothing has changed.
     pub sequence: u64,
-    /// `blake3(previous ‖ sequence ‖ delta)`, chained from zero.
+    /// `blake3(previous ‖ sequence ‖ transient ‖ delta)`, chained from zero.
     pub hash: Blake3Hash,
 }
 
@@ -98,6 +98,10 @@ pub struct Instant {
     pub sequence: u64,
     /// The chained hash after this instant.
     pub hash: Blake3Hash,
+    /// Whether these facts were witnessed for one induction round without
+    /// changing the store. Replicas must preserve this distinction.
+    #[serde(default)]
+    pub transient: bool,
     /// Facts that became readable: stored, or un-shadowed beneath.
     pub asserted: Vec<Artifact>,
     /// Facts that stopped being readable: removed, or shadowed
@@ -298,6 +302,7 @@ fn index_keys(fact: &Artifact, manifest: &Manifest) -> [Key; 3] {
 /// The delta one write is accumulating, before it is minted.
 #[derive(Default)]
 struct Delta {
+    transient: bool,
     asserted: Vec<Artifact>,
     retracted: Vec<Artifact>,
     tombstones_changed: bool,
@@ -393,6 +398,7 @@ impl State {
             Vec::with_capacity(2 + delta.asserted.len() + delta.retracted.len());
         chunks.push(self.hash.as_bytes().to_vec());
         chunks.push(self.sequence.to_be_bytes().to_vec());
+        chunks.push(vec![u8::from(delta.transient)]);
         for (polarity, facts) in [(b'+', &delta.asserted), (b'-', &delta.retracted)] {
             for fact in facts {
                 let (the, of, tail) = default_sort_key(fact);
@@ -410,6 +416,7 @@ impl State {
         let instant = Instant {
             sequence: self.sequence,
             hash: self.hash.clone(),
+            transient: delta.transient,
             asserted: delta.asserted,
             retracted: delta.retracted,
         };
@@ -481,6 +488,7 @@ impl Filter {
                 Some(Instant {
                     sequence: instant.sequence,
                     hash: instant.hash.clone(),
+                    transient: instant.transient,
                     asserted,
                     retracted,
                 })
@@ -528,15 +536,24 @@ impl Observer {
     /// marker if the queue overflowed. Draining a gap clears it, so
     /// the next drain starts collecting again.
     pub fn drain(&self) -> Drained {
+        self.drain_at().0
+    }
+
+    /// Drain and capture the covered sequence under the same state lock.
+    /// Writers lock the layer before its queues; readers use that order too.
+    fn drain_at(&self) -> (Drained, u64) {
+        let state = self.layer.state.read();
         let mut queue = self.queue.lock();
-        if queue.gapped {
+        let drained = if queue.gapped {
             queue.gapped = false;
             queue.instants.clear();
-            return Drained::Gap {
-                sequence: self.layer.revision().sequence,
-            };
-        }
-        Drained::Instants(queue.instants.drain(..).collect())
+            Drained::Gap {
+                sequence: state.sequence,
+            }
+        } else {
+            Drained::Instants(queue.instants.drain(..).collect())
+        };
+        (drained, state.sequence)
     }
 
     /// Narrow the observer to the facts `demand` covers from now on.
@@ -620,6 +637,38 @@ impl Ephemeral {
             state.apply(instruction, &mut delta);
         }
         state.mint(delta)
+    }
+
+    /// Apply scope maintenance and its replacement facts under one write
+    /// lock and mint one instant, so a re-stamp has no empty intermediate.
+    pub(crate) fn maintain(&self, changes: Changes, clear: bool, forgotten: &HashSet<Entity>) {
+        let mut state = self.state.write();
+        let mut delta = Delta::default();
+        let dropped: Vec<Artifact> = state
+            .facts
+            .values()
+            .filter(|fact| clear || forgotten.contains(&fact.of))
+            .cloned()
+            .collect();
+        for fact in dropped {
+            state.remove(&fact, &mut delta);
+        }
+        let lifted: Vec<SortKey> = state
+            .shadowed
+            .iter()
+            .filter(|(_, fact)| clear || forgotten.contains(&fact.of))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in lifted {
+            if let Some(fact) = state.shadowed.remove(&key) {
+                delta.tombstones_changed = true;
+                delta.asserted.push(fact);
+            }
+        }
+        for instruction in changes.into_instructions() {
+            state.apply(instruction, &mut delta);
+        }
+        state.mint(delta);
     }
 
     /// Drop every fact and tombstone recorded for entities that fail
@@ -731,7 +780,10 @@ impl Ephemeral {
         if changes.is_empty() {
             return None;
         }
-        let mut delta = Delta::default();
+        let mut delta = Delta {
+            transient: true,
+            ..Delta::default()
+        };
         for instruction in changes.into_instructions() {
             match instruction {
                 Instruction::Assert(fact) | Instruction::Replace(fact) => {
@@ -775,15 +827,22 @@ impl Ephemeral {
     /// Every fact held, each once, in entity order: the fold a peer
     /// that cannot be caught up from instants applies instead.
     pub fn facts(&self) -> Vec<Artifact> {
+        self.fold().0
+    }
+
+    /// Capture the fold and its sequence together, so a peer never skips a
+    /// write that arrived between reading the facts and reading the revision.
+    fn fold(&self) -> (Vec<Artifact>, u64) {
         let state = self.state.read();
-        state
+        let facts = state
             .facts
             .iter()
             .filter(|(key, fact)| {
                 **key == EntityKey::from_artifact(fact, &state.manifest).into_key()
             })
             .map(|(_, fact)| fact.clone())
-            .collect()
+            .collect();
+        (facts, state.sequence)
     }
 
     /// The facts a selector matches, in the order a tree scan of the
@@ -1087,6 +1146,37 @@ mod tests {
         assert_eq!(line.observers(), 0, "pruned at the next fan-out");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn it_drains_overflow_while_another_thread_writes() {
+        let line = Ephemeral::detached();
+        let observer = line.observe_everything();
+        for i in 0..=QUEUE_CAPACITY {
+            line.assert(claim(&format!("id:{i}"), "person/name", "Before"));
+        }
+        let writer = line.clone();
+        let (done, completion) = std::sync::mpsc::channel();
+        let writing = done.clone();
+        std::thread::spawn(move || {
+            for i in 0..2048 {
+                writer.assert(claim(&format!("next:{i}"), "person/name", "After"));
+            }
+            writing.send(()).unwrap();
+        });
+        std::thread::spawn(move || {
+            for _ in 0..2048 {
+                observer.drain();
+                std::thread::yield_now();
+            }
+            done.send(()).unwrap();
+        });
+        for _ in 0..2 {
+            completion
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("overflow draining and writes must not deadlock");
+        }
+    }
+
     #[dialog_common::test]
     fn it_witnesses_without_changing_the_store() {
         let line = Ephemeral::detached();
@@ -1096,6 +1186,7 @@ mod tests {
         claim("cmd:1", "cmd.start/target", "doc:1").assert(&mut transient);
         line.witness(transient);
         let instant = only(&observer);
+        assert!(instant.transient);
         assert_eq!(
             instant.asserted,
             vec![fact("cmd:1", "cmd.start/target", "doc:1")]
