@@ -1989,11 +1989,11 @@ impl<'a> StackCommit<'a> {
             let Layer::Ephemeral(ephemeral) = &topology.layers[index] else {
                 unreachable!("maintenance targets were validated above");
             };
-            ephemeral.maintain(
-                batches.remove(&index).unwrap_or_default(),
-                clear,
-                &forgotten,
-            );
+            let mut batch = batches.remove(&index).unwrap_or_default();
+            // Scope maintenance clears user state, while the stack retains
+            // its declared wiring. Re-stamp it in the same atomic instant.
+            topology.link_facts(index, &stack.captured(), &mut batch);
+            ephemeral.maintain(batch, clear, &forgotten);
             stack.state.write().published[index] = Head::Ephemeral(ephemeral.revision());
         }
         // Maintenance moved ephemeral heads: re-read what the stack reads at.
@@ -3969,6 +3969,13 @@ mod tests {
             .perform(&operator)
             .await?;
         assert_eq!(state.scan(&paths).len(), 0, "cleared");
+        let reopened = Stack::open(top.clone()).perform(&operator).await?;
+        assert_eq!(
+            reopened.identities(),
+            stack.identities(),
+            "clearing state preserves stack wiring"
+        );
+        assert_eq!(reopened.layers().len(), 3);
 
         let refused = stack
             .transaction()
