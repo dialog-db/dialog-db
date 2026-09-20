@@ -390,11 +390,11 @@ pub enum StackError {
     #[error("Layer {from} ({from_audience:?}) may not link {to} ({to_audience:?})")]
     Audience {
         /// The address entity of the linking layer.
-        from: Entity,
+        from: Box<Entity>,
         /// Its audience.
         from_audience: Audience,
         /// The address entity of the linked layer.
-        to: Entity,
+        to: Box<Entity>,
         /// Its audience.
         to_audience: Audience,
     },
@@ -464,7 +464,7 @@ pub enum StackError {
     #[error("Failed to publish layer {layer}: {source}")]
     Publish {
         /// The address entity of the layer whose publish failed.
-        layer: Entity,
+        layer: Box<Entity>,
         /// Why.
         #[source]
         source: CommitError,
@@ -553,9 +553,9 @@ impl Topology {
         let (from_audience, to_audience) = (encloser.audience(), target.audience());
         if to_audience < from_audience {
             return Err(StackError::Audience {
-                from: address,
+                from: Box::new(address),
                 from_audience,
-                to: target.address_entity(),
+                to: Box::new(target.address_entity()),
                 to_audience,
             });
         }
@@ -1382,7 +1382,7 @@ impl Stack {
                         *stale = None;
                     }
                     return Err(StackError::Publish {
-                        layer: layer.address_entity(),
+                        layer: Box::new(layer.address_entity()),
                         source,
                     });
                 }
@@ -1929,25 +1929,22 @@ impl<'a> StackCommit<'a> {
         };
         let topology = stack.topology();
 
-        // Store maintenance first, so a fact this commit writes to a
-        // cleared layer survives the clear.
-        for (scope, maintenance) in self.stores {
+        // Resolve and validate every explicit scope before touching any store.
+        let mut maintenance: BTreeMap<usize, (bool, std::collections::HashSet<Entity>)> =
+            BTreeMap::new();
+        for (scope, operation) in self.stores {
             let Some(indices) = topology.bound.get(&scope) else {
                 return Err(StackError::UnboundScope { scope });
             };
             for index in indices {
-                let Layer::Ephemeral(ephemeral) = &topology.layers[*index] else {
+                if !matches!(&topology.layers[*index], Layer::Ephemeral(_)) {
                     return Err(StackError::NotEphemeral { scope });
-                };
-                match &maintenance {
-                    Maintenance::Clear => {
-                        ephemeral.clear();
-                    }
-                    Maintenance::Forget(entities) => {
-                        ephemeral.retain_entities(|entity| !entities.contains(entity));
-                    }
                 }
-                stack.state.write().published[*index] = Head::Ephemeral(ephemeral.revision());
+                let (clear, forgotten) = maintenance.entry(*index).or_default();
+                match &operation {
+                    Maintenance::Clear => *clear = true,
+                    Maintenance::Forget(entities) => forgotten.extend(entities.iter().cloned()),
+                }
             }
         }
         // Facts placed by the writer land where the scope's links say,
@@ -1962,6 +1959,19 @@ impl<'a> StackCommit<'a> {
                     apply(batches.entry(*index).or_default(), op, artifact.clone());
                 }
             }
+        }
+        // Maintenance and explicitly placed replacement facts land together:
+        // readers and observers never see an entity between forget and assert.
+        for (index, (clear, forgotten)) in maintenance {
+            let Layer::Ephemeral(ephemeral) = &topology.layers[index] else {
+                unreachable!("maintenance targets were validated above");
+            };
+            ephemeral.maintain(
+                batches.remove(&index).unwrap_or_default(),
+                clear,
+                &forgotten,
+            );
+            stack.state.write().published[index] = Head::Ephemeral(ephemeral.revision());
         }
         // Maintenance moved ephemeral heads: re-read what the stack reads at.
         let captured = stack.captured();
@@ -3804,6 +3814,45 @@ mod tests {
         );
         let paths = ArtifactSelector::new().the("site/path".parse()?);
         assert_eq!(state.scan(&paths).len(), 2);
+
+        let demand = crate::Demand::new();
+        demand.record(&paths);
+        let observer = state.observe(demand);
+        stack
+            .transaction()
+            .forget(name("state"), vec![site.clone()])
+            .assert_into(
+                name("state"),
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/restamped".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let crate::Drained::Instants(instants) = observer.drain() else {
+            panic!("one restamp cannot overflow");
+        };
+        assert_eq!(instants.len(), 1, "forget and replacement are one instant");
+        assert_eq!(instants[0].retracted[0].is, Value::String("/a".into()));
+        assert_eq!(
+            instants[0].asserted[0].is,
+            Value::String("/restamped".into())
+        );
+        let refused = stack
+            .transaction()
+            .clear(name("state"))
+            .clear(name("shared"))
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(matches!(refused, Err(StackError::NotEphemeral { .. })));
+        assert_eq!(
+            state.scan(&paths).len(),
+            2,
+            "invalid maintenance changes no store"
+        );
 
         stack
             .transaction()
