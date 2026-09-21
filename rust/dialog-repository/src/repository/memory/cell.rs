@@ -1,4 +1,4 @@
-use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve};
+use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve, Retract};
 use dialog_capability::Did;
 use dialog_common::ConditionalSync;
 use dialog_common::time::{self, Duration, SystemTime};
@@ -344,6 +344,26 @@ where
     }
 }
 
+impl<T, Codec> Cell<T, Codec>
+where
+    T: Clone,
+    Codec: Clone,
+{
+    /// Create a command to empty this cell.
+    ///
+    /// The CAS precondition is the cache's current version, so a cell
+    /// that has not been resolved has nothing to retract and says so
+    /// rather than removing whatever the backend happens to hold.
+    ///
+    /// Call `.perform(&env)` to run it.
+    pub fn retract(&self) -> Retract<T, Codec> {
+        Retract {
+            capability: self.capability.clone(),
+            cache: self.cache.clone(),
+        }
+    }
+}
+
 /// A cell paired with the version it held when the checkpoint was taken.
 ///
 /// Created by [`Cell::checkpoint`]. Publishing through it CAS's against the
@@ -498,6 +518,124 @@ mod tests {
 
         cell.resolve().perform(&provider).await?;
         assert!(cell.content().is_none());
+
+        Ok(())
+    }
+
+    /// Retraction empties the cell and clears what we knew about it.
+    #[dialog_common::test]
+    async fn it_retracts_a_published_cell() -> Result<()> {
+        let provider = Volatile::new();
+        let cell: Cell<TestValue> = test_cell("retract-me");
+
+        let value = TestValue {
+            count: 1,
+            name: "doomed".into(),
+        };
+        cell.publish(value).perform(&provider).await?;
+        assert!(cell.content().is_some());
+
+        cell.retract().perform(&provider).await?;
+        assert!(cell.content().is_none(), "the cache forgets the value");
+
+        // And the backend really is empty, read through a fresh handle.
+        let reader: Cell<TestValue> = test_cell("retract-me");
+        reader.resolve().perform(&provider).await?;
+        assert!(reader.content().is_none());
+
+        Ok(())
+    }
+
+    /// A caller that never observed the cell has no version to name, so
+    /// it is refused rather than deleting whatever is there.
+    #[dialog_common::test]
+    async fn it_refuses_to_retract_what_it_never_observed() -> Result<()> {
+        let provider = Volatile::new();
+
+        let writer: Cell<TestValue> = test_cell("unobserved");
+        writer
+            .publish(TestValue {
+                count: 7,
+                name: "safe".into(),
+            })
+            .perform(&provider)
+            .await?;
+
+        let blind: Cell<TestValue> = test_cell("unobserved");
+        let result = blind.retract().perform(&provider).await;
+        assert!(
+            matches!(result, Err(crate::RetractError::Unobserved)),
+            "a blind retract is refused, got {result:?}"
+        );
+
+        // The value it would have destroyed is still there.
+        let reader: Cell<TestValue> = test_cell("unobserved");
+        reader.resolve().perform(&provider).await?;
+        assert_eq!(reader.content().map(|v| v.count), Some(7));
+
+        Ok(())
+    }
+
+    /// Retracting against a stale version loses to the concurrent write
+    /// rather than clobbering it.
+    #[dialog_common::test]
+    async fn it_refuses_to_retract_a_version_that_moved() -> Result<()> {
+        let provider = Volatile::new();
+
+        let first: Cell<TestValue> = test_cell("moved");
+        first
+            .publish(TestValue {
+                count: 1,
+                name: "first".into(),
+            })
+            .perform(&provider)
+            .await?;
+
+        // A second writer advances the cell past what `first` holds.
+        let second: Cell<TestValue> = test_cell("moved");
+        second.resolve().perform(&provider).await?;
+        second
+            .publish(TestValue {
+                count: 2,
+                name: "second".into(),
+            })
+            .perform(&provider)
+            .await?;
+
+        let result = first.retract().perform(&provider).await;
+        assert!(
+            matches!(result, Err(crate::RetractError::VersionMismatch { .. })),
+            "a stale retract is refused, got {result:?}"
+        );
+
+        Ok(())
+    }
+
+    /// Retracting an already-empty cell succeeds: the caller asked for
+    /// it to hold nothing, and it holds nothing.
+    #[dialog_common::test]
+    async fn it_retracts_idempotently() -> Result<()> {
+        let provider = Volatile::new();
+        let cell: Cell<TestValue> = test_cell("twice");
+
+        cell.publish(TestValue {
+            count: 1,
+            name: "once".into(),
+        })
+        .perform(&provider)
+        .await?;
+        let version = cell
+            .edition()
+            .expect("a published cell has an edition")
+            .version;
+
+        cell.retract().perform(&provider).await?;
+        // Retract the same version again, as a crashed caller retrying
+        // would: the cell is already empty, so there is nothing to undo.
+        cell.retract()
+            .expecting(version, &provider)
+            .await
+            .expect("retracting an empty cell succeeds");
 
         Ok(())
     }
