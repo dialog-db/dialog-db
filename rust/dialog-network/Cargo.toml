@@ -29,7 +29,7 @@ dialog-common = { workspace = true, features = ["helpers"] }
 dialog-operator = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true }
 dialog-did-web = { workspace = true }
-iroh-base = { version = "1.2", features = ["key"] }
+iroh-base = { workspace = true, features = ["key"] }
 async-trait = { workspace = true }
 
 # The async tests run on tokio natively; in wasm `dialog_common::test`
