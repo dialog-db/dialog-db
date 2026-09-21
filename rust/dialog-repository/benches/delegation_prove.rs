@@ -56,7 +56,8 @@ fn scope(subject: &Did) -> Scope {
 
 async fn open_branch(name: &str) -> (Branch, Session<VolatileSpace>) {
     let storage = Storage::volatile();
-    let profile = Peer::new().storage(storage.clone())
+    let profile = Peer::new()
+        .storage(storage.clone())
         .network(Network::default())
         .open(Location::profile(name.to_string()))
         .await
@@ -87,7 +88,8 @@ async fn operator_with_retained(
 ) -> Session<VolatileSpace> {
     use dialog_capability::access::Retain;
     let storage = Storage::volatile();
-    let profile = Peer::new().storage(storage.clone())
+    let profile = Peer::new()
+        .storage(storage.clone())
         .open(Location::profile(format!(
             "delegation-cached-{n}-{}",
             std::process::id()

@@ -51,7 +51,7 @@ use dialog_varsig::{Did, Principal};
 use parking_lot::Mutex;
 
 use crate::session::access::ChainCache;
-use crate::session::builder::derive_credential;
+use crate::session::derive_credential;
 use crate::{PeerError, PeerSpace, Session, SessionBuilder};
 
 /// A site identified by a key, holding replicas.
@@ -431,7 +431,10 @@ mod tests {
         let storage = Storage::<VolatileSpace>::volatile();
         let location = Location::temp(unique_name("peer"));
 
-        let first = Peer::new().storage(storage.clone()).open(location.clone()).await?;
+        let first = Peer::new()
+            .storage(storage.clone())
+            .open(location.clone())
+            .await?;
         let second = Peer::new().storage(storage).open(location).await?;
 
         assert_eq!(first.did(), second.did());
@@ -441,7 +444,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_refuses_to_load_a_missing_peer() -> Result<()> {
         let storage = Storage::<VolatileSpace>::volatile();
-        let result = Peer::new().storage(storage)
+        let result = Peer::new()
+            .storage(storage)
             .load(Location::temp(unique_name("missing")))
             .await;
         assert!(matches!(result, Err(PeerError::Open(_))));
@@ -452,7 +456,8 @@ mod tests {
     /// Their own keys differ per context and are stable per context.
     #[dialog_common::test]
     async fn it_derives_sessions_deterministically_per_context() -> Result<()> {
-        let peer = Peer::new().storage(Storage::<VolatileSpace>::volatile())
+        let peer = Peer::new()
+            .storage(Storage::<VolatileSpace>::volatile())
             .open(Location::temp(unique_name("sessions")))
             .await?;
 
@@ -470,7 +475,8 @@ mod tests {
     /// A supplied credential is the session key; the peer still grants it.
     #[dialog_common::test]
     async fn it_builds_a_session_over_a_supplied_credential() -> Result<()> {
-        let peer = Peer::new().storage(Storage::<VolatileSpace>::volatile())
+        let peer = Peer::new()
+            .storage(Storage::<VolatileSpace>::volatile())
             .open(Location::temp(unique_name("supplied")))
             .await?;
         let agent = Ed25519Signer::generate().await?;
@@ -500,7 +506,8 @@ mod tests {
     /// and proves for itself without a session.
     #[dialog_common::test]
     async fn it_performs_as_the_peer_itself() -> Result<()> {
-        let peer = Peer::new().storage(Storage::<VolatileSpace>::volatile())
+        let peer = Peer::new()
+            .storage(Storage::<VolatileSpace>::volatile())
             .open(Location::temp(unique_name("self")))
             .await?;
 
@@ -527,12 +534,17 @@ mod tests {
     /// retains into it, and a second session sees what the first retained.
     #[dialog_common::test]
     async fn it_shares_the_registry_across_sessions() -> Result<()> {
-        let peer = Peer::new().storage(Storage::<VolatileSpace>::volatile())
+        let peer = Peer::new()
+            .storage(Storage::<VolatileSpace>::volatile())
             .open(Location::temp(unique_name("shared")))
             .await?;
         let space = Ed25519Signer::generate().await?;
 
-        let first = peer.session(peer.derive(b"first").await?).allow(Subject::any()).build().await?;
+        let first = peer
+            .session(peer.derive(b"first").await?)
+            .allow(Subject::any())
+            .build()
+            .await?;
         retain(&first, &peer.did(), &space).await;
 
         let second = peer
@@ -558,7 +570,8 @@ mod tests {
     async fn it_proves_from_the_named_branch() -> Result<()> {
         let storage = Storage::<VolatileSpace>::volatile();
         let location = Location::temp(unique_name("named-branch"));
-        let peer = Peer::new().storage(storage.clone())
+        let peer = Peer::new()
+            .storage(storage.clone())
             .branch("account/test")
             .open(location.clone())
             .await?;

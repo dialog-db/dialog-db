@@ -12,6 +12,7 @@ mod space;
 #[cfg(test)]
 mod test;
 
+pub(crate) use builder::derive_credential;
 pub use builder::{Allowance, PeerError, SessionBuilder};
 
 use std::future::Future;

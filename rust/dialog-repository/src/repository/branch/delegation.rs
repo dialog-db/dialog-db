@@ -414,7 +414,8 @@ mod tests {
 
     async fn open_branch(name: &str) -> Result<(crate::Branch, Session<VolatileSpace>)> {
         let storage = Storage::volatile();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name(name)))
             .await?;

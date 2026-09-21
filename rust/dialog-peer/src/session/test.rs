@@ -12,13 +12,18 @@ mod tests {
     async fn it_builds_operator_from_profile() {
         let storage = Storage::volatile();
 
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("test")))
             .await
             .unwrap();
 
-        let operator = profile.session(profile.derive(b"test").await.unwrap()).build().await.unwrap();
+        let operator = profile
+            .session(profile.derive(b"test").await.unwrap())
+            .build()
+            .await
+            .unwrap();
 
         assert!(!operator.did().to_string().is_empty());
     }
@@ -26,20 +31,30 @@ mod tests {
     #[dialog_common::test]
     async fn it_derives_different_operators_from_different_contexts() {
         let storage1 = Storage::volatile();
-        let profile1 = Peer::new().storage(storage1.clone())
+        let profile1 = Peer::new()
+            .storage(storage1.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("ctx1")))
             .await
             .unwrap();
-        let op1 = profile1.session(profile1.derive(b"context-a").await.unwrap()).build().await.unwrap();
+        let op1 = profile1
+            .session(profile1.derive(b"context-a").await.unwrap())
+            .build()
+            .await
+            .unwrap();
 
         let storage2 = Storage::volatile();
-        let profile2 = Peer::new().storage(storage2.clone())
+        let profile2 = Peer::new()
+            .storage(storage2.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("ctx2")))
             .await
             .unwrap();
-        let op2 = profile2.session(profile2.derive(b"context-b").await.unwrap()).build().await.unwrap();
+        let op2 = profile2
+            .session(profile2.derive(b"context-b").await.unwrap())
+            .build()
+            .await
+            .unwrap();
 
         assert_ne!(op1.did(), op2.did());
     }
@@ -53,13 +68,18 @@ mod tests {
         async fn self_grant_produces_delegation() {
             let storage = Storage::volatile();
 
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("self")))
                 .await
                 .unwrap();
 
-            let operator = profile.session(profile.derive(b"alice").await.unwrap()).build().await.unwrap();
+            let operator = profile
+                .session(profile.derive(b"alice").await.unwrap())
+                .build()
+                .await
+                .unwrap();
 
             let result = profile
                 .access()
@@ -79,13 +99,18 @@ mod tests {
         async fn powerline_self_grant_produces_delegation() {
             let storage = Storage::volatile();
 
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("psg")))
                 .await
                 .unwrap();
 
-            let operator = profile.session(profile.derive(b"alice").await.unwrap()).build().await.unwrap();
+            let operator = profile
+                .session(profile.derive(b"alice").await.unwrap())
+                .build()
+                .await
+                .unwrap();
 
             let result = profile
                 .access()
@@ -105,7 +130,8 @@ mod tests {
         async fn scoped_delegation_found() {
             let storage = Storage::volatile();
 
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("found")))
                 .await
@@ -136,7 +162,8 @@ mod tests {
         async fn scoped_delegation_denied() {
             let storage = Storage::volatile();
 
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("deny")))
                 .await
@@ -163,7 +190,8 @@ mod tests {
         async fn powerline_delegation_allows_anything() {
             let storage = Storage::volatile();
 
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("power")))
                 .await
@@ -195,13 +223,18 @@ mod tests {
         async fn no_delegation_fails() {
             let storage = Storage::volatile();
 
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("none")))
                 .await
                 .unwrap();
 
-            let operator = profile.session(profile.derive(b"alice").await.unwrap()).build().await.unwrap();
+            let operator = profile
+                .session(profile.derive(b"alice").await.unwrap())
+                .build()
+                .await
+                .unwrap();
 
             let result = profile
                 .access()
@@ -217,7 +250,8 @@ mod tests {
         async fn no_issuer_uses_profile_did() {
             let storage = Storage::volatile();
 
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("nois")))
                 .await
@@ -264,11 +298,16 @@ mod tests {
         async fn build_restricted_operator_with_profile()
         -> (Session<VolatileSpace>, Peer<VolatileSpace>) {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .open(Location::profile(unique_name("time-restricted")))
                 .await
                 .unwrap();
-            let operator = profile.session(profile.derive(b"test").await.unwrap()).build().await.unwrap();
+            let operator = profile
+                .session(profile.derive(b"test").await.unwrap())
+                .build()
+                .await
+                .unwrap();
             (operator, profile)
         }
 
@@ -621,7 +660,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_fails_without_saved_credential(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("s3-no-cred")))
                 .await
@@ -656,7 +696,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_loads_saved_credential_for_get(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("s3-get")))
                 .await
@@ -698,7 +739,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_loads_saved_credential_for_put_and_get(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("s3-put-get")))
                 .await
@@ -752,7 +794,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_memory_publish_and_resolve(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("s3-mem-pub")))
                 .await?;
@@ -802,7 +845,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_memory_update_existing(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("s3-mem-upd")))
                 .await?;
@@ -860,7 +904,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_memory_cas_conflict(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("s3-mem-cas")))
                 .await?;
@@ -927,7 +972,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_memory_retract(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("s3-mem-ret")))
                 .await?;
@@ -1000,7 +1046,8 @@ mod tests {
             s3: UcanS3Address,
         ) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-get-miss")))
                 .await?;
@@ -1027,7 +1074,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_archive_put_and_get(s3: UcanS3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-put-get")))
                 .await?;
@@ -1066,7 +1114,8 @@ mod tests {
             s3: UcanS3Address,
         ) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-mem-miss")))
                 .await?;
@@ -1094,7 +1143,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_memory_publish_and_resolve(s3: UcanS3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-mem-pub")))
                 .await?;
@@ -1135,7 +1185,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_memory_update_existing(s3: UcanS3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-mem-upd")))
                 .await?;
@@ -1184,7 +1235,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_memory_cas_conflict(s3: UcanS3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-mem-cas")))
                 .await?;
@@ -1245,7 +1297,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_memory_retract(s3: UcanS3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-mem-ret")))
                 .await?;
@@ -1292,7 +1345,8 @@ mod tests {
         #[dialog_common::test]
         async fn fork_with_scoped_delegation(s3: UcanS3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-scoped")))
                 .await?;
@@ -1354,7 +1408,8 @@ mod tests {
             s3: UcanS3Address,
         ) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-direct")))
                 .await?;
@@ -1398,7 +1453,8 @@ mod tests {
             s3: UcanS3Address,
         ) -> anyhow::Result<()> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("ucan-permits")))
                 .await?;
@@ -1451,7 +1507,8 @@ mod tests {
         #[dialog_common::test]
         async fn it_routes_blob_effects_to_the_space() -> anyhow::Result<()> {
             let storage = Storage::temp();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("blob-route")))
                 .await?;
@@ -1496,7 +1553,8 @@ mod tests {
         #[dialog_common::test]
         async fn it_denies_space_load_for_wrong_subject() {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("space-deny")))
                 .await
@@ -1523,7 +1581,8 @@ mod tests {
         #[dialog_common::test]
         async fn it_allows_space_for_profile_subject() {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name("space-allow")))
                 .await

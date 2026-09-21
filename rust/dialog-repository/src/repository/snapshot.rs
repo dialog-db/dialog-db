@@ -1037,7 +1037,8 @@ mod tests {
             .create(stage.repository.credential().clone())
             .perform(&destination)
             .await?;
-        let peer = dialog_peer::Peer::new().storage(destination)
+        let peer = dialog_peer::Peer::new()
+            .storage(destination)
             .attach(stage.profile.credential().clone())
             .await?;
         Ok(peer

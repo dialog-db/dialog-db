@@ -577,12 +577,17 @@ mod tests {
 
     async fn operator(name: &str) -> (Session<VolatileSpace>, Peer<VolatileSpace>) {
         let storage = Storage::volatile();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique(name)))
             .await
             .unwrap();
-        let operator = profile.session(profile.derive(b"test").await.unwrap()).build().await.unwrap();
+        let operator = profile
+            .session(profile.derive(b"test").await.unwrap())
+            .build()
+            .await
+            .unwrap();
         (operator, profile)
     }
 
@@ -913,7 +918,8 @@ mod tests {
     async fn it_leaves_no_session_residue() -> Result<()> {
         let (operator, profile) = {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique("no-residue")))
                 .await
@@ -972,7 +978,8 @@ mod tests {
     async fn it_composes_the_session_link_over_a_retained_chain() -> Result<()> {
         let (operator, profile) = {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique("compose")))
                 .await
@@ -1026,10 +1033,14 @@ mod tests {
     #[dialog_common::test]
     async fn it_bounds_in_memory_sessions_without_retaining_them() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .open(Location::profile(unique("bounded-session")))
             .await?;
-        let setup = profile.session(profile.derive(b"setup").await?).build().await?;
+        let setup = profile
+            .session(profile.derive(b"setup").await?)
+            .build()
+            .await?;
         let space = Ed25519Signer::generate().await?;
         let now = now_s();
         let upstream_end = now + 7200;
@@ -1107,7 +1118,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_selects_a_session_grant_covering_the_requested_window() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .open(Location::profile(unique("session-windows")))
             .await?;
         let now = now_s();

@@ -200,7 +200,8 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
     use crate::helpers::Counting;
 
     let storage = Storage::temp();
-    let profile = Peer::new().storage(storage.clone())
+    let profile = Peer::new()
+        .storage(storage.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("ship-overlap")))
         .await?;
@@ -313,7 +314,8 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
 async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()> {
     // --- Site A: write a blob, reference it, push. ---
     let storage_a = Storage::temp();
-    let profile_a = Peer::new().storage(storage_a.clone())
+    let profile_a = Peer::new()
+        .storage(storage_a.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("blob-ship-a")))
         .await?;
@@ -361,7 +363,8 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
 
     // --- Site B: same remote subject, separate local store; pull then read. ---
     let storage_b = Storage::temp();
-    let profile_b = Peer::new().storage(storage_b.clone())
+    let profile_b = Peer::new()
+        .storage(storage_b.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("blob-ship-b")))
         .await?;
@@ -435,7 +438,8 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
 async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
     // --- Site A: write a blob, push. ---
     let storage_a = Storage::temp();
-    let profile_a = Peer::new().storage(storage_a.clone())
+    let profile_a = Peer::new()
+        .storage(storage_a.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("blob-retract-a")))
         .await?;
@@ -483,7 +487,8 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
 
     // --- Site B: pull and hydrate the bytes while still referenced. ---
     let storage_b = Storage::temp();
-    let profile_b = Peer::new().storage(storage_b.clone())
+    let profile_b = Peer::new()
+        .storage(storage_b.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("blob-retract-b")))
         .await?;
@@ -563,7 +568,8 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
     // --- Site C: fresh replica, pulls after the retraction; it can neither
     // see the reference nor hydrate the bytes. ---
     let storage_c = Storage::temp();
-    let profile_c = Peer::new().storage(storage_c.clone())
+    let profile_c = Peer::new()
+        .storage(storage_c.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("blob-retract-c")))
         .await?;
@@ -640,7 +646,8 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
 
     // --- Site A: retain a delegation, push. ---
     let storage_a = Storage::temp();
-    let profile_a = Peer::new().storage(storage_a.clone())
+    let profile_a = Peer::new()
+        .storage(storage_a.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("delegation-ship-a")))
         .await?;
@@ -701,7 +708,8 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
 
     // --- Site B: pull, query by audience, read the envelope. ---
     let storage_b = Storage::temp();
-    let profile_b = Peer::new().storage(storage_b.clone())
+    let profile_b = Peer::new()
+        .storage(storage_b.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("delegation-ship-b")))
         .await?;
@@ -839,7 +847,8 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
 
     // --- Site A: commit a spilling fact, push. ---
     let storage_a = Storage::temp();
-    let profile_a = Peer::new().storage(storage_a.clone())
+    let profile_a = Peer::new()
+        .storage(storage_a.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("spill-ship-a")))
         .await?;
@@ -919,7 +928,8 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
 
     // --- Site B: same remote subject, separate local store; pull then select. ---
     let storage_b = Storage::temp();
-    let profile_b = Peer::new().storage(storage_b.clone())
+    let profile_b = Peer::new()
+        .storage(storage_b.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("spill-ship-b")))
         .await?;
@@ -1007,7 +1017,8 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
 
     // --- Site A: commit the spilling fact, push. ---
     let storage_a = Storage::temp();
-    let profile_a = Peer::new().storage(storage_a.clone())
+    let profile_a = Peer::new()
+        .storage(storage_a.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("spill-retract-a")))
         .await?;
@@ -1048,7 +1059,8 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
 
     // --- Site B: separate local store; pull, retract WITHOUT selecting, push. ---
     let storage_b = Storage::temp();
-    let profile_b = Peer::new().storage(storage_b.clone())
+    let profile_b = Peer::new()
+        .storage(storage_b.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("spill-retract-b")))
         .await?;
@@ -1138,7 +1150,8 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
 
     // --- Site A: repo + remote. ---
     let storage_a = Storage::temp();
-    let profile_a = Peer::new().storage(storage_a.clone())
+    let profile_a = Peer::new()
+        .storage(storage_a.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("spill-sub-a")))
         .await?;
@@ -1174,7 +1187,8 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
 
     // --- Site B: separate store, subscribed to doc bodies. ---
     let storage_b = Storage::temp();
-    let profile_b = Peer::new().storage(storage_b.clone())
+    let profile_b = Peer::new()
+        .storage(storage_b.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("spill-sub-b")))
         .await?;
@@ -2410,7 +2424,8 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
         )))
         .perform(&account_storage)
         .await?;
-    let account_profile = Peer::new().storage(account_storage.clone())
+    let account_profile = Peer::new()
+        .storage(account_storage.clone())
         .network(Network::default())
         .load(Location::profile(account_name))
         .await?;
@@ -2471,7 +2486,8 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
     // account-to-profile powerline locally (handed over out of band) and
     // points the profile's access branch at the account. ---
     let device_storage = Storage::volatile();
-    let device_profile = Peer::new().storage(device_storage.clone())
+    let device_profile = Peer::new()
+        .storage(device_storage.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("device")))
         .await?;
@@ -2588,7 +2604,8 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         )))
         .perform(&account_storage)
         .await?;
-    let account_profile = Peer::new().storage(account_storage.clone())
+    let account_profile = Peer::new()
+        .storage(account_storage.clone())
         .network(Network::default())
         .load(Location::profile(account_name))
         .await?;
@@ -2643,7 +2660,8 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
     // The device logs in: retain the powerline, point at the account,
     // pull WITH download.
     let device_storage = Storage::volatile();
-    let device_profile = Peer::new().storage(device_storage.clone())
+    let device_profile = Peer::new()
+        .storage(device_storage.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("device")))
         .await?;
@@ -2802,7 +2820,8 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
     // way an old install left it (storage-routed, not through the
     // operator). ---
     let bob_storage = Storage::volatile();
-    let bob_profile = Peer::new().storage(bob_storage.clone())
+    let bob_profile = Peer::new()
+        .storage(bob_storage.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("migrate-bob")))
         .await?;
@@ -3504,7 +3523,8 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
 
     // --- Site B: same remote, empty local store, head only. ---
     let storage_b = Storage::<VolatileSpace>::volatile();
-    let profile_b = Peer::new().storage(storage_b.clone())
+    let profile_b = Peer::new()
+        .storage(storage_b.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("reach-b")))
         .await?;
@@ -3667,7 +3687,8 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
     // --- Site B: pull the fact, then advance on its own so the next pull
     // is a real merge rather than a fast-forward adoption. ---
     let storage_b = Storage::<VolatileSpace>::volatile();
-    let profile_b = Peer::new().storage(storage_b.clone())
+    let profile_b = Peer::new()
+        .storage(storage_b.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("retire-b")))
         .await?;
@@ -3816,7 +3837,8 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
         )))
         .perform(&account_storage)
         .await?;
-    let account_profile = Peer::new().storage(account_storage.clone())
+    let account_profile = Peer::new()
+        .storage(account_storage.clone())
         .network(Network::default())
         .load(Location::profile(account_name))
         .await?;
@@ -3868,7 +3890,8 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
     // A device of the account: its login grant retained locally, the
     // account tracked as its access upstream.
     let device_storage = Storage::volatile();
-    let device_profile = Peer::new().storage(device_storage.clone())
+    let device_profile = Peer::new()
+        .storage(device_storage.clone())
         .network(Network::default())
         .open(Location::profile(unique_name("device")))
         .await?;
@@ -4803,7 +4826,8 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         crate::Repository<SignerCredential>,
     )> {
         let storage = Storage::temp();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name(name)))
             .await?;

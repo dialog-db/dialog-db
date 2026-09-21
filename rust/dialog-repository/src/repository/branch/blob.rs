@@ -712,7 +712,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_writes_a_blob_and_reads_it_back_by_entity() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("blob")))
             .await?;
@@ -772,7 +773,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_retracts_a_blob_from_the_index_but_not_the_store() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("blob-retract")))
             .await?;
@@ -845,7 +847,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_rejects_a_non_blob_entity() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("blob-reject")))
             .await?;

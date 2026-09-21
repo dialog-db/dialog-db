@@ -56,7 +56,8 @@ impl DialogRepo<Session<VolatileSpace>> {
     /// signal, like `dialog_mem`.
     pub async fn volatile() -> Result<Self> {
         let storage = Storage::volatile();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("baseline")))
             .await?;
@@ -74,7 +75,8 @@ impl DialogRepo<Session<NativeTempSpace>> {
     /// real-latency signal, like `dialog_disk`.
     pub async fn temp() -> Result<Self> {
         let storage = Storage::temp();
-        let profile = Peer::new().storage(storage.clone())
+        let profile = Peer::new()
+            .storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("baseline")))
             .await?;

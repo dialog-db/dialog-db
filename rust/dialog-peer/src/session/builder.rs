@@ -11,9 +11,9 @@ use dialog_identity::Authority;
 use dialog_identity::access::Claim;
 use dialog_ucan::{Scope, UcanCertificate};
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
-use dialog_varsig::{Did, Principal as _};
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use dialog_varsig::Signer;
+use dialog_varsig::{Did, Principal as _};
 
 const SESSION_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 
@@ -174,7 +174,9 @@ pub(crate) async fn derive_credential(
         .as_ed25519()
         .cloned()
         .ok_or_else(|| PeerError::Key("session derivation requires an ed25519 peer".into()))?;
-    Ok(SignerCredential::from(derive_session(&signer, context).await?))
+    Ok(SignerCredential::from(
+        derive_session(&signer, context).await?,
+    ))
 }
 
 async fn derive_session(

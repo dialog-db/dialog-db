@@ -461,7 +461,8 @@ mod tests {
     impl Harness {
         async fn new(name: &str) -> Result<Self> {
             let storage = Storage::volatile();
-            let profile = Peer::new().storage(storage.clone())
+            let profile = Peer::new()
+                .storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique_name(name)))
                 .await?;
