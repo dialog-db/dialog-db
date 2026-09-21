@@ -192,6 +192,18 @@ impl SigningKey {
         }
     }
 
+    /// Import a seed as an **extractable** private key.
+    ///
+    /// [`Self::import`] imports non-extractable, so a key cannot give its seed
+    /// back; this is the opt-in for a consumer that needs raw material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `WebCrypto` import fails.
+    pub async fn import_extractable(seed: &[u8; 32]) -> Result<Self, WebCryptoError> {
+        import_with_agreement(seed, true).await
+    }
+
     /// Export the key material.
     ///
     /// If the private key is extractable, returns `KeyExport::Extractable` with the

@@ -20,7 +20,7 @@ mod verifier;
 pub use crate::key::KeyExport;
 pub use error::{Ed25519DidFromStrError, Ed25519KeyError, Ed25519ResolveError, Ed25519SignerError};
 pub use resolver::Ed25519KeyResolver;
-pub use signer::Ed25519Signer;
+pub use signer::{Ed25519Signer, Extractable, Sealed};
 pub use verifier::Ed25519Verifier;
 
 // Re-export WebCrypto types on WASM
@@ -194,6 +194,29 @@ impl Ed25519SigningKey {
             Self::Native(key) => Ok(KeyExport::Extractable(key.to_bytes().to_vec())),
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::WebCrypto(key) => Ok(key.export().await?),
+        }
+    }
+
+    /// Import a seed whose material stays readable.
+    ///
+    /// In the browser this asks `WebCrypto` for an extractable `CryptoKey`,
+    /// where [`Self::import`] asks for a non-extractable one. On native both
+    /// hold the seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the import fails.
+    pub async fn import_extractable(seed: &[u8; 32]) -> Result<Self, Ed25519KeyError> {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            Ok(Self::WebCrypto(
+                web::SigningKey::import_extractable(seed).await?,
+            ))
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Ok(Self::Native(ed25519_dalek::SigningKey::from_bytes(seed)))
         }
     }
 

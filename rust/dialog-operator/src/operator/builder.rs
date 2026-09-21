@@ -254,7 +254,8 @@ async fn derive_operator(
     context: &[u8],
 ) -> Result<Ed25519Signer, OperatorError> {
     signer
-        .derive(OPERATOR_DERIVATION_CONTEXT, context)
+        .secret(OPERATOR_DERIVATION_CONTEXT)
+        .derive(context)
         .await
         .map_err(|e| OperatorError::Key(e.to_string()))
 }

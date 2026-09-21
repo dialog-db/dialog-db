@@ -6,6 +6,7 @@ use super::{
 use crate::key::KeyExport;
 use dialog_varsig::{Did, Principal, Signer, eddsa::Ed25519Signature};
 use serde::Serialize;
+use std::marker::PhantomData;
 
 // Re-import WebCrypto types on WASM
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -13,25 +14,51 @@ use super::web;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use crate::key::{ExtractableKey, WebCryptoError};
 
+/// A signer whose key material cannot be read out. The default.
+///
+/// In the browser this is physical: a non-extractable `CryptoKey` has no seed
+/// to give. On native `ed25519_dalek` holds the seed whatever the type says,
+/// so there it is an API boundary rather than a guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sealed;
+
+/// A signer whose key material can be exported.
+///
+/// Reached through
+/// [`Secret::derive_extractable`](crate::secret::Secret::derive_extractable),
+/// and the only state with an [`export`](Ed25519Signer::export). A consumer
+/// that needs raw bytes asks for this type:
+/// `fn peer_key(signer: &Ed25519Signer<Extractable>)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Extractable;
+
 /// An `Ed25519` `did:key` signer.
 ///
 /// This is the unified signer that works on both native and WASM platforms.
 /// On native platforms, it wraps an `ed25519_dalek::SigningKey`.
 /// On WASM, it can also wrap a `WebCrypto` `CryptoKey` for non-extractable key support.
+///
+/// `E` records whether the key material can be read back: [`Sealed`] by
+/// default, or [`Extractable`], which is the only state with an `export`.
 #[derive(Debug, Clone)]
-pub struct Ed25519Signer {
+pub struct Ed25519Signer<E = Sealed> {
     did: Ed25519Verifier,
     signer: Ed25519SigningKey,
+    extractability: PhantomData<E>,
 }
 
-impl From<Ed25519SigningKey> for Ed25519Signer {
+impl<E> From<Ed25519SigningKey> for Ed25519Signer<E> {
     fn from(signer: Ed25519SigningKey) -> Self {
         let did = Ed25519Verifier::from(signer.verifying_key());
-        Self { did, signer }
+        Self {
+            did,
+            signer,
+            extractability: PhantomData,
+        }
     }
 }
 
-impl Ed25519Signer {
+impl Ed25519Signer<Sealed> {
     /// Generate a new Ed25519 keypair.
     ///
     /// On WASM, uses the `WebCrypto` API (non-extractable key by default).
@@ -56,45 +83,23 @@ impl Ed25519Signer {
         let signing_key = Ed25519SigningKey::import(key).await?;
         Ok(signing_key.into())
     }
+}
 
-    /// Export the key material.
+impl<E> Ed25519Signer<E> {
+    /// Archive this signer for storage.
+    ///
+    /// In the browser a sealed key archives as opaque `CryptoKey` handles,
+    /// which carry no material and restore to a key that still cannot give
+    /// its seed back. On native the archive is the seed.
+    ///
+    /// To read raw material, hold an [`Ed25519Signer<Extractable>`] and call
+    /// [`export`](Ed25519Signer::export).
     ///
     /// # Errors
     ///
     /// Returns an error if the `WebCrypto` export operation fails.
-    pub async fn export(&self) -> Result<KeyExport, Ed25519SignerError> {
+    pub async fn archive(&self) -> Result<KeyExport, Ed25519SignerError> {
         Ok(self.signer.export().await?)
-    }
-
-    /// Derive another signer from this one.
-    ///
-    /// Credentials in, credentials out: the derived key material is imported
-    /// here and never handed back, so a caller gets something it can sign
-    /// with rather than bytes it has to look after. The same identity,
-    /// `context` and `label` always yield the same signer, on every platform,
-    /// which is what lets an operator DID stay put across sessions and across
-    /// native and the browser.
-    ///
-    /// The derivation is a key agreement against this identity's own agreement
-    /// key, not a signature -- see
-    /// [`Secret::derive_bytes`](crate::secret::Secret::derive_bytes) for why
-    /// that distinction is the whole point.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when this identity carries no agreement key, or when a
-    /// platform crypto operation fails.
-    pub async fn derive(
-        &self,
-        context: crate::secret::Context,
-        label: &[u8],
-    ) -> Result<Self, Ed25519SignerError> {
-        let seed = self
-            .secret(context)
-            .derive_bytes(label)
-            .await
-            .map_err(Ed25519SignerError::Derive)?;
-        Self::import(&seed).await
     }
 
     /// Get the associated Ed25519 DID (verifier).
@@ -116,6 +121,33 @@ impl Ed25519Signer {
     /// agreement output.
     pub(crate) async fn agreement_key(&self) -> Result<X25519SecretKey, Ed25519SignerError> {
         Ok(self.signer.agreement_key().await?)
+    }
+}
+
+impl Ed25519Signer<Extractable> {
+    /// Export the key material.
+    ///
+    /// Only on [`Extractable`]. To store a signer of any state, use
+    /// [`archive`](Ed25519Signer::archive).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `WebCrypto` export operation fails.
+    pub async fn export(&self) -> Result<KeyExport, Ed25519SignerError> {
+        Ok(self.signer.export().await?)
+    }
+
+    /// Import a seed as a signer whose material stays readable.
+    ///
+    /// In the browser this asks `WebCrypto` for an extractable `CryptoKey`,
+    /// where [`import`](Ed25519Signer::import) asks for a non-extractable one.
+    /// On native both hold the seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the seed has the wrong length or the import fails.
+    pub async fn import_extractable(seed: &[u8; 32]) -> Result<Self, Ed25519SignerError> {
+        Ok(Ed25519SigningKey::import_extractable(seed).await?.into())
     }
 }
 
@@ -335,7 +367,7 @@ mod tests {
         let signer = test_signer(77).await;
         let original_did = signer.ed25519_did().to_string();
 
-        let exported = signer.export().await.unwrap();
+        let exported = signer.archive().await.unwrap();
         let restored = Ed25519Signer::import(exported).await.unwrap();
 
         assert_eq!(
@@ -350,7 +382,7 @@ mod tests {
         let signer = test_signer(88).await;
         let msg = b"roundtrip signing test";
 
-        let exported = signer.export().await.unwrap();
+        let exported = signer.archive().await.unwrap();
         let restored = Ed25519Signer::import(exported).await.unwrap();
 
         let signature = <Ed25519Signer as Signer<Ed25519Signature>>::sign(&restored, msg)
@@ -370,7 +402,7 @@ mod tests {
         let seed = [55u8; 32];
         let signer = Ed25519Signer::import(&seed).await.unwrap();
 
-        let exported = signer.export().await.unwrap();
+        let exported = signer.archive().await.unwrap();
         match exported {
             KeyExport::Extractable(ref bytes) => {
                 assert_eq!(
@@ -396,10 +428,10 @@ mod tests {
     async fn double_export_import_roundtrip() {
         let signer = test_signer(66).await;
 
-        let exported1 = signer.export().await.unwrap();
+        let exported1 = signer.archive().await.unwrap();
         let restored1 = Ed25519Signer::import(exported1).await.unwrap();
 
-        let exported2 = restored1.export().await.unwrap();
+        let exported2 = restored1.archive().await.unwrap();
         let restored2 = Ed25519Signer::import(exported2).await.unwrap();
 
         assert_eq!(
@@ -568,7 +600,7 @@ mod web_tests {
         let original_did = signer.ed25519_did().to_string();
         let msg = b"non-extractable roundtrip test";
 
-        let exported = signer.export().await.unwrap();
+        let exported = signer.archive().await.unwrap();
         match &exported {
             KeyExport::NonExtractable { .. } => { /* expected */ }
             KeyExport::Extractable(_) => {

@@ -90,13 +90,6 @@ pub enum Ed25519SignerError {
 
     /// Key import/export error.
     Key(Ed25519KeyError),
-
-    /// Deriving another signer from this one failed.
-    ///
-    /// Its own variant rather than folding into [`Self::Key`]: the failure is
-    /// in the agreement this identity carries, not in importing or exporting
-    /// key material, and the two send a reader to different places.
-    Derive(crate::secret::SecretError),
 }
 
 impl std::fmt::Display for Ed25519SignerError {
@@ -107,7 +100,6 @@ impl std::fmt::Display for Ed25519SignerError {
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::WebCrypto(e) => write!(f, "{e}"),
             Self::Key(e) => write!(f, "{e}"),
-            Self::Derive(e) => write!(f, "{e}"),
         }
     }
 }

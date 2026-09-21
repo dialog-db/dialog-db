@@ -84,8 +84,10 @@ impl SignerCredential {
     pub async fn export(&self) -> Result<SignerCredentialExport, CredentialExportError> {
         match &self.0 {
             Signer::Ed25519(signer) => {
+                // Native-only, where a key is its seed, so archiving yields
+                // the material this format needs.
                 let crate::key::KeyExport::Extractable(ref seed) = signer
-                    .export()
+                    .archive()
                     .await
                     .map_err(|e| CredentialExportError::Key(e.to_string()))?;
 
@@ -209,8 +211,10 @@ impl SignerCredential {
     pub async fn export(&self) -> Result<SignerCredentialExport, CredentialExportError> {
         match &self.0 {
             Signer::Ed25519(signer) => {
+                // Archiving, not revealing: a sealed key stores as opaque
+                // `CryptoKey` handles and restores still sealed.
                 let key_export = signer
-                    .export()
+                    .archive()
                     .await
                     .map_err(|e| CredentialExportError::Key(e.to_string()))?;
                 Ok(SignerCredentialExport(key_export.into()))

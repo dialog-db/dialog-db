@@ -32,7 +32,9 @@
 //! twice therefore produces different bytes, and a later compromise of the
 //! sender's own keys does not open past messages.
 
-use crate::ed25519::{Ed25519Signer, Ed25519Verifier, X25519PublicKey, X25519SecretKey};
+use crate::ed25519::{
+    Ed25519Signer, Ed25519Verifier, Extractable, Sealed, X25519PublicKey, X25519SecretKey,
+};
 
 mod error;
 mod message;
@@ -105,12 +107,12 @@ impl Seal<'_> {
 /// Obtained from [`Ed25519Signer::secret`]. Backed by a signing key, so it can
 /// both conceal (to itself) and reveal.
 #[derive(Debug, Clone, Copy)]
-pub struct Secret<'a> {
-    signer: &'a Ed25519Signer,
+pub struct Secret<'a, E = crate::ed25519::Sealed> {
+    signer: &'a Ed25519Signer<E>,
     context: Context,
 }
 
-impl Secret<'_> {
+impl<E> Secret<'_, E> {
     /// Reveal a secret concealed to this identity.
     ///
     /// # Errors
@@ -123,28 +125,20 @@ impl Secret<'_> {
         platform::reveal(&key, self.signer.ed25519_did(), self.context, sealed).await
     }
 
-    /// Derive a deterministic 32-byte secret from this identity.
+    /// Derive a signer from this identity, deterministically.
     ///
-    /// Prefer [`Ed25519Signer::derive`], which returns a SIGNER and never puts
-    /// the material in a caller's hands. This is the escape hatch for a
-    /// consumer that cannot take one: a key type built only from raw bytes,
-    /// such as `iroh::SecretKey`, whose QUIC stack needs the material
-    /// in-process and offers no external-signer hook. Reach for it when the
-    /// alternative is not having the key at all, and keep the bytes as
-    /// short-lived as the consumer allows.
-    ///
-    /// The same identity, context and `label` always yield the same bytes, on
-    /// every platform.
+    /// The same identity, context and `label` yield the same signer on every
+    /// platform, so a derived DID is stable across sessions and across native
+    /// and the browser.
     ///
     /// The derivation is a key agreement against this identity's own agreement
-    /// public key, NOT a signature. A signature is not a pseudo-random
-    /// function: RFC 8032 specifies a deterministic nonce, but hedged variants
-    /// that fold in fresh entropy are conforming and deployed (Apple's
-    /// CryptoKit, and so WebKit's `Ed25519`), and a key held in an enclave or
-    /// on a token is likely to do the same. Agreement has no nonce to hedge.
+    /// key. Ed25519 signatures are not a pseudo-random function: RFC 8032
+    /// specifies a deterministic nonce, but hedged variants that fold in fresh
+    /// entropy are conforming and deployed (Apple's CryptoKit, and so WebKit's
+    /// `Ed25519`). Agreement has no nonce to hedge.
     ///
-    /// `label` is hashed into the derivation after the fixed-width identity
-    /// key, so distinct labels give unrelated secrets.
+    /// The result is [`Sealed`]: its material cannot be read back. Use
+    /// [`Self::derive_extractable`] for a consumer that needs raw bytes.
     ///
     /// # Errors
     ///
@@ -153,7 +147,37 @@ impl Secret<'_> {
     /// restored from an archive written before agreement keys were stored,
     /// whose seed is gone and cannot be re-derived. Otherwise returns an error
     /// if a platform crypto operation fails.
-    pub async fn derive_bytes(&self, label: &[u8]) -> Result<[u8; 32], SecretError> {
+    pub async fn derive(&self, label: &[u8]) -> Result<Ed25519Signer<Sealed>, SecretError> {
+        let seed = self.derive_bytes(label).await?;
+        Ed25519Signer::import(&seed)
+            .await
+            .map_err(|error| SecretError::Crypto(error.to_string()))
+    }
+
+    /// Derive a signer whose material can be exported.
+    ///
+    /// The same key as [`Self::derive`] under the same label, in a type that
+    /// permits `export`. For a consumer that cannot take a signer at all: a
+    /// key built from raw bytes, such as `iroh::SecretKey`, whose QUIC stack
+    /// needs the material in-process.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::derive`].
+    pub async fn derive_extractable(
+        &self,
+        label: &[u8],
+    ) -> Result<Ed25519Signer<Extractable>, SecretError> {
+        let seed = self.derive_bytes(label).await?;
+        Ed25519Signer::<Extractable>::import_extractable(&seed)
+            .await
+            .map_err(|error| SecretError::Crypto(error.to_string()))
+    }
+
+    /// The derived 32 bytes.
+    ///
+    /// Private: material leaves this module only inside a signer.
+    async fn derive_bytes(&self, label: &[u8]) -> Result<[u8; 32], SecretError> {
         let key: X25519SecretKey = self.signer.agreement_key().await?;
         platform::derive(&key, self.context, label).await
     }
@@ -185,10 +209,10 @@ impl Ed25519Verifier {
     }
 }
 
-impl Ed25519Signer {
+impl<E> Ed25519Signer<E> {
     /// Seal and open secrets for this identity, scoped to `context`.
     #[must_use]
-    pub const fn secret(&self, context: Context) -> Secret<'_> {
+    pub const fn secret(&self, context: Context) -> Secret<'_, E> {
         Secret {
             signer: self,
             context,
@@ -199,6 +223,7 @@ impl Ed25519Signer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::KeyExport;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
@@ -210,26 +235,48 @@ mod tests {
         Ed25519Signer::import(&[seed; 32]).await.unwrap()
     }
 
-    /// The credential-returning derivation is the byte one, imported.
-    ///
-    /// Pinned because they are two entry points to one scheme: production
-    /// takes `Ed25519Signer::derive` and never sees the material, while
-    /// `derive_bytes` is the escape hatch for a consumer that can only take
-    /// raw bytes. A change that moved one without the other would give the
-    /// same identity two different operators.
+    /// Both derivations give the same identity; only extractability differs.
     #[dialog_common::test]
-    async fn derive_returns_a_signer_over_the_same_bytes() {
+    async fn extractable_derivation_is_the_same_key() {
         let profile = signer(1).await;
 
-        let bytes = profile
+        let sealed = profile.secret(VAULT).derive(b"peer").await.unwrap();
+        let readable = profile
             .secret(VAULT)
-            .derive_bytes(b"operator")
+            .derive_extractable(b"peer")
             .await
             .unwrap();
-        let expected = Ed25519Signer::import(&bytes).await.unwrap();
-        let derived = profile.derive(VAULT, b"operator").await.unwrap();
 
-        assert_eq!(derived.ed25519_did(), expected.ed25519_did());
+        assert_eq!(
+            sealed.ed25519_did(),
+            readable.ed25519_did(),
+            "one derivation, two extractabilities"
+        );
+    }
+
+    /// A key derived as extractable exports its seed.
+    ///
+    /// Only a real assertion in the browser: native keys are readable
+    /// whatever the type says.
+    #[dialog_common::test]
+    async fn an_extractable_derivation_exports() {
+        let profile = signer(1).await;
+        let readable = profile
+            .secret(VAULT)
+            .derive_extractable(b"peer")
+            .await
+            .unwrap();
+
+        // Matched rather than destructured: on native `KeyExport` has only
+        // the one variant, so a `let...else` here is irrefutable and the
+        // compiler says so.
+        match readable.export().await.unwrap() {
+            KeyExport::Extractable(seed) => assert_eq!(seed.len(), 32),
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            KeyExport::NonExtractable { .. } => {
+                panic!("a key derived as extractable must export its seed")
+            }
+        }
     }
 
     #[dialog_common::test]
@@ -656,7 +703,7 @@ mod session_tests {
         let archived: KeyExport = {
             let profile = Ed25519Signer::generate().await.unwrap();
             let did = profile.ed25519_did().to_string();
-            let export = profile.export().await.unwrap();
+            let export = profile.archive().await.unwrap();
             // The account seals to the DID it was given; it never sees the key.
             let sealed = did
                 .parse::<Ed25519Verifier>()
@@ -688,7 +735,7 @@ mod session_tests {
         let export = Ed25519Signer::generate()
             .await
             .unwrap()
-            .export()
+            .archive()
             .await
             .unwrap();
         let restored = Ed25519Signer::import(export).await.unwrap();
@@ -718,10 +765,10 @@ mod session_tests {
             .await
             .unwrap();
 
-        let once = Ed25519Signer::import(first.export().await.unwrap())
+        let once = Ed25519Signer::import(first.archive().await.unwrap())
             .await
             .unwrap();
-        let twice = Ed25519Signer::import(once.export().await.unwrap())
+        let twice = Ed25519Signer::import(once.archive().await.unwrap())
             .await
             .unwrap();
 
@@ -747,7 +794,7 @@ mod session_tests {
             .await
             .unwrap();
 
-        let restored = Ed25519Signer::import(signer.export().await.unwrap())
+        let restored = Ed25519Signer::import(signer.archive().await.unwrap())
             .await
             .unwrap();
 
