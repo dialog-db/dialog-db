@@ -114,6 +114,7 @@ impl Provider<Import> for IndexedDb {
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::prelude::*;
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
@@ -128,11 +129,7 @@ mod tests {
         let subject = unique_subject("archive-get-none");
         let digest = Blake3Hash::hash(b"nonexistent");
 
-        let effect = subject
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new(digest));
+        let effect = subject.archive().catalog("index").get(digest);
 
         let result = effect.perform(&provider).await?;
         assert!(result.is_none());
@@ -149,18 +146,16 @@ mod tests {
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(content.clone())))
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content.clone()))
             .perform(&provider)
             .await?;
 
         let result = subject
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new(digest))
+            .archive()
+            .catalog("index")
+            .get(digest)
             .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
@@ -179,47 +174,42 @@ mod tests {
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog1"))
-            .invoke(Put::new(Buffer::from(content1.clone())))
+            .archive()
+            .catalog("catalog1")
+            .put(Buffer::from(content1.clone()))
             .perform(&provider)
             .await?;
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog2"))
-            .invoke(Put::new(Buffer::from(content2.clone())))
+            .archive()
+            .catalog("catalog2")
+            .put(Buffer::from(content2.clone()))
             .perform(&provider)
             .await?;
 
         let result1 = subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog1"))
-            .invoke(Get::new(digest1))
+            .archive()
+            .catalog("catalog1")
+            .get(digest1)
             .perform(&provider)
             .await?;
         assert_eq!(result1, Some(content1));
 
         let result2 = subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog2"))
-            .invoke(Get::new(digest2.clone()))
+            .archive()
+            .catalog("catalog2")
+            .get(digest2.clone())
             .perform(&provider)
             .await?;
         assert_eq!(result2, Some(content2));
 
         let cross = subject
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("catalog1"))
-            .invoke(Get::new(digest2))
+            .archive()
+            .catalog("catalog1")
+            .get(digest2)
             .perform(&provider)
             .await?;
         assert!(cross.is_none());
@@ -240,20 +230,18 @@ mod tests {
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Import::new(blocks))
+            .archive()
+            .catalog("index")
+            .import(blocks)
             .perform(&provider)
             .await?;
 
         for (i, digest) in digests.into_iter().enumerate() {
             let content = subject
                 .clone()
-                .attenuate(Use)
-                .attenuate(Archive)
-                .attenuate(Catalog::new("index"))
-                .invoke(Get::new(digest))
+                .archive()
+                .catalog("index")
+                .get(digest)
                 .perform(&provider)
                 .await?;
             assert_eq!(content, Some(vec![i as u8; 64]));
@@ -286,10 +274,9 @@ mod tests {
         for block in &blocks {
             subject
                 .clone()
-                .attenuate(Use)
-                .attenuate(Archive)
-                .attenuate(Catalog::new("puts"))
-                .invoke(Put::new(block.clone()))
+                .archive()
+                .catalog("puts")
+                .put(block.clone())
                 .perform(&provider)
                 .await?;
         }
@@ -298,10 +285,9 @@ mod tests {
         let start = js_sys::Date::now();
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("import"))
-            .invoke(Import::new(blocks))
+            .archive()
+            .catalog("import")
+            .import(blocks)
             .perform(&provider)
             .await?;
         let import_ms = js_sys::Date::now() - start;
