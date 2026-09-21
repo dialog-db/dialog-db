@@ -35,7 +35,7 @@ use crate::Verb;
 use crate::destroy;
 use crate::verb;
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::{Attenuate, Attenuation, Constraint, Effect};
+use dialog_capability::{Attenuate, Attenuation, Constraint, Effect, Policy};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use thiserror::Error;
@@ -70,8 +70,8 @@ where
 {
     type Of = V;
 
-    fn attenuation() -> Option<&'static str> {
-        Some("dialog")
+    fn attenuation() -> &'static str {
+        "dialog"
     }
 }
 
@@ -106,8 +106,8 @@ where
 {
     type Of = Branches<V>;
 
-    fn attenuation() -> Option<&'static str> {
-        Some("branch")
+    fn attenuation() -> &'static str {
+        "branch"
     }
 }
 
@@ -121,18 +121,18 @@ where
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
 pub struct List;
 
-impl Effect for List {
+// Listing names the resource itself: it asks about the branches as a
+// set, so there is no `Branch` link above it to have named one.
+impl Attenuation for List {
     type Of = Branches<verb::Get>;
-    type Output = Result<Vec<String>, BranchError>;
 
-    // `/use/get/dialog/branch` is complete at the namespace: listing
-    // asks about the branches as a set, so there is no one branch to
-    // scope it to.
-    const NAMED: bool = true;
-
-    fn segment() -> &'static str {
+    fn attenuation() -> &'static str {
         "branch"
     }
+}
+
+impl Effect for List {
+    type Output = Result<Vec<String>, BranchError>;
 }
 
 /// Create a branch and record it in the `meta` branch.
@@ -143,11 +143,12 @@ impl Effect for List {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
 pub struct Create;
 
-impl Effect for Create {
+impl Policy for Create {
     type Of = Branch<verb::Put>;
-    type Output = Result<(), BranchError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Create {
+    type Output = Result<(), BranchError>;
 }
 
 /// Delete a branch: retract its `dialog.branch/*` facts and retract the
@@ -164,11 +165,12 @@ impl Effect for Create {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
 pub struct Delete;
 
-impl Effect for Delete {
+impl Policy for Delete {
     type Of = Branch<destroy::Delete>;
-    type Output = Result<(), BranchError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Delete {
+    type Output = Result<(), BranchError>;
 }
 
 pub mod prelude;

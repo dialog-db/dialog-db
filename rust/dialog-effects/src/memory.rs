@@ -58,8 +58,8 @@ where
 {
     type Of = V;
 
-    fn attenuation() -> Option<&'static str> {
-        Some("memory")
+    fn attenuation() -> &'static str {
+        "memory"
     }
 }
 
@@ -127,8 +127,8 @@ where
 {
     type Of = Space<V>;
 
-    fn attenuation() -> Option<&'static str> {
-        Some("cell")
+    fn attenuation() -> &'static str {
+        "cell"
     }
 }
 
@@ -243,13 +243,12 @@ pub struct Edition<T> {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
 pub struct Resolve;
 
-impl Effect for Resolve {
+impl Policy for Resolve {
     type Of = Cell<verb::Get>;
-    type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
+}
 
-    // `/use/get/memory/cell` is complete at the cell; a `resolve`
-    // segment would repeat what `get` already said.
-    const NAMED: bool = false;
+impl Effect for Resolve {
+    type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
 }
 
 /// Publish operation - sets cell content with CAS semantics.
@@ -279,11 +278,12 @@ impl Publish {
     }
 }
 
-impl Effect for Publish {
+impl Policy for Publish {
     type Of = Cell<verb::Put>;
-    type Output = Result<Version, MemoryError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Publish {
+    type Output = Result<Version, MemoryError>;
 }
 
 /// Retract operation - removes cell content with CAS semantics.
@@ -303,11 +303,12 @@ impl Retract {
     }
 }
 
-impl Effect for Retract {
+impl Policy for Retract {
     type Of = Cell<verb::Delete>;
-    type Output = Result<(), MemoryError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Retract {
+    type Output = Result<(), MemoryError>;
 }
 
 pub mod prelude;

@@ -226,11 +226,11 @@ pub trait ResolveExt {
 
 impl ResolveExt for Capability<Resolve> {
     fn space(&self) -> &str {
-        &Space::<Get>::of(self).space
+        &Space::of(self).space
     }
 
     fn cell(&self) -> &str {
-        &Cell::<Get>::of(self).cell
+        &Cell::of(self).cell
     }
 }
 
@@ -248,11 +248,11 @@ pub trait PublishExt {
 
 impl PublishExt for Capability<Publish> {
     fn space(&self) -> &str {
-        &Space::<Put>::of(self).space
+        &Space::of(self).space
     }
 
     fn cell(&self) -> &str {
-        &Cell::<Put>::of(self).cell
+        &Cell::of(self).cell
     }
 
     fn content(&self) -> &[u8] {
@@ -276,11 +276,11 @@ pub trait RetractExt {
 
 impl RetractExt for Capability<Retract> {
     fn space(&self) -> &str {
-        &Space::<Delete>::of(self).space
+        &Space::of(self).space
     }
 
     fn cell(&self) -> &str {
-        &Cell::<Delete>::of(self).cell
+        &Cell::of(self).cell
     }
 
     fn when(&self) -> &Version {

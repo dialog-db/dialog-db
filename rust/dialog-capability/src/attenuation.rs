@@ -1,5 +1,5 @@
 use crate::settings::Caveat;
-use crate::{Constraint, Effect, Policy};
+use crate::{Constraint, Policy};
 use std::any::type_name;
 
 /// The last path component of a type name, without generics: what a type
@@ -39,8 +39,8 @@ pub(crate) fn type_segment<T>() -> &'static str {
 ///     type Of = Subject;
 ///
 ///     // Custom path segment instead of default "blobstore"
-///     fn attenuation() -> Option<&'static str> {
-///         Some("blob")
+///     fn attenuation() -> &'static str {
+///         "blob"
 ///     }
 /// }
 /// ```
@@ -51,15 +51,14 @@ pub trait Attenuation: Sized + Caveat {
     /// Must implement [`Constraint`] so the blanket [`Policy`] impl works.
     type Of: Constraint;
 
-    /// The path segment this attenuation adds to the ability path, or
-    /// `None` to add nothing.
+    /// The path segment this attenuation adds to the ability path.
     ///
     /// Defaults to the struct name (lowercased). Override to use a
-    /// different segment, or return `None` to stay out of the path while
-    /// still scoping the capability -- a link that narrows authority
-    /// need not also name itself.
-    fn attenuation() -> Option<&'static str> {
-        Some(type_segment::<Self>())
+    /// different segment. A link that scopes a capability without
+    /// naming itself implements [`Policy`] directly instead -- that is
+    /// the difference between the two traits.
+    fn attenuation() -> &'static str {
+        type_segment::<Self>()
     }
 }
 
@@ -68,18 +67,6 @@ impl<T: Attenuation> Policy for T {
     type Of = <T as Attenuation>::Of;
 
     fn attenuation() -> Option<&'static str> {
-        <T as Attenuation>::attenuation()
-    }
-}
-
-// Effect implies Attenuation. An effect that declines to name itself
-// (`NAMED = false`) contributes nothing, exactly as a silent `Policy`
-// does: where the chain already spells the whole command, the effect on
-// the end has nothing left to add.
-impl<T: Effect> Attenuation for T {
-    type Of = <T as Effect>::Of;
-
-    fn attenuation() -> Option<&'static str> {
-        T::NAMED.then(T::segment)
+        Some(<T as Attenuation>::attenuation())
     }
 }

@@ -144,12 +144,12 @@ pub trait BranchNameExt {
 
 impl BranchNameExt for Capability<Create> {
     fn name(&self) -> &str {
-        &Branch::<verb::Put>::of(self).name
+        &Branch::of(self).name
     }
 }
 
 impl BranchNameExt for Capability<Delete> {
     fn name(&self) -> &str {
-        &Branch::<destroy::Delete>::of(self).name
+        &Branch::of(self).name
     }
 }

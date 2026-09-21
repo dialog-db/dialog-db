@@ -57,8 +57,8 @@ where
 {
     type Of = V;
 
-    fn attenuation() -> Option<&'static str> {
-        Some("archive")
+    fn attenuation() -> &'static str {
+        "archive"
     }
 }
 
@@ -116,8 +116,8 @@ where
 {
     type Of = Catalog<V>;
 
-    fn attenuation() -> Option<&'static str> {
-        Some("block")
+    fn attenuation() -> &'static str {
+        "block"
     }
 }
 
@@ -140,11 +140,12 @@ impl Get {
     }
 }
 
-impl Effect for Get {
+impl Policy for Get {
     type Of = Block<verb::Get>;
-    type Output = Result<Option<Vec<u8>>, ArchiveError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Get {
+    type Output = Result<Option<Vec<u8>>, ArchiveError>;
 }
 
 /// Put operation - stores a single content-addressed block.
@@ -236,11 +237,12 @@ impl Put {
     }
 }
 
-impl Effect for Put {
+impl Policy for Put {
     type Of = Block<verb::Put>;
-    type Output = Result<(), ArchiveError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Put {
+    type Output = Result<(), ArchiveError>;
 }
 
 /// Import operation - stores a batch of content-addressed blocks.
@@ -289,11 +291,12 @@ impl Import {
     }
 }
 
-impl Effect for Import {
+impl Policy for Import {
     type Of = Block<verb::Put>;
-    type Output = Result<(), ArchiveError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Import {
+    type Output = Result<(), ArchiveError>;
 }
 
 pub mod prelude;

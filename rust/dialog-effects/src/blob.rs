@@ -59,8 +59,8 @@ where
 {
     type Of = Archive<V>;
 
-    fn attenuation() -> Option<&'static str> {
-        Some("blob")
+    fn attenuation() -> &'static str {
+        "blob"
     }
 }
 
@@ -132,11 +132,12 @@ impl Read {
     }
 }
 
-impl Effect for Read {
+impl Policy for Read {
     type Of = Blob<verb::Get>;
-    type Output = Result<BlobReader, BlobError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Read {
+    type Output = Result<BlobReader, BlobError>;
 }
 
 /// Ingest a blob whose hash is **discovered** during the write. Carries no
@@ -158,11 +159,12 @@ impl Default for Write {
     }
 }
 
-impl Effect for Write {
+impl Policy for Write {
     type Of = Blob<verb::Put>;
-    type Output = Result<BlobWriter, BlobError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Write {
+    type Output = Result<BlobWriter, BlobError>;
 }
 
 /// Import a blob whose hash is **already known**: a content-bound write used by
@@ -191,11 +193,12 @@ impl Import {
     }
 }
 
-impl Effect for Import {
+impl Policy for Import {
     type Of = Blob<verb::Put>;
-    type Output = Result<BlobWriter, BlobError>;
+}
 
-    const NAMED: bool = false;
+impl Effect for Import {
+    type Output = Result<BlobWriter, BlobError>;
 }
 
 pub mod prelude;

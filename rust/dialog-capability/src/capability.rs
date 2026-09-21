@@ -173,6 +173,7 @@ impl<T: Constraint> AsRef<T::Capability> for Capability<T> {
 
 #[cfg(test)]
 mod tests {
+    use crate::Policy;
     use crate::*;
     use crate::{Attenuation, Subject};
     use serde::{Deserialize, Serialize};
@@ -204,8 +205,11 @@ mod tests {
         digest: Vec<u8>,
     }
 
-    impl Effect for Get {
+    impl Attenuation for Get {
         type Of = Catalog;
+    }
+
+    impl Effect for Get {
         type Output = Option<Vec<u8>>;
     }
 
@@ -233,8 +237,11 @@ mod tests {
         key: Vec<u8>,
     }
 
-    impl Effect for Lookup {
+    impl Attenuation for Lookup {
         type Of = Store;
+    }
+
+    impl Effect for Lookup {
         type Output = Option<Vec<u8>>;
     }
 

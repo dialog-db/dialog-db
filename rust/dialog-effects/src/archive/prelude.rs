@@ -166,7 +166,7 @@ pub trait ImportExt {
 
 impl ImportExt for Capability<Import> {
     fn catalog(&self) -> &str {
-        &Catalog::<verb::Put>::of(self).catalog
+        &Catalog::of(self).catalog
     }
 
     fn blocks(&self) -> &[Buffer] {
@@ -184,7 +184,7 @@ pub trait GetExt {
 
 impl GetExt for Capability<Get> {
     fn catalog(&self) -> &str {
-        &Catalog::<verb::Get>::of(self).catalog
+        &Catalog::of(self).catalog
     }
 
     fn digest(&self) -> &Blake3Hash {
@@ -204,7 +204,7 @@ pub trait PutExt {
 
 impl PutExt for Capability<Put> {
     fn catalog(&self) -> &str {
-        &Catalog::<verb::Put>::of(self).catalog
+        &Catalog::of(self).catalog
     }
 
     fn digest(&self) -> &Blake3Hash {
