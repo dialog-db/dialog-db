@@ -24,6 +24,9 @@ pub use resolve::*;
 /// recursion rather than special-casing it.
 pub const REGISTRY: &str = "meta";
 
+mod retract;
+pub use retract::*;
+
 /// Extension trait for repository memory navigation.
 ///
 /// Extends [`MemoryExt`] with repository-specific helpers for
