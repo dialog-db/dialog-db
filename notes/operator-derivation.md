@@ -162,14 +162,16 @@ whose QUIC stack needs the material in process — asks for the extractable
 form by type:
 
 ```rust
-let peer: Ed25519Signer<Extractable> =
-    signer.secret(PEER_CONTEXT).derive_as(b"peer").await?;
+let peer = SecretExtractableDerive::derive(
+    &signer.secret(PEER_CONTEXT), b"peer").await?;
 ```
 
-`derive_as` is generic over `ExtractableKey`, the same trait that already
-described keys `WebCrypto` will hand material back for. So which kind of
-key comes out is decided by the type, not by a differently named method,
-and both derive the same key under the same label.
+`SecretExtractableDerive` is a trait `Secret` implements, deriving the
+same key under the same label and differing only in extractability. The
+inherent `derive` wins method resolution, so the extractable one is
+reachable only in fully-qualified form: getting a readable key means
+importing the trait *and* writing the explicit call, neither of which
+happens by accident.
 
 Extractability being a type parameter is what keeps a leak from being a
 runtime question: a consumer that needs material asks for

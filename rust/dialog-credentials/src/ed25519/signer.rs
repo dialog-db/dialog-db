@@ -27,8 +27,9 @@ pub struct Sealed;
 /// A signer whose key material can be exported.
 ///
 /// Derived through
-/// [`Secret::derive_as`](crate::secret::Secret::derive_as), which picks the
-/// kind of key by type. A consumer that needs raw bytes asks for this one:
+/// [`SecretExtractableDerive`](crate::secret::SecretExtractableDerive), whose
+/// fully-qualified call is the deliberate act that produces one. A consumer
+/// that needs raw bytes asks for this one:
 /// `fn peer_key(signer: &Ed25519Signer<Extractable>)`, so a sealed key cannot
 /// reach it and `export` on one yields opaque handles rather than a seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

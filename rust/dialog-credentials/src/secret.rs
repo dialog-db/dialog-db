@@ -32,7 +32,11 @@
 //! twice therefore produces different bytes, and a later compromise of the
 //! sender's own keys does not open past messages.
 
-use crate::ed25519::{Ed25519Signer, Ed25519Verifier, Sealed, X25519PublicKey, X25519SecretKey};
+use crate::ed25519::{
+    Ed25519Signer, Ed25519Verifier, Extractable, Sealed, X25519PublicKey, X25519SecretKey,
+};
+use crate::key::ExtractableKey;
+use std::future::Future;
 
 mod error;
 mod message;
@@ -135,17 +139,15 @@ impl<E> Secret<'_, E> {
     /// entropy are conforming and deployed (Apple's CryptoKit, and so WebKit's
     /// `Ed25519`). Agreement has no nonce to hedge.
     ///
-    /// The result is [`Sealed`]: its material cannot be read back. For a
-    /// consumer that needs raw bytes, derive the extractable form through
-    /// [`ExtractableKey`](crate::key::ExtractableKey):
+    /// The result is [`Sealed`]: its material cannot be read back. A consumer
+    /// that needs raw bytes derives the extractable form through
+    /// [`SecretExtractableDerive`]:
     ///
     /// ```no_run
-    /// # use dialog_credentials::{Ed25519Signer, Extractable, key::ExtractableKey,
-    /// #     secret::Context};
+    /// # use dialog_credentials::{Ed25519Signer, secret::{Context, SecretExtractableDerive}};
     /// # async fn example(signer: &Ed25519Signer) -> Result<(), Box<dyn std::error::Error>> {
     /// # const CTX: Context = Context::new("example/v1");
-    /// let readable: Ed25519Signer<Extractable> =
-    ///     signer.secret(CTX).derive_as(b"peer").await?;
+    /// let readable = SecretExtractableDerive::derive(&signer.secret(CTX), b"peer").await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -160,29 +162,6 @@ impl<E> Secret<'_, E> {
     pub async fn derive(&self, label: &[u8]) -> Result<Ed25519Signer<Sealed>, SecretError> {
         let seed = self.derive_bytes(label).await?;
         Ed25519Signer::import(&seed)
-            .await
-            .map_err(|error| SecretError::Crypto(error.to_string()))
-    }
-
-    /// Derive a key of the caller's choosing.
-    ///
-    /// The same derivation as [`Self::derive`] under the same label, with the
-    /// kind of key decided by the type rather than by the method name. An
-    /// [`Ed25519Signer<Extractable>`] comes back readable; the seed reaches it
-    /// through [`ExtractableKey::import`](crate::key::ExtractableKey::import),
-    /// which asks `WebCrypto` for an extractable `CryptoKey` where the default
-    /// import asks for one that will not give its seed back.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::derive`].
-    pub async fn derive_as<K>(&self, label: &[u8]) -> Result<K, SecretError>
-    where
-        K: crate::key::ExtractableKey,
-        K::Error: std::fmt::Display,
-    {
-        let seed = self.derive_bytes(label).await?;
-        K::import(&seed)
             .await
             .map_err(|error| SecretError::Crypto(error.to_string()))
     }
@@ -211,6 +190,54 @@ impl<E> Secret<'_, E> {
     }
 }
 
+/// Derive a signer whose material can be read back.
+///
+/// The counterpart to [`Secret::derive`], deriving the same key under the same
+/// label and differing only in extractability. `Secret`'s inherent `derive`
+/// wins method resolution, so this one is reachable only through its
+/// fully-qualified form:
+///
+/// ```no_run
+/// # use dialog_credentials::{Ed25519Signer, secret::{Context, SecretExtractableDerive}};
+/// # async fn example(signer: &Ed25519Signer) -> Result<(), Box<dyn std::error::Error>> {
+/// # const CTX: Context = Context::new("example/v1");
+/// let readable = SecretExtractableDerive::derive(&signer.secret(CTX), b"peer").await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Importing the trait and writing that form is what makes a readable key a
+/// deliberate act rather than the shape of a binding.
+///
+/// # Security Warning
+///
+/// A derived extractable key yields its seed to anyone holding it. Derive one
+/// only for a consumer that is built from raw bytes and cannot take a signer,
+/// such as `iroh::SecretKey`, whose QUIC stack needs the material in process.
+pub trait SecretExtractableDerive {
+    /// Derive an extractable signer, deterministically.
+    ///
+    /// # Errors
+    ///
+    /// As [`Secret::derive`].
+    fn derive(
+        &self,
+        label: &[u8],
+    ) -> impl Future<Output = Result<Ed25519Signer<Extractable>, SecretError>>;
+}
+
+impl<E> SecretExtractableDerive for Secret<'_, E> {
+    async fn derive(&self, label: &[u8]) -> Result<Ed25519Signer<Extractable>, SecretError> {
+        let seed = self.derive_bytes(label).await?;
+        // `ExtractableKey::import` asks `WebCrypto` for a `CryptoKey` that will
+        // give its seed back, where the default import asks for one that will
+        // not.
+        <Ed25519Signer<Extractable> as ExtractableKey>::import(&seed)
+            .await
+            .map_err(|error| SecretError::Crypto(error.to_string()))
+    }
+}
+
 impl Ed25519Verifier {
     /// Seal secrets to this identity, scoped to `context`.
     #[must_use]
@@ -236,7 +263,6 @@ impl<E> Ed25519Signer<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ed25519::Extractable;
     use crate::key::KeyExport;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -255,9 +281,7 @@ mod tests {
         let profile = signer(1).await;
 
         let sealed = profile.secret(VAULT).derive(b"peer").await.unwrap();
-        let readable = profile
-            .secret(VAULT)
-            .derive_as::<Ed25519Signer<Extractable>>(b"peer")
+        let readable = SecretExtractableDerive::derive(&profile.secret(VAULT), b"peer")
             .await
             .unwrap();
 
@@ -275,9 +299,7 @@ mod tests {
     #[dialog_common::test]
     async fn an_extractable_derivation_exports() {
         let profile = signer(1).await;
-        let readable = profile
-            .secret(VAULT)
-            .derive_as::<Ed25519Signer<Extractable>>(b"peer")
+        let readable = SecretExtractableDerive::derive(&profile.secret(VAULT), b"peer")
             .await
             .unwrap();
 
