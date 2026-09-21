@@ -10,11 +10,11 @@
 //! into the branch, once, explicitly:
 //!
 //! ```no_run
-//! # use dialog_identity::Profile;
+//! # use dialog_peer::Peer;
 //! # use dialog_repository::MigrateAccess as _;
 //! # use dialog_storage::provider::storage::{Storage, VolatileSpace};
-//! # async fn example(profile: &Peer<VolatileSpace>, storage: &Storage<VolatileSpace>) -> anyhow::Result<()> {
-//! profile.access().migrate().perform(storage).await?;
+//! # async fn example(peer: &Peer<VolatileSpace>, storage: &Storage<VolatileSpace>) -> anyhow::Result<()> {
+//! peer.access().migrate().perform(storage).await?;
 //! # Ok(())
 //! # }
 //! ```
