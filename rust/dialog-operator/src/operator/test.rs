@@ -1,6 +1,6 @@
 use crate::DeriveOperator as _;
 use crate::helpers::unique_name;
-use dialog_effects::verb::Get as GetVerb;
+use dialog_effects::verb::{Get as GetVerb, Put as PutVerb};
 use dialog_identity::Profile;
 use dialog_network::Network;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
@@ -1421,11 +1421,20 @@ mod tests {
             // Only delegate archive access, not memory
             let operator = profile
                 .derive(b"test")
+                // Reading and writing are separate powers now that the
+                // verb is a level of the hierarchy, so a delegation that
+                // covers both says so twice.
                 .allow(
                     Subject::any()
                         .archive()
                         .catalog("allowed")
                         .claim::<GetVerb>(),
+                )
+                .allow(
+                    Subject::any()
+                        .archive()
+                        .catalog("allowed")
+                        .claim::<PutVerb>(),
                 )
                 .network(Network::default())
                 .build(storage)
