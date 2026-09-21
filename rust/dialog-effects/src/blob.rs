@@ -23,7 +23,7 @@
 //! reads from ([`BlobReader`]) or writes into ([`BlobWriter`]).
 
 use crate::archive::Archive;
-use crate::verb;
+use crate::method;
 use async_trait::async_trait;
 use std::marker::PhantomData;
 
@@ -38,7 +38,7 @@ pub use dialog_capability::{
 /// Blob store domain under the archive. Contributes no ability segment of
 /// its own: the effects name the whole command (`/use/get/archive/blob`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Blob<V = verb::Get>(#[serde(skip)] PhantomData<V>);
+pub struct Blob<V = method::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Blob<V> {
     /// The blob resource under `V`.
@@ -53,11 +53,11 @@ impl<V> Default for Blob<V> {
     }
 }
 
-impl<V: crate::Verb> Attenuation for Blob<V>
+impl<M: crate::Method> Attenuation for Blob<M>
 where
-    V::Of: dialog_capability::Constraint,
+    M::Of: dialog_capability::Constraint,
 {
-    type Of = Archive<V>;
+    type Of = Archive<M>;
 
     fn attenuation() -> &'static str {
         "blob"
@@ -133,7 +133,7 @@ impl Read {
 }
 
 impl Policy for Read {
-    type Of = Blob<verb::Get>;
+    type Of = Blob<method::Get>;
 }
 
 impl Effect for Read {
@@ -160,7 +160,7 @@ impl Default for Write {
 }
 
 impl Policy for Write {
-    type Of = Blob<verb::Put>;
+    type Of = Blob<method::Put>;
 }
 
 impl Effect for Write {
@@ -194,7 +194,7 @@ impl Import {
 }
 
 impl Policy for Import {
-    type Of = Blob<verb::Put>;
+    type Of = Blob<method::Put>;
 }
 
 impl Effect for Import {
@@ -217,6 +217,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_blob_read_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .get()
             .archive()
             .blob()
             .read([0u8; 32]);
@@ -226,13 +227,18 @@ mod tests {
 
     #[dialog_common::test]
     fn it_builds_blob_write_path() {
-        let claim = Subject::from(did!("key:zSpace")).archive().blob().write();
+        let claim = Subject::from(did!("key:zSpace"))
+            .put()
+            .archive()
+            .blob()
+            .write();
         assert_eq!(claim.ability(), "/use/put/archive/blob");
     }
 
     #[dialog_common::test]
     fn it_builds_blob_import_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .put()
             .archive()
             .blob()
             .import([0u8; 32], 4096);

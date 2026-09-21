@@ -3,18 +3,23 @@
 //! ```
 //! use dialog_effects::blob::prelude::*;
 //! ```
+//!
+//! A chain is written in the order the path reads:
+//!
+//! ```text
+//! subject.get().archive().blob().read(digest)
+//!                              = /use/get/archive/blob
+//! ```
 
-use crate::verb;
-use dialog_capability::{Capability, Policy, Subject};
+use dialog_capability::{Capability, Constraint, Policy};
 use dialog_common::Blake3Hash;
 
-use crate::AttenuateVerb;
 use crate::archive::Archive;
-use crate::archive::prelude::ArchiveScope;
+use crate::{Method, method};
 
 use super::{Blob, ByteRange, Import, Read, Write};
 
-/// Scope an archive capability to its blob store.
+/// Scope the archive to its blob store.
 pub trait ArchiveBlobExt {
     /// The resulting blob chain type.
     type Blob;
@@ -22,84 +27,49 @@ pub trait ArchiveBlobExt {
     fn blob(self) -> Self::Blob;
 }
 
-impl ArchiveBlobExt for ArchiveScope {
-    type Blob = BlobScope;
-    fn blob(self) -> BlobScope {
-        BlobScope {
-            subject: self.into_subject(),
-        }
+impl<M: Method> ArchiveBlobExt for Capability<Archive<M>>
+where
+    M::Of: Constraint,
+{
+    type Blob = Capability<Blob<M>>;
+    fn blob(self) -> Self::Blob {
+        self.attenuate(Blob::new())
     }
 }
 
-/// A blob chain that has not chosen its verb yet.
-///
-/// See the note in [`memory::prelude`](crate::memory::prelude) for why
-/// the builder defers.
-#[derive(Debug, Clone)]
-pub struct BlobScope {
-    subject: Subject,
-}
-
-impl BlobScope {
-    /// Invoke a pre-built effect on this scope.
-    ///
-    /// The builder methods cover the common cases; this is for a caller
-    /// that already holds the effect value, such as one reconstructing a
-    /// read with an explicit byte range.
-    pub fn invoke<Fx>(self, effect: Fx) -> Capability<Fx>
-    where
-        Fx: dialog_capability::Effect,
-        Fx::Of: dialog_capability::Constraint,
-        Self: InvokeOn<Fx>,
-    {
-        InvokeOn::invoke_on(self, effect)
-    }
-
-    /// Build the chain under `V`.
-    fn under<V>(self) -> Capability<Blob<V>>
-    where
-        V: crate::Verb,
-        V::Of: dialog_capability::Constraint,
-        Subject: AttenuateVerb<V>,
-    {
-        AttenuateVerb::verb(self.subject)
-            .attenuate(Archive::<V>::new())
-            .attenuate(Blob::<V>::new())
-    }
-}
-
-/// Invoke effects on the blob store.
-pub trait BlobExt {
-    /// The resulting read chain type.
-    type Read;
-    /// The resulting write (ingest) chain type.
-    type Write;
-    /// The resulting import chain type.
-    type Import;
-
+/// Read a blob.
+pub trait ReadBlobExt {
     /// Read a blob by hash.
-    fn read(self, digest: impl Into<Blake3Hash>) -> Self::Read;
-    /// Ingest a blob whose hash is discovered during the write.
-    fn write(self) -> Self::Write;
-    /// Import a blob whose hash is already known.
-    fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Self::Import;
+    fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read>;
+    /// Read a blob, with a pre-built effect carrying its own range.
+    fn read_effect(self, effect: Read) -> Capability<Read>;
 }
 
-impl BlobExt for BlobScope {
-    type Read = Capability<Read>;
-    type Write = Capability<Write>;
-    type Import = Capability<Import>;
-
+impl ReadBlobExt for Capability<Blob<method::Get>> {
     fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read> {
-        self.under::<verb::Get>().invoke(Read::new(digest))
+        self.invoke(Read::new(digest))
     }
 
+    fn read_effect(self, effect: Read) -> Capability<Read> {
+        self.invoke(effect)
+    }
+}
+
+/// Write a blob.
+pub trait WriteBlobExt {
+    /// Ingest a blob whose hash is discovered during the write.
+    fn write(self) -> Capability<Write>;
+    /// Import a blob whose hash is already known.
+    fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Capability<Import>;
+}
+
+impl WriteBlobExt for Capability<Blob<method::Put>> {
     fn write(self) -> Capability<Write> {
-        self.under::<verb::Put>().invoke(Write::new())
+        self.invoke(Write::new())
     }
 
     fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Capability<Import> {
-        self.under::<verb::Put>().invoke(Import::new(digest, size))
+        self.invoke(Import::new(digest, size))
     }
 }
 
@@ -142,35 +112,5 @@ impl BlobImportExt for Capability<Import> {
 
     fn chunks(&self) -> &[[u8; 32]] {
         &Import::of(self).chunks
-    }
-}
-
-/// How a scope builds the chain for one effect.
-///
-/// One impl per effect, so the verb a scope attenuates under is fixed
-/// by the effect being invoked rather than by the caller.
-pub trait InvokeOn<Fx: dialog_capability::Effect>
-where
-    Fx::Of: dialog_capability::Constraint,
-{
-    /// Build this scope's chain and invoke `effect` on it.
-    fn invoke_on(self, effect: Fx) -> Capability<Fx>;
-}
-
-impl InvokeOn<Read> for BlobScope {
-    fn invoke_on(self, effect: Read) -> Capability<Read> {
-        self.under::<verb::Get>().invoke(effect)
-    }
-}
-
-impl InvokeOn<Write> for BlobScope {
-    fn invoke_on(self, effect: Write) -> Capability<Write> {
-        self.under::<verb::Put>().invoke(effect)
-    }
-}
-
-impl InvokeOn<Import> for BlobScope {
-    fn invoke_on(self, effect: Import) -> Capability<Import> {
-        self.under::<verb::Put>().invoke(effect)
     }
 }

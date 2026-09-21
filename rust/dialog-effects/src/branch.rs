@@ -30,10 +30,9 @@
 //!                           └── Delete → Effect → Result<(), BranchError>
 //! ```
 
+use crate::Method;
 use crate::Rejection;
-use crate::Verb;
-use crate::destroy;
-use crate::verb;
+use crate::method;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Attenuate, Attenuation, Constraint, Effect, Policy};
 use serde::{Deserialize, Serialize};
@@ -49,7 +48,7 @@ use crate::memory::MemoryError;
 /// (`get/dialog/branch` — verb, then namespace, then resource,
 /// as in `get/memory/cell`), as they do in [`memory`](crate::memory).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Branches<V = verb::Get>(#[serde(skip)] PhantomData<V>);
+pub struct Branches<V = method::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Branches<V> {
     /// The dialog namespace under `V`.
@@ -64,7 +63,7 @@ impl<V> Default for Branches<V> {
     }
 }
 
-impl<V: crate::Verb> Attenuation for Branches<V>
+impl<V: crate::Method> Attenuation for Branches<V>
 where
     V::Of: dialog_capability::Constraint,
 {
@@ -81,7 +80,7 @@ where
 /// the branch *name* scopes the capability and travels in the
 /// invocation's parameters, as a cell's name does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Branch<V = verb::Get> {
+pub struct Branch<V = method::Get> {
     /// The branch name, as it appears in `dialog.branch/name`.
     pub name: String,
     /// The verb this policy hangs from. A type-level marker: it holds
@@ -100,11 +99,11 @@ impl<V> Branch<V> {
     }
 }
 
-impl<V: Verb> Attenuation for Branch<V>
+impl<M: Method> Attenuation for Branch<M>
 where
-    V::Of: Constraint,
+    M::Of: Constraint,
 {
-    type Of = Branches<V>;
+    type Of = Branches<M>;
 
     fn attenuation() -> &'static str {
         "branch"
@@ -124,7 +123,7 @@ pub struct List;
 // Listing names the resource itself: it asks about the branches as a
 // set, so there is no `Branch` link above it to have named one.
 impl Attenuation for List {
-    type Of = Branches<verb::Get>;
+    type Of = Branches<method::Get>;
 
     fn attenuation() -> &'static str {
         "branch"
@@ -144,7 +143,7 @@ impl Effect for List {
 pub struct Create;
 
 impl Policy for Create {
-    type Of = Branch<verb::Put>;
+    type Of = Branch<method::Put>;
 }
 
 impl Effect for Create {
@@ -166,7 +165,7 @@ impl Effect for Create {
 pub struct Delete;
 
 impl Policy for Delete {
-    type Of = Branch<destroy::Delete>;
+    type Of = Branch<method::Void>;
 }
 
 impl Effect for Delete {
@@ -223,7 +222,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_builds_list_claim_path() {
-        let claim = Subject::from(did!("key:zRepo")).branches().list();
+        let claim = Subject::from(did!("key:zRepo")).get().branches().list();
 
         assert_eq!(claim.ability(), "/use/get/dialog/branch");
     }
@@ -231,6 +230,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_create_claim_path() {
         let claim = Subject::from(did!("key:zRepo"))
+            .put()
             .branches()
             .branch("main")
             .create();
@@ -244,6 +244,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_delete_claim_path() {
         let claim = Subject::from(did!("key:zRepo"))
+            .discard()
             .branches()
             .branch("main")
             .delete();
@@ -256,8 +257,8 @@ mod tests {
     #[dialog_common::test]
     fn it_keeps_deletion_out_of_the_use_root() {
         let subject = Subject::from(did!("key:zRepo"));
-        let write = subject.clone().branches().branch("main").create();
-        let destroy = subject.branches().branch("main").delete();
+        let write = subject.clone().put().branches().branch("main").create();
+        let destroy = subject.discard().branches().branch("main").delete();
 
         assert!(write.ability().starts_with("/use/"));
         assert!(destroy.ability().starts_with("/void/"));
@@ -269,8 +270,8 @@ mod tests {
     #[dialog_common::test]
     fn it_scopes_by_name_without_changing_the_path() {
         let subject = Subject::from(did!("key:zRepo"));
-        let main = subject.clone().branches().branch("main").delete();
-        let feature = subject.branches().branch("feature").delete();
+        let main = subject.clone().discard().branches().branch("main").delete();
+        let feature = subject.discard().branches().branch("feature").delete();
 
         assert_eq!(main.ability(), feature.ability());
         assert_ne!(main.name(), feature.name());

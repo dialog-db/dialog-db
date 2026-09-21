@@ -14,8 +14,8 @@
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
 
-use crate::Verb;
-use crate::verb;
+use crate::Method;
+use crate::method;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str;
@@ -37,7 +37,7 @@ use thiserror::Error;
 /// the chain, so the path reads verb-then-namespace without any link
 /// having to spell the combination out.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Memory<V = verb::Get>(PhantomData<V>);
+pub struct Memory<V = method::Get>(PhantomData<V>);
 
 impl<V> Memory<V> {
     /// The memory namespace under `V`.
@@ -52,11 +52,11 @@ impl<V> Default for Memory<V> {
     }
 }
 
-impl<V: Verb> Attenuation for Memory<V>
+impl<M: Method> Attenuation for Memory<M>
 where
-    V::Of: Constraint,
+    M::Of: Constraint,
 {
-    type Of = V;
+    type Of = M;
 
     fn attenuation() -> &'static str {
         "memory"
@@ -70,7 +70,7 @@ where
 /// path segment -- `/use/get/memory/cell` names the kind of thing
 /// reached, not which one.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Space<V = verb::Get> {
+pub struct Space<V = method::Get> {
     /// The space name (typically a DID).
     pub space: String,
     /// The verb this policy hangs from. A type-level marker: it holds
@@ -89,11 +89,11 @@ impl<V> Space<V> {
     }
 }
 
-impl<V: Verb> Policy for Space<V>
+impl<M: Method> Policy for Space<M>
 where
-    V::Of: Constraint,
+    M::Of: Constraint,
 {
-    type Of = Memory<V>;
+    type Of = Memory<M>;
 }
 
 /// Cell policy that scopes operations to a specific cell within a space.
@@ -102,7 +102,7 @@ where
 /// applies to, and so completes the command. The cell *name* scopes the
 /// capability and travels in the parameters, as the space name does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Cell<V = verb::Get> {
+pub struct Cell<V = method::Get> {
     /// The cell name.
     pub cell: String,
     /// The verb this policy hangs from. A type-level marker: it holds
@@ -121,11 +121,11 @@ impl<V> Cell<V> {
     }
 }
 
-impl<V: Verb> Attenuation for Cell<V>
+impl<M: Method> Attenuation for Cell<M>
 where
-    V::Of: Constraint,
+    M::Of: Constraint,
 {
-    type Of = Space<V>;
+    type Of = Space<M>;
 
     fn attenuation() -> &'static str {
         "cell"
@@ -244,7 +244,7 @@ pub struct Edition<T> {
 pub struct Resolve;
 
 impl Policy for Resolve {
-    type Of = Cell<verb::Get>;
+    type Of = Cell<method::Get>;
 }
 
 impl Effect for Resolve {
@@ -279,7 +279,7 @@ impl Publish {
 }
 
 impl Policy for Publish {
-    type Of = Cell<verb::Put>;
+    type Of = Cell<method::Put>;
 }
 
 impl Effect for Publish {
@@ -304,7 +304,7 @@ impl Retract {
 }
 
 impl Policy for Retract {
-    type Of = Cell<verb::Delete>;
+    type Of = Cell<method::Delete>;
 }
 
 impl Effect for Retract {
@@ -347,31 +347,51 @@ impl From<StorageError> for MemoryError {
 
 #[cfg(test)]
 mod tests {
-    use crate::memory::prelude::CellScope;
     use crate::prelude::*;
     use dialog_capability::{Subject, did};
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    fn cell() -> CellScope {
+    fn subject() -> Subject {
         Subject::from(did!("key:zSpace"))
-            .memory()
-            .space("local")
-            .cell("main")
     }
 
-    /// The verb sits above the namespace, so the same cell reads,
-    /// writes and deletes through three different roots while the
-    /// caller names it the same way each time.
+    /// The method sits above the namespace, so the same cell reads,
+    /// writes and deletes through three different chains -- each named
+    /// in the order its path reads.
     #[dialog_common::test]
     fn it_builds_the_three_cell_commands() {
-        assert_eq!(cell().resolve().ability(), "/use/get/memory/cell");
         assert_eq!(
-            cell().publish(b"test".to_vec(), None).ability(),
+            subject()
+                .get()
+                .memory()
+                .space("local")
+                .cell("main")
+                .resolve()
+                .ability(),
+            "/use/get/memory/cell"
+        );
+        assert_eq!(
+            subject()
+                .put()
+                .memory()
+                .space("local")
+                .cell("main")
+                .publish(b"test".to_vec(), None)
+                .ability(),
             "/use/put/memory/cell"
         );
-        assert_eq!(cell().retract(b"v1").ability(), "/use/delete/memory/cell");
+        assert_eq!(
+            subject()
+                .delete()
+                .memory()
+                .space("local")
+                .cell("main")
+                .retract(b"v1")
+                .ability(),
+            "/use/delete/memory/cell"
+        );
     }
 
     /// The space and cell names scope the capability without appearing
@@ -379,9 +399,8 @@ mod tests {
     /// the command reads.
     #[dialog_common::test]
     fn it_scopes_by_name_without_changing_the_path() {
-        let subject = Subject::from(did!("key:zSpace"));
-        let main = subject.clone().memory().space("local").cell("main");
-        let other = subject.memory().space("local").cell("other");
+        let main = subject().get().memory().space("local").cell("main");
+        let other = subject().get().memory().space("local").cell("other");
 
         assert_eq!(main.resolve().ability(), other.resolve().ability());
     }
@@ -389,7 +408,8 @@ mod tests {
     /// The chain keeps the subject it started from.
     #[dialog_common::test]
     fn it_keeps_its_subject() {
-        let claim = Subject::from(did!("key:zSpace"))
+        let claim = subject()
+            .get()
             .memory()
             .space("local")
             .cell("main")

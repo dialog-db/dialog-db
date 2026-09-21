@@ -13,8 +13,8 @@
 //!               └── Import { blocks } → Effect → Result<(), ArchiveError>
 //! ```
 
-use crate::Verb;
-use crate::verb;
+use crate::Method;
+use crate::method;
 use std::error::Error;
 use std::marker::PhantomData;
 
@@ -36,7 +36,7 @@ use thiserror::Error;
 /// Generic over the verb above it, because the same namespace is
 /// reached by reading and by writing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Archive<V = verb::Get>(#[serde(skip)] PhantomData<V>);
+pub struct Archive<V = method::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Archive<V> {
     /// The archive namespace under `V`.
@@ -51,11 +51,11 @@ impl<V> Default for Archive<V> {
     }
 }
 
-impl<V: Verb> Attenuation for Archive<V>
+impl<M: Method> Attenuation for Archive<M>
 where
-    V::Of: Constraint,
+    M::Of: Constraint,
 {
-    type Of = V;
+    type Of = M;
 
     fn attenuation() -> &'static str {
         "archive"
@@ -66,7 +66,7 @@ where
 ///
 /// Does not add to ability path but constrains invocation arguments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Catalog<V = verb::Get> {
+pub struct Catalog<V = method::Get> {
     /// The catalog name (e.g., "index", "blobs").
     pub catalog: String,
     /// The verb this policy hangs from. A type-level marker: it holds
@@ -85,17 +85,17 @@ impl<V> Catalog<V> {
     }
 }
 
-impl<V: Verb> Policy for Catalog<V>
+impl<M: Method> Policy for Catalog<M>
 where
-    V::Of: Constraint,
+    M::Of: Constraint,
 {
-    type Of = Archive<V>;
+    type Of = Archive<M>;
 }
 
 /// The block resource: the unit an archive stores, named by content
 /// hash. Completes the command `/use/get/archive/block`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Block<V = verb::Get>(#[serde(skip)] PhantomData<V>);
+pub struct Block<V = method::Get>(#[serde(skip)] PhantomData<V>);
 
 impl<V> Block<V> {
     /// The block resource under `V`.
@@ -110,11 +110,11 @@ impl<V> Default for Block<V> {
     }
 }
 
-impl<V: Verb> Attenuation for Block<V>
+impl<M: Method> Attenuation for Block<M>
 where
-    V::Of: Constraint,
+    M::Of: Constraint,
 {
-    type Of = Catalog<V>;
+    type Of = Catalog<M>;
 
     fn attenuation() -> &'static str {
         "block"
@@ -141,7 +141,7 @@ impl Get {
 }
 
 impl Policy for Get {
-    type Of = Block<verb::Get>;
+    type Of = Block<method::Get>;
 }
 
 impl Effect for Get {
@@ -238,7 +238,7 @@ impl Put {
 }
 
 impl Policy for Put {
-    type Of = Block<verb::Put>;
+    type Of = Block<method::Put>;
 }
 
 impl Effect for Put {
@@ -292,7 +292,7 @@ impl Import {
 }
 
 impl Policy for Import {
-    type Of = Block<verb::Put>;
+    type Of = Block<method::Put>;
 }
 
 impl Effect for Import {
@@ -351,6 +351,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_get_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .get()
             .archive()
             .catalog("index")
             .get([0u8; 32]);
@@ -362,6 +363,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_put_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
+            .put()
             .archive()
             .catalog("index")
             .put(Buffer::from(Vec::new()));
@@ -374,8 +376,13 @@ mod tests {
     #[dialog_common::test]
     fn it_scopes_by_catalog_without_changing_the_path() {
         let subject = Subject::from(did!("key:zSpace"));
-        let index = subject.clone().archive().catalog("index").get([0u8; 32]);
-        let other = subject.archive().catalog("other").get([0u8; 32]);
+        let index = subject
+            .clone()
+            .get()
+            .archive()
+            .catalog("index")
+            .get([0u8; 32]);
+        let other = subject.get().archive().catalog("other").get([0u8; 32]);
 
         assert_eq!(index.ability(), other.ability());
     }

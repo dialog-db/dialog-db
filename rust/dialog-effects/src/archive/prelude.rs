@@ -4,155 +4,102 @@
 //! ```
 //! use dialog_effects::archive::prelude::*;
 //! ```
+//!
+//! A chain is written in the order the path reads: the method, then the
+//! namespace, then the resource, then the effect.
+//!
+//! ```text
+//! subject.get().archive().catalog("index").get(digest)
+//!                                        = /use/get/archive/block
+//! ```
 
-use crate::verb;
-use dialog_capability::{Capability, Did, Policy, Subject};
+use dialog_capability::{Capability, Constraint, Policy};
 use dialog_common::{Blake3Hash, Buffer};
 
 use super::{Archive, Block, Catalog, Get, Import, Put};
-use crate::AttenuateVerb;
+use crate::{Method, method};
 
-/// Extension trait to start an archive capability chain.
-pub trait ArchiveSubjectExt {
+/// Scope a method to the archive namespace.
+pub trait ArchiveExt {
     /// The resulting archive chain type.
     type Archive;
-    /// Begin an archive capability chain.
+    /// Scope to the archive.
     fn archive(self) -> Self::Archive;
 }
 
-impl ArchiveSubjectExt for Subject {
-    type Archive = ArchiveScope;
-    fn archive(self) -> ArchiveScope {
-        ArchiveScope { subject: self }
+impl<M: Method> ArchiveExt for Capability<M>
+where
+    M::Of: Constraint,
+{
+    type Archive = Capability<Archive<M>>;
+    fn archive(self) -> Self::Archive {
+        self.attenuate(Archive::new())
     }
 }
 
-impl ArchiveSubjectExt for Did {
-    type Archive = ArchiveScope;
-    fn archive(self) -> ArchiveScope {
-        ArchiveScope {
-            subject: Subject::from(self),
-        }
-    }
-}
-
-/// An archive chain that has not chosen its verb yet.
-///
-/// See the note in [`memory::prelude`](crate::memory::prelude) for why
-/// the builder defers.
-#[derive(Debug, Clone)]
-pub struct ArchiveScope {
-    subject: Subject,
-}
-
-impl ArchiveScope {
-    /// The subject this scope was started from, for a sibling namespace
-    /// (the blob store) that continues from the same root.
-    pub(crate) fn into_subject(self) -> Subject {
-        self.subject
-    }
-}
-
-/// Extension methods for scoping archive to a named catalog.
-pub trait ArchiveExt {
+/// Scope the archive to a named catalog.
+pub trait CatalogExt {
     /// The resulting catalog chain type.
     type Catalog;
     /// Scope to a named catalog.
     fn catalog(self, name: impl Into<String>) -> Self::Catalog;
 }
 
-impl ArchiveExt for ArchiveScope {
-    type Catalog = CatalogScope;
-    fn catalog(self, name: impl Into<String>) -> CatalogScope {
-        CatalogScope {
-            subject: self.subject,
-            catalog: name.into(),
-        }
+impl<M: Method> CatalogExt for Capability<Archive<M>>
+where
+    M::Of: Constraint,
+{
+    type Catalog = Capability<Catalog<M>>;
+    fn catalog(self, name: impl Into<String>) -> Self::Catalog {
+        self.attenuate(Catalog::new(name))
     }
 }
 
-/// A catalog chain that has not chosen its verb yet.
-#[derive(Debug, Clone)]
-pub struct CatalogScope {
-    subject: Subject,
-    catalog: String,
+/// Scope a catalog to its blocks.
+pub trait BlockExt {
+    /// The resulting block chain type.
+    type Block;
+    /// Scope to the catalog's blocks.
+    fn block(self) -> Self::Block;
 }
 
-impl CatalogScope {
-    /// The chain as a capability under `V`, for delegating rather than
-    /// invoking.
-    ///
-    /// A delegation names a level of the hierarchy, not an effect --
-    /// "everything this holder may read in the index catalog" -- so it
-    /// needs the chain without an effect on the end. Invoking goes
-    /// through the effect methods instead, which pick the verb from the
-    /// effect.
-    pub fn claim<V>(self) -> Capability<Catalog<V>>
-    where
-        V: crate::Verb,
-        V::Of: dialog_capability::Constraint,
-        Subject: AttenuateVerb<V>,
-    {
-        AttenuateVerb::verb(self.subject)
-            .attenuate(Archive::<V>::new())
-            .attenuate(Catalog::<V>::new(self.catalog))
-    }
-
-    /// The subject this chain is rooted at.
-    pub fn subject(&self) -> &dialog_capability::Did {
-        self.subject.did()
-    }
-
-    /// The catalog name.
-    pub fn catalog_name(&self) -> &str {
-        &self.catalog
-    }
-
-    /// Build the block chain under `V`.
-    fn under<V>(self) -> Capability<Block<V>>
-    where
-        V: crate::Verb,
-        V::Of: dialog_capability::Constraint,
-        Subject: AttenuateVerb<V>,
-    {
-        AttenuateVerb::verb(self.subject)
-            .attenuate(Archive::<V>::new())
-            .attenuate(Catalog::<V>::new(self.catalog))
-            .attenuate(Block::<V>::new())
+impl<M: Method> BlockExt for Capability<Catalog<M>>
+where
+    M::Of: Constraint,
+{
+    type Block = Capability<Block<M>>;
+    fn block(self) -> Self::Block {
+        self.attenuate(Block::new())
     }
 }
 
-/// Extension methods for invoking effects on a catalog.
-pub trait CatalogExt {
-    /// The resulting get chain type.
-    type Get;
-    /// The resulting put chain type.
-    type Put;
-    /// The resulting import chain type.
-    type Import;
+/// Read a block.
+pub trait GetBlockExt {
     /// Get content by digest.
-    fn get(self, digest: impl Into<Blake3Hash>) -> Self::Get;
-    /// Put a single content-addressed block.
-    fn put(self, block: impl Into<Buffer>) -> Self::Put;
-    /// Import a batch of content-addressed blocks.
-    fn import(self, blocks: impl IntoIterator<Item = impl Into<Buffer>>) -> Self::Import;
+    fn get(self, digest: impl Into<Blake3Hash>) -> Capability<Get>;
 }
 
-impl CatalogExt for CatalogScope {
-    type Get = Capability<Get>;
-    type Put = Capability<Put>;
-    type Import = Capability<Import>;
-
+impl GetBlockExt for Capability<Catalog<method::Get>> {
     fn get(self, digest: impl Into<Blake3Hash>) -> Capability<Get> {
-        self.under::<verb::Get>().invoke(Get::new(digest))
+        self.block().invoke(Get::new(digest))
     }
+}
 
+/// Write blocks.
+pub trait PutBlockExt {
+    /// Put a single content-addressed block.
+    fn put(self, block: impl Into<Buffer>) -> Capability<Put>;
+    /// Import a batch of content-addressed blocks.
+    fn import(self, blocks: impl IntoIterator<Item = impl Into<Buffer>>) -> Capability<Import>;
+}
+
+impl PutBlockExt for Capability<Catalog<method::Put>> {
     fn put(self, block: impl Into<Buffer>) -> Capability<Put> {
-        self.under::<verb::Put>().invoke(Put::new(block))
+        self.block().invoke(Put::new(block))
     }
 
     fn import(self, blocks: impl IntoIterator<Item = impl Into<Buffer>>) -> Capability<Import> {
-        self.under::<verb::Put>().invoke(Import::new(blocks))
+        self.block().invoke(Import::new(blocks))
     }
 }
 
