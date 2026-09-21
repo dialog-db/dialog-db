@@ -1,5 +1,6 @@
 use crate::DeriveOperator as _;
 use crate::helpers::unique_name;
+use dialog_effects::verb::Get as GetVerb;
 use dialog_identity::Profile;
 use dialog_network::Network;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
@@ -83,7 +84,7 @@ mod tests {
                     Subject::from(operator.did())
                         .archive()
                         .catalog("index")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -137,12 +138,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(
-                    Subject::any()
-                        .archive()
-                        .catalog("index")
-                        .claim::<dialog_effects::verb::Get>(),
-                )
+                .allow(Subject::any().archive().catalog("index").claim::<GetVerb>())
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -154,7 +150,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("index")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -178,12 +174,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(
-                    Subject::any()
-                        .archive()
-                        .catalog("index")
-                        .claim::<dialog_effects::verb::Get>(),
-                )
+                .allow(Subject::any().archive().catalog("index").claim::<GetVerb>())
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -195,7 +186,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("secret")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -258,7 +249,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("index")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -278,12 +269,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(
-                    Subject::any()
-                        .archive()
-                        .catalog("index")
-                        .claim::<dialog_effects::verb::Get>(),
-                )
+                .allow(Subject::any().archive().catalog("index").claim::<GetVerb>())
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -295,7 +281,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("index")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -352,7 +338,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("index")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .not_before(ts(1000))
                 .expires(ts(5000))
@@ -375,7 +361,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("index")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -399,7 +385,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .expires(ts(1000))
                 .delegate(operator.did())
@@ -421,7 +407,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .expires(ts(5000))
@@ -445,7 +431,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .not_before(ts(5000))
                 .delegate(operator.did())
@@ -467,7 +453,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .not_before(ts(1000))
@@ -491,7 +477,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .not_before(ts(100))
                 .expires(ts(10000))
@@ -514,7 +500,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .not_before(ts(500))
@@ -540,7 +526,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .not_before(ts(100))
                 .expires(ts(200))
@@ -563,7 +549,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -586,7 +572,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .expires(ts(1000))
                 .delegate(operator.did())
@@ -607,7 +593,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -636,7 +622,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .not_before(ts(1000))
                 .delegate(operator.did())
@@ -657,7 +643,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -686,7 +672,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .not_before(ts(100))
                 .expires(ts(10000))
@@ -708,7 +694,7 @@ mod tests {
                     Subject::from(profile.did())
                         .archive()
                         .catalog("data")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -1439,7 +1425,7 @@ mod tests {
                     Subject::any()
                         .archive()
                         .catalog("allowed")
-                        .claim::<dialog_effects::verb::Get>(),
+                        .claim::<GetVerb>(),
                 )
                 .network(Network::default())
                 .build(storage)

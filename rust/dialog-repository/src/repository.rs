@@ -625,7 +625,9 @@ mod tests {
     mod delegation_tests {
 
         use super::*;
+        use dialog_effects::Use;
         use dialog_effects::memory as fx_memory;
+        use dialog_effects::verb::Get as GetVerb;
         use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 
         #[dialog_common::test]
@@ -649,10 +651,10 @@ mod tests {
             // Profile should be able to claim access to any memory space
             let capability = repo
                 .subject()
-                .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::verb::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
+                .attenuate(Use)
+                .attenuate(GetVerb)
+                .attenuate(fx_memory::Memory::<GetVerb>::new())
+                .attenuate(fx_memory::Space::<GetVerb>::new("data"));
 
             let result = profile.access().claim(capability).perform(&operator).await;
             assert!(
@@ -676,10 +678,10 @@ mod tests {
             // Repo delegates only memory/space("data") to the profile
             let scoped_cap = repo
                 .subject()
-                .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::verb::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
+                .attenuate(Use)
+                .attenuate(GetVerb)
+                .attenuate(fx_memory::Memory::<GetVerb>::new())
+                .attenuate(fx_memory::Space::<GetVerb>::new("data"));
             let chain = repo
                 .access()
                 .claim(scoped_cap)
@@ -691,10 +693,10 @@ mod tests {
             // Claiming "data" space should succeed
             let data_cap = repo
                 .subject()
-                .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::verb::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
+                .attenuate(Use)
+                .attenuate(GetVerb)
+                .attenuate(fx_memory::Memory::<GetVerb>::new())
+                .attenuate(fx_memory::Space::<GetVerb>::new("data"));
             let result = profile.access().claim(data_cap).perform(&operator).await;
             assert!(
                 result.is_ok(),
@@ -705,10 +707,10 @@ mod tests {
             // Claiming "secret" space should fail
             let secret_cap = repo
                 .subject()
-                .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::verb::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("secret"));
+                .attenuate(Use)
+                .attenuate(GetVerb)
+                .attenuate(fx_memory::Memory::<GetVerb>::new())
+                .attenuate(fx_memory::Space::<GetVerb>::new("secret"));
             let result = profile.access().claim(secret_cap).perform(&operator).await;
             assert!(
                 result.is_err(),
@@ -730,10 +732,10 @@ mod tests {
             // Repo delegates memory/space("data") to the profile
             let scoped_cap = repo
                 .subject()
-                .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::verb::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
+                .attenuate(Use)
+                .attenuate(GetVerb)
+                .attenuate(fx_memory::Memory::<GetVerb>::new())
+                .attenuate(fx_memory::Space::<GetVerb>::new("data"));
             let chain = repo
                 .access()
                 .claim(scoped_cap)
@@ -745,10 +747,10 @@ mod tests {
             // Profile can re-delegate "data" space to operator
             let data_cap = repo
                 .subject()
-                .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::verb::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("data"));
+                .attenuate(Use)
+                .attenuate(GetVerb)
+                .attenuate(fx_memory::Memory::<GetVerb>::new())
+                .attenuate(fx_memory::Space::<GetVerb>::new("data"));
             let result = profile
                 .access()
                 .claim(data_cap)
@@ -764,10 +766,10 @@ mod tests {
             // Profile cannot delegate "secret" space (no chain)
             let secret_cap = repo
                 .subject()
-                .attenuate(dialog_effects::Use)
-                .attenuate(dialog_effects::verb::Get)
-                .attenuate(fx_memory::Memory::<dialog_effects::verb::Get>::new())
-                .attenuate(fx_memory::Space::<dialog_effects::verb::Get>::new("secret"));
+                .attenuate(Use)
+                .attenuate(GetVerb)
+                .attenuate(fx_memory::Memory::<GetVerb>::new())
+                .attenuate(fx_memory::Space::<GetVerb>::new("secret"));
             let result = profile
                 .access()
                 .claim(secret_cap)
