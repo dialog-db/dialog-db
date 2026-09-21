@@ -62,11 +62,8 @@ use dialog_artifacts::{
 };
 use dialog_capability::{Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::{
-    ArchiveScope, ArchiveSubjectExt as _, CatalogExt as _, CatalogScope,
-};
+use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveScope, CatalogScope};
 use dialog_effects::archive::{Get, Put};
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory;
 use dialog_query::query::Application;
@@ -83,8 +80,7 @@ use dialog_varsig::Principal;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     BlobArchive, Branch, Index, NetworkedIndex, Overlay, PublishError, RemoteRepository,
-    RemoteSite, Repository, RepositoryArchiveExt as _, Revision, Select, SelectQuery,
-    SnapshotError,
+    RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
 };
 
 pub mod codec;

@@ -23,10 +23,13 @@ use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Did, Policy, Provider, Subject};
 use dialog_common::{Blake3Hash, Buffer, Checksum, ConditionalSync};
 use dialog_did_web::{CachingResolver, Resolve, WebResolver};
+use dialog_effects::MethodExt as _;
 use dialog_effects::Rejection;
+use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{self, Catalog, PutAttenuation};
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{self, BlobError, BlobReader};
+use dialog_effects::memory::prelude::MemoryExt as _;
 use dialog_effects::memory::{self, Cell, PublishAttenuation, Space};
 use dialog_remote_ucan_s3::{Args, FromUcanArgs, verify_invocation};
 use dialog_ucan_core::revocation::RevocationChecker;
@@ -491,13 +494,12 @@ where
         {
             return Err(Failure::checksum_mismatch());
         }
-        let capability = dialog_effects::AttenuateVerb::<dialog_effects::verb::Put>::verb(
-            Subject::from(subject.clone()),
-        )
-        .attenuate(archive::Archive::<dialog_effects::verb::Put>::new())
-        .attenuate(Catalog::of(&attenuated).clone())
-        .attenuate(archive::Block::<dialog_effects::verb::Put>::new())
-        .invoke(archive::Put::new(Buffer::from(payload)));
+        let capability = Subject::from(subject.clone())
+            .put()
+            .archive()
+            .attenuate(Catalog::of(&attenuated).clone())
+            .attenuate(archive::Block::new())
+            .invoke(archive::Put::new(Buffer::from(payload)));
         Provider::<archive::Put>::execute(&self.provider, capability).await?;
         Ok(Response::status(200))
     }
@@ -581,13 +583,12 @@ where
         if Checksum::sha256(&payload) != bound.checksum {
             return Err(Failure::checksum_mismatch());
         }
-        let capability = dialog_effects::AttenuateVerb::<dialog_effects::verb::Put>::verb(
-            Subject::from(subject.clone()),
-        )
-        .attenuate(memory::Memory::<dialog_effects::verb::Put>::new())
-        .attenuate(Space::of(&attenuated).clone())
-        .attenuate(Cell::of(&attenuated).clone())
-        .invoke(memory::Publish::new(payload, bound.when.clone()));
+        let capability = Subject::from(subject.clone())
+            .put()
+            .memory()
+            .attenuate(Space::of(&attenuated).clone())
+            .attenuate(Cell::of(&attenuated).clone())
+            .invoke(memory::Publish::new(payload, bound.when.clone()));
         let version = Provider::<memory::Publish>::execute(&self.provider, capability).await?;
         Ok(Response::versioned(200, render(&version)?, Vec::new()))
     }

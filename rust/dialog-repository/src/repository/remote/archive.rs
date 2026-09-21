@@ -4,7 +4,7 @@ use crate::{RemoteRepository, RemoteSite, UploadError};
 use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt, CatalogScope};
+use dialog_effects::archive::prelude::{ArchiveExt, CatalogScope};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_search_tree::{DialogSearchTreeError, PersistentNode};
 use dialog_storage::Blake3Hash;

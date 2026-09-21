@@ -2,7 +2,6 @@ use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainR
 use dialog_capability::Did;
 use dialog_common::ConditionalSync;
 use dialog_common::time::{self, Duration, SystemTime};
-use dialog_effects::memory::prelude::CellExt;
 use dialog_effects::memory::prelude::CellScope;
 use dialog_effects::memory::{self, Edition, Version};
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};

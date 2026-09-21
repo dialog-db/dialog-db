@@ -17,7 +17,6 @@ use dialog_credentials::{Ed25519Signer, Signer};
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::prelude::*;
 use dialog_effects::blob::BlobError;
-use dialog_effects::blob::prelude::*;
 use dialog_effects::memory::prelude::*;
 use dialog_effects::memory::{MemoryError, Version};
 use dialog_ucan::Scope;

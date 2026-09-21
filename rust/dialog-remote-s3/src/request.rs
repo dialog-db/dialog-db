@@ -149,9 +149,8 @@ mod tests {
     use dialog_common::{Blake3Hash, Buffer};
     use dialog_effects::prelude::*;
 
-    use dialog_effects::blob::prelude::{ArchiveBlobExt, BlobExt};
     use dialog_effects::memory::Version;
-    use dialog_effects::memory::prelude::{CellExt, MemoryExt, MemorySubjectExt, SpaceExt};
+    use dialog_effects::memory::prelude::MemoryExt;
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test_configure;

@@ -101,6 +101,29 @@ fn it_preserves_archive_commands() {
     );
 }
 
+/// Skipping the catalog reaches the default one and changes nothing a
+/// peer can observe: same path, same parameters. The catalog name is a
+/// parameter, so a shorthand that supplies it cannot move `cmd`, and
+/// supplying the default explicitly must stay indistinguishable.
+#[dialog_common::test]
+fn it_defaults_the_catalog_without_moving_the_wire() {
+    let digest = Blake3Hash::hash(b"block");
+
+    let spelled = subject()
+        .get()
+        .archive()
+        .catalog("index")
+        .get(digest.clone());
+    let implied = subject().get().archive().get(digest.clone());
+
+    assert_eq!(
+        spelled.ability(),
+        implied.ability(),
+        "the catalog is a parameter, so omitting it cannot move the path"
+    );
+    assert_eq!(implied.ability(), "/use/get/archive/block");
+}
+
 /// Blobs live under the `archive` namespace even though they are
 /// declared in the `blob` module — a relationship currently visible only
 /// in these literals, and one a chain-derived path must reproduce.
@@ -225,4 +248,26 @@ fn it_roots_every_command_under_use_or_void() {
             "{ability} escapes the use/void roots"
         );
     }
+}
+
+/// A method names a path on its own, before any namespace narrows it.
+///
+/// This is what a delegation grants when it stops at the method:
+/// `subject.get()` is `/use/get`, authorizing every namespace beneath
+/// it. The roots are pinned here because a holder's reach is decided by
+/// these strings, so a chain that silently rooted `get` somewhere else
+/// would widen or narrow every delegation minted from it.
+#[dialog_common::test]
+fn it_names_a_path_from_the_method_alone() {
+    assert_eq!(subject().r#use().ability(), "/use");
+    assert_eq!(subject().void().ability(), "/void");
+
+    assert_eq!(subject().get().ability(), "/use/get");
+    assert_eq!(subject().put().ability(), "/use/put");
+
+    // Emptying a value sits under `use`; destroying what held it sits
+    // under `void`. Both read as `delete`, and the root is the only
+    // thing that tells them apart.
+    assert_eq!(subject().delete().ability(), "/use/delete");
+    assert_eq!(subject().discard().ability(), "/void/delete");
 }

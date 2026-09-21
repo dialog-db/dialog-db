@@ -3,7 +3,6 @@ use crate::rules::SharedRuleCache;
 use crate::{ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
@@ -19,7 +18,7 @@ use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Did, Subject};
 use dialog_common::Blake3Hash;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_query::query::Application;
 use dialog_search_tree::{Buffer, Cache};
@@ -76,6 +75,7 @@ mod select;
 pub use select::*;
 
 mod session;
+use dialog_effects::archive::prelude::ArchiveScope;
 pub use session::*;
 
 mod subscription;

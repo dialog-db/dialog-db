@@ -1,6 +1,5 @@
 use crate::DeriveOperator as _;
 use crate::helpers::unique_name;
-use dialog_effects::verb::{Get as GetVerb, Put as PutVerb};
 use dialog_identity::Profile;
 use dialog_network::Network;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
@@ -60,7 +59,8 @@ mod tests {
     mod delegation_tests {
         use super::*;
         use dialog_capability::Subject;
-        use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt};
+        use dialog_effects::MethodExt as _;
+        use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _};
 
         #[dialog_common::test]
         async fn self_grant_produces_delegation() {
@@ -82,9 +82,9 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(operator.did())
+                        .get()
                         .archive()
-                        .catalog("index")
-                        .claim::<GetVerb>(),
+                        .catalog("index"),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -138,7 +138,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(Subject::any().archive().catalog("index").claim::<GetVerb>())
+                .allow(Subject::any().get().archive().catalog("index"))
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -148,9 +148,9 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
+                        .get()
                         .archive()
-                        .catalog("index")
-                        .claim::<GetVerb>(),
+                        .catalog("index"),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -174,7 +174,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(Subject::any().archive().catalog("index").claim::<GetVerb>())
+                .allow(Subject::any().get().archive().catalog("index"))
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -184,9 +184,9 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
+                        .get()
                         .archive()
-                        .catalog("secret")
-                        .claim::<GetVerb>(),
+                        .catalog("secret"),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -247,9 +247,9 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
+                        .get()
                         .archive()
-                        .catalog("index")
-                        .claim::<GetVerb>(),
+                        .catalog("index"),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -269,7 +269,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(Subject::any().archive().catalog("index").claim::<GetVerb>())
+                .allow(Subject::any().get().archive().catalog("index"))
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -279,9 +279,9 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
+                        .get()
                         .archive()
-                        .catalog("index")
-                        .claim::<GetVerb>(),
+                        .catalog("index"),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -300,7 +300,8 @@ mod tests {
         use crate::Operator;
         use dialog_capability::Subject;
         use dialog_capability::access::{Authorization as _, Proof as _};
-        use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt};
+        use dialog_effects::MethodExt as _;
+        use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _};
         use dialog_identity::Profile;
         use dialog_ucan_core::time::Timestamp;
         use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
@@ -336,9 +337,9 @@ mod tests {
                 .access()
                 .claim(
                     Subject::from(profile.did())
+                        .get()
                         .archive()
-                        .catalog("index")
-                        .claim::<GetVerb>(),
+                        .catalog("index"),
                 )
                 .not_before(ts(1000))
                 .expires(ts(5000))
@@ -359,9 +360,9 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
+                        .get()
                         .archive()
-                        .catalog("index")
-                        .claim::<GetVerb>(),
+                        .catalog("index"),
                 )
                 .audience(&operator)
                 .perform(&operator)
@@ -381,12 +382,7 @@ mod tests {
             // Delegate with expiration at 1000
             let chain = profile
                 .access()
-                .claim(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
                 .expires(ts(1000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -403,12 +399,7 @@ mod tests {
             // Request authorization valid until 5000 - should fail
             let result = profile
                 .access()
-                .prove(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
                 .audience(&operator)
                 .expires(ts(5000))
                 .perform(&operator)
@@ -427,12 +418,7 @@ mod tests {
             // Delegate with not_before at 5000
             let chain = profile
                 .access()
-                .claim(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
                 .not_before(ts(5000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -449,12 +435,7 @@ mod tests {
             // Request authorization valid from 1000 - should fail
             let result = profile
                 .access()
-                .prove(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
                 .audience(&operator)
                 .not_before(ts(1000))
                 .perform(&operator)
@@ -473,12 +454,7 @@ mod tests {
             // Delegate valid from 100 to 10000
             let chain = profile
                 .access()
-                .claim(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
                 .not_before(ts(100))
                 .expires(ts(10000))
                 .delegate(operator.did())
@@ -496,12 +472,7 @@ mod tests {
             // Request authorization valid from 500 to 5000 - cert covers this
             let result = profile
                 .access()
-                .prove(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
                 .audience(&operator)
                 .not_before(ts(500))
                 .expires(ts(5000))
@@ -522,12 +493,7 @@ mod tests {
             // Delegate with short window
             let chain = profile
                 .access()
-                .claim(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
                 .not_before(ts(100))
                 .expires(ts(200))
                 .delegate(operator.did())
@@ -545,12 +511,7 @@ mod tests {
             // Request with no time constraints ("I don't care")
             let proof = profile
                 .access()
-                .prove(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -568,12 +529,7 @@ mod tests {
             // Delegate expiring at 1000
             let chain = profile
                 .access()
-                .claim(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
                 .expires(ts(1000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -589,12 +545,7 @@ mod tests {
 
             let proof = profile
                 .access()
-                .prove(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -618,12 +569,7 @@ mod tests {
             // Delegate starting at 1000
             let chain = profile
                 .access()
-                .claim(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
                 .not_before(ts(1000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -639,12 +585,7 @@ mod tests {
 
             let proof = profile
                 .access()
-                .prove(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -668,12 +609,7 @@ mod tests {
             // Delegate valid from 100 to 10000
             let chain = profile
                 .access()
-                .claim(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
                 .not_before(ts(100))
                 .expires(ts(10000))
                 .delegate(operator.did())
@@ -690,12 +626,7 @@ mod tests {
 
             let proof = profile
                 .access()
-                .prove(
-                    Subject::from(profile.did())
-                        .archive()
-                        .catalog("data")
-                        .claim::<GetVerb>(),
-                )
+                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -1108,6 +1039,7 @@ mod tests {
         use super::*;
         use dialog_capability::Subject;
         use dialog_common::{Blake3Hash, Buffer};
+        use dialog_effects::MethodExt as _;
         use dialog_effects::archive::prelude::*;
         use dialog_effects::memory::prelude::*;
         use dialog_network::NetworkAddress as SiteAddress;
@@ -1424,18 +1356,8 @@ mod tests {
                 // Reading and writing are separate powers now that the
                 // verb is a level of the hierarchy, so a delegation that
                 // covers both says so twice.
-                .allow(
-                    Subject::any()
-                        .archive()
-                        .catalog("allowed")
-                        .claim::<GetVerb>(),
-                )
-                .allow(
-                    Subject::any()
-                        .archive()
-                        .catalog("allowed")
-                        .claim::<PutVerb>(),
-                )
+                .allow(Subject::any().get().archive().catalog("allowed"))
+                .allow(Subject::any().put().archive().catalog("allowed"))
                 .network(Network::default())
                 .build(storage)
                 .await?;
@@ -1583,7 +1505,6 @@ mod tests {
         use super::*;
         use dialog_capability::Subject;
         use dialog_effects::archive::prelude::*;
-        use dialog_effects::blob::prelude::*;
 
         #[dialog_common::test]
         async fn it_routes_blob_effects_to_the_space() -> anyhow::Result<()> {

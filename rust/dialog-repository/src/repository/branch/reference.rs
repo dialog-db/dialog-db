@@ -1,8 +1,7 @@
 use dialog_capability::{Did, Subject};
-use dialog_effects::memory::prelude::SpaceExt;
-use dialog_effects::memory::prelude::SpaceScope;
 
 use crate::{Cell, LoadBranch, OpenBranch, Revision, Upstreams};
+use dialog_effects::memory::prelude::SpaceScope;
 
 /// A reference to a named branch within a repository's memory.
 ///

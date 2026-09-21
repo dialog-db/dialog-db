@@ -61,7 +61,7 @@ impl MemoryStore {
 
 fn block_key<V, Fx>(capability: &Capability<Fx>, digest: Blake3Hash) -> (String, String, Blake3Hash)
 where
-    V: dialog_effects::Verb,
+    V: dialog_effects::Method,
     V::Of: dialog_capability::Constraint,
     Fx: Policy<Of = dialog_effects::archive::Block<V>>,
 {
@@ -74,7 +74,7 @@ where
 
 fn cell_key<V, Fx>(capability: &Capability<Fx>) -> (String, String, String)
 where
-    V: dialog_effects::Verb,
+    V: dialog_effects::Method,
     V::Of: dialog_capability::Constraint,
     Fx: Policy<Of = Cell<V>>,
 {

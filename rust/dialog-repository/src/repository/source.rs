@@ -15,8 +15,7 @@ use dialog_artifacts::tree::{SpillCache, spill_cache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
-use dialog_effects::archive::prelude::ArchiveScope;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveScope};
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
@@ -28,8 +27,8 @@ use std::sync::Arc;
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{
-    Branch, EMPTY_TREE_HASH, NetworkedIndex, Overlay, RemoteFallback, RepositoryArchiveExt as _,
-    RepositoryMemoryExt as _, Revision, Snapshot, Upstream,
+    Branch, EMPTY_TREE_HASH, NetworkedIndex, Overlay, RemoteFallback, RepositoryMemoryExt as _,
+    Revision, Snapshot, Upstream,
 };
 
 /// An owned line to read from: a branch or a snapshot, cheaply cloned

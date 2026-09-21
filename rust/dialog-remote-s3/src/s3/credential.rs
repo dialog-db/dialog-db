@@ -308,16 +308,15 @@ mod tests {
     async fn it_includes_checksum_header() {
         let address = test_address();
         let checksum = Checksum::Sha256([0u8; 32]);
-        let put = dialog_effects::AttenuateVerb::<dialog_effects::verb::Put>::verb(Subject::from(
-            test_subject(),
-        ))
-        .attenuate(archive::Archive::<dialog_effects::verb::Put>::new())
-        .attenuate(archive::Catalog::<dialog_effects::verb::Put>::new("index"))
-        .attenuate(archive::Block::<dialog_effects::verb::Put>::new())
-        .attenuate(archive::PutAttenuation {
-            digest: [0x99; 32].into(),
-            checksum,
-        });
+        let put = Subject::from(test_subject())
+            .put()
+            .archive()
+            .catalog("index")
+            .block()
+            .attenuate(archive::PutAttenuation {
+                digest: [0x99; 32].into(),
+                checksum,
+            });
         let auth = S3Authorization::public(S3Request::from(&put));
         let descriptor = auth.redeem(&address).await.unwrap();
 

@@ -9,12 +9,12 @@
 //! `hydrate`, and the operator's provider runs it through a process-wide
 //! [`HydrationScheduler`].
 
-use dialog_effects::archive::prelude::CatalogScope;
 use std::sync::Arc;
 
 use dialog_capability::{Command, Did};
 use dialog_common::{Blake3Hash, Priority, Scheduler};
 use dialog_effects::archive::ArchiveError;
+use dialog_effects::archive::prelude::CatalogScope;
 
 use crate::NetworkAddress;
 

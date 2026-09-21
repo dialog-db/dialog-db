@@ -74,7 +74,7 @@ use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Key, Speculation, Sta
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
@@ -93,7 +93,7 @@ use crate::layer::tombstones_from;
 use crate::repository::source::Source;
 use crate::{
     Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Upstream,
+    RepositoryMemoryExt as _, Revision, Upstream,
 };
 
 /// The demand cover of one evaluation: every index key range the

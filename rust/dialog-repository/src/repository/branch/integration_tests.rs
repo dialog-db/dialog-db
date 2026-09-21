@@ -10,8 +10,8 @@ use dialog_operator::DeriveOperator as _;
 use std::collections::HashSet;
 
 use crate::{
-    Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryArchiveExt as _,
-    RepositoryExt as _, Revision, SiteAddress, SnapshotError,
+    Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryExt as _, Revision,
+    SiteAddress, SnapshotError,
 };
 use anyhow::{Context as _, Result};
 use dialog_artifacts::tree::TreeStorageBridge;
@@ -22,7 +22,7 @@ use dialog_artifacts::{
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 // Only the native-only tests below construct one.
 #[cfg(not(feature = "web-integration-tests"))]
@@ -42,7 +42,7 @@ use dialog_capability::{Fork, Provider};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::{
     Rejection,
@@ -2551,8 +2551,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
 async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result<()> {
     use dialog_capability::access::{Access as AccessAttenuation, Retain};
     use dialog_credentials::{Credential as RawCredential, Ed25519Signer, SignerCredential};
-    use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
-    use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+    use dialog_effects::archive::prelude::ArchiveExt as _;
     use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
     use dialog_operator::DeriveOperator as _;
     use dialog_ucan::{Ucan, UcanDelegation};

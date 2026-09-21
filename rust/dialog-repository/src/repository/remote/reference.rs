@@ -1,6 +1,5 @@
 use crate::{Cell, CreateRemote, LoadRemote, RemoteAddress, SiteAddress};
 use dialog_capability::Did;
-use dialog_effects::memory::prelude::SpaceExt;
 use dialog_effects::memory::prelude::SpaceScope;
 
 /// A reference to a named remote within a repository.

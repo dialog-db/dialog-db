@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use dialog_capability::Fork;
 use dialog_capability::Provider;
 use dialog_common::{Buffer, ConditionalSync, Priority};
-use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt, CatalogScope};
+use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
@@ -15,6 +15,7 @@ pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
 
 use super::local::LocalIndex;
 use crate::RemoteRepository;
+use dialog_effects::archive::prelude::CatalogScope;
 
 /// The remote half of a [`NetworkedIndex`]: what a local read miss means.
 ///
@@ -298,7 +299,6 @@ mod tests {
     use parking_lot::Mutex;
 
     use super::{Hydrate, HydrationRequest, NetworkedIndex, RemoteFallback};
-    use crate::RepositoryArchiveExt as _;
     use crate::helpers::test_repo;
 
     /// An env that answers every hydration with "not found" and keeps the

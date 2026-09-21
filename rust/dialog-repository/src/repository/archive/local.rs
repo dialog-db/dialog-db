@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use dialog_capability::Provider;
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogScope;
-use dialog_effects::archive::prelude::*;
 use dialog_effects::archive::{Get, Put};
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
@@ -121,6 +120,8 @@ mod tests {
     use dialog_capability::Subject;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
+
+    use dialog_effects::archive::prelude::ArchiveExt as _;
 
     fn test_catalog(name: &str) -> CatalogScope {
         Subject::from(did!("key:zArchiveCasTest"))

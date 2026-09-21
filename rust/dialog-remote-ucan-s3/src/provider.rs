@@ -251,7 +251,6 @@ mod tests {
         use super::*;
         use dialog_common::Blake3Hash;
         use dialog_effects::blob::BlobError;
-        use dialog_effects::blob::prelude::{ArchiveBlobExt, BlobExt};
         use dialog_remote_s3::helpers::LocalS3;
 
         /// A one-shot access service: answers every POST with the given

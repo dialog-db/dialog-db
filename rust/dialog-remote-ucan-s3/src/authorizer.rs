@@ -97,14 +97,14 @@ fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, S3Error>
 /// `Subject -> Use -> V -> Memory -> Space -> Cell -> Attenuation`.
 ///
 /// `V` is the verb the claim sits under, which the leaf's own `Of`
-/// fixes: a claim reconstructed here lands under the same verb the
+/// fixes: a claim reconstructed here lands under the same method the
 /// client invoked it through, so the ability matched against the
 /// delegation is the one that was granted.
 fn memory_claim_from_args<V, C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
-    V: dialog_effects::Verb,
+    V: dialog_effects::Method,
     V::Of: Constraint,
-    dialog_capability::Subject: dialog_effects::AttenuateVerb<V>,
+    dialog_capability::Subject: dialog_effects::Chain<V>,
     C: Policy<Of = memory::Cell<V>> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
 {
@@ -112,7 +112,7 @@ where
     let cell: memory::Cell<V> = deserialize_from_args(args)?;
     let claim: C = deserialize_from_args(args)?;
     Ok(
-        dialog_effects::AttenuateVerb::verb(dialog_capability::Subject::from(subject.clone()))
+        dialog_effects::Chain::<V>::under(dialog_capability::Subject::from(subject.clone()))
             .attenuate(memory::Memory::<V>::new())
             .attenuate(space)
             .attenuate(cell)
@@ -124,16 +124,16 @@ where
 /// `Subject -> Use -> V -> Archive -> Catalog -> Block -> Attenuation`.
 fn archive_claim_from_args<V, C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
-    V: dialog_effects::Verb,
+    V: dialog_effects::Method,
     V::Of: Constraint,
-    dialog_capability::Subject: dialog_effects::AttenuateVerb<V>,
+    dialog_capability::Subject: dialog_effects::Chain<V>,
     C: Policy<Of = archive::Block<V>> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
 {
     let catalog: archive::Catalog<V> = deserialize_from_args(args)?;
     let claim: C = deserialize_from_args(args)?;
     Ok(
-        dialog_effects::AttenuateVerb::verb(dialog_capability::Subject::from(subject.clone()))
+        dialog_effects::Chain::<V>::under(dialog_capability::Subject::from(subject.clone()))
             .attenuate(archive::Archive::<V>::new())
             .attenuate(catalog)
             .attenuate(archive::Block::<V>::new())
@@ -147,15 +147,15 @@ where
 /// attenuation is deserialized from the args map.
 fn blob_claim_from_args<V, C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
-    V: dialog_effects::Verb,
+    V: dialog_effects::Method,
     V::Of: Constraint,
-    dialog_capability::Subject: dialog_effects::AttenuateVerb<V>,
+    dialog_capability::Subject: dialog_effects::Chain<V>,
     C: Policy<Of = blob::Blob<V>> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
 {
     let claim: C = deserialize_from_args(args)?;
     Ok(
-        dialog_effects::AttenuateVerb::verb(dialog_capability::Subject::from(subject.clone()))
+        dialog_effects::Chain::<V>::under(dialog_capability::Subject::from(subject.clone()))
             .attenuate(archive::Archive::<V>::new())
             .attenuate(blob::Blob::<V>::new())
             .attenuate(claim),
@@ -190,17 +190,15 @@ impl FromUcanArgs for memory::Resolve {
         // `Resolve` is a unit struct: it carries no arguments, so it is
         // constructed rather than deserialized. Reading it out of the
         // args map fails, since a map does not deserialize into a unit.
-        let space: memory::Space<dialog_effects::verb::Get> = deserialize_from_args(args)?;
-        let cell: memory::Cell<dialog_effects::verb::Get> = deserialize_from_args(args)?;
-        Ok(
-            dialog_effects::AttenuateVerb::<dialog_effects::verb::Get>::verb(
-                dialog_capability::Subject::from(subject.clone()),
-            )
-            .attenuate(memory::Memory::<dialog_effects::verb::Get>::new())
-            .attenuate(space)
-            .attenuate(cell)
-            .attenuate(memory::Resolve),
+        let space: memory::Space<dialog_effects::method::Get> = deserialize_from_args(args)?;
+        let cell: memory::Cell<dialog_effects::method::Get> = deserialize_from_args(args)?;
+        Ok(dialog_effects::Chain::<dialog_effects::method::Get>::under(
+            dialog_capability::Subject::from(subject.clone()),
         )
+        .attenuate(memory::Memory::<dialog_effects::method::Get>::new())
+        .attenuate(space)
+        .attenuate(cell)
+        .attenuate(memory::Resolve))
     }
 }
 impl FromUcanArgs for memory::Publish {
