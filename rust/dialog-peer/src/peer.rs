@@ -33,6 +33,7 @@
 //! narrows that to a derived (or supplied) key and the grants it was
 //! built with.
 
+use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 use dialog_capability::access::AuthorizeError;
@@ -69,8 +70,8 @@ impl<S: Clone> Clone for Peer<S> {
     }
 }
 
-impl<S: Clone> std::fmt::Debug for Peer<S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<S: Clone> fmt::Debug for Peer<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Peer")
             .field("did", &self.did())
             .field("branch", &self.inner.branch)
@@ -108,7 +109,9 @@ impl<S: Clone> Peer<S> {
     /// Start building a peer over `storage`.
     ///
     /// The storage decides persistence: a platform default persists, a
-    /// [`Storage::volatile`] peer leaves nothing behind.
+    /// [`Storage::volatile`] peer leaves nothing behind. Returns the
+    /// builder rather than a peer because opening is async and fallible.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(storage: Storage<S>) -> PeerBuilder<S> {
         PeerBuilder {
             storage,
@@ -290,7 +293,7 @@ impl<S: Clone> PeerBuilder<S> {
 impl<S> PeerBuilder<S>
 where
     S: PeerSpace + Resource<Location>,
-    S::Error: std::fmt::Display,
+    S::Error: fmt::Display,
 {
     /// Open the peer at `location`: load its credential, or generate and
     /// persist one if none is there.

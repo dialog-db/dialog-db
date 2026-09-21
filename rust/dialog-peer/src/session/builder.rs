@@ -20,8 +20,9 @@ const SESSION_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 enum SessionKey {
     /// Derived from the peer key and this context.
     Derived(Vec<u8>),
-    /// Supplied by the caller.
-    Supplied(SignerCredential),
+    /// Supplied by the caller. Boxed: a credential is an order of
+    /// magnitude larger than a context.
+    Supplied(Box<SignerCredential>),
 }
 
 /// Builder for a [`Session`]. Created by [`Peer::session`].
@@ -49,7 +50,7 @@ impl<S: Clone> SessionBuilder<S> {
     /// its DID is known before `build`, so a certificate someone else
     /// issued to it can be passed through [`grant`](Self::grant).
     pub fn credential(mut self, credential: SignerCredential) -> Self {
-        self.key = SessionKey::Supplied(credential);
+        self.key = SessionKey::Supplied(Box::new(credential));
         self
     }
 
