@@ -90,6 +90,14 @@ http-body-util = "0.1"
 hyper = "1"
 hyper-util = "0.1"
 ipld-core = { version = "0.4", features = ["serde"] }
+# Pinned exactly, not by caret: `tonk-rtc` builds its endpoint with iroh's
+# `unstable-custom-transports`, and an `Endpoint` from a different iroh is a
+# different type. An exact pin makes a divergence a resolver error rather than
+# a puzzling mismatch at the call site. `iroh-base` moves with it, since
+# `IrohAddress` wraps an `EndpointAddr` from there.
+iroh = { version = "=1.2.0", default-features = false }
+iroh-base = { version = "=1.2.0" }
+form_urlencoded = "1"
 # getrandom = "0.3"
 getrandom = "0.2"
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
