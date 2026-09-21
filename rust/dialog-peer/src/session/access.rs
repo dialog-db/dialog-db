@@ -577,12 +577,12 @@ mod tests {
 
     async fn operator(name: &str) -> (Session<VolatileSpace>, Peer<VolatileSpace>) {
         let storage = Storage::volatile();
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique(name)))
             .await
             .unwrap();
-        let operator = profile.session(b"test").build().await.unwrap();
+        let operator = profile.session(profile.derive(b"test").await.unwrap()).build().await.unwrap();
         (operator, profile)
     }
 
@@ -913,13 +913,13 @@ mod tests {
     async fn it_leaves_no_session_residue() -> Result<()> {
         let (operator, profile) = {
             let storage = Storage::volatile();
-            let profile = Peer::new(storage.clone())
+            let profile = Peer::new().storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique("no-residue")))
                 .await
                 .unwrap();
             let operator = profile
-                .session(b"test")
+                .session(profile.derive(b"test").await.unwrap())
                 .allow(Subject::any())
                 .build()
                 .await
@@ -972,13 +972,13 @@ mod tests {
     async fn it_composes_the_session_link_over_a_retained_chain() -> Result<()> {
         let (operator, profile) = {
             let storage = Storage::volatile();
-            let profile = Peer::new(storage.clone())
+            let profile = Peer::new().storage(storage.clone())
                 .network(Network::default())
                 .open(Location::profile(unique("compose")))
                 .await
                 .unwrap();
             let operator = profile
-                .session(b"test")
+                .session(profile.derive(b"test").await.unwrap())
                 .allow(Subject::any())
                 .build()
                 .await
@@ -1026,10 +1026,10 @@ mod tests {
     #[dialog_common::test]
     async fn it_bounds_in_memory_sessions_without_retaining_them() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .open(Location::profile(unique("bounded-session")))
             .await?;
-        let setup = profile.session(b"setup").build().await?;
+        let setup = profile.session(profile.derive(b"setup").await?).build().await?;
         let space = Ed25519Signer::generate().await?;
         let now = now_s();
         let upstream_end = now + 7200;
@@ -1055,8 +1055,13 @@ mod tests {
             .await?;
         for session_end in [now + 3600, now + 10800, now - 60] {
             let operator = profile
-                .session(session_end.to_le_bytes())
-                .allow_until(Subject::any(), Timestamp::try_from(session_end as i128)?)
+                .session(profile.derive(session_end.to_le_bytes()).await?)
+                .allow(
+                    profile
+                        .access()
+                        .claim(Subject::any())
+                        .expires(Timestamp::try_from(session_end as i128)?),
+                )
                 .build()
                 .await?;
             assert_eq!(operator.delegations()?.revision(), revision);
@@ -1102,14 +1107,24 @@ mod tests {
     #[dialog_common::test]
     async fn it_selects_a_session_grant_covering_the_requested_window() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .open(Location::profile(unique("session-windows")))
             .await?;
         let now = now_s();
         let operator = profile
-            .session(b"test")
-            .allow_until(Subject::any(), Timestamp::try_from((now - 60) as i128)?)
-            .allow_until(Subject::any(), Timestamp::try_from((now + 3600) as i128)?)
+            .session(profile.derive(b"test").await?)
+            .allow(
+                profile
+                    .access()
+                    .claim(Subject::any())
+                    .expires(Timestamp::try_from((now - 60) as i128)?),
+            )
+            .allow(
+                profile
+                    .access()
+                    .claim(Subject::any())
+                    .expires(Timestamp::try_from((now + 3600) as i128)?),
+            )
             .build()
             .await?;
         let mut claim = Prove::<Ucan>::new(

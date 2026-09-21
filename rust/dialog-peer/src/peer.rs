@@ -13,13 +13,13 @@
 //! # use dialog_peer::Peer;
 //! # use dialog_storage::provider::storage::{Storage, VolatileSpace};
 //! # async fn example() -> anyhow::Result<()> {
-//! let alice = Peer::new(Storage::<VolatileSpace>::volatile())
+//! let alice = Peer::new().storage(Storage::<VolatileSpace>::volatile())
 //!     .branch("main")
 //!     .open(Location::profile("alice"))
 //!     .await?;
 //!
 //! let job = alice
-//!     .session(b"refactor")
+//!     .session(alice.derive(b"refactor").await?)
 //!     .allow(Subject::any())
 //!     .build()
 //!     .await?;
@@ -51,6 +51,7 @@ use dialog_varsig::{Did, Principal};
 use parking_lot::Mutex;
 
 use crate::session::access::ChainCache;
+use crate::session::builder::derive_credential;
 use crate::{PeerError, PeerSpace, Session, SessionBuilder};
 
 /// A site identified by a key, holding replicas.
@@ -105,22 +106,25 @@ struct Inner<S: Clone> {
     speculation: Arc<dialog_artifacts::PreloadQueue>,
 }
 
-impl<S: Clone> Peer<S> {
-    /// Start building a peer over `storage`.
-    ///
-    /// The storage decides persistence: a platform default persists, a
-    /// [`Storage::volatile`] peer leaves nothing behind. Returns the
-    /// builder rather than a peer because opening is async and fallible.
+/// The storage slot of a [`PeerBuilder`] before [`PeerBuilder::storage`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Unset;
+
+impl Peer<Unset> {
+    /// Start building a peer. [`PeerBuilder::storage`] fixes the space
+    /// type; the builder exists because opening is async and fallible.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(storage: Storage<S>) -> PeerBuilder<S> {
+    pub fn new() -> PeerBuilder {
         PeerBuilder {
-            storage,
+            storage: Unset,
             network: Network::default(),
             directory: Directory::Current,
             branch: ACCESS_BRANCH.to_string(),
         }
     }
+}
 
+impl<S: Clone> Peer<S> {
     /// The peer's DID.
     pub fn did(&self) -> Did {
         self.inner.credential.did()
@@ -207,13 +211,21 @@ impl<S: Clone> Peer<S> {
         &self.inner.speculation
     }
 
-    /// Start a session derived from this peer's key with `context`.
+    /// Derive a session credential from this peer's key and `context`.
     ///
     /// Derivation is deterministic per `(peer, context)`, so a grant
     /// issued to a derived DID is reusable across runs. Pass a random
-    /// context for a disposable key.
-    pub fn session(&self, context: impl Into<Vec<u8>>) -> SessionBuilder<S> {
-        SessionBuilder::derive(self.clone(), context.into())
+    /// context for a disposable key. Requires an ed25519 peer key.
+    pub async fn derive(&self, context: impl AsRef<[u8]>) -> Result<SignerCredential, PeerError> {
+        derive_credential(&self.inner.credential, context.as_ref()).await
+    }
+
+    /// Start a session acting as `credential`: one this peer
+    /// [derived](Self::derive), or any other signer. The peer mints the
+    /// session's grants to it at build, so a supplied key is constrained
+    /// exactly as a derived one is.
+    pub fn session(&self, credential: impl Into<SignerCredential>) -> SessionBuilder<S> {
+        SessionBuilder::new(self.clone(), credential.into())
     }
 }
 
@@ -260,15 +272,16 @@ where
     }
 }
 
-/// Builder for a [`Peer`]. Created by [`Peer::new`].
-pub struct PeerBuilder<S: Clone> {
-    storage: Storage<S>,
+/// Builder for a [`Peer`]. Created by [`Peer::new`]; `St` is the storage
+/// slot, [`Unset`] until [`storage`](Self::storage) fixes the space type.
+pub struct PeerBuilder<St = Unset> {
+    storage: St,
     network: Network,
     directory: Directory,
     branch: String,
 }
 
-impl<S: Clone> PeerBuilder<S> {
+impl<St> PeerBuilder<St> {
     /// Set the network dispatch provider. Defaults to [`Network::default`].
     pub fn network(mut self, network: Network) -> Self {
         self.network = network;
@@ -290,7 +303,22 @@ impl<S: Clone> PeerBuilder<S> {
     }
 }
 
-impl<S> PeerBuilder<S>
+impl PeerBuilder<Unset> {
+    /// The storage the peer's spaces are mounted in.
+    ///
+    /// The storage decides persistence: a platform default persists, a
+    /// [`Storage::volatile`] peer leaves nothing behind.
+    pub fn storage<S: Clone>(self, storage: Storage<S>) -> PeerBuilder<Storage<S>> {
+        PeerBuilder {
+            storage,
+            network: self.network,
+            directory: self.directory,
+            branch: self.branch,
+        }
+    }
+}
+
+impl<S> PeerBuilder<Storage<S>>
 where
     S: PeerSpace + Resource<Location>,
     S::Error: fmt::Display,
@@ -317,7 +345,7 @@ where
     }
 }
 
-impl<S: PeerSpace> PeerBuilder<S> {
+impl<S: PeerSpace> PeerBuilder<Storage<S>> {
     /// Build the peer over a credential whose space is already mounted in
     /// the storage, then open its registry branch through the peer itself.
     ///
@@ -403,8 +431,8 @@ mod tests {
         let storage = Storage::<VolatileSpace>::volatile();
         let location = Location::temp(unique_name("peer"));
 
-        let first = Peer::new(storage.clone()).open(location.clone()).await?;
-        let second = Peer::new(storage).open(location).await?;
+        let first = Peer::new().storage(storage.clone()).open(location.clone()).await?;
+        let second = Peer::new().storage(storage).open(location).await?;
 
         assert_eq!(first.did(), second.did());
         Ok(())
@@ -413,7 +441,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_refuses_to_load_a_missing_peer() -> Result<()> {
         let storage = Storage::<VolatileSpace>::volatile();
-        let result = Peer::new(storage)
+        let result = Peer::new().storage(storage)
             .load(Location::temp(unique_name("missing")))
             .await;
         assert!(matches!(result, Err(PeerError::Open(_))));
@@ -424,13 +452,13 @@ mod tests {
     /// Their own keys differ per context and are stable per context.
     #[dialog_common::test]
     async fn it_derives_sessions_deterministically_per_context() -> Result<()> {
-        let peer = Peer::new(Storage::<VolatileSpace>::volatile())
+        let peer = Peer::new().storage(Storage::<VolatileSpace>::volatile())
             .open(Location::temp(unique_name("sessions")))
             .await?;
 
-        let a = peer.session(b"a").build().await?;
-        let again = peer.session(b"a").build().await?;
-        let b = peer.session(b"b").build().await?;
+        let a = peer.session(peer.derive(b"a").await?).build().await?;
+        let again = peer.session(peer.derive(b"a").await?).build().await?;
+        let b = peer.session(peer.derive(b"b").await?).build().await?;
 
         assert_eq!(a.did(), again.did());
         assert_ne!(a.did(), b.did());
@@ -442,14 +470,13 @@ mod tests {
     /// A supplied credential is the session key; the peer still grants it.
     #[dialog_common::test]
     async fn it_builds_a_session_over_a_supplied_credential() -> Result<()> {
-        let peer = Peer::new(Storage::<VolatileSpace>::volatile())
+        let peer = Peer::new().storage(Storage::<VolatileSpace>::volatile())
             .open(Location::temp(unique_name("supplied")))
             .await?;
         let agent = Ed25519Signer::generate().await?;
 
         let session = peer
-            .session(b"ignored")
-            .credential(SignerCredential::from(agent.clone()))
+            .session(agent.clone())
             .allow(Subject::any())
             .build()
             .await?;
@@ -473,7 +500,7 @@ mod tests {
     /// and proves for itself without a session.
     #[dialog_common::test]
     async fn it_performs_as_the_peer_itself() -> Result<()> {
-        let peer = Peer::new(Storage::<VolatileSpace>::volatile())
+        let peer = Peer::new().storage(Storage::<VolatileSpace>::volatile())
             .open(Location::temp(unique_name("self")))
             .await?;
 
@@ -500,16 +527,16 @@ mod tests {
     /// retains into it, and a second session sees what the first retained.
     #[dialog_common::test]
     async fn it_shares_the_registry_across_sessions() -> Result<()> {
-        let peer = Peer::new(Storage::<VolatileSpace>::volatile())
+        let peer = Peer::new().storage(Storage::<VolatileSpace>::volatile())
             .open(Location::temp(unique_name("shared")))
             .await?;
         let space = Ed25519Signer::generate().await?;
 
-        let first = peer.session(b"first").allow(Subject::any()).build().await?;
+        let first = peer.session(peer.derive(b"first").await?).allow(Subject::any()).build().await?;
         retain(&first, &peer.did(), &space).await;
 
         let second = peer
-            .session(b"second")
+            .session(peer.derive(b"second").await?)
             .allow(Subject::any())
             .build()
             .await?;
@@ -531,7 +558,7 @@ mod tests {
     async fn it_proves_from_the_named_branch() -> Result<()> {
         let storage = Storage::<VolatileSpace>::volatile();
         let location = Location::temp(unique_name("named-branch"));
-        let peer = Peer::new(storage.clone())
+        let peer = Peer::new().storage(storage.clone())
             .branch("account/test")
             .open(location.clone())
             .await?;
@@ -545,7 +572,7 @@ mod tests {
             .await?;
         assert_eq!(proof.proofs().len(), 1);
 
-        let on_main = Peer::new(storage).open(location).await?;
+        let on_main = Peer::new().storage(storage).open(location).await?;
         assert!(
             on_main.registry()?.revision().is_none(),
             "main holds nothing"

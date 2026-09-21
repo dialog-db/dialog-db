@@ -4,84 +4,107 @@ use std::sync::Arc;
 
 use super::{PeerSpace, Session};
 use crate::Peer;
-use dialog_capability::{Ability, Capability, Constraint};
+use dialog_capability::{Ability, Capability, Constraint, Subject};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_identity::Authority;
+use dialog_identity::access::Claim;
 use dialog_ucan::{Scope, UcanCertificate};
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
-use dialog_varsig::Principal as _;
+use dialog_varsig::{Did, Principal as _};
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use dialog_varsig::Signer;
 
 const SESSION_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 
-/// Where a session's acting key comes from.
-enum SessionKey {
-    /// Derived from the peer key and this context.
-    Derived(Vec<u8>),
-    /// Supplied by the caller. Boxed: a credential is an order of
-    /// magnitude larger than a context.
-    Supplied(Box<SignerCredential>),
+/// A scope the peer delegates to the session at build.
+///
+/// Made from a bare capability (unbounded, claimed by the peer) or from a
+/// [`Claim`], which carries its validity window and names who claimed it.
+/// A claim by anyone but the peer is refused at build: the peer is the
+/// only issuer of a session's grants.
+#[derive(Debug, Clone)]
+pub struct Allowance {
+    scope: Scope,
+    issuer: Option<Did>,
+    not_before: Option<Timestamp>,
+    expiration: Option<Timestamp>,
+}
+
+impl<T> From<Capability<T>> for Allowance
+where
+    T: Constraint,
+    Capability<T>: Ability,
+{
+    fn from(capability: Capability<T>) -> Self {
+        Allowance {
+            scope: Scope::from(&capability),
+            issuer: None,
+            not_before: None,
+            expiration: None,
+        }
+    }
+}
+
+impl From<Subject> for Allowance {
+    fn from(subject: Subject) -> Self {
+        Capability::from(subject).into()
+    }
+}
+
+impl<C> From<Claim<'_, C>> for Allowance
+where
+    C: Constraint,
+    Capability<C>: Ability,
+{
+    fn from(claim: Claim<'_, C>) -> Self {
+        Allowance {
+            scope: Scope::from(claim.capability()),
+            issuer: Some(claim.issuer()),
+            not_before: claim.activation(),
+            expiration: claim.expiration(),
+        }
+    }
 }
 
 /// Builder for a [`Session`]. Created by [`Peer::session`].
 pub struct SessionBuilder<S: Clone> {
     peer: Peer<S>,
-    key: SessionKey,
-    allowed: Vec<(Scope, Option<Timestamp>)>,
+    credential: SignerCredential,
+    allowed: Vec<Allowance>,
     certificates: Vec<UcanCertificate>,
 }
 
 impl<S: Clone> SessionBuilder<S> {
-    pub(crate) fn derive(peer: Peer<S>, context: Vec<u8>) -> Self {
+    pub(crate) fn new(peer: Peer<S>, credential: SignerCredential) -> Self {
         Self {
             peer,
-            key: SessionKey::Derived(context),
+            credential,
             allowed: Vec::new(),
             certificates: Vec::new(),
         }
     }
 
-    /// Use `credential` as the session key instead of deriving one.
+    /// The session's DID. Known before build, so a certificate someone
+    /// else issued to it can be passed through [`grant`](Self::grant).
+    pub fn did(&self) -> Did {
+        self.credential.did()
+    }
+
+    /// Allow a scope: the peer delegates it to the session at build.
     ///
-    /// The peer still mints the session's grants to it, so a supplied key
-    /// is constrained exactly as a derived one is. Unlike a derived key,
-    /// its DID is known before `build`, so a certificate someone else
-    /// issued to it can be passed through [`grant`](Self::grant).
-    pub fn credential(mut self, credential: SignerCredential) -> Self {
-        self.key = SessionKey::Supplied(Box::new(credential));
-        self
-    }
-
-    /// Allow a capability: the peer delegates it to the session at build.
-    pub fn allow<T, C>(mut self, capability: C) -> Self
-    where
-        T: Constraint,
-        C: Into<Capability<T>>,
-        Capability<T>: Ability,
-    {
-        let cap = capability.into();
-        self.allowed.push((Scope::from(&cap), None));
-        self
-    }
-
-    /// Allow a capability until `expiration`, held only in memory.
-    pub fn allow_until<T, C>(mut self, capability: C, expiration: Timestamp) -> Self
-    where
-        T: Constraint,
-        C: Into<Capability<T>>,
-        Capability<T>: Ability,
-    {
-        let cap = capability.into();
-        self.allowed.push((Scope::from(&cap), Some(expiration)));
+    /// Takes a capability for an unbounded grant, or a [`Claim`] made
+    /// through the peer's [`access`](Peer::access) for a bounded one:
+    /// `peer.access().claim(cap).expires(t)`.
+    pub fn allow(mut self, allowance: impl Into<Allowance>) -> Self {
+        self.allowed.push(allowance.into());
         self
     }
 
     /// Hold a pre-minted certificate as a session grant.
     ///
-    /// For a certificate whose audience is this session's key: one issued
-    /// to a supplied credential, or to a derived DID from an earlier run.
+    /// For a certificate whose audience is this session's key, which
+    /// [`did`](Self::did) names before build.
     pub fn grant(mut self, certificate: UcanCertificate) -> Self {
         self.certificates.push(certificate);
         self
@@ -89,33 +112,41 @@ impl<S: Clone> SessionBuilder<S> {
 }
 
 impl<S: PeerSpace> SessionBuilder<S> {
-    /// Build the session: resolve its key and mint its grants.
+    /// Build the session: mint its grants to its key.
     ///
-    /// Every allowed scope becomes a peer-to-session delegation held **in
+    /// Every allowance becomes a peer-to-session delegation held **in
     /// memory**. Nothing is persisted: a derived key re-mints identical
     /// authority on every build, and persisting it would only accumulate
     /// (one immortal certificate per session was exactly the field
     /// pathology).
     pub async fn build(self) -> Result<Session<S>, PeerError> {
-        let peer_signer = ed25519_signer(self.peer.credential())?;
-        let session_signer: dialog_credentials::Signer = match self.key {
-            SessionKey::Derived(context) => derive_session(&peer_signer, &context).await?.into(),
-            SessionKey::Supplied(credential) => credential.signer().clone(),
-        };
+        let peer_did = self.peer.did();
+        let peer_signer = self.peer.credential().signer().clone();
+        let session_signer = self.credential.signer().clone();
         let session_did = session_signer.did();
         let authority = Authority::new("session", peer_signer.clone(), session_signer);
 
         let mut grants = self.certificates;
         grants.reserve(self.allowed.len());
-        for (scope, expiration) in &self.allowed {
+        for allowance in &self.allowed {
+            if let Some(issuer) = &allowance.issuer
+                && *issuer != peer_did
+            {
+                return Err(PeerError::Delegation(format!(
+                    "allowance claimed by {issuer}, not by this peer ({peer_did})"
+                )));
+            }
             let mut builder = DelegationBuilder::new()
-                .issuer(dialog_credentials::Signer::from(peer_signer.clone()))
+                .issuer(peer_signer.clone())
                 .audience(&session_did)
-                .subject(scope.subject.clone())
-                .command(scope.command.segments().clone())
-                .policy(scope.policy());
-            if let Some(expiration) = expiration {
-                builder = builder.expiration(*expiration);
+                .subject(allowance.scope.subject.clone())
+                .command(allowance.scope.command.segments().clone())
+                .policy(allowance.scope.policy());
+            if let Some(not_before) = allowance.not_before {
+                builder = builder.not_before(not_before);
+            }
+            if let Some(expiration) = allowance.expiration {
+                builder = builder.expiration(expiration);
             }
             let delegation = builder
                 .try_build()
@@ -128,18 +159,22 @@ impl<S: PeerSpace> SessionBuilder<S> {
     }
 }
 
-/// Extract the ed25519 signer from a credential.
+/// Derive a session credential from `credential` and `context`.
 ///
-/// Session derivation currently assumes an ed25519 peer key (the blake3
-/// derivation and `did:key` session identity are ed25519-specific). A peer
-/// backed by another algorithm is rejected here rather than deriving a
-/// wrong session key.
-fn ed25519_signer(credential: &SignerCredential) -> Result<Ed25519Signer, PeerError> {
-    credential
+/// Deterministic per `(key, context)`. Assumes an ed25519 key (the blake3
+/// derivation and `did:key` session identity are ed25519-specific); a
+/// peer backed by another algorithm is rejected rather than deriving a
+/// wrong key.
+pub(crate) async fn derive_credential(
+    credential: &SignerCredential,
+    context: &[u8],
+) -> Result<SignerCredential, PeerError> {
+    let signer = credential
         .signer()
         .as_ed25519()
         .cloned()
-        .ok_or_else(|| PeerError::Key("session derivation requires an ed25519 peer".into()))
+        .ok_or_else(|| PeerError::Key("session derivation requires an ed25519 peer".into()))?;
+    Ok(SignerCredential::from(derive_session(&signer, context).await?))
 }
 
 async fn derive_session(

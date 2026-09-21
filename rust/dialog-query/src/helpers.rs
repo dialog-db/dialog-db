@@ -1587,12 +1587,12 @@ where
 
 impl BenchEnv<Session<VolatileSpace>> {
     async fn with_storage(storage: Storage<VolatileSpace>) -> Result<Self> {
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("bench")))
             .await?;
         let operator = profile
-            .session(b"bench")
+            .session(profile.derive(b"bench").await?)
             .allow(Subject::any())
             .build()
             .await?;
@@ -1603,12 +1603,12 @@ impl BenchEnv<Session<VolatileSpace>> {
 #[cfg(not(target_arch = "wasm32"))]
 impl BenchEnv<Session<NativeTempSpace>> {
     async fn with_storage(storage: Storage<NativeTempSpace>) -> Result<Self> {
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("bench")))
             .await?;
         let operator = profile
-            .session(b"bench")
+            .session(profile.derive(b"bench").await?)
             .allow(Subject::any())
             .build()
             .await?;
@@ -1621,12 +1621,12 @@ impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
     async fn with_storage(
         storage: Storage<::dialog_storage::provider::storage::WebSpace>,
     ) -> Result<Self> {
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .network(Network::default())
             .open(Location::profile(unique_name("bench")))
             .await?;
         let operator = profile
-            .session(b"bench")
+            .session(profile.derive(b"bench").await?)
             .allow(Subject::any())
             .build()
             .await?;

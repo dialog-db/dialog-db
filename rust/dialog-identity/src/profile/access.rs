@@ -93,6 +93,26 @@ impl<'a, C: Constraint> Claim<'a, C> {
     }
 
     /// Chain into a delegation to the given audience.
+    /// The credential making the claim.
+    pub fn issuer(&self) -> Did {
+        self.by.did()
+    }
+
+    /// The capability claimed.
+    pub fn capability(&self) -> &Capability<C> {
+        &self.capability
+    }
+
+    /// When the claim starts, when bounded.
+    pub fn activation(&self) -> Option<Timestamp> {
+        self.not_before
+    }
+
+    /// When the claim ends, when bounded.
+    pub fn expiration(&self) -> Option<Timestamp> {
+        self.expiration
+    }
+
     pub fn delegate(self, audience: impl Into<Did>) -> Delegate<'a, C> {
         Delegate {
             claim: self,

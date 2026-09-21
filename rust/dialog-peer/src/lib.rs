@@ -21,7 +21,7 @@
 pub use dialog_identity::*;
 
 mod session;
-pub use session::{PeerError, PeerSpace, Session, SessionBuilder};
+pub use session::{Allowance, PeerError, PeerSpace, Session, SessionBuilder};
 
 mod peer;
 pub use peer::*;

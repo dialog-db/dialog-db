@@ -1037,11 +1037,11 @@ mod tests {
             .create(stage.repository.credential().clone())
             .perform(&destination)
             .await?;
-        let peer = dialog_peer::Peer::new(destination)
+        let peer = dialog_peer::Peer::new().storage(destination)
             .attach(stage.profile.credential().clone())
             .await?;
         Ok(peer
-            .session(b"snapshot-destination")
+            .session(peer.derive(b"snapshot-destination").await?)
             .allow(Subject::any())
             .build()
             .await?)

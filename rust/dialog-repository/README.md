@@ -17,13 +17,14 @@ use dialog_storage::Storage;
 let storage = Storage::default();
 
 // Open (load-or-create) the peer at its location.
-let alice = Peer::new(storage)
+let alice = Peer::new()
+    .storage(storage)
     .open(Location::profile("alice"))
     .await?;
 
 // A session scoped to this application.
 let session = alice
-    .session(b"my-app")
+    .session(alice.derive(b"my-app").await?)
     .allow(Subject::any())
     .build()
     .await?;

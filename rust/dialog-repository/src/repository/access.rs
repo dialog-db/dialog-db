@@ -362,7 +362,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_migrates_compacts_and_drains() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .open(Location::profile(unique_name("migrate")))
             .await?;
         let space = signer().await;
@@ -462,7 +462,7 @@ mod tests {
         use dialog_ucan_core::command::Command as UcanCommand;
 
         let storage = Storage::volatile();
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .network(dialog_network::Network::default())
             .open(Location::profile(unique_name("migrate-prove")))
             .await?;
@@ -481,7 +481,7 @@ mod tests {
         profile.access().migrate().perform(&storage).await?;
 
         let operator = profile
-            .session(b"test")
+            .session(profile.derive(b"test").await?)
             .allow(dialog_capability::Subject::any())
             .build()
             .await?;
@@ -520,7 +520,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_migrates_the_filesystem_store() -> Result<()> {
         let storage = Storage::temp();
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .open(Location::profile(unique_name("migrate-fs")))
             .await?;
         let space = signer().await;
@@ -581,7 +581,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_completes_the_drain_on_rerun() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .open(Location::profile(unique_name("migrate-rerun")))
             .await?;
         let space = signer().await;
@@ -630,7 +630,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_is_a_noop_on_an_empty_store() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new(storage.clone())
+        let profile = Peer::new().storage(storage.clone())
             .open(Location::profile(unique_name("migrate-empty")))
             .await?;
         let retained = profile.access().migrate().perform(&storage).await?;

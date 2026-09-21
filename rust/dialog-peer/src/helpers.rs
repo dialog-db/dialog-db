@@ -42,7 +42,7 @@ pub fn unique_name(prefix: &str) -> String {
 
 /// A fresh volatile peer under a unique name.
 pub async fn test_peer() -> Peer<VolatileSpace> {
-    Peer::new(Storage::volatile())
+    Peer::new().storage(Storage::volatile())
         .open(Location::profile(unique_name("test")))
         .await
         .expect("test_peer: failed to open peer")
@@ -57,7 +57,7 @@ pub async fn test_session() -> Session<VolatileSpace> {
 pub async fn test_session_with_peer() -> (Session<VolatileSpace>, Peer<VolatileSpace>) {
     let peer = test_peer().await;
     let session = peer
-        .session(b"test")
+        .session(peer.derive(b"test").await.expect("failed to derive the session key"))
         .allow(Subject::any())
         .build()
         .await

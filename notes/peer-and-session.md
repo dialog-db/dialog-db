@@ -62,18 +62,19 @@ is located by facts in that space.
 Implemented today (`dialog-peer`):
 
 ```rust
-let alice = Peer::new(disk)                // Storage<S>; volatile for tests
+let alice = Peer::new()
+    .storage(disk)                         // Storage<S>; volatile for tests
     .network(net)                          // optional, Network::default()
-    .base(Directory::Current)              // where space names resolve, until the registry
-    .branch("main")                        // registry + default proof source
+    .base(Directory::Current)              // optional; where space names resolve, until the registry
+    .branch("main")                        // optional; registry + default proof source
     .open(Location::profile("alice"))      // or .load(..), or .attach(credential)
     .await?;
 
-let job = alice.session(b"refactor")       // derived key, deterministic per context
-    .credential(signer)                    // or a supplied SignerCredential
-    .allow(scope)                          // grants minted at build
-    .allow_until(scope, t)                 // bounded
-    .grant(certificate)                    // pre-minted, when the audience was known
+let key = alice.derive(b"refactor").await?;      // deterministic per (peer, context)
+let job = alice.session(key)                     // or any other SignerCredential
+    .allow(Subject::any())                       // unbounded, minted at build
+    .allow(alice.access().claim(cap).expires(t)) // bounded: the claim carries the window
+    .grant(certificate)                          // pre-minted to the session's key
     .build()
     .await?;
 
@@ -81,26 +82,28 @@ alice.space("notes").open().perform(&job).await?;   // named space under the pee
 branch.revision().resolve().perform(&alice).await?; // the peer is the unconstrained env
 ```
 
-`Peer::new` takes the storage rather than a `.storage()` step because the
-storage fixes the space type parameter and Rust cannot infer it from a
-later call.
+The session key is always a `SignerCredential`, known before build:
+`derive` is the deterministic path, any other signer is the supplied one,
+and `SessionBuilder::did` names the audience a certificate for `grant`
+must carry. A bare capability in `allow` is an unbounded claim by the
+peer; a `Claim` made through `peer.access()` carries its window, and a
+claim by any other issuer is refused at build.
 
 Planned (steps 4 and 5 below):
 
 ```rust
-let tonk = alice.connect(did).await?;      // address book lookup; NoAddress otherwise
-let job = alice.session(b"refactor")
+let job = alice.session(alice.derive(b"refactor").await?)
     .using(branch)                         // extra proof layers, repeatable
     .build().await?;
 Repository::open("notes").perform(&job).await?;            // registry lookup, mounts
-let there = job.at(&tonk);                                 // bound env
+let there = job.connect(did).await?;                       // registry lookup; NoAddress otherwise
 let head = branch.revision().resolve().perform(&there).await?;   // same effect, remote
 ```
 
 Rules the surface encodes:
 
 - `Peer` is the unconstrained env: `perform(&alice)` acts with the peer's
-  own key and proves from its branch. `alice.session(..)` narrows it and
+  own key and proves from its branch. `alice.session(key)` narrows it and
   can add proof layers, never swap storage or network.
 - Every session starts from a key that exists. `open` for a root (load or
   generate and persist), `derive` for a child. There is no session that
@@ -108,7 +111,10 @@ Rules the surface encodes:
 - `derive` is deterministic per `(peer, context)` so that a grant issued
   to a derived DID is reusable across runs. A caller that wants a
   disposable key passes a random context (the worker does).
-- `connect` reads the registry and never resolves or records on its own.
+- `connect` is on the session: it reads the registry, proves `Connect`
+  once, and returns the env bound to that peer. A remote peer is never
+  derived or opened, only bound. `connect` never resolves or records on
+  its own.
   Introducing a peer is asserting `Peer { did, address }` facts. Resolution
   (did:web documents, Pkarr/DNS for did:key) is a separate operation that
   produces the same facts, and once recorded they are pinned.
@@ -126,7 +132,7 @@ binding rather than per effect.
   chain-derived vocabulary (#524). Proven to whoever serves the read: the
   session's own env locally, the remote peer over the wire.
 - **On the peer's own subject:** system operations, `space::Load` is
-  already shaped this way. New: `Connect { peer }`. Proven at `session.at(peer)`
+  already shaped this way. New: `Connect { peer }`. Proven at `session.connect(peer)`
   and ridden by every effect through the binding. A session without it
   cannot bind a remote at all, and a local miss during hydration is a
   plain not-found instead of a fetch. This is what makes "read what is
@@ -154,7 +160,7 @@ a list of bound envs in priority order.
 
 ```rust
 let Upstream::Remote { peer, subject, branch: name, tree } = upstream;
-let there  = env.at(&env.peer().connect(peer).await?);
+let there  = env.connect(peer).await?;
 let remote = Repository::from(subject).branch(name);
 let head   = remote.revision().resolve().perform(&there).await?;
 head.verify()?;
@@ -199,8 +205,8 @@ by type.
 
 | today | becomes |
 | --- | --- |
-| `Profile::open(name).at(dir)` | `Peer::new(storage).open(Location)` |
-| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.session(ctx).allow(..).build()` |
+| `Profile::open(name).at(dir)` | `Peer::new().storage(storage).open(Location)` |
+| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.session(peer.derive(ctx).await?).allow(..).build()` |
 | `Operator<S>` | `Session<S>`; the crate is `dialog-peer` |
 | `Authority { profile, operator, account }` | `(peer, session)`; account is a link in the proof chain |
 | `OperatorBuilder::access_branch(name)` (#526) | `.using(BranchReference)` on the session; the peer's `.branch(..)` is the default |
@@ -230,6 +236,27 @@ by type.
 - Per-effect versus per-binding authorization for reads against the tonk
   service: proposed per-binding, bounded by the session TTL, with the
   access-branch epoch as early exit.
+- Names or subjects and locations. `peer.space(name).open()` resolves the
+  name against the base directory (`Location::new(base, name)`) and loads
+  the credential found there; the registry plan keeps names as a lookup
+  (name, subject, address). Review on #527 proposes dropping names from
+  the peer API, `peer.repository(did).open().at(location).perform(&job)`,
+  subject up front and placement explicit, which removes `base` as well.
+  What it touches: `SpaceHandle` and `RepositoryExt`, `space::Load` and
+  `space::Create` by name, 25 test sites here, and tonk's registry, which
+  is name-keyed. To settle first: what a caller names when creating a
+  repository (no DID exists until the key does), and whether a name index
+  is then a product-layer fact rather than a peer API.
+- One type or two. With the session key always a credential, a session is
+  a peer plus `(authority, grants)`, and `Peer::as_session` is the
+  embedding with empty grants. The review proposes an enum (`Root`,
+  `Delegate`, and after step 5 `Bound { remote }`) so a session is a
+  constrained peer, not a second type. What the split buys is a
+  type-level "unconstrained" (`perform(&peer)`) that no dependent asks
+  for by type: `Peer<_>` appears in their signatures only as the thing to
+  derive from or read a DID off. What it costs is `session.peer()` at 41
+  sites and two builders. Proposed: fold in its own PR after this one,
+  since it touches every `Provider` impl in the crate.
 
 ## Order
 
@@ -250,7 +277,7 @@ Each step is one PR and leaves tonk compiling.
 4. Registry facts (`Peer`, `PeerAddress`, `Replica`) in the peer's branch;
    `connect`; `Upstream::Remote { peer, subject }`; replace the remote
    cells and tonk's registry and meta-branch mirror.
-5. `session.at(peer)` as a bound env; invocation audience = peer DID;
+5. `session.connect(peer)` returning a bound env; invocation audience = peer DID;
    `Connect` capability on the peer subject; pull/push/hydrate rewritten
    as effects against two envs.
 6. Retire the `Secret` effects for sealed facts.
@@ -262,11 +289,11 @@ places.
 
 ## Pitfalls already met
 
-- A delegation names its audience, so a builder cannot accept "a delegation
-  to the session" before the session key exists. Derived keys are known
-  only at build (a non-extractable browser key derives by signing, which is
-  async); supplied keys are known before. `allow` takes a scope and mints
-  at build, or a certificate whose audience the caller already knew.
+- A delegation names its audience, so the session key must exist before
+  its grants are minted or passed in. Derivation is async (a
+  non-extractable browser key derives by signing), so `derive` is its own
+  awaited step and `session` takes the credential; the builder's `did` is
+  then known before build.
 - Deriving from a context alone (no peer key) is a key anyone can compute.
   A throwaway peer is `open` at a temp location over volatile storage.
 - `Storage::default()` creates a fresh pool each call; two pools over one
@@ -296,25 +323,32 @@ let operator = profile
     .await?;
 
 // after
-let peer = Peer::new(Storage::<NativeSpace>::default())
+let peer = Peer::new()
+    .storage(Storage::<NativeSpace>::default())
     .base(Directory::At(root))             // was OperatorBuilder::base
     .network(Network::default())           // was OperatorBuilder::network
     .branch("main")                        // was OperatorBuilder::access_branch
     .open(Location::new(Directory::Profile, name))
     .await?;
-let session = peer.session(b"app").allow(Subject::any()).build().await?;
+let session = peer
+    .session(peer.derive(b"app").await?)   // was profile.derive(b"app")
+    .allow(Subject::any())
+    .build()
+    .await?;
 ```
 
 `Peer::open` mounts the credential and opens the registry branch; there is
 no separate "mount the profile then derive" step, and a peer cannot be
 built from an unmounted handle. `Peer::load` fails when the credential is
-absent; `Peer::new(storage).attach(credential)` builds over a credential
+absent; `Peer::new().storage(storage).attach(credential)` builds over a credential
 mounted some other way.
 
 | before | after |
 | --- | --- |
 | `Operator<S>` | `Session<S>` |
 | `OperatorError` | `PeerError` |
+| `.allow_until(cap, t)` | `.allow(peer.access().claim(cap).expires(t))` |
+| a session over a supplied signer | `peer.session(signer)` |
 | `operator.did()` | `session.did()` |
 | `operator.profile_did()` | `session.peer().did()` |
 | `operator.hydration()` | `session.hydration()` or `session.peer().hydration()` |
@@ -335,12 +369,12 @@ Things the split makes possible that the old shape did not:
 - `perform(&peer)`: the peer is the unconstrained environment, acting with
   its own key. Where tonk built a "full" operator with `Subject::any()`
   and a fixed context only to act as the profile, use the peer.
-- `peer.session(ctx).credential(signer)`: a supplied session key. Where
+- `peer.session(signer)`: a supplied session key. Where
   tonk wrapped the operator to sign as another principal, build a session
   over that principal's credential and `.grant(certificate)` what it holds.
 - Key rotation without rebuilding the runtime: the worker's
-  `session::rotate` becomes `peer.session(random).allow_until(..).build()`
-  over the peer it already holds. The scheduler and the preload queue
+  `session::rotate` becomes a session over `peer.derive(random)` with a
+  bounded claim, on the peer it already holds. The scheduler and the preload queue
   survive the rotation.
 
 Tonk-specific notes:

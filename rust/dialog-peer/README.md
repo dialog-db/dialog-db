@@ -20,14 +20,15 @@ the unconstrained environment. See `notes/peer-and-session.md`.
 # use dialog_storage::provider::storage::{Storage, VolatileSpace};
 # async fn example() -> anyhow::Result<()> {
 // Open or create the peer at a location, over some storage.
-let alice = Peer::new(Storage::<VolatileSpace>::volatile())
+let alice = Peer::new()
+    .storage(Storage::<VolatileSpace>::volatile())
     .branch("main")
     .open(Location::profile("alice"))
     .await?;
 
 // A session narrows the peer to one key and the scopes it may act on.
 let job = alice
-    .session(b"my-app")
+    .session(alice.derive(b"my-app").await?)
     .allow(Subject::any())
     .build()
     .await?;

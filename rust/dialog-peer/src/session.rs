@@ -12,7 +12,7 @@ mod space;
 #[cfg(test)]
 mod test;
 
-pub use builder::{PeerError, SessionBuilder};
+pub use builder::{Allowance, PeerError, SessionBuilder};
 
 use std::future::Future;
 use std::pin::Pin;
