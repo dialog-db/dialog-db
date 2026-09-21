@@ -48,7 +48,7 @@ use dialog_effects::{
     blob::{BlobWriter, Import as BlobImportEffect},
 };
 use dialog_network::Network;
-use dialog_peer::{Peer, Profile, Session};
+use dialog_peer::{Peer, Session};
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -84,6 +84,7 @@ async fn setup_repo_with_s3_remote(
     // Save S3 credentials so the Operator can authorize fork requests
     let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     profile
+        .profile()
         .credential()
         .site(&site_address)
         .save(authorization)
@@ -215,6 +216,7 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
         .await?;
     let site = s3_site_address(&s3);
     profile
+        .profile()
         .credential()
         .site(&site)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -329,6 +331,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
 
     let site_a = s3_site_address(&s3);
     profile_a
+        .profile()
         .credential()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -376,6 +379,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
 
     let site_b = s3_site_address(&s3);
     profile_b
+        .profile()
         .credential()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -449,6 +453,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
 
     let site_a = s3_site_address(&s3);
     profile_a
+        .profile()
         .credential()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -494,6 +499,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .await?;
     let site_b = s3_site_address(&s3);
     profile_b
+        .profile()
         .credential()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -573,6 +579,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .await?;
     let site_c = s3_site_address(&s3);
     profile_c
+        .profile()
         .credential()
         .site(&site_c)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -649,6 +656,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .await?;
     let site_a = s3_site_address(&s3);
     profile_a
+        .profile()
         .credential()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -709,6 +717,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .await?;
     let site_b = s3_site_address(&s3);
     profile_b
+        .profile()
         .credential()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -848,6 +857,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
 
     let site_a = s3_site_address(&s3);
     profile_a
+        .profile()
         .credential()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -927,6 +937,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
 
     let site_b = s3_site_address(&s3);
     profile_b
+        .profile()
         .credential()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -1012,6 +1023,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .await?;
     let site_a = s3_site_address(&s3);
     profile_a
+        .profile()
         .credential()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -1052,6 +1064,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .await?;
     let site_b = s3_site_address(&s3);
     profile_b
+        .profile()
         .credential()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -1141,6 +1154,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .await?;
     let site_a = s3_site_address(&s3);
     profile_a
+        .profile()
         .credential()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -1176,6 +1190,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .await?;
     let site_b = s3_site_address(&s3);
     profile_b
+        .profile()
         .credential()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -1598,6 +1613,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
         ..s3.clone()
     };
     profile
+        .profile()
         .credential()
         .site(s3_site_address(&b_address))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -2041,6 +2057,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
         ..s3.clone()
     };
     profile
+        .profile()
         .credential()
         .site(s3_site_address(&b_address))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -2153,6 +2170,7 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
         ..s3.clone()
     };
     profile
+        .profile()
         .credential()
         .site(s3_site_address(&b_address))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -3248,6 +3266,7 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> Result<()> {
     let site_address = s3_site_address(&s3);
     let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     profile
+        .profile()
         .credential()
         .site(&site_address)
         .save(authorization)
@@ -3311,6 +3330,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
     let site_address = s3_site_address(&s3);
     let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     alice_profile
+        .profile()
         .credential()
         .site(&site_address)
         .save(authorization)
@@ -3363,6 +3383,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
     let bob_site_address = s3_site_address(&s3);
     let bob_authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     bob_profile
+        .profile()
         .credential()
         .site(&bob_site_address)
         .save(bob_authorization)
@@ -3498,6 +3519,7 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
         .perform(&operator_b)
         .await?;
     profile_b
+        .profile()
         .credential()
         .site(s3_site_address(&s3))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -3660,6 +3682,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         .perform(&operator_b)
         .await?;
     profile_b
+        .profile()
         .credential()
         .site(s3_site_address(&s3))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
@@ -4796,6 +4819,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
             .await?;
         let site = s3_site_address(s3);
         profile
+            .profile()
             .credential()
             .site(&site)
             .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))

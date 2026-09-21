@@ -171,6 +171,7 @@ where
             .clone();
 
         let secret = profile
+            .profile()
             .credential()
             .site(self.0.address())
             .load()

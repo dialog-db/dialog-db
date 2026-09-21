@@ -331,6 +331,7 @@ mod tests {
             .unwrap();
 
         profile
+            .profile()
             .credential()
             .site("example.com")
             .save(Secret::from(vec![1u8, 2, 3]))
@@ -339,6 +340,7 @@ mod tests {
             .unwrap();
 
         profile
+            .profile()
             .credential()
             .site("example.com")
             .retract()
@@ -347,6 +349,7 @@ mod tests {
             .unwrap();
 
         let result = profile
+            .profile()
             .credential()
             .site("example.com")
             .load::<Secret>()
