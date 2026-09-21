@@ -168,10 +168,10 @@ let peer = SecretExtractableDerive::derive(
 
 `SecretExtractableDerive` is a trait `Secret` implements, deriving the
 same key under the same label and differing only in extractability. The
-inherent `derive` wins method resolution, so the extractable one is
-reachable only in fully-qualified form: getting a readable key means
-importing the trait *and* writing the explicit call, neither of which
-happens by accident.
+inherent `derive` shadows it, which is what makes extractability
+deliberate: `.derive()` yields a sealed key whatever the call site
+expects, so no binding's type can quietly turn one readable. Asking for
+a readable key means naming the trait.
 
 Extractability being a type parameter is what keeps a leak from being a
 runtime question: a consumer that needs material asks for

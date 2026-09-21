@@ -139,9 +139,9 @@ impl<E> Secret<'_, E> {
     /// entropy are conforming and deployed (Apple's CryptoKit, and so WebKit's
     /// `Ed25519`). Agreement has no nonce to hedge.
     ///
-    /// The result is [`Sealed`]: its material cannot be read back. A consumer
-    /// that needs raw bytes derives the extractable form through
-    /// [`SecretExtractableDerive`]:
+    /// The result is always [`Sealed`]: its material cannot be read back, and
+    /// no call site can ask this method for anything else. A consumer that
+    /// needs raw bytes names [`SecretExtractableDerive`] instead:
     ///
     /// ```no_run
     /// # use dialog_credentials::{Ed25519Signer, secret::{Context, SecretExtractableDerive}};
@@ -193,9 +193,12 @@ impl<E> Secret<'_, E> {
 /// Derive a signer whose material can be read back.
 ///
 /// The counterpart to [`Secret::derive`], deriving the same key under the same
-/// label and differing only in extractability. `Secret`'s inherent `derive`
-/// wins method resolution, so this one is reachable only through its
-/// fully-qualified form:
+/// label and differing only in extractability.
+///
+/// `Secret`'s inherent `derive` shadows this one, which is the point:
+/// `.derive()` yields a sealed key whatever the call site expects, so a
+/// readable one is never what a binding's type quietly turned it into. Asking
+/// for it means naming the trait:
 ///
 /// ```no_run
 /// # use dialog_credentials::{Ed25519Signer, secret::{Context, SecretExtractableDerive}};
@@ -205,9 +208,6 @@ impl<E> Secret<'_, E> {
 /// # Ok(())
 /// # }
 /// ```
-///
-/// Importing the trait and writing that form is what makes a readable key a
-/// deliberate act rather than the shape of a binding.
 ///
 /// # Security Warning
 ///
