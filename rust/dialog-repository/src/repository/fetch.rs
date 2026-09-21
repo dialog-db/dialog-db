@@ -295,7 +295,7 @@ where
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+    use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_query::{AttributeQuery, Term, the};
 
     use super::*;
@@ -317,10 +317,10 @@ mod tests {
     /// query's rows flow as if the machinery did not exist.
     #[dialog_common::test]
     async fn it_refuses_hints_and_flows_demand_with_a_zero_budget() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("preload-off"))
+            .space(unique_name("preload-off"))
             .create()
             .perform(&env)
             .await?;
@@ -375,10 +375,10 @@ mod tests {
     /// cross-evaluation sharing the ambient design exists for.
     #[dialog_common::test]
     async fn it_replicates_hinted_ranges_while_any_query_runs() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("preload"))
+            .space(unique_name("preload"))
             .create()
             .perform(&env)
             .await?;

@@ -1094,7 +1094,7 @@ dependencies = [
  "dialog-common",
  "dialog-effects",
  "dialog-network",
- "dialog-operator",
+ "dialog-peer",
  "dialog-repository",
  "dialog-search-tree",
  "dialog-storage",
@@ -1332,7 +1332,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialog-operator"
+name = "dialog-peer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1394,7 +1394,7 @@ dependencies = [
  "dialog-effects",
  "dialog-macros",
  "dialog-network",
- "dialog-operator",
+ "dialog-peer",
  "dialog-repository",
  "dialog-search-tree",
  "dialog-storage",
@@ -1427,7 +1427,7 @@ dependencies = [
  "dialog-credentials",
  "dialog-effects",
  "dialog-network",
- "dialog-operator",
+ "dialog-peer",
  "dialog-repository",
  "dialog-storage",
  "dialog-ucan",
@@ -1571,7 +1571,7 @@ dependencies = [
  "dialog-effects",
  "dialog-identity",
  "dialog-network",
- "dialog-operator",
+ "dialog-peer",
  "dialog-query",
  "dialog-remote-s3",
  "dialog-remote-ucan",
@@ -1645,7 +1645,7 @@ dependencies = [
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
- "dialog-operator",
+ "dialog-peer",
  "dialog-query",
  "dialog-remote-fs",
  "dialog-repository",

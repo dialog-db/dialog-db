@@ -34,7 +34,7 @@ impl CreateRepository {
     ///
     /// ```no_run
     /// # async fn example<Env>(
-    /// #     profile: &dialog_operator::Profile,
+    /// #     profile: &dialog_peer::Profile,
     /// #     operator: &Env,
     /// # ) -> Result<(), Box<dyn std::error::Error>>
     /// # where Env: dialog_capability::Provider<dialog_effects::space::Create> + dialog_common::ConditionalSync {

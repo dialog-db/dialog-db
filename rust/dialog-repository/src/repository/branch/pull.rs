@@ -1142,14 +1142,14 @@ mod tests {
 
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_pulls_from_local_upstream_no_changes() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1172,7 +1172,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_upstream_changes_without_local_changes() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1207,7 +1207,7 @@ mod tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1276,7 +1276,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_and_merges_with_both_sides_changed() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1335,7 +1335,7 @@ mod tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // Upstream `main` has a change to pull in.
@@ -1426,7 +1426,7 @@ mod tests {
     /// over only the instant cell advance.
     #[dialog_common::test]
     async fn it_pulls_in_two_phases_prepare_then_commit() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1468,7 +1468,7 @@ mod tests {
     /// `Ok(None)` without touching the cells.
     #[dialog_common::test]
     async fn it_prepares_a_noop_when_upstream_has_not_moved() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1508,7 +1508,7 @@ mod history_tests {
 
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+    use dialog_peer::helpers::{test_session_with_peer, unique_name};
 
     use dialog_artifacts::history::{
         Causality, History as _, HistorySelector, causality, common_ancestor,
@@ -1525,7 +1525,7 @@ mod history_tests {
     /// upstream movement.
     #[dialog_common::test]
     async fn it_keeps_the_head_cell_untouched_on_a_nothing_new_pull() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1586,7 +1586,7 @@ mod history_tests {
     /// re-imposing their own copy forever.
     #[dialog_common::test]
     async fn it_quiesces_after_concurrent_identical_asserts() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let a = repo.branch("a").open().perform(&operator).await?;
@@ -1660,7 +1660,7 @@ mod history_tests {
         use dialog_query::query::Output as _;
         use dialog_query::{AttributeQuery, Claim, Term, the};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let a = repo.branch("a").open().perform(&operator).await?;
@@ -1793,7 +1793,7 @@ mod history_tests {
         use dialog_query::query::Output as _;
         use dialog_query::{AttributeQuery, Claim, Term, the};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // The fact everyone starts from.
@@ -1895,7 +1895,7 @@ mod history_tests {
     /// claims committed on the other is detectable afterwards.
     #[dialog_common::test]
     async fn it_merges_history_across_a_pull() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // Main commits a title; feature adopts it via fast-forward pull —
@@ -2065,7 +2065,7 @@ mod history_tests {
     /// signed attribution.
     #[dialog_common::test]
     async fn it_logs_history_across_a_merge() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // A fresh branch has nothing to log.
@@ -2154,7 +2154,7 @@ mod history_tests {
         use dialog_query::query::Output as _;
         use dialog_query::{Query, Term};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // Same shape as the log test: shared base, divergence, merge.
@@ -2226,7 +2226,7 @@ mod history_tests {
         use dialog_artifacts::DialogArtifactsError;
         use dialog_artifacts::history::Edition;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // A branch whose head is planted rather than committed: attributed
@@ -2274,7 +2274,7 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // A shared base: both branches see title = "Base".
@@ -2373,7 +2373,7 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // A shared base: both branches see the title.
@@ -2443,7 +2443,7 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let count_labels = |branch: crate::Branch| {
@@ -2548,7 +2548,7 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let count_labels = |branch: crate::Branch| {
@@ -2634,7 +2634,7 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let titles = |branch: crate::Branch| {
@@ -2725,7 +2725,7 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // `feature` authors the original value.
@@ -2797,7 +2797,7 @@ mod history_tests {
     async fn it_maintains_the_context_memo_incrementally() -> Result<()> {
         use dialog_artifacts::history::context_of;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -2871,7 +2871,7 @@ mod history_tests {
     async fn it_publishes_the_watermark_with_the_head() -> Result<()> {
         use dialog_artifacts::history::{Edition, Origin, Version, context_of};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -2934,10 +2934,10 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&env)
             .await?;
@@ -3016,10 +3016,10 @@ mod history_tests {
         use crate::RepositoryExt as _;
         use crate::helpers::Counting;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&env)
             .await?;
@@ -3079,7 +3079,7 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // `author` asserts the fact; `moderator` adopts it and retracts
@@ -3204,10 +3204,10 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&env)
             .await?;
@@ -3293,7 +3293,7 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // The shared base: replica `f` syncs upstream `m` before the
@@ -3417,7 +3417,7 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let m = repo.branch("m").open().perform(&operator).await?;
@@ -3503,10 +3503,10 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&env)
             .await?;
@@ -3588,7 +3588,7 @@ mod history_tests {
     /// order.
     #[dialog_common::test]
     async fn it_converges_under_randomized_triangle_sync() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let a = repo.branch("a").open().perform(&operator).await?;
@@ -3692,10 +3692,10 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&env)
             .await?;
@@ -3829,9 +3829,9 @@ mod history_tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&operator)
             .await?;
@@ -3970,7 +3970,7 @@ mod history_tests {
     /// re-reads and folds its own entry in.
     #[dialog_common::test]
     async fn it_folds_tracking_updates_racing_from_another_handle() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;

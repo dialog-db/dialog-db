@@ -2,7 +2,7 @@
 //!
 //! Provides the [`Ucan`] protocol type and proof chain types.
 //! Delegation is handled via
-//! [`profile.access().claim().delegate()`](dialog_operator::profile::access).
+//! `profile.access().claim().delegate()` (see `dialog_identity::access`).
 
 mod access;
 mod certificate_store;

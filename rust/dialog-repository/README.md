@@ -8,35 +8,38 @@ Provides repositories with branches, remotes, push/pull, and merge, but for stru
 
 ```rust
 use dialog_capability::Subject;
-use dialog_operator::Profile;
+use dialog_effects::storage::Location;
+use dialog_peer::Peer;
 use dialog_repository::RepositoryExt;
 use dialog_storage::Storage;
 
 // Target-appropriate default storage: filesystem on native, IndexedDB on web.
 let storage = Storage::default();
 
-// Open (load-or-create) the profile.
-let profile = Profile::open("alice").perform(&storage).await?;
-
-// Derive an operator scoped to this application.
-let operator = profile
-    .derive(b"my-app")
-    .allow(Subject::any())
-    .build(storage)
+// Open (load-or-create) the peer at its location.
+let alice = Peer::new(storage)
+    .open(Location::profile("alice"))
     .await?;
 
-// Open or create a repository.
-let contacts = profile
-    .repository("contacts")
+// A session scoped to this application.
+let session = alice
+    .session(b"my-app")
+    .allow(Subject::any())
+    .build()
+    .await?;
+
+// Open or create a repository the peer holds.
+let contacts = alice
+    .space("contacts")
     .open()
-    .perform(&operator)
+    .perform(&session)
     .await?;
 
 // Work with branches.
 let main = contacts
     .branch("main")
     .open()
-    .perform(&operator)
+    .perform(&session)
     .await?;
 
 // Define a concept with typed attributes.
@@ -55,7 +58,7 @@ main.transaction()
         role: employee::Role("Engineer".into()),
     })
     .commit()
-    .perform(&operator)
+    .perform(&session)
     .await?;
 
 // Query.
@@ -66,7 +69,7 @@ let results: Vec<Employee> = main
         name: Term::var("name"),
         role: Term::var("role"),
     })
-    .perform(&operator)
+    .perform(&session)
     .try_vec()
     .await?;
 
@@ -79,20 +82,20 @@ use dialog_remote_ucan_s3::UcanAddress;
 let origin = contacts
     .remote("origin")
     .create(UcanAddress::new("https://access.example.com"))
-    .perform(&operator)
+    .perform(&session)
     .await?;
 
 let upstream = origin
     .branch("main")
     .open()
-    .perform(&operator)
+    .perform(&session)
     .await?;
 
 main
     .set_upstream(upstream)
-    .perform(&operator)
+    .perform(&session)
     .await?;
 
-main.push().perform(&operator).await?;
-main.pull().perform(&operator).await?;
+main.push().perform(&session).await?;
+main.pull().perform(&session).await?;
 ```

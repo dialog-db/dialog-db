@@ -1063,14 +1063,14 @@ mod tests {
     use crate::PushError;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::{StreamExt as _, stream};
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1108,7 +1108,7 @@ mod tests {
     /// nothing new is a no-op (no re-upload).
     #[dialog_common::test]
     async fn it_pushes_spilled_value_blocks_once() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1180,7 +1180,7 @@ mod tests {
     /// regression where an idle sync tick re-pushed on every drain.
     #[dialog_common::test]
     async fn it_is_a_noop_when_nothing_new_to_push() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1231,9 +1231,9 @@ mod tests {
     async fn it_folds_tracking_updates_when_pushing_from_a_stale_handle() -> Result<()> {
         use crate::Upstream;
         use crate::helpers::test_repo;
-        use dialog_operator::helpers::test_operator_with_profile;
+        use dialog_peer::helpers::test_session_with_peer;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1299,7 +1299,7 @@ mod tests {
     async fn it_pushes_to_a_non_default_upstream_and_tracks_it() -> Result<()> {
         use crate::Upstream;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1358,7 +1358,7 @@ mod tests {
     /// empty target can be fast-forwarded onto. Pull it first.
     #[dialog_common::test]
     async fn it_refuses_pushing_to_an_untracked_nonempty_target() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let occupied = repo.branch("occupied").open().perform(&operator).await?;
@@ -1394,7 +1394,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_non_fast_forward_on_local_upstream_diverged() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1432,7 +1432,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_has_no_upstream_by_default() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("feature").open().perform(&operator).await?;
 
@@ -1443,7 +1443,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_pushing_branch_without_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("feature").open().perform(&operator).await?;
 
@@ -1458,7 +1458,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_when_pushing_empty_branch() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;

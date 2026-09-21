@@ -1,7 +1,7 @@
 //! The profile's access branch, and migration into it.
 //!
 //! A profile's retained delegations live in the profile repository's own
-//! branch, named [`ACCESS_BRANCH`]. The operator (in `dialog-operator`,
+//! branch, named [`ACCESS_BRANCH`]. The operator (in `dialog-peer`,
 //! above this crate) opens it at build time and serves every proof from
 //! its `dialog.ucan/*` facts; cross-party delegations retained there
 //! replicate across the profile's replicas by ordinary push/pull.
@@ -13,7 +13,7 @@
 //! # use dialog_identity::Profile;
 //! # use dialog_repository::MigrateAccess as _;
 //! # use dialog_storage::provider::storage::{Storage, VolatileSpace};
-//! # async fn example(profile: &Profile, storage: &Storage<VolatileSpace>) -> anyhow::Result<()> {
+//! # async fn example(profile: &Peer<VolatileSpace>, storage: &Storage<VolatileSpace>) -> anyhow::Result<()> {
 //! profile.access().migrate().perform(storage).await?;
 //! # Ok(())
 //! # }
@@ -308,8 +308,10 @@ mod tests {
     use dialog_artifacts::{ArtifactSelector, Value};
     use dialog_capability::access::Retain;
     use dialog_credentials::Ed25519Signer;
-    use dialog_identity::Profile;
-    use dialog_operator::helpers::unique_name;
+    use dialog_effects::storage::Location;
+    use dialog_peer::Peer;
+
+    use dialog_peer::helpers::unique_name;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan_core::DelegationBuilder;
     use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -322,7 +324,7 @@ mod tests {
     /// Save a delegation into the LEGACY certificate store, storage-routed.
     async fn seed_legacy(
         storage: &Storage<VolatileSpace>,
-        profile: &Profile,
+        profile: &Peer<VolatileSpace>,
         issuer: &Ed25519Signer,
         audience: dialog_capability::Did,
         subject: UcanSubject,
@@ -345,7 +347,10 @@ mod tests {
         UcanCertificate(delegation)
     }
 
-    async fn export(storage: &Storage<VolatileSpace>, profile: &Profile) -> Vec<UcanCertificate> {
+    async fn export(
+        storage: &Storage<VolatileSpace>,
+        profile: &Peer<VolatileSpace>,
+    ) -> Vec<UcanCertificate> {
         Subject::from(profile.did())
             .attenuate(AccessAttenuation)
             .invoke(Export::<Ucan>::new())
@@ -357,12 +362,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_migrates_compacts_and_drains() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("migrate"))
-            .perform(&storage)
+        let profile = Peer::new(storage.clone())
+            .open(Location::profile(unique_name("migrate")))
             .await?;
         let space = signer().await;
         let other_space = signer().await;
-        let profile_signer = profile.signer().signer().as_ed25519().unwrap().clone();
+        let profile_signer = profile.credential().signer().as_ed25519().unwrap().clone();
 
         // Legacy store: two interchangeable space->profile grants (same
         // payload, different nonce), one distinct grant, and one
@@ -453,13 +458,13 @@ mod tests {
     #[dialog_common::test]
     async fn it_proves_migrated_delegations_through_a_fresh_operator() -> Result<()> {
         use dialog_capability::access::{Proof as _, Prove, TimeRange};
-        use dialog_operator::DeriveOperator as _;
         use dialog_ucan::Scope;
         use dialog_ucan_core::command::Command as UcanCommand;
 
         let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("migrate-prove"))
-            .perform(&storage)
+        let profile = Peer::new(storage.clone())
+            .network(dialog_network::Network::default())
+            .open(Location::profile(unique_name("migrate-prove")))
             .await?;
         let space = signer().await;
 
@@ -476,10 +481,9 @@ mod tests {
         profile.access().migrate().perform(&storage).await?;
 
         let operator = profile
-            .derive(b"test")
+            .session(b"test")
             .allow(dialog_capability::Subject::any())
-            .network(dialog_network::Network::default())
-            .build(storage)
+            .build()
             .await?;
 
         let mut claim = Prove::<Ucan>::new(
@@ -516,11 +520,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_migrates_the_filesystem_store() -> Result<()> {
         let storage = Storage::temp();
-        let profile = Profile::open(unique_name("migrate-fs"))
-            .perform(&storage)
+        let profile = Peer::new(storage.clone())
+            .open(Location::profile(unique_name("migrate-fs")))
             .await?;
         let space = signer().await;
-        let profile_signer = profile.signer().signer().as_ed25519().unwrap().clone();
+        let profile_signer = profile.credential().signer().as_ed25519().unwrap().clone();
 
         // One migratable grant, one self-issued survivor.
         let seed = |issuer: Ed25519Signer, audience: dialog_capability::Did, subject| {
@@ -577,11 +581,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_completes_the_drain_on_rerun() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("migrate-rerun"))
-            .perform(&storage)
+        let profile = Peer::new(storage.clone())
+            .open(Location::profile(unique_name("migrate-rerun")))
             .await?;
         let space = signer().await;
-        let profile_signer = profile.signer().signer().as_ed25519().unwrap().clone();
+        let profile_signer = profile.credential().signer().as_ed25519().unwrap().clone();
 
         let certificate = seed_legacy(
             &storage,
@@ -626,8 +630,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_is_a_noop_on_an_empty_store() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("migrate-empty"))
-            .perform(&storage)
+        let profile = Peer::new(storage.clone())
+            .open(Location::profile(unique_name("migrate-empty")))
             .await?;
         let retained = profile.access().migrate().perform(&storage).await?;
         assert!(retained.is_empty());

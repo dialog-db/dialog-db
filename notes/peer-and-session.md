@@ -1,8 +1,10 @@
 # Peers and sessions
 
-Status: design, agreed in discussion; implementation in progress. Supersedes
-the profile / operator split described in `repository.md` and
-`space-and-storage.md`, which this note treats as the "today" column.
+Status: design, agreed in discussion; step 2 of the order below is
+implemented (the `dialog-peer` crate). Supersedes the profile / operator
+split described in `repository.md` and `space-and-storage.md`, which this
+note treats as the "today" column. The migration guide at the end is what a
+dependent (tonk) follows.
 
 ## Why
 
@@ -57,24 +59,39 @@ is located by facts in that space.
 
 ## Surface
 
-```rust
-let alice = Peer::new()
-    .network(net)                          // optional, Network::default()
-    .storage(disk)                         // Storage<S>; volatile for tests
-    .branch("main")                        // registry + default proof source
-    .open(Location::profile("alice"))
-    .await?;
+Implemented today (`dialog-peer`):
 
-let tonk = alice.connect(did).await?;      // address book lookup; NoAddress otherwise
+```rust
+let alice = Peer::new(disk)                // Storage<S>; volatile for tests
+    .network(net)                          // optional, Network::default()
+    .base(Directory::Current)              // where space names resolve, until the registry
+    .branch("main")                        // registry + default proof source
+    .open(Location::profile("alice"))      // or .load(..), or .attach(credential)
+    .await?;
 
 let job = alice.session(b"refactor")       // derived key, deterministic per context
     .credential(signer)                    // or a supplied SignerCredential
-    .allow(scope).expires(t)               // grants minted at build
-    .allow(certificate)                    // or pre-minted, when the audience was known
-    .using(branch)                         // extra proof layers, repeatable
+    .allow(scope)                          // grants minted at build
+    .allow_until(scope, t)                 // bounded
+    .grant(certificate)                    // pre-minted, when the audience was known
     .build()
     .await?;
 
+alice.space("notes").open().perform(&job).await?;   // named space under the peer
+branch.revision().resolve().perform(&alice).await?; // the peer is the unconstrained env
+```
+
+`Peer::new` takes the storage rather than a `.storage()` step because the
+storage fixes the space type parameter and Rust cannot infer it from a
+later call.
+
+Planned (steps 4 and 5 below):
+
+```rust
+let tonk = alice.connect(did).await?;      // address book lookup; NoAddress otherwise
+let job = alice.session(b"refactor")
+    .using(branch)                         // extra proof layers, repeatable
+    .build().await?;
 Repository::open("notes").perform(&job).await?;            // registry lookup, mounts
 let there = job.at(&tonk);                                 // bound env
 let head = branch.revision().resolve().perform(&there).await?;   // same effect, remote
@@ -182,9 +199,9 @@ by type.
 
 | today | becomes |
 | --- | --- |
-| `Profile::open(name).at(dir)` | `Peer::new().storage(s).open(Location)` |
+| `Profile::open(name).at(dir)` | `Peer::new(storage).open(Location)` |
 | `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.session(ctx).allow(..).build()` |
-| `Operator<S>` | `Session<S>` (alias kept until tonk migrates) |
+| `Operator<S>` | `Session<S>`; the crate is `dialog-peer` |
 | `Authority { profile, operator, account }` | `(peer, session)`; account is a link in the proof chain |
 | `OperatorBuilder::access_branch(name)` (#526) | `.using(BranchReference)` on the session; the peer's `.branch(..)` is the default |
 | `Directory::Current` base + `space::Load` by name | registry lookup: name → subject → address; physical placement keyed by subject DID |
@@ -218,14 +235,17 @@ by type.
 
 Each step is one PR and leaves tonk compiling.
 
-1. Retype #526's `access_branch(name)` to take a `BranchReference` and
-   merge it.
-2. Split `Operator` into `Peer` and `Session` inside `dialog-operator`,
-   keeping `Operator<S>` as an alias for `Session<S>` and the old builder
-   working on top. Storage, network, scheduler and queue move to the peer;
-   signer, grants, proof layers, chain cache stay on the session. The
-   worker's rotation becomes replacing the session; the CLI's
-   per-invocation retained grant disappears.
+1. Close #526: its knob landed as `PeerBuilder::branch(name)` in step 2,
+   with the same "main holds nothing" test. Retyping it to a
+   `BranchReference` waits for step 4, when the registry can name a
+   branch of another repository.
+2. **Done.** `dialog-operator` is `dialog-peer`, and `Operator` is split
+   into `Peer` and `Session` with no compatibility alias: storage,
+   network, base directory, registry branch, scheduler, queue and the
+   chain cache are the peer's; the acting signer, the grants and the
+   walk's reach are the session's. `OperatorBuilder::access_branch` (#526)
+   is `PeerBuilder::branch`. The worker's rotation becomes replacing the
+   session; the CLI's per-invocation retained grant disappears.
 3. Move the per-branch caches into the env keyed by `(subject, branch)`.
 4. Registry facts (`Peer`, `PeerAddress`, `Replica`) in the peer's branch;
    `connect`; `Upstream::Remote { peer, subject }`; replace the remote
@@ -253,3 +273,87 @@ places.
   database is how tonk ended up remounting profiles. One peer holds the
   one storage, sessions share it.
 - The mounts table is keyed by the `Debug` rendering of a `Location`.
+
+## Migration guide (dialog-operator to dialog-peer)
+
+The crate is `dialog-peer`; the module path is `dialog_peer`. There is no
+`Operator`, `OperatorBuilder` or `DeriveOperator`. `Profile` still exists
+in `dialog-identity` and is re-exported, but nothing needs it to build a
+session any more.
+
+Opening the identity and building the environment:
+
+```rust
+// before
+let storage = Storage::<NativeSpace>::default();
+let profile = Profile::open(name).at(Directory::Profile).perform(&storage).await?;
+let operator = profile
+    .derive(b"app")
+    .allow(Subject::any())
+    .base(Directory::At(root))
+    .network(Network::default())
+    .build(storage)
+    .await?;
+
+// after
+let peer = Peer::new(Storage::<NativeSpace>::default())
+    .base(Directory::At(root))             // was OperatorBuilder::base
+    .network(Network::default())           // was OperatorBuilder::network
+    .branch("main")                        // was OperatorBuilder::access_branch
+    .open(Location::new(Directory::Profile, name))
+    .await?;
+let session = peer.session(b"app").allow(Subject::any()).build().await?;
+```
+
+`Peer::open` mounts the credential and opens the registry branch; there is
+no separate "mount the profile then derive" step, and a peer cannot be
+built from an unmounted handle. `Peer::load` fails when the credential is
+absent; `Peer::new(storage).attach(credential)` builds over a credential
+mounted some other way.
+
+| before | after |
+| --- | --- |
+| `Operator<S>` | `Session<S>` |
+| `OperatorError` | `PeerError` |
+| `operator.did()` | `session.did()` |
+| `operator.profile_did()` | `session.peer().did()` |
+| `operator.hydration()` | `session.hydration()` or `session.peer().hydration()` |
+| `profile.did()` | `peer.did()` |
+| `profile.signer()` | `peer.credential()` |
+| `profile.access()` | `peer.access()` |
+| `profile.repository(name)` | `peer.space(name)` |
+| `profile.save(chain)` / `profile.access().save(chain)` | `peer.access().save(chain)` (goes away in step 4; use `branch.delegations().retain(chain)`) |
+| `profile.credential().site(id)` | `peer.profile().credential().site(id)` (goes away in step 6) |
+| `Repository::from(&profile)` | `Repository::from(&peer)` or `Repository::from(peer.credential().clone())` |
+| `Storage::default()` per call site | one `Storage` per process, owned by the peer; sessions share it |
+| `dialog_operator::helpers::test_operator()` | `dialog_peer::helpers::test_session()` |
+| `dialog_operator::helpers::test_operator_with_profile()` | `dialog_peer::helpers::test_session_with_peer()`, returns `(Session, Peer)` |
+| `test_repo(&operator, &profile)` | `test_repo(&session, &peer)` |
+
+Things the split makes possible that the old shape did not:
+
+- `perform(&peer)`: the peer is the unconstrained environment, acting with
+  its own key. Where tonk built a "full" operator with `Subject::any()`
+  and a fixed context only to act as the profile, use the peer.
+- `peer.session(ctx).credential(signer)`: a supplied session key. Where
+  tonk wrapped the operator to sign as another principal, build a session
+  over that principal's credential and `.grant(certificate)` what it holds.
+- Key rotation without rebuilding the runtime: the worker's
+  `session::rotate` becomes `peer.session(random).allow_until(..).build()`
+  over the peer it already holds. The scheduler and the preload queue
+  survive the rotation.
+
+Tonk-specific notes:
+
+- `AccountBoundOperator` forwards every effect to the inner operator and
+  overrides `Authorize` to splice the account chain in. Under the split,
+  the inner operator is a `Session`; the wrapper keeps working unchanged
+  until step 4 lets a session prove from the account branch directly.
+- `account_state::operator_with_profile` remounts the profile by name to
+  derive a second operator because a derived operator needed a mounted
+  profile in its own storage. A `Peer` already holds its storage; derive
+  the second session from the same peer instead.
+- `site.rs` retains a fresh expiring session grant on every open
+  (`profile.access().save(session)`). Delete it: the session's grant is in
+  memory, and the retained copies were the accumulation the in-memory
+  session was introduced to stop.

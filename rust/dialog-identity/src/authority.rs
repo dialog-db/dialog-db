@@ -16,7 +16,7 @@ use dialog_varsig::{Did, Principal, Signer as _};
 ///
 /// Implements `Provider<Identify>` and `Principal` so the capability
 /// system can resolve identity.
-/// Built by [`OperatorBuilder`](crate::operator::OperatorBuilder).
+/// Built by a session builder in `dialog-peer`, above this crate.
 #[derive(Debug, Clone)]
 pub struct Authority {
     name: String,

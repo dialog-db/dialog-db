@@ -60,11 +60,11 @@ mod tests {
     use anyhow::Result;
 
     use crate::helpers::test_repo;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     #[dialog_common::test]
     async fn it_sets_local_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
@@ -85,7 +85,7 @@ mod tests {
     async fn it_sets_remote_upstream() -> Result<()> {
         use dialog_remote_s3::Address;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let site = Address::builder("https://s3.us-east-1.amazonaws.com")
@@ -117,7 +117,7 @@ mod tests {
     async fn it_persists_remote_upstream_across_reload() -> Result<()> {
         use dialog_remote_s3::Address;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let site = Address::builder("https://s3.us-east-1.amazonaws.com")
@@ -153,7 +153,7 @@ mod tests {
     /// re-setting an existing target just promotes it back.
     #[dialog_common::test]
     async fn it_tracks_multiple_upstreams_with_the_latest_set_as_default() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -183,7 +183,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_setting_upstream_to_self() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

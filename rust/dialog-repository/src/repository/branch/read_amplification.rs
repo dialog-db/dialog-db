@@ -27,7 +27,7 @@ use dialog_artifacts::{Artifact, Instruction, Value};
 use crate::RepositoryExt as _;
 use crate::helpers::Counting;
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+use dialog_peer::helpers::{test_session_with_peer, unique_name};
 
 fn assert_fact(entity: usize, value: &str) -> Instruction {
     Instruction::Assert(Artifact {
@@ -106,10 +106,10 @@ macro_rules! measured {
 }
 
 async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
     let repo = profile
-        .repository(unique_name("bench"))
+        .space(unique_name("bench"))
         .open()
         .perform(&env)
         .await?;
@@ -195,10 +195,10 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
 /// not the adopted bulk — this is the scenario the graft merge exists
 /// for, and the row that shows whether it is doing its job.
 async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
     let repo = profile
-        .repository(unique_name("bench"))
+        .space(unique_name("bench"))
         .open()
         .perform(&env)
         .await?;
@@ -289,10 +289,10 @@ async fn measure_shape(depth: usize) -> Result<()> {
     use crate::RepositoryArchiveExt as _;
     use dialog_search_tree::TreeDifference;
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
     let repo = profile
-        .repository(unique_name("bench"))
+        .space(unique_name("bench"))
         .open()
         .perform(&env)
         .await?;
@@ -361,10 +361,10 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     use dialog_effects::prelude::CatalogExt as _;
     use dialog_search_tree::Delta;
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
     let repo = profile
-        .repository(unique_name("bench"))
+        .space(unique_name("bench"))
         .open()
         .perform(&env)
         .await?;
@@ -514,10 +514,10 @@ async fn read_amplification_by_depth() -> Result<()> {
 #[ignore]
 async fn current_costs() -> Result<()> {
     for depth in [1_000usize, 10_000] {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("bench"))
+            .space(unique_name("bench"))
             .open()
             .perform(&env)
             .await?;

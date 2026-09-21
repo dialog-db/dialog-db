@@ -968,7 +968,7 @@ mod tests {
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::Identify;
     use dialog_effects::memory::Resolve;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::The;
     use dialog_query::attribute::{AttributeDescriptor, Keyed, Relation};
     use dialog_query::concept::descriptor::ConceptFieldDescriptor;
@@ -1047,7 +1047,7 @@ mod tests {
     /// subscription still evaluates normally afterwards.
     #[dialog_common::test]
     async fn it_keeps_the_poll_future_send_general() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1123,7 +1123,7 @@ mod tests {
     /// the first poll, without ever being committed.
     #[dialog_common::test]
     async fn it_folds_the_overlay_into_subscription_results() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1172,7 +1172,7 @@ mod tests {
     /// the ephemeral rows.
     #[dialog_common::test]
     async fn it_propagates_overlay_updates_to_subscriptions() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1260,7 +1260,7 @@ mod tests {
     /// next poll while the tree keeps the fact.
     #[dialog_common::test]
     async fn it_tombstones_tree_facts_retracted_in_the_overlay() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1318,7 +1318,7 @@ mod tests {
     async fn it_folds_the_overlay_into_queries_and_transactions() -> anyhow::Result<()> {
         use dialog_query::query::Output as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1395,7 +1395,7 @@ mod tests {
     async fn it_merges_spilled_values_across_overlay_and_branch() -> anyhow::Result<()> {
         use dialog_query::query::Output as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1465,7 +1465,7 @@ mod tests {
     /// polling again without a commit is a no-op.
     #[dialog_common::test]
     async fn it_evaluates_on_first_poll_and_idles_after() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1508,7 +1508,7 @@ mod tests {
     /// re-evaluating: unrelated writes are free.
     #[dialog_common::test]
     async fn it_ignores_writes_outside_the_demand_cover() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1569,7 +1569,7 @@ mod tests {
     /// subscription watching its contents.
     #[dialog_common::test]
     async fn it_ignores_the_other_half_of_a_mixed_domain() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1622,7 +1622,7 @@ mod tests {
     /// stopped working.
     #[dialog_common::test]
     async fn it_emits_a_new_member_of_the_demanded_half() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1669,7 +1669,7 @@ mod tests {
     /// silently turning incremental maintenance back into polling.
     #[dialog_common::test]
     async fn it_does_not_trip_the_head_gate_on_a_domain_scan() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1768,7 +1768,7 @@ mod tests {
     /// to a bound conclusion field.
     #[dialog_common::test]
     async fn it_queries_a_concept_over_a_collection() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1816,7 +1816,7 @@ mod tests {
     /// subscription at all.
     #[dialog_common::test]
     async fn it_maintains_a_collection_subscription() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1882,7 +1882,7 @@ mod tests {
     /// append.
     #[dialog_common::test]
     async fn it_retracts_a_member_from_a_collection_subscription() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1927,7 +1927,7 @@ mod tests {
     /// only the member stored under `todo.list/N5`.
     #[dialog_common::test]
     async fn it_selects_one_entry_by_literal_key() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1968,7 +1968,7 @@ mod tests {
     /// domain, keyed by name, and leaves the ordered members alone.
     #[dialog_common::test]
     async fn it_queries_a_dictionary_field() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2043,7 +2043,7 @@ mod tests {
     /// than unify on a shared name.
     #[dialog_common::test]
     async fn it_scans_two_collection_fields_independently() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2104,7 +2104,7 @@ mod tests {
     /// asserted rows on assert, retracted rows on retract.
     #[dialog_common::test]
     async fn it_emits_deltas_for_writes_inside_the_cover() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2176,7 +2176,7 @@ mod tests {
     /// re-triggers when a fact lands in the demanded range.
     #[dialog_common::test]
     async fn it_invalidates_absence_reads() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2226,7 +2226,7 @@ mod tests {
     /// never a whole-query recompute.
     #[dialog_common::test]
     async fn it_maintains_covered_writes_without_recompute() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2304,7 +2304,7 @@ mod tests {
     /// per-entity re-evaluation.
     #[dialog_common::test]
     async fn it_rederives_surviving_rows_on_partial_retraction() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2357,7 +2357,7 @@ mod tests {
     /// changed.
     #[dialog_common::test]
     async fn it_scopes_maintenance_to_touched_entities() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2719,7 +2719,7 @@ mod tests {
         use concepts::{Badge, BadgeHolder};
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2777,7 +2777,7 @@ mod tests {
         use concepts::{Badge, Manager, Name, Report};
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2872,7 +2872,7 @@ mod tests {
         use concepts::{Contact, Email, Handle, Phone, WithEmail, WithPhone};
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2972,7 +2972,7 @@ mod tests {
         use concepts::{Ancestor, HasAncestor, HasParent, Parent};
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -3138,7 +3138,7 @@ mod tests {
         use concepts::{Badge, Chief, Deputy, Manager, Name, Title};
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -3245,7 +3245,7 @@ mod tests {
         use concepts::{Dept, DeptTotal, Salary, Staffed, Total};
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -3329,7 +3329,7 @@ mod tests {
         use concepts::{Dept, DeptTotal, Salary, Staffed};
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -3414,7 +3414,7 @@ mod tests {
         use crate::schema;
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -3482,7 +3482,7 @@ mod tests {
         use concepts::{Bonus, Bonused, Dept, DeptBonus, Headcount, TopBonus};
         use dialog_query::{Aggregator, Query};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -3581,7 +3581,7 @@ mod tests {
         use concepts::{Dept, DeptReport, DeptTotal, ReportTotal, Salary, Staffed};
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -3665,7 +3665,7 @@ mod tests {
         use concepts::{Dept, DeptTotal, HasParent, Parent, Salary, Staffed, Total};
         use dialog_query::Query;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

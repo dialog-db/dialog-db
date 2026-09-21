@@ -178,7 +178,7 @@ impl From<&Profile> for Repository<SignerCredential> {
 
 /// Extension trait for opening repositories from a [`SpaceHandle`].
 ///
-/// Enables `profile.repository("name").open().perform(&operator)`.
+/// Enables `profile.space("name").open().perform(&operator)`.
 pub trait RepositoryExt {
     /// Open or create a repository, loading existing or creating new.
     fn open(self) -> OpenRepository;
@@ -213,7 +213,7 @@ mod tests {
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
-    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+    use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::StreamExt;
     use futures_util::stream;
@@ -228,9 +228,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn open_creates_repository() {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = profile
-            .repository(unique_name("open"))
+            .space(unique_name("open"))
             .open()
             .perform(&operator)
             .await
@@ -241,28 +241,23 @@ mod tests {
 
     #[dialog_common::test]
     async fn create_then_load() {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let name = unique_name("create-load");
 
         let created = profile
-            .repository(name.clone())
+            .space(name.clone())
             .create()
             .perform(&operator)
             .await
             .unwrap();
 
-        let loaded = profile
-            .repository(name)
-            .load()
-            .perform(&operator)
-            .await
-            .unwrap();
+        let loaded = profile.space(name).load().perform(&operator).await.unwrap();
         assert_eq!(created.did(), loaded.did());
     }
 
     #[dialog_common::test]
     async fn create_with_credential_names_from_did() {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
 
         // Generate the keypair first, derive the space name from the
         // last 8 chars of its did:key, then create with that same signer.
@@ -271,7 +266,7 @@ mod tests {
         let name = did[did.len() - 8..].to_string();
 
         let created = profile
-            .repository(name.clone())
+            .space(name.clone())
             .create()
             .with_credential(signer)
             .perform(&operator)
@@ -283,18 +278,13 @@ mod tests {
         assert_eq!(created.did().to_string(), did);
         assert!(did.ends_with(&name));
 
-        let loaded = profile
-            .repository(name)
-            .load()
-            .perform(&operator)
-            .await
-            .unwrap();
+        let loaded = profile.space(name).load().perform(&operator).await.unwrap();
         assert_eq!(created.did(), loaded.did());
     }
 
     #[dialog_common::test]
     async fn it_opens_branch_via_repository() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -310,7 +300,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_loads_branch_via_repository() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // A branch only materializes once it has a commit — open + no commits
@@ -333,7 +323,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_via_repository() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -358,7 +348,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_adds_and_loads_remote_via_repository() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let site = repo
@@ -377,10 +367,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_repository_by_name() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
 
         let repo = profile
-            .repository(unique_name("home"))
+            .space(unique_name("home"))
             .open()
             .perform(&operator)
             .await?;
@@ -394,17 +384,17 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_reopens_same_repository() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let name = unique_name("home");
 
         let did1 = profile
-            .repository(name.clone())
+            .space(name.clone())
             .open()
             .perform(&operator)
             .await?
             .subject();
         let did2 = profile
-            .repository(name)
+            .space(name)
             .open()
             .perform(&operator)
             .await?
@@ -417,15 +407,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_isolates_repositories_by_name() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
 
         let repo1 = profile
-            .repository(unique_name("home"))
+            .space(unique_name("home"))
             .open()
             .perform(&operator)
             .await?;
         let repo2 = profile
-            .repository(unique_name("work"))
+            .space(unique_name("work"))
             .open()
             .perform(&operator)
             .await?;
@@ -441,7 +431,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_and_selects_by_attribute() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -499,7 +489,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_and_selects_by_entity() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -548,7 +538,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_empty_branch() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -571,7 +561,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_artifact() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -626,13 +616,13 @@ mod tests {
 
         use super::*;
         use dialog_effects::memory as fx_memory;
-        use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+        use dialog_peer::helpers::{test_session_with_peer, unique_name};
 
         #[dialog_common::test]
         async fn it_delegates_repo_to_profile_and_claims() -> Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = profile
-                .repository(unique_name("home"))
+                .space(unique_name("home"))
                 .create()
                 .perform(&operator)
                 .await?;
@@ -665,9 +655,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_enforces_scoped_delegation_policy() -> Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = profile
-                .repository(unique_name("home"))
+                .space(unique_name("home"))
                 .create()
                 .perform(&operator)
                 .await?;
@@ -716,9 +706,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_validates_delegation_against_policy() -> Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = profile
-                .repository(unique_name("home"))
+                .space(unique_name("home"))
                 .create()
                 .perform(&operator)
                 .await?;
@@ -779,7 +769,7 @@ mod tests {
     mod query_engine {
 
         use crate::helpers::test_repo;
-        use dialog_operator::helpers::test_operator_with_profile;
+        use dialog_peer::helpers::test_session_with_peer;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term};
 
@@ -800,7 +790,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_queries_via_session() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -858,7 +848,7 @@ mod tests {
                 pub entity: NamedEntity,
             }
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -951,7 +941,7 @@ mod tests {
                 pub tag: Tag,
             }
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1015,7 +1005,7 @@ mod tests {
                 pub entity: NamedEntity,
             }
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1075,7 +1065,7 @@ mod tests {
 
         use super::query_engine::{Employee, employee};
         use crate::helpers::test_repo;
-        use dialog_operator::helpers::test_operator_with_profile;
+        use dialog_peer::helpers::test_session_with_peer;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
@@ -1102,7 +1092,7 @@ mod tests {
             // concept instance) into the session's overlay changes.
             // The fact surfaces via `Provider<Select> for Changes`,
             // alongside the branch's stored facts.
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1129,7 +1119,7 @@ mod tests {
         #[dialog_common::test]
         async fn it_unions_two_branches_via_join() -> anyhow::Result<()> {
             // `.join(&branch)` unions another branch into the session.
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
             let feature = repo.branch("feature").open().perform(&operator).await?;
@@ -1185,7 +1175,7 @@ mod tests {
             // `.join(&branch)` adds a branch source; `.with(stmt)`
             // adds in-memory facts via the Changes overlay. Both
             // compose on the same session.
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
             let scratch = repo.branch("scratch").open().perform(&operator).await?;
@@ -1230,7 +1220,7 @@ mod tests {
         async fn layer_facts_union_with_stored_facts() -> anyhow::Result<()> {
             // Asserting a layered fact under the same attribute as a stored
             // fact should yield both rows when queried.
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1275,7 +1265,7 @@ mod tests {
             // content-derived from (profile, subject, name).
             use crate::schema;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
             let replica = schema::Replica::new(profile.did(), branch.of().clone());
@@ -1307,7 +1297,7 @@ mod tests {
             use crate::schema;
             use crate::schema::DidExt as _;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
             let expected = schema::Replica::new(profile.did(), branch.of().clone());
@@ -1337,7 +1327,7 @@ mod tests {
             // hash + clock components.
             use crate::schema;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
             branch
@@ -1379,7 +1369,7 @@ mod tests {
             // so no BranchRevision fact should appear.
             use crate::schema;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
             let replica = schema::Replica::new(profile.did(), branch.of().clone());
@@ -1413,7 +1403,7 @@ mod tests {
             // metadata synthesis sees the post-commit revision.
             use crate::schema;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
             let replica = schema::Replica::new(profile.did(), branch.of().clone());
@@ -1489,7 +1479,7 @@ mod tests {
             use crate::schema;
             use crate::schema::DidExt as _;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
             branch
@@ -1548,7 +1538,7 @@ mod tests {
             // signed record: one row per parent, none for genesis.
             use crate::schema;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1606,7 +1596,7 @@ mod tests {
             // edges however far back they reach.
             use crate::schema;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1689,7 +1679,7 @@ mod tests {
             use crate::schema;
             use crate::schema::DidExt as _;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1720,7 +1710,7 @@ mod tests {
             use crate::schema;
             use crate::schema::DidExt as _;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1779,7 +1769,7 @@ mod tests {
             // search.
             use crate::schema;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
             let feature = repo.branch("feature").open().perform(&operator).await?;
@@ -1824,7 +1814,7 @@ mod tests {
             use dialog_artifacts::ArtifactSelector;
             use futures_util::StreamExt as _;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
             // Commit something so the branch has a tree to scan.
@@ -1860,7 +1850,7 @@ mod tests {
             // A QueryLayer carries every branch (the one `query()` was
             // called on plus any `.join`-ed) and the pending overlay
             // changes. Verify both are visible through the accessors.
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
             let feature = repo.branch("feature").open().perform(&operator).await?;
@@ -1883,7 +1873,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_starts_with_only_its_branch_and_empty_overlay() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1918,7 +1908,7 @@ mod tests {
             // sliding-window in `only.rs` assumes consecutive `(the, of)`
             // grouping, so the composite env must merge — not chain —
             // branch streams.
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
             let feature = repo.branch("feature").open().perform(&operator).await?;
@@ -2002,7 +1992,7 @@ mod tests {
             use dialog_capability::Provider;
             use futures_util::StreamExt as _;
 
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2142,24 +2132,24 @@ mod tests {
     mod profile_as_repository {
 
         use super::*;
-        use dialog_operator::helpers::test_operator_with_profile;
+        use dialog_peer::helpers::test_session_with_peer;
         use dialog_query::{Entity, the};
 
         #[dialog_common::test]
         async fn repository_from_profile_shares_did() {
-            let (_operator, profile) = test_operator_with_profile().await;
-            let repo = Repository::from(&profile);
+            let (_operator, profile) = test_session_with_peer().await;
+            let repo = Repository::from(profile.credential().clone());
             assert_eq!(
                 repo.did(),
                 profile.did(),
-                "Repository::from(&profile) must inherit the profile DID"
+                "Repository::from(profile.credential().clone()) must inherit the profile DID"
             );
         }
 
         #[dialog_common::test]
         async fn repository_from_profile_commits_through_profile_mount() -> Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
-            let repo = Repository::from(&profile);
+            let (operator, profile) = test_session_with_peer().await;
+            let repo = Repository::from(profile.credential().clone());
 
             let branch = repo.branch("main").open().perform(&operator).await?;
             let alice = Entity::new()?;
@@ -2180,9 +2170,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn reopening_profile_as_repository_sees_prior_commits() -> Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
 
-            let writer = Repository::from(&profile);
+            let writer = Repository::from(profile.credential().clone());
             let w_branch = writer.branch("trunk").open().perform(&operator).await?;
             let alice = Entity::new()?;
             w_branch
@@ -2193,7 +2183,7 @@ mod tests {
                 .perform(&operator)
                 .await?;
 
-            let reader = Repository::from(&profile);
+            let reader = Repository::from(profile.credential().clone());
             let r_branch = reader.branch("trunk").load().perform(&operator).await?;
 
             let results: Vec<_> = r_branch
@@ -2210,18 +2200,18 @@ mod tests {
             assert_eq!(
                 results.len(),
                 1,
-                "a second Repository::from(&profile) must read what the first wrote"
+                "a second Repository::from(profile.credential().clone()) must read what the first wrote"
             );
             Ok(())
         }
 
         #[dialog_common::test]
         async fn profile_repo_and_named_repo_are_distinct_spaces() -> Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
 
-            let profile_repo = Repository::from(&profile);
+            let profile_repo = Repository::from(profile.credential().clone());
             let named_repo = profile
-                .repository(unique_name("named"))
+                .space(unique_name("named"))
                 .open()
                 .perform(&operator)
                 .await?;

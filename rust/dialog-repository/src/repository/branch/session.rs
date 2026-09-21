@@ -894,7 +894,7 @@ mod rule_tests {
     use super::*;
     use crate::Branch;
     use crate::helpers::{Counting, test_repo};
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
     use dialog_query::rule::DeductiveRuleDescriptor;
@@ -966,7 +966,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_resolves_a_committed_rule() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -999,7 +999,7 @@ mod rule_tests {
     /// stream executes the hints, leaving nothing pending.
     #[dialog_common::test]
     async fn it_hints_the_rule_region_when_resolving_cold() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let env = Counting::new(operator);
         let branch = repo.branch("main").open().perform(&env).await?;
@@ -1037,7 +1037,7 @@ mod rule_tests {
     /// its fold over committed facts.
     #[dialog_common::test]
     async fn it_resolves_a_committed_reducing_rule() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1110,7 +1110,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_returns_empty_when_no_rules() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1133,7 +1133,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_resolves_an_overlay_rule() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1176,7 +1176,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_resolves_overlay_rule_after_prior_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1222,7 +1222,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_does_not_leak_overlay_rule_into_later_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1271,7 +1271,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_invalidates_discovery_on_head_move() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1316,7 +1316,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_resolves_two_distinct_rules_and_reuses_bodies() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1367,7 +1367,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_unions_committed_and_overlay_rules() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1425,7 +1425,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_keeps_discovery_cached_until_head_advances() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let alice: Entity = "id:alice".parse()?;
@@ -1482,7 +1482,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_unions_rules_across_joined_branches() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // `main` holds a person + the person rule.
@@ -1556,7 +1556,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_invalidates_discovery_when_a_rule_is_retracted() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1603,7 +1603,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_does_not_reuse_a_body_across_distinct_rule_entities() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1668,8 +1668,8 @@ mod resolver_tests {
     use crate::{Branch, Repository};
     use base58::ToBase58;
     use dialog_artifacts::{Entity, Value};
-    use dialog_operator::Operator;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::Session;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output as _;
     use dialog_query::{
         ResolverConclusion, ResolverQuery, Term, TreeEntryQuery, TreeKeyQuery, TreeNodeQuery,
@@ -1682,7 +1682,7 @@ mod resolver_tests {
     /// carries it).
     async fn committed_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Operator<VolatileSpace>,
+        operator: &Session<VolatileSpace>,
     ) -> anyhow::Result<(Branch, String)> {
         let branch = repo.branch("main").open().perform(operator).await?;
         let mut tx = branch.transaction();
@@ -1778,7 +1778,7 @@ mod resolver_tests {
     /// span/descent surface runs against a real multi-level tree.
     async fn committed_wide_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Operator<VolatileSpace>,
+        operator: &Session<VolatileSpace>,
         count: usize,
     ) -> anyhow::Result<(Branch, String)> {
         let branch = repo.branch("main").open().perform(operator).await?;
@@ -1804,7 +1804,7 @@ mod resolver_tests {
     /// only refuses an unbound *variable* input.
     #[dialog_common::test]
     async fn it_yields_nothing_for_a_blank_reference() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, _root) = committed_branch(&repo, &operator).await?;
 
@@ -1834,7 +1834,7 @@ mod resolver_tests {
     /// segment entries.
     #[dialog_common::test]
     async fn it_descends_a_multi_level_tree() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
 
@@ -1920,7 +1920,7 @@ mod resolver_tests {
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptConclusion, Parameters};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
@@ -1990,7 +1990,7 @@ mod resolver_tests {
     /// query path: one row, a real kind, a positive size, and a count.
     #[dialog_common::test]
     async fn it_reads_the_root_node_through_resolvers() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
@@ -2016,7 +2016,7 @@ mod resolver_tests {
     /// (the descent chain).
     #[dialog_common::test]
     async fn it_descends_consistently() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
@@ -2080,7 +2080,7 @@ mod resolver_tests {
     /// contribute nothing — zero rows, no error.
     #[dialog_common::test]
     async fn it_yields_nothing_for_absent_or_malformed_references() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, _root) = committed_branch(&repo, &operator).await?;
 
@@ -2101,7 +2101,7 @@ mod resolver_tests {
     /// commit the old root still answers, and the new root differs.
     #[dialog_common::test]
     async fn it_keeps_old_roots_queryable() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, first) = committed_branch(&repo, &operator).await?;
 
@@ -2133,7 +2133,7 @@ mod resolver_tests {
     /// resolvers are available in the as-if-committed view too.
     #[dialog_common::test]
     async fn it_serves_resolvers_in_transaction_queries() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
@@ -2155,7 +2155,7 @@ mod resolver_tests {
     /// history region legible.
     #[dialog_common::test]
     async fn it_reads_spilled_values_and_claim_metadata() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2242,7 +2242,7 @@ mod ordered_relation_tests {
         Artifact, ArtifactSelector, ArtifactViewStream as _, Attribute, Directory, Entity,
         Sequence, Symbol, Value,
     };
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::AttributeStatement;
     use dialog_query::attribute::The;
     use futures_util::TryStreamExt as _;
@@ -2274,7 +2274,7 @@ mod ordered_relation_tests {
     /// prepend-free insertion between neighbors and all.
     #[dialog_common::test]
     async fn it_reads_ordered_members_from_one_scan() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

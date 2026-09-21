@@ -251,7 +251,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::{Type, Value};
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
     fn optional_nickname() -> OptionalAttributeQuery {
         OptionalAttributeQuery::new(
@@ -297,7 +297,7 @@ mod tests {
     /// fallback.
     #[dialog_common::test]
     async fn it_passes_present_fact_through() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -331,7 +331,7 @@ mod tests {
     /// Missing fact: one fallback row with the value bound Absent.
     #[dialog_common::test]
     async fn it_yields_absent_fallback_on_miss() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -351,7 +351,7 @@ mod tests {
     /// not absence: zero rows, no fallback.
     #[dialog_common::test]
     async fn it_treats_pinned_value_mismatch_as_filter() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -387,7 +387,7 @@ mod tests {
     /// no fact; an existing fact contradicts the claim.
     #[dialog_common::test]
     async fn it_checks_claimed_absence_against_facts() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -430,7 +430,7 @@ mod tests {
     /// the fact count.
     #[dialog_common::test]
     async fn it_left_joins_cardinality_many_fields() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -479,7 +479,7 @@ mod tests {
     /// unconstrained or aborting the stream.
     #[dialog_common::test]
     async fn it_filters_scalar_scan_over_absent_binding() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -520,7 +520,7 @@ mod tests {
     /// an error, never a phantom row.
     #[dialog_common::test]
     async fn it_errors_on_unbound_entity() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());

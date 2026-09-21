@@ -5,7 +5,7 @@
 //! session material operators are built from. This crate holds only the
 //! identity primitives; storage routing lives in `dialog-storage` and the
 //! operating environment composed from a profile lives in
-//! `dialog-operator`, above the repository layer.
+//! `dialog-peer`, above the repository layer.
 
 mod authority;
 mod profile;

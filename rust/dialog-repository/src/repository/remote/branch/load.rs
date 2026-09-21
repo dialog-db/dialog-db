@@ -47,7 +47,7 @@ mod tests {
     use crate::LoadRemoteBranchError;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_remote_s3::Address;
 
     fn test_site() -> Address {
@@ -60,7 +60,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_loading_remote_branch_never_fetched() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let origin = repo

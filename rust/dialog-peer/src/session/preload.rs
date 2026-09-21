@@ -16,28 +16,28 @@ use dialog_artifacts::{Preload, PreloadQueue, PreloadRequest, Speculation};
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSend, ConditionalSync};
 
-use crate::Operator;
+use crate::Session;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Preload> for Operator<S>
+impl<S> Provider<Preload> for Session<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: ConditionalSync,
 {
     async fn execute(&self, request: PreloadRequest) -> bool {
-        self.speculation.preload(request)
+        self.peer().speculation().preload(request)
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Speculation> for Operator<S>
+impl<S> Provider<Speculation> for Session<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: ConditionalSync,
 {
     async fn execute(&self, (): ()) -> Arc<PreloadQueue> {
-        self.speculation.clone()
+        self.peer().speculation().clone()
     }
 }

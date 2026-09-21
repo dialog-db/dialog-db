@@ -1,12 +1,11 @@
-use crate::DeriveOperator as _;
 use std::str::FromStr;
 
-use crate::{Operator, Profile};
+use crate::{Peer, Session};
 use anyhow::Result;
 use base58::ToBase58;
 use dialog_artifacts::{Artifact, Attribute, Entity, Value};
 use dialog_capability::Subject;
-use dialog_network::Network;
+use dialog_effects::storage::Location;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -41,49 +40,40 @@ pub fn unique_name(prefix: &str) -> String {
     format!("{prefix}-{ts}-{pid}-{seq}")
 }
 
-/// Build a test operator with a fresh profile and powerline delegation.
-pub async fn test_operator() -> Operator<VolatileSpace> {
-    let storage = Storage::volatile();
-    let profile = Profile::open(unique_name("test"))
-        .perform(&storage)
+/// A fresh volatile peer under a unique name.
+pub async fn test_peer() -> Peer<VolatileSpace> {
+    Peer::new(Storage::volatile())
+        .open(Location::profile(unique_name("test")))
         .await
-        .unwrap();
-    profile
-        .derive(b"test")
-        .allow(Subject::any())
-        .network(Network::default())
-        .build(storage)
-        .await
-        .unwrap()
+        .expect("test_peer: failed to open peer")
 }
 
-/// Build a test operator and return both the operator and the profile.
-pub async fn test_operator_with_profile() -> (Operator<VolatileSpace>, Profile) {
-    let storage = Storage::volatile();
-    let profile = Profile::open(unique_name("test"))
-        .perform(&storage)
-        .await
-        .unwrap();
-    let operator = profile
-        .derive(b"test")
-        .allow(Subject::any())
-        .network(Network::default())
-        .build(storage)
-        .await
-        .unwrap();
-    (operator, profile)
+/// A session with a powerline grant on a fresh volatile peer.
+pub async fn test_session() -> Session<VolatileSpace> {
+    test_session_with_peer().await.0
 }
 
-/// Create a test repository using the given operator and profile.
+/// A session with a powerline grant, and the peer it narrows.
+pub async fn test_session_with_peer() -> (Session<VolatileSpace>, Peer<VolatileSpace>) {
+    let peer = test_peer().await;
+    let session = peer
+        .session(b"test")
+        .allow(Subject::any())
+        .build()
+        .await
+        .expect("test_session: failed to build session");
+    (session, peer)
+}
+
+/// Create a test repository under `peer`, through `session`.
 pub async fn test_repo(
-    operator: &Operator<VolatileSpace>,
-    profile: &Profile,
+    session: &Session<VolatileSpace>,
+    peer: &Peer<VolatileSpace>,
 ) -> dialog_repository::Repository<dialog_credentials::Credential> {
     use dialog_repository::RepositoryExt as _;
-    profile
-        .repository(unique_name("repo"))
+    peer.space(unique_name("repo"))
         .open()
-        .perform(operator)
+        .perform(session)
         .await
         .expect("test_repo: failed to open repository")
 }

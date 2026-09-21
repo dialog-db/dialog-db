@@ -1,5 +1,5 @@
 [package]
-name = "dialog-operator"
+name = "dialog-peer"
 edition.workspace = true
 version.workspace = true
 authors.workspace = true

@@ -23,7 +23,6 @@
 // `#[path]`-included into a separate target where Cargo links the package's
 // own lib under the `dialog_query` name (its extern prelude), so bare
 // `dialog_query::…` resolves to the real crate in both.
-
 use anyhow::Result;
 use async_trait::async_trait;
 use dialog_artifacts::inspect::Load;
@@ -38,10 +37,10 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
+use dialog_effects::storage::Location;
 use dialog_network::Network;
-use dialog_operator::DeriveOperator as _;
-use dialog_operator::helpers::{generate_data, unique_name};
-use dialog_operator::{Operator, Profile};
+use dialog_peer::helpers::{generate_data, unique_name};
+use dialog_peer::{Peer, Session};
 use dialog_repository::{
     Branch, NetworkedIndex, RemoteSite, Repository, RepositoryArchiveExt as _, RepositoryExt as _,
 };
@@ -564,7 +563,7 @@ pub struct BenchEnv<Env> {
     branch: String,
 }
 
-impl BenchEnv<Operator<VolatileSpace>> {
+impl BenchEnv<Session<VolatileSpace>> {
     /// Build a volatile (in-memory) benchmark environment.
     ///
     /// Use for CPU/memory-read isolated signals — no disk I/O.
@@ -575,7 +574,7 @@ impl BenchEnv<Operator<VolatileSpace>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl BenchEnv<Operator<NativeTempSpace>> {
+impl BenchEnv<Session<NativeTempSpace>> {
     /// Build an on-disk benchmark environment rooted in the platform
     /// temp directory.
     ///
@@ -587,7 +586,7 @@ impl BenchEnv<Operator<NativeTempSpace>> {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
-impl BenchEnv<Operator<::dialog_storage::provider::storage::WebSpace>> {
+impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
     /// Build an IndexedDB-backed benchmark environment (the real browser
     /// backend). Reads are async IndexedDB round-trips, so this is the wasm
     /// analogue of the on-disk backend — the read-count reduction shows up as
@@ -1572,9 +1571,9 @@ where
     }
 
     /// Open the repository under `profile` and assemble the environment.
-    async fn assemble(operator: Env, profile: &Profile) -> Result<Self> {
+    async fn assemble<S: Clone>(operator: Env, profile: &Peer<S>) -> Result<Self> {
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&operator)
             .await?;
@@ -1586,50 +1585,50 @@ where
     }
 }
 
-impl BenchEnv<Operator<VolatileSpace>> {
+impl BenchEnv<Session<VolatileSpace>> {
     async fn with_storage(storage: Storage<VolatileSpace>) -> Result<Self> {
-        let profile = Profile::open(unique_name("bench"))
-            .perform(&storage)
+        let profile = Peer::new(storage.clone())
+            .network(Network::default())
+            .open(Location::profile(unique_name("bench")))
             .await?;
         let operator = profile
-            .derive(b"bench")
+            .session(b"bench")
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
+            .build()
             .await?;
         Self::assemble(operator, &profile).await
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl BenchEnv<Operator<NativeTempSpace>> {
+impl BenchEnv<Session<NativeTempSpace>> {
     async fn with_storage(storage: Storage<NativeTempSpace>) -> Result<Self> {
-        let profile = Profile::open(unique_name("bench"))
-            .perform(&storage)
+        let profile = Peer::new(storage.clone())
+            .network(Network::default())
+            .open(Location::profile(unique_name("bench")))
             .await?;
         let operator = profile
-            .derive(b"bench")
+            .session(b"bench")
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
+            .build()
             .await?;
         Self::assemble(operator, &profile).await
     }
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
-impl BenchEnv<Operator<::dialog_storage::provider::storage::WebSpace>> {
+impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
     async fn with_storage(
         storage: Storage<::dialog_storage::provider::storage::WebSpace>,
     ) -> Result<Self> {
-        let profile = Profile::open(unique_name("bench"))
-            .perform(&storage)
+        let profile = Peer::new(storage.clone())
+            .network(Network::default())
+            .open(Location::profile(unique_name("bench")))
             .await?;
         let operator = profile
-            .derive(b"bench")
+            .session(b"bench")
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
+            .build()
             .await?;
         Self::assemble(operator, &profile).await
     }
