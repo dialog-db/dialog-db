@@ -45,6 +45,7 @@ pub struct OperatorBuilder {
     allowed: Vec<(Scope, Option<Timestamp>)>,
     directory: Directory,
     network: Network,
+    access_branch: Option<String>,
 }
 
 impl OperatorBuilder {
@@ -55,7 +56,19 @@ impl OperatorBuilder {
             allowed: Vec::new(),
             directory: Directory::Current,
             network: Network::default(),
+            access_branch: None,
         }
+    }
+
+    /// Name the branch of the profile repository this operator resolves
+    /// proofs from and retains delegations into.
+    ///
+    /// Defaults to [`ACCESS_BRANCH`]. A profile that keeps one branch per
+    /// account names the active one here, so the authority the operator
+    /// proves with is the authority of the account the profile is on.
+    pub fn access_branch(mut self, name: impl Into<String>) -> Self {
+        self.access_branch = Some(name.into());
+        self
     }
 
     /// Set the base directory for resolving space names.
@@ -155,9 +168,10 @@ impl OperatorBuilder {
 
         // Open the profile repository's access branch: the store every
         // proof resolves from and every retained delegation commits into.
+        let access_branch = self.access_branch.as_deref().unwrap_or(ACCESS_BRANCH);
         let repository = dialog_repository::Repository::from(self.credential.clone());
         let branch = repository
-            .branch(ACCESS_BRANCH)
+            .branch(access_branch)
             .open()
             .perform(&operator)
             .await
