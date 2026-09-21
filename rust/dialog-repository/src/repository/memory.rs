@@ -27,6 +27,18 @@ pub const REGISTRY: &str = "meta";
 mod retract;
 pub use retract::*;
 
+/// The branch every other branch is recorded in.
+///
+/// A branch exists as a set of memory cells; the fact that it exists
+/// lives here, so that branches can be listed without asking a backend
+/// to enumerate anything.
+///
+/// The registry is not recorded in itself. It does not have to be: its
+/// own fact is synthesized into every query's overlay, so a listing
+/// sees it while nothing about it is ever stored. That dissolves the
+/// recursion rather than special-casing it.
+pub const REGISTRY: &str = "meta";
+
 /// Extension trait for repository memory navigation.
 ///
 /// Extends [`MemoryExt`] with repository-specific helpers for
