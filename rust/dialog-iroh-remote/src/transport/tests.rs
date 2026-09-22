@@ -13,9 +13,9 @@ use dialog_capability::{Fork, ForkInvocation, Provider, SiteFork, Subject};
 use dialog_common::Blake3Hash;
 use dialog_common::Buffer;
 use dialog_did_web::{CachingResolver, WebResolver};
-use dialog_effects::Use;
 use dialog_effects::archive::{self, ArchiveError};
 use dialog_effects::blob::{self, BlobError};
+use dialog_effects::prelude::*;
 use dialog_operator::helpers::test_operator_with_profile;
 use iroh::Endpoint;
 use iroh::endpoint::presets;
@@ -73,10 +73,10 @@ async fn a_block_crosses_a_real_stream_and_reads_back() {
     let digest = Buffer::from(bytes.clone()).blake3_hash().clone();
 
     let put = Subject::from(subject.clone())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new("blocks"))
-        .invoke(archive::Put::new(Buffer::from(bytes.clone())));
+        .writer()
+        .archive()
+        .catalog("blocks")
+        .put(Buffer::from(bytes.clone()));
     let fork: IrohFork<archive::Put> = Fork::<Iroh, _>::new(put, address.clone()).into();
     let invocation = fork.authorize(&operator).await.expect("authorized");
     let stored: Result<(), ArchiveError> =
@@ -94,10 +94,10 @@ async fn a_block_crosses_a_real_stream_and_reads_back() {
     // still answer correctly, rather than reading a stale or truncated
     // stream.
     let read = Subject::from(subject)
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new("blocks"))
-        .invoke(archive::Get::new(digest));
+        .reader()
+        .archive()
+        .catalog("blocks")
+        .get(digest);
     let fork: IrohFork<archive::Get> = Fork::<Iroh, _>::new(read, address).into();
     let invocation = fork.authorize(&operator).await.expect("authorized");
     let found: Result<Option<Vec<u8>>, ArchiveError> =
@@ -157,10 +157,10 @@ async fn a_blob_streams_both_ways() {
     let bytes: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
 
     let write = Subject::from(subject.clone())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(blob::Blob)
-        .attenuate(blob::Write);
+        .writer()
+        .archive()
+        .blob()
+        .write();
     let fork: IrohFork<blob::Write> = Fork::<Iroh, _>::new(write, address.clone()).into();
     let invocation = fork.authorize(&operator).await.expect("authorized");
     let mut writer = Provider::<ForkInvocation<Iroh, blob::Write>>::execute(&site, invocation)
@@ -179,10 +179,10 @@ async fn a_blob_streams_both_ways() {
     );
 
     let read = Subject::from(subject)
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(blob::Blob)
-        .attenuate(blob::Read::new(digest));
+        .reader()
+        .archive()
+        .blob()
+        .read(digest);
     let fork: IrohFork<blob::Read> = Fork::<Iroh, _>::new(read, address).into();
     let invocation = fork.authorize(&operator).await.expect("authorized");
     let mut reader = Provider::<ForkInvocation<Iroh, blob::Read>>::execute(&site, invocation)
@@ -212,10 +212,10 @@ async fn an_import_that_lies_about_its_digest_is_refused() {
     let declared = Blake3Hash::from(*blake3::hash(&honest).as_bytes());
 
     let import = Subject::from(profile.did())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(blob::Blob)
-        .attenuate(blob::Import::new(declared.clone(), honest.len() as u64));
+        .writer()
+        .archive()
+        .blob()
+        .import(declared.clone(), honest.len() as u64);
     let fork: IrohFork<blob::Import> = Fork::<Iroh, _>::new(import, address).into();
     let invocation = fork.authorize(&operator).await.expect("authorized");
     let mut writer = Provider::<ForkInvocation<Iroh, blob::Import>>::execute(&site, invocation)

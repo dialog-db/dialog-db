@@ -186,16 +186,39 @@ pub fn decode<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::Effect;
-    use dialog_effects::archive::Get;
+    use dialog_capability::{Subject, did};
+    use dialog_effects::peer::{Hello, Peer, Spaces};
+    use dialog_effects::prelude::*;
 
-    /// The command a peer dispatches on is the effect's own string,
+    /// The command a peer dispatches on is the chain's own ability,
     /// taken from the signed invocation rather than from a field beside
     /// it, so its dispatch table and its authorization check cannot
     /// disagree.
     #[dialog_common::test]
-    fn the_command_is_the_effects_own() {
-        assert_eq!(Get::command(), "get/archive/block");
+    fn the_command_is_the_chains_own() {
+        let subject = Subject::from(did!("key:zSpace"));
+        assert_eq!(
+            subject
+                .clone()
+                .reader()
+                .archive()
+                .get(dialog_effects::archive::Blake3Hash::from([0u8; 32]))
+                .ability(),
+            "/use/get/archive/block"
+        );
+        assert_eq!(
+            subject
+                .clone()
+                .reader()
+                .attenuate(Peer)
+                .attenuate(Hello)
+                .ability(),
+            "/use/get/peer"
+        );
+        assert_eq!(
+            subject.reader().attenuate(Peer).attenuate(Spaces).ability(),
+            "/use/get/peer/space"
+        );
     }
 
     #[dialog_common::test]
