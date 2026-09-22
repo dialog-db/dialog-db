@@ -1338,7 +1338,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base58",
- "blake3",
  "dialog-artifacts",
  "dialog-capability",
  "dialog-common",
