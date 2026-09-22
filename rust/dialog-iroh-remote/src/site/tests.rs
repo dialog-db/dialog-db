@@ -17,8 +17,8 @@ use dialog_capability::{
 };
 use dialog_common::Buffer;
 use dialog_did_web::{CachingResolver, WebResolver};
-use dialog_effects::Use;
 use dialog_effects::archive::{self, ArchiveError};
+use dialog_effects::prelude::*;
 use dialog_operator::helpers::test_operator_with_profile;
 use iroh_base::{EndpointAddr, SecretKey};
 use std::sync::Arc;
@@ -89,10 +89,10 @@ where
 
 fn put_of(subject: &dialog_capability::Did, bytes: &[u8]) -> Capability<archive::Put> {
     Subject::from(subject.clone())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new("blocks"))
-        .invoke(archive::Put::new(Buffer::from(bytes.to_vec())))
+        .writer()
+        .archive()
+        .catalog("blocks")
+        .put(Buffer::from(bytes.to_vec()))
 }
 
 #[dialog_common::test]
@@ -119,12 +119,10 @@ async fn a_put_signed_here_is_performed_there() {
 async fn a_get_that_finds_nothing_is_an_answer() {
     let (outcome, _) = exchange(|subject| {
         Subject::from(subject.clone())
-            .attenuate(Use)
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog::new("blocks"))
-            .invoke(archive::Get::new(
-                dialog_effects::archive::Blake3Hash::from([4u8; 32]),
-            ))
+            .reader()
+            .archive()
+            .catalog("blocks")
+            .get(dialog_effects::archive::Blake3Hash::from([4u8; 32]))
     })
     .await;
     assert_eq!(
@@ -140,11 +138,11 @@ async fn a_get_that_finds_nothing_is_an_answer() {
 async fn an_effect_failure_arrives_as_that_effect_failing() {
     let (outcome, _) = exchange(|subject| {
         Subject::from(subject.clone())
-            .attenuate(Use)
-            .attenuate(dialog_effects::memory::Memory)
-            .attenuate(dialog_effects::memory::Space::new("space"))
-            .attenuate(dialog_effects::memory::Cell::new("cell"))
-            .invoke(dialog_effects::memory::Resolve)
+            .reader()
+            .memory()
+            .space("space")
+            .cell("cell")
+            .resolve()
     })
     .await;
     match outcome {
@@ -181,10 +179,10 @@ async fn a_stored_block_reads_back() {
     }
 
     let read = Subject::from(subject)
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new("blocks"))
-        .invoke(archive::Get::new(digest));
+        .reader()
+        .archive()
+        .catalog("blocks")
+        .get(digest);
     let fork: IrohFork<archive::Get> = Fork::<Iroh, _>::new(read, peer()).into();
     let invocation = fork.authorize(&operator).await.expect("authorized");
     let found: Result<Option<Vec<u8>>, ArchiveError> =
@@ -208,7 +206,7 @@ async fn a_peer_says_who_it_is() {
     let site = Iroh::new(Loopback(responder.clone()));
 
     let hello = Subject::from(subject.clone())
-        .attenuate(Use)
+        .reader()
         .attenuate(dialog_effects::peer::Peer)
         .attenuate(dialog_effects::peer::Hello);
     let fork: IrohFork<dialog_effects::peer::Hello> = Fork::<Iroh, _>::new(hello, peer()).into();
@@ -260,7 +258,7 @@ async fn a_peer_says_which_spaces_it_holds() {
     let site = Iroh::new(Loopback(responder.clone()));
 
     let ask = Subject::from(subject)
-        .attenuate(Use)
+        .reader()
         .attenuate(dialog_effects::peer::Peer)
         .attenuate(dialog_effects::peer::Spaces);
     let fork: IrohFork<dialog_effects::peer::Spaces> = Fork::<Iroh, _>::new(ask, peer()).into();
@@ -324,7 +322,7 @@ async fn a_site_connects_once_and_not_before_it_must() {
 
     for _ in 0..3 {
         let hello = Subject::from(subject.clone())
-            .attenuate(Use)
+            .reader()
             .attenuate(dialog_effects::peer::Peer)
             .attenuate(dialog_effects::peer::Hello);
         let fork: IrohFork<dialog_effects::peer::Hello> =
@@ -393,7 +391,7 @@ async fn a_site_that_could_not_connect_tries_again() {
 
     let ask = || {
         let hello = Subject::from(subject.clone())
-            .attenuate(Use)
+            .reader()
             .attenuate(dialog_effects::peer::Peer)
             .attenuate(dialog_effects::peer::Hello);
         Fork::<Iroh, _>::new(hello, peer())
@@ -520,7 +518,7 @@ async fn a_broken_link_is_rebuilt_by_the_next_exchange() {
 
     let ask = || {
         let hello = Subject::from(subject.clone())
-            .attenuate(Use)
+            .reader()
             .attenuate(dialog_effects::peer::Peer)
             .attenuate(dialog_effects::peer::Hello);
         Fork::<Iroh, _>::new(hello, peer())
