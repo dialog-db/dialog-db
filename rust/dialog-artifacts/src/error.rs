@@ -1,4 +1,5 @@
 use dialog_capability::access::AuthorizeError;
+use dialog_capability::identity::IdentityError;
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::memory::MemoryError;
@@ -143,6 +144,20 @@ pub enum TypeError {
     /// Expected type and actual type mismatch.
     #[error("Type mismatch: expected {0}, got {1}")]
     TypeMismatch(ValueDataType, ValueDataType),
+}
+
+/// Flattened, not nested: the corrupt-entry path matches on
+/// [`DialogArtifactsError::CorruptEntry`] to decide whether to skip a
+/// row rather than fail the scan, so an identity failure has to arrive
+/// as that same variant.
+impl From<IdentityError> for DialogArtifactsError {
+    fn from(error: IdentityError) -> Self {
+        match error {
+            IdentityError::InvalidUri(reason) => Self::InvalidUri(reason),
+            IdentityError::InvalidEntity(reason) => Self::InvalidEntity(reason),
+            IdentityError::CorruptEntry(reason) => Self::CorruptEntry(reason),
+        }
+    }
 }
 
 #[cfg(test)]
