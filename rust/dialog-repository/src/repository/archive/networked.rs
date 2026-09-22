@@ -1,12 +1,14 @@
+use dialog_effects::archive::prelude::CatalogExt as _;
+use dialog_effects::archive::prelude::GetBlockExt as _;
 use std::sync::Arc;
 
 use crate::RemoteSite;
 use async_trait::async_trait;
 use dialog_capability::Fork;
-use dialog_capability::{Capability, Provider};
+use dialog_capability::Provider;
 use dialog_common::{Buffer, ConditionalSync, Priority};
-use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
-use dialog_effects::archive::{ArchiveError, Catalog, Get, Put};
+use dialog_effects::archive::prelude::ArchiveExt;
+use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::{Debug, Display};
@@ -15,6 +17,8 @@ pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
 
 use super::local::LocalIndex;
 use crate::RemoteRepository;
+use dialog_effects::MethodExt as _;
+use dialog_effects::archive::prelude::CatalogScope;
 
 /// The remote half of a [`NetworkedIndex`]: what a local read miss means.
 ///
@@ -108,11 +112,7 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
     /// Create a networked index. With [`RemoteFallback::Remote`] (or a
     /// `Some(remote)`), reads that miss locally fall back to the remote
     /// and cache the result; see [`RemoteFallback`] for the other modes.
-    pub fn new(
-        env: &'a Env,
-        index: Capability<Catalog>,
-        remote: impl Into<RemoteFallback>,
-    ) -> Self {
+    pub fn new(env: &'a Env, index: CatalogScope, remote: impl Into<RemoteFallback>) -> Self {
         Self {
             local: LocalIndex::new(env, index),
             remote: remote.into(),
@@ -223,7 +223,7 @@ where
         return Ok(Some(Arc::new(bytes)));
     }
 
-    let remote_catalog = subject.archive().catalog("index");
+    let remote_catalog = subject.reader().archive().catalog("index");
     let remote_result = remote_catalog
         .get(digest.clone())
         .fork(&address)
@@ -302,7 +302,6 @@ mod tests {
     use parking_lot::Mutex;
 
     use super::{Hydrate, HydrationRequest, NetworkedIndex, RemoteFallback};
-    use crate::RepositoryArchiveExt as _;
     use crate::helpers::test_repo;
 
     /// An env that answers every hydration with "not found" and keeps the

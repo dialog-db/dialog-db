@@ -2,20 +2,19 @@ use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactView, DialogArtifactsError};
-use dialog_capability::{Capability, Fork, Provider};
+use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
-use dialog_effects::archive::{Catalog, Get, Put};
+use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
 use dialog_search_tree::{Buffer, DialogSearchTreeError};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
+use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
+
 use crate::repository::source::SourceRef;
-use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-};
+use crate::{Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite};
 
 /// Command struct for selecting artifacts from a branch or a snapshot.
 pub struct Select<'a> {
@@ -43,8 +42,8 @@ impl<'a> Select<'a> {
     }
 
     /// The catalog (archive index) scoped to this line's subject.
-    pub fn catalog(&self) -> Capability<Catalog> {
-        self.source.subject().archive().index()
+    pub fn catalog(&self) -> CatalogScope {
+        ArchiveScope::new(self.source.subject()).index()
     }
 }
 
@@ -254,7 +253,7 @@ pub struct SelectOwned<'a>(Select<'a>);
 
 impl SelectOwned<'_> {
     /// The catalog (archive index) scoped to this line's subject.
-    pub fn catalog(&self) -> Capability<Catalog> {
+    pub fn catalog(&self) -> CatalogScope {
         self.0.catalog()
     }
 

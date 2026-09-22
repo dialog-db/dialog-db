@@ -1,3 +1,6 @@
+use dialog_effects::MethodExt as _;
+use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use std::collections::HashSet;
 
 use dialog_artifacts::tree::TreeStorageBridge;
@@ -7,9 +10,8 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveSubjectExt as _, CatalogExt as _};
+use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get, Put};
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{
@@ -21,7 +23,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use crate::{
     Branch, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex, RemoteRepository,
-    RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
+    RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -672,6 +674,7 @@ where
             let mut sink = address
                 .subject
                 .clone()
+                .writer()
                 .archive()
                 .blob()
                 .import(digest.clone(), size)
@@ -729,6 +732,7 @@ where
     let found: Option<Vec<u8>> = address
         .subject
         .clone()
+        .reader()
         .archive()
         .catalog("index")
         .get(hash.clone())
@@ -753,6 +757,7 @@ where
     address
         .subject
         .clone()
+        .reader()
         .archive()
         .catalog("index")
         .get(hash.clone())
@@ -854,6 +859,7 @@ where
     let probe = address
         .subject
         .clone()
+        .reader()
         .archive()
         .blob()
         .read(digest.clone())
@@ -887,6 +893,7 @@ where
             match origin_address
                 .subject
                 .clone()
+                .reader()
                 .archive()
                 .blob()
                 .read(digest.clone())
@@ -914,6 +921,7 @@ where
     let mut sink = address
         .subject
         .clone()
+        .writer()
         .archive()
         .blob()
         .import(digest, size)

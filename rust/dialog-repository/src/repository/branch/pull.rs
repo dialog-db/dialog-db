@@ -11,7 +11,6 @@ use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
@@ -20,8 +19,7 @@ use futures_util::future::Either;
 
 use crate::{
     Branch, Checkpoint, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError,
-    RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
-    UpstreamBranch,
+    RemoteSite, RepositoryMemoryExt, Revision, TreeReference, Upstream, UpstreamBranch,
 };
 
 /// Below this divergence mass (summed edition excess, roughly commits),

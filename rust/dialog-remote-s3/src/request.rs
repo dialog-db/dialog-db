@@ -12,8 +12,7 @@
 //!
 //! ```
 //! use dialog_capability::{Subject, did};
-//! use dialog_effects::archive::{Archive, Catalog, Get, Put};
-//! use dialog_effects::Use;
+//! use dialog_effects::prelude::*;
 //! use dialog_common::Blake3Hash;
 //! use dialog_remote_s3::request::S3Request;
 //!
@@ -22,9 +21,9 @@
 //! // Build a capability to get content from the "index" catalog
 //! let digest = Blake3Hash::hash(b"hello");
 //! let get = Subject::from(subject.clone())
-//!     .attenuate(Use).attenuate(Archive)
-//!     .attenuate(Catalog::new("index"))
-//!     .invoke(Get::new(digest));
+//!     .archive()
+//!     .catalog("index")
+//!     .get(digest);
 //!
 //! let request = S3Request::from(&get);
 //! assert_eq!(request.method, "GET");
@@ -148,11 +147,11 @@ mod tests {
     use super::{IntoRequest, RequestMethod};
     use dialog_capability::{Subject, did};
     use dialog_common::{Blake3Hash, Buffer};
-    use dialog_effects::Use;
-    use dialog_effects::archive::{Archive, Catalog, Get, Put};
-    use dialog_effects::blob::prelude::{ArchiveBlobExt, BlobExt};
+    use dialog_effects::prelude::*;
+
+    use dialog_effects::archive::prelude::CatalogScope;
     use dialog_effects::memory::Version;
-    use dialog_effects::memory::prelude::{CellExt, MemoryExt, MemorySubjectExt, SpaceExt};
+    use dialog_effects::memory::prelude::CellScope;
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test_configure;
@@ -174,38 +173,21 @@ mod tests {
     #[dialog_common::test]
     fn it_reports_the_method_the_archive_translations_produce() {
         let digest = Blake3Hash::hash(b"content");
-        let catalog = || {
-            subject()
-                .attenuate(Use)
-                .attenuate(Archive)
-                .attenuate(Catalog::new("index"))
-        };
-        method_matches(&catalog().invoke(Get::new(digest)));
-        method_matches(&catalog().invoke(Put::new(Buffer::from(vec![1, 2, 3]))));
+        let catalog = || CatalogScope::new(subject(), "index");
+        method_matches(&catalog().get(digest));
+        method_matches(&catalog().put(Buffer::from(vec![1, 2, 3])));
     }
 
     #[dialog_common::test]
     fn it_reports_the_method_the_blob_translations_produce() {
         let digest = Blake3Hash::hash(b"content");
-        method_matches(
-            &subject()
-                .attenuate(Use)
-                .attenuate(Archive)
-                .blob()
-                .read(digest.clone()),
-        );
-        method_matches(
-            &subject()
-                .attenuate(Use)
-                .attenuate(Archive)
-                .blob()
-                .import(digest, 3),
-        );
+        method_matches(&subject().reader().archive().blob().read(digest.clone()));
+        method_matches(&subject().writer().archive().blob().import(digest, 3));
     }
 
     #[dialog_common::test]
     fn it_reports_the_method_the_memory_translations_produce() {
-        let cell = || subject().memory().space("space").cell("cell");
+        let cell = || CellScope::new(subject(), "space", "cell");
         method_matches(&cell().resolve());
         method_matches(&cell().publish(vec![1, 2, 3], None));
         method_matches(&cell().retract(Version::from("v1".to_string())));

@@ -73,7 +73,6 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Write as BlobWrite;
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_ucan::{UcanCertificate, UcanDelegation};
 use futures_util::stream;

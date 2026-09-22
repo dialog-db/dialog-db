@@ -286,7 +286,6 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
 /// entries and how many tree nodes it holds. Grounds the read counts:
 /// a merge's reads should be compared against these totals.
 async fn measure_shape(depth: usize) -> Result<()> {
-    use crate::RepositoryArchiveExt as _;
     use dialog_search_tree::TreeDifference;
 
     let (operator, profile) = test_operator_with_profile().await;
@@ -354,11 +353,10 @@ async fn measure_shape(depth: usize) -> Result<()> {
 ///   would look like if it could defer the flush (publishing a head only at a
 ///   sync/publish point). This is the regime the buffer is designed for.
 async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
-    use crate::RepositoryArchiveExt as _;
     use dialog_artifacts::tree::ArtifactTreeExt as _;
     use dialog_artifacts::tree::{WriteScope, write_instructions};
     use dialog_artifacts::{Instruction as I, apply_buffered};
-    use dialog_effects::prelude::CatalogExt as _;
+
     use dialog_search_tree::Delta;
 
     let (operator, profile) = test_operator_with_profile().await;

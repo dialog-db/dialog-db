@@ -17,6 +17,7 @@
 //! [fsapi]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API
 
 use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle};
+use dialog_effects::MethodExt as _;
 use futures_util::StreamExt;
 use js_sys::Uint8Array;
 use std::rc::Rc;
@@ -1042,6 +1043,7 @@ fn lock_manager() -> Result<web_sys::LockManager, FileSystemError> {
 mod tests {
     use super::MountedDirectory;
     use crate::helpers::{unique_did, unique_name};
+    use dialog_effects::MethodExt as _;
     use dialog_effects::archive::prelude::*;
     use dialog_effects::memory::prelude::*;
 
@@ -1064,6 +1066,7 @@ mod tests {
         let digest = dialog_common::Blake3Hash::hash(b"never written");
 
         let result = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -1081,6 +1084,7 @@ mod tests {
         let digest = dialog_common::Blake3Hash::hash(&content);
 
         did.clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -1088,6 +1092,7 @@ mod tests {
             .await?;
 
         let result = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -1105,6 +1110,7 @@ mod tests {
 
         let version = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -1114,6 +1120,7 @@ mod tests {
         assert!(!version.is_empty());
 
         let resolved = did
+            .reader()
             .memory()
             .space("local")
             .cell("head")
@@ -1134,6 +1141,7 @@ mod tests {
         let did = unique_did().await;
 
         did.clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -1143,6 +1151,7 @@ mod tests {
 
         // A second IfNoneMatch publish must fail: the cell already exists.
         let result = did
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -1160,6 +1169,7 @@ mod tests {
         let content = b"branch head".to_vec();
 
         did.clone()
+            .writer()
             .memory()
             .space("local")
             .cell("branch/main")
@@ -1168,6 +1178,7 @@ mod tests {
             .await?;
 
         let resolved = did
+            .reader()
             .memory()
             .space("local")
             .cell("branch/main")
@@ -1193,6 +1204,7 @@ mod tests {
         let digest = dialog_common::Blake3Hash::hash(&content);
 
         did.clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -1200,6 +1212,7 @@ mod tests {
             .await?;
         let result = did
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest.clone())
@@ -1210,6 +1223,7 @@ mod tests {
         // Re-opening the same Location must reach the same directory.
         let reopened = crate::provider::FileSystem::open(&location).await?;
         let again = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -1237,6 +1251,7 @@ mod tests {
         let digest = dialog_common::Blake3Hash::hash(&content);
 
         did.clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -1246,6 +1261,7 @@ mod tests {
         // Re-opening the same Location must reach the same directory.
         let reopened = crate::provider::FileSystem::open(&location).await?;
         let result = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)

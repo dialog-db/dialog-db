@@ -48,6 +48,7 @@
 //! upstream as the walk proceeds, which is what makes the result complete.
 
 use core::ops::RangeInclusive;
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use std::collections::HashSet;
 
 use async_stream::try_stream;
@@ -60,11 +61,12 @@ use dialog_artifacts::{
     ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, ShipmentRef,
     State, Statement, shipment_ref,
 };
-use dialog_capability::{Capability, Did, Fork, Provider, Subject};
+use dialog_capability::{Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveSubjectExt as _, CatalogExt as _};
-use dialog_effects::archive::{Archive, Catalog, Get, Put};
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::archive::prelude::{
+    ArchiveExt as _, ArchiveScope, CatalogExt as _, CatalogScope, DEFAULT_CATALOG, PutBlockExt as _,
+};
+use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory;
 use dialog_query::query::Application;
@@ -81,9 +83,9 @@ use dialog_varsig::Principal;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     BlobArchive, Branch, Index, NetworkedIndex, Overlay, PublishError, RemoteRepository,
-    RemoteSite, Repository, RepositoryArchiveExt as _, Revision, Select, SelectQuery,
-    SnapshotError,
+    RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
 };
+use dialog_effects::MethodExt as _;
 
 pub mod codec;
 
@@ -294,13 +296,13 @@ impl Snapshot {
     }
 
     /// Archive capability for this snapshot's subject.
-    pub fn archive(&self) -> Capability<Archive> {
-        self.subject().archive()
+    pub fn archive(&self) -> ArchiveScope {
+        ArchiveScope::new(self.subject())
     }
 
     /// The archive catalog this snapshot's blocks live in.
-    pub(crate) fn index(&self) -> Capability<Catalog> {
-        self.subject.clone().archive().index()
+    pub(crate) fn index(&self) -> CatalogScope {
+        ArchiveScope::new(self.subject.clone()).index()
     }
 
     /// The revision a commit builds on and the line it mints on, read
@@ -779,6 +781,7 @@ impl SnapshotExport {
                     };
                     let reader = subject
                         .clone()
+                        .reader()
                         .archive()
                         .blob()
                         .read(digest.clone())
@@ -798,6 +801,7 @@ impl SnapshotExport {
                             let mut source = address
                                 .subject
                                 .clone()
+                                .reader()
                                 .archive()
                                 .blob()
                                 .read(digest.clone())
@@ -806,6 +810,7 @@ impl SnapshotExport {
                                 .await?;
                             let mut sink = subject
                                 .clone()
+                                .writer()
                                 .archive()
                                 .blob()
                                 .import(digest.clone(), record.size)
@@ -817,6 +822,7 @@ impl SnapshotExport {
                             sink.finish().await?;
                             subject
                                 .clone()
+                                .reader()
                                 .archive()
                                 .blob()
                                 .read(digest.clone())
@@ -908,8 +914,9 @@ where
                     }
                     subject
                         .clone()
+                        .writer()
                         .archive()
-                        .index()
+                        .catalog(DEFAULT_CATALOG)
                         .put(block.content)
                         .perform(env)
                         .await?;
@@ -922,6 +929,7 @@ where
                 } => {
                     let mut writer = subject
                         .clone()
+                        .writer()
                         .archive()
                         .blob()
                         .import(digest.clone(), size)
@@ -966,6 +974,7 @@ mod tests {
     use anyhow::Result;
     use dialog_artifacts::{Artifact, Instruction, Value};
     use dialog_credentials::Credential;
+    use dialog_effects::archive::prelude::GetBlockExt as _;
     use dialog_effects::blob::BlobSource;
     use dialog_search_tree::PersistentNode;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
@@ -1184,8 +1193,9 @@ mod tests {
         // And nothing was written under the address it claimed.
         let stored = elsewhere
             .subject()
+            .reader()
             .archive()
-            .index()
+            .catalog(DEFAULT_CATALOG)
             .get(honest.digest.clone())
             .perform(&destination)
             .await?;

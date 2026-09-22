@@ -2,9 +2,10 @@
 
 use super::cell::Cache;
 use crate::PublishError;
-use dialog_capability::{Capability, Fork, Provider, SiteAddress};
+use dialog_capability::{Fork, Provider, SiteAddress};
 use dialog_common::ConditionalSync;
-use dialog_effects::memory::{self, prelude::CellExt};
+use dialog_effects::memory;
+use dialog_effects::memory::prelude::CellScope;
 use dialog_storage::Encoder;
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -17,7 +18,7 @@ use std::fmt::Debug;
 /// [`ForkPublish`] that runs against a remote site.
 pub struct Publish<T, Codec: Clone> {
     /// Capability chain targeting the cell to publish to.
-    pub capability: Capability<memory::Cell>,
+    pub capability: CellScope,
     /// Cached edition used for edition tracking and cache updates.
     pub cache: Cache<T, Codec>,
     /// Value to publish.
@@ -65,7 +66,7 @@ where
 /// `cell.resolve().fork(&addr).perform(&env)` first to sync the remote's
 /// current edition if you do not already hold it.
 pub struct ForkPublish<T, A: SiteAddress, Codec: Clone> {
-    capability: Capability<memory::Cell>,
+    capability: CellScope,
     cache: Cache<T, Codec>,
     content: T,
     address: A,

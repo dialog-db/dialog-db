@@ -11,9 +11,10 @@
 
 use std::sync::Arc;
 
-use dialog_capability::{Capability, Command, Did};
+use dialog_capability::{Command, Did};
 use dialog_common::{Blake3Hash, Priority, Scheduler};
-use dialog_effects::archive::{ArchiveError, Catalog};
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::archive::prelude::CatalogScope;
 
 use crate::NetworkAddress;
 
@@ -58,7 +59,7 @@ pub struct HydrationRequest {
     /// The subject (repository DID) at that site.
     pub subject: Did,
     /// The local catalog the fetched block writes back into.
-    pub catalog: Capability<Catalog>,
+    pub catalog: CatalogScope,
     /// The block to hydrate.
     pub digest: Blake3Hash,
     /// How the read ranks against the site's other reads: a demand read

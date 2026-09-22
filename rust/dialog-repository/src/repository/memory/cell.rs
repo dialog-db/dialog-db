@@ -1,8 +1,8 @@
 use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve};
-use dialog_capability::{Capability, Did, Policy};
+use dialog_capability::Did;
 use dialog_common::ConditionalSync;
 use dialog_common::time::{self, Duration, SystemTime};
-use dialog_effects::memory::prelude::CellExt;
+use dialog_effects::memory::prelude::CellScope;
 use dialog_effects::memory::{self, Edition, Version};
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
 use parking_lot::RwLock;
@@ -220,14 +220,14 @@ where
 /// - [`publish`](Cell::publish) returns a [`Publish`] command to write a value
 #[derive(Debug, Clone)]
 pub struct Cell<T, Codec: Clone = CborEncoder> {
-    capability: Capability<memory::Cell>,
+    capability: CellScope,
     cache: Cache<T, Codec>,
 }
 
 impl<T> Cell<T> {
     /// Returns the name of this cell.
     pub fn name(&self) -> &str {
-        &memory::Cell::of(&self.capability).cell
+        self.capability.cell_name()
     }
 
     /// How long ago this replica confirmed this cell's value.
@@ -240,8 +240,8 @@ impl<T> Cell<T> {
     }
 }
 
-impl<T> From<Capability<memory::Cell>> for Cell<T> {
-    fn from(capability: Capability<memory::Cell>) -> Self {
+impl<T> From<CellScope> for Cell<T> {
+    fn from(capability: CellScope) -> Self {
         Self {
             capability,
             cache: Cache {
@@ -469,16 +469,11 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use dialog_capability::Subject;
-    use dialog_effects::memory::prelude::*;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
     fn test_cell<T>(name: &str) -> Cell<T> {
-        Subject::from(did!("key:zCellTests"))
-            .memory()
-            .space("branch/test")
-            .cell(name)
-            .into()
+        CellScope::new(Subject::from(did!("key:zCellTests")), "branch/test", name).into()
     }
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

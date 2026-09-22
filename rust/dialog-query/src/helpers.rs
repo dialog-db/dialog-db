@@ -42,9 +42,7 @@ use dialog_network::Network;
 use dialog_operator::DeriveOperator as _;
 use dialog_operator::helpers::{generate_data, unique_name};
 use dialog_operator::{Operator, Profile};
-use dialog_repository::{
-    Branch, NetworkedIndex, RemoteSite, Repository, RepositoryArchiveExt as _, RepositoryExt as _,
-};
+use dialog_repository::{Branch, NetworkedIndex, RemoteSite, Repository, RepositoryExt as _};
 use dialog_search_tree::audit as tree_audit;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBackend};

@@ -8,22 +8,25 @@
 //!
 //! - [`storage`]: Location-based storage operations (`Storage`, `Location`, `Mount`, `Load`, `Save`)
 //! - [`memory`]: CAS memory cells (`Memory`, `Space`, `Cell`, `Resolve`, `Publish`, `Retract`)
+//! - [`branch`]: Named lines of revisions (`Branches`, `Branch`, `List`, `Create`, `Delete`)
 //! - [`archive`]: Content-addressed archive (`Archive`, `Catalog`, `Get`, `Put`)
 //!
 //! # Example
 //!
 //! ```
-//! use dialog_effects::archive::{Archive, Catalog, Get};
-//! use dialog_effects::Use;
+//! use dialog_effects::prelude::*;
 //! use dialog_capability::{did, Subject};
 //! use dialog_common::Blake3Hash;
 //!
-//! // Build a capability to get content from the "index" catalog
+//! // A chain is written in the order its path reads.
 //! let digest = Blake3Hash::hash(b"hello");
 //! let get_capability = Subject::from(did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"))
-//!     .attenuate(Use).attenuate(Archive)              // Domain: archive operations
-//!     .attenuate(Catalog::new("index"))  // Policy: only the "index" catalog
-//!     .invoke(Get::new(digest));         // Effect: get this specific digest
+//!     .reader()              // Method: read, under `/use`
+//!     .archive()             // Namespace: the archive
+//!     .catalog("index")      // Policy: only the "index" catalog
+//!     .get(digest);          // Effect: this specific digest
+//!
+//! assert_eq!(get_capability.ability(), "/use/get/archive/block");
 //! ```
 
 #![warn(missing_docs)]
@@ -41,6 +44,7 @@ pub mod access;
 pub mod archive;
 pub mod authority;
 pub mod blob;
+pub mod branch;
 pub mod credential;
 pub mod memory;
 pub mod rejection;
@@ -53,14 +57,17 @@ pub mod storage;
 /// use dialog_effects::prelude::*;
 /// ```
 pub mod prelude {
+    pub use crate::{MethodExt, UseExt};
+
     pub use crate::archive::prelude::*;
     pub use crate::blob::prelude::*;
+    pub use crate::branch::prelude::*;
     pub use crate::credential::prelude::*;
     pub use crate::memory::prelude::*;
 }
 
 // Re-export capability primitives for convenience
-pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
+pub use dialog_capability::{Attenuation, Capability, Did, Effect, Policy, Subject};
 pub use rejection::Rejection;
 use serde::{Deserialize, Serialize};
 
@@ -68,11 +75,193 @@ use serde::{Deserialize, Serialize};
 /// every write (`/use/get/...`, `/use/put/...`, `/use/delete/...`). A delegation
 /// attenuated to `Use` lets its holder read and write the subject's data
 /// without holding `/ucan` (delegation and revocation), which is what a
-/// member of a shared space is given. `/void` is reserved beside it for
-/// operations that destroy rather than change; nothing lives there yet.
+/// member of a shared space is given. [`Void`] sits beside it for
+/// operations that destroy rather than change.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Use;
 
 impl Attenuation for Use {
     type Of = Subject;
+}
+
+/// Operations that destroy rather than change (`/void/delete/...`).
+///
+/// Separate from [`Use`] because retracting a fact and destroying the
+/// thing that holds facts are different powers. A member of a shared
+/// space holds `/use`, so they may write and retract the subject's
+/// data — but deleting the branch itself is not something that grant
+/// should carry. Keeping destruction in its own root means it can only
+/// ever be conferred deliberately.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Void;
+
+impl Attenuation for Void {
+    type Of = Subject;
+}
+
+/// What a namespace hangs from.
+///
+/// A namespace such as [`memory`](crate::memory::Memory) is reached by
+/// reading, by writing and by deleting, so it is generic over the
+/// method above it. This alias is the bound that generic parameter
+/// needs, named once so the four namespaces do not each restate it.
+pub trait Method: Attenuation + dialog_capability::Caveat
+where
+    Self::Of: dialog_capability::Constraint,
+{
+}
+
+impl<T> Method for T
+where
+    T: Attenuation + dialog_capability::Caveat,
+    T::Of: dialog_capability::Constraint,
+{
+}
+
+/// Start a capability chain at a method.
+///
+/// A method is named for what its holder becomes, not for the segment
+/// it emits: a `reader()` reaches `/use/get`. `.user().reader()`
+/// spells the two links out; `.reader()` is the same chain in one
+/// call, since a read is always under [`Use`]. Both land on
+/// `Capability<method::Get>`, which the namespaces hang from.
+pub trait MethodExt: Sized {
+    /// Everything a holder needs to use the subject's data: `/use`.
+    fn user(self) -> Capability<Use>;
+
+    /// Destroying the thing itself rather than changing it: `/void`.
+    ///
+    /// Unlike [`user`](Self::user), this is already a method: nothing
+    /// hangs under `/void` but the destroying of what the chain goes
+    /// on to name, so there is no second link to write.
+    fn voider(self) -> Capability<Void>;
+
+    /// Read, under [`Use`]: `/use/get/...`.
+    fn reader(self) -> Capability<method::Get> {
+        self.user().attenuate(method::Get)
+    }
+
+    /// Write, under [`Use`]: `/use/put/...`.
+    fn writer(self) -> Capability<method::Put> {
+        self.user().attenuate(method::Put)
+    }
+}
+
+impl MethodExt for Subject {
+    fn user(self) -> Capability<Use> {
+        self.attenuate(Use)
+    }
+
+    fn voider(self) -> Capability<Void> {
+        self.attenuate(Void)
+    }
+}
+
+impl MethodExt for Did {
+    fn user(self) -> Capability<Use> {
+        Subject::from(self).attenuate(Use)
+    }
+
+    fn voider(self) -> Capability<Void> {
+        Subject::from(self).attenuate(Void)
+    }
+}
+
+/// Start a chain at a method known only as a type.
+///
+/// For a caller reconstructing a chain from the wire, where the method
+/// comes from the effect being matched rather than from anything
+/// written in source.
+pub trait Chain<M: dialog_capability::Constraint> {
+    /// Begin the chain under `M`.
+    fn under(self) -> Capability<M>;
+}
+
+impl Chain<method::Get> for Subject {
+    fn under(self) -> Capability<method::Get> {
+        self.reader()
+    }
+}
+
+impl Chain<method::Put> for Subject {
+    fn under(self) -> Capability<method::Put> {
+        self.writer()
+    }
+}
+
+impl Chain<method::Delete> for Subject {
+    fn under(self) -> Capability<method::Delete> {
+        self.user().delete()
+    }
+}
+
+impl Chain<Void> for Subject {
+    fn under(self) -> Capability<Void> {
+        self.voider()
+    }
+}
+
+/// Attach a method to a root that already exists.
+///
+/// For a chain written out as `.user().get()` rather than `.get()`.
+pub trait UseExt {
+    /// Read: `/use/get/...`.
+    fn get(self) -> Capability<method::Get>;
+    /// Write: `/use/put/...`.
+    fn put(self) -> Capability<method::Put>;
+    /// Empty a value: `/use/delete/...`.
+    fn delete(self) -> Capability<method::Delete>;
+}
+
+impl UseExt for Capability<Use> {
+    fn get(self) -> Capability<method::Get> {
+        self.attenuate(method::Get)
+    }
+
+    fn put(self) -> Capability<method::Put> {
+        self.attenuate(method::Put)
+    }
+
+    fn delete(self) -> Capability<method::Delete> {
+        self.attenuate(method::Delete)
+    }
+}
+
+/// Attach the destroying method to [`Void`].
+/// What a holder does to a subject's data.
+///
+/// A method is a level of the hierarchy, not a prefix an effect spells
+/// out for itself. That is what makes `/use/get` a real thing to
+/// delegate -- every read of a subject's data and nothing else --
+/// rather than a convention each effect's path has to agree to.
+pub mod method {
+    use super::{Attenuation, Deserialize, Serialize, Use};
+
+    /// Reading: `/use/get/...`.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+    pub struct Get;
+
+    impl Attenuation for Get {
+        type Of = Use;
+    }
+
+    /// Writing: `/use/put/...`.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+    pub struct Put;
+
+    impl Attenuation for Put {
+        type Of = Use;
+    }
+
+    /// Removing a value while leaving what held it: `/use/delete/...`.
+    ///
+    /// Distinct from [`Void`](self::Void), which destroys the container
+    /// itself. Emptying a cell is an ordinary write; discarding the
+    /// branch that cell belongs to is not.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+    pub struct Delete;
+
+    impl Attenuation for Delete {
+        type Of = Use;
+    }
 }

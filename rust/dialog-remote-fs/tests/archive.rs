@@ -12,6 +12,7 @@ mod helpers;
 
 use anyhow::Result;
 use dialog_common::Blake3Hash;
+use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::*;
 use helpers::{perform, setup};
 
@@ -26,6 +27,7 @@ async fn it_returns_none_for_missing_blob() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -45,6 +47,7 @@ async fn it_writes_and_reads_back_a_blob() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -55,6 +58,7 @@ async fn it_writes_and_reads_back_a_blob() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -77,6 +81,7 @@ async fn it_writes_byte_compatibly_with_a_direct_filesystem() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -87,6 +92,7 @@ async fn it_writes_byte_compatibly_with_a_direct_filesystem() -> Result<()> {
     let loaded = env
         .subject
         .clone()
+        .reader()
         .archive()
         .catalog("index")
         .get(digest)
@@ -105,6 +111,7 @@ async fn it_reads_byte_compatibly_from_a_direct_filesystem() -> Result<()> {
 
     env.subject
         .clone()
+        .writer()
         .archive()
         .catalog("index")
         .put(content.clone())
@@ -114,6 +121,7 @@ async fn it_reads_byte_compatibly_from_a_direct_filesystem() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -133,6 +141,7 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -142,6 +151,7 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -152,6 +162,7 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -188,6 +199,7 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
             holder
                 .subject
                 .clone()
+                .writer()
                 .archive()
                 .catalog("index")
                 .put(content)
@@ -208,6 +220,7 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
             holder
                 .subject
                 .clone()
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(shared_digest.clone())
@@ -231,6 +244,7 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
             holder
                 .subject
                 .clone()
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(held_digest.clone())
@@ -240,6 +254,7 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
             empty
                 .subject
                 .clone()
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(held_digest.clone())
