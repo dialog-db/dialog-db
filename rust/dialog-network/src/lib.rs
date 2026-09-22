@@ -95,8 +95,9 @@ mod tests {
     use dialog_capability::{Site, SiteAddress};
     use dialog_common::Buffer;
     use dialog_did_web::{CachingResolver, WebResolver};
+    use dialog_effects::archive;
+    use dialog_effects::prelude::*;
     use dialog_effects::storage::Location;
-    use dialog_effects::{Use, archive};
     use dialog_iroh_remote::channel::{Channel, ChannelError};
     use dialog_iroh_remote::helpers::Volatile;
     use dialog_iroh_remote::serve::Responder;
@@ -199,10 +200,10 @@ mod tests {
 
         let bytes = b"routed by address alone".to_vec();
         let put = Subject::from(profile.did())
-            .attenuate(Use)
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog::new("blocks"))
-            .invoke(archive::Put::new(Buffer::from(bytes.clone())));
+            .writer()
+            .archive()
+            .catalog("blocks")
+            .put(Buffer::from(bytes.clone()));
 
         let fork: NetworkFork<archive::Put> =
             Fork::<Network, _>::new(put, NetworkAddress::Iroh(iroh_address())).into();
@@ -227,10 +228,10 @@ mod tests {
     async fn an_unconfigured_table_says_so() {
         let (operator, profile) = test_operator_with_profile().await;
         let put = Subject::from(profile.did())
-            .attenuate(Use)
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog::new("blocks"))
-            .invoke(archive::Put::new(Buffer::from(b"nowhere to go".to_vec())));
+            .writer()
+            .archive()
+            .catalog("blocks")
+            .put(Buffer::from(b"nowhere to go".to_vec()));
 
         let fork: NetworkFork<archive::Put> =
             Fork::<Network, _>::new(put, NetworkAddress::Iroh(iroh_address())).into();

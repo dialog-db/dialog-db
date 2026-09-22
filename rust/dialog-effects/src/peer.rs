@@ -30,22 +30,22 @@
 //! cannot be invoked across a wire.
 
 use crate::Rejection;
-use crate::Use;
+use crate::method;
 use dialog_capability::Did;
 use dialog_capability::access::AuthorizeError;
-pub use dialog_capability::{Attenuate, Capability, Effect, Policy, Subject};
+pub use dialog_capability::{Attenuate, Attenuation, Capability, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Root attenuation for asking about a peer.
 ///
-/// Contributes no ability segment of its own, as the other domains do:
-/// the effect names the whole command.
+/// Every question about a peer is a read, so it hangs from
+/// [`Get`](method::Get) and contributes `peer` to the ability path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Peer;
 
-impl Policy for Peer {
-    type Of = Use;
+impl Attenuation for Peer {
+    type Of = method::Get;
 }
 
 /// Who a peer is.
@@ -82,13 +82,12 @@ impl Hello {
     }
 }
 
-impl Effect for Hello {
+impl Policy for Hello {
     type Of = Peer;
-    type Output = Result<Greeting, PeerError>;
+}
 
-    fn command() -> &'static str {
-        "get/peer"
-    }
+impl Effect for Hello {
+    type Output = Result<Greeting, PeerError>;
 }
 
 /// One space a peer holds.
@@ -145,13 +144,16 @@ impl Spaces {
     }
 }
 
-impl Effect for Spaces {
+impl Attenuation for Spaces {
     type Of = Peer;
-    type Output = Result<Vec<Offer>, PeerError>;
 
-    fn command() -> &'static str {
-        "get/peer/space"
+    fn attenuation() -> &'static str {
+        "space"
     }
+}
+
+impl Effect for Spaces {
+    type Output = Result<Vec<Offer>, PeerError>;
 }
 
 /// Why a peer would not describe itself.

@@ -12,6 +12,7 @@ use dialog_common::{Buffer, Checksum};
 use dialog_credentials::Ed25519Signer;
 use dialog_did_web::{CachingResolver, WebResolver};
 use dialog_effects::archive::{ArchiveError, Blake3Hash};
+use dialog_effects::prelude::*;
 use dialog_ucan::Scope;
 use dialog_ucan_core::subject::Subject as DelegatedSubject;
 use dialog_ucan_core::{DelegationBuilder, InvocationBuilder};
@@ -216,10 +217,10 @@ fn responder(store: Recording) -> Responder<Recording, CachingResolver<WebResolv
 
 fn put_of(subject: &Ed25519Signer, bytes: &[u8]) -> Capability<archive::Put> {
     Subject::from(subject.did())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new("blocks"))
-        .invoke(archive::Put::new(Buffer::from(bytes.to_vec())))
+        .writer()
+        .archive()
+        .catalog("blocks")
+        .put(Buffer::from(bytes.to_vec()))
 }
 
 #[dialog_common::test]
@@ -331,10 +332,10 @@ async fn a_one_block_import_is_not_mistaken_for_a_put() {
     let (subject, operator) = signers().await;
     let bytes = b"a single block, imported".to_vec();
     let capability = Subject::from(subject.did())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new("blocks"))
-        .invoke(archive::Import::new([Buffer::from(bytes.clone())]));
+        .writer()
+        .archive()
+        .catalog("blocks")
+        .import([Buffer::from(bytes.clone())]);
     let container = request(&subject, &operator, &capability, vec![bytes.clone()]).await;
 
     let responder = responder(Recording::default());
@@ -358,10 +359,10 @@ async fn an_import_carrying_a_wrong_block_is_refused() {
     let (subject, operator) = signers().await;
     let signed_for = b"the block the import names".to_vec();
     let capability = Subject::from(subject.did())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new("blocks"))
-        .invoke(archive::Import::new([Buffer::from(signed_for)]));
+        .writer()
+        .archive()
+        .catalog("blocks")
+        .import([Buffer::from(signed_for)]);
     let container = request(
         &subject,
         &operator,
@@ -392,10 +393,10 @@ async fn an_import_carrying_a_wrong_block_is_refused() {
 async fn a_blob_command_reaches_the_store() {
     let (subject, operator) = signers().await;
     let capability = Subject::from(subject.did())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(dialog_effects::blob::Blob)
-        .invoke(dialog_effects::blob::Read::new(Blake3Hash::from([9u8; 32])));
+        .reader()
+        .archive()
+        .blob()
+        .read(Blake3Hash::from([9u8; 32]));
     let container = request(&subject, &operator, &capability, vec![]).await;
 
     // This store has no blobs and says so. What matters is *which* kind
@@ -448,10 +449,10 @@ async fn a_blob_asked_of_a_whole_answer_channel_is_refused() {
 fn a_blocks_address_comes_from_its_sha256() {
     let bytes = b"block".as_slice();
     let capability = Subject::from(dialog_capability::did!("key:zSpace"))
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new("blocks"))
-        .invoke(archive::Put::new(Buffer::from(bytes.to_vec())));
+        .writer()
+        .archive()
+        .catalog("blocks")
+        .put(Buffer::from(bytes.to_vec()));
     let params = Scope::invoke(&capability).parameters;
     let params = params.as_map();
     assert!(
