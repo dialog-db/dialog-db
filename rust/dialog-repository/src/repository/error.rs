@@ -1,6 +1,7 @@
 use crate::TreeReference;
 use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::access::AuthorizeError;
+use dialog_capability::identity::IdentityError;
 use dialog_common::Blake3Hash;
 use dialog_credentials::Ed25519SignerError;
 use dialog_effects::Rejection;
@@ -733,4 +734,10 @@ pub enum SnapshotError {
     /// Accessing the archive backend failed.
     #[error(transparent)]
     Storage(#[from] DialogStorageError),
+}
+
+impl From<IdentityError> for CommitError {
+    fn from(error: IdentityError) -> Self {
+        Self::Artifact(error.into())
+    }
 }

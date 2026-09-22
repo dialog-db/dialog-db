@@ -125,7 +125,7 @@ impl Revision {
     /// suitable for use as the subject of the revision's own attribute claims
     pub fn entity(&self) -> Result<Entity, DialogArtifactsError> {
         use base58::ToBase58;
-        format!("blake3:{}", self.reference().to_base58()).parse()
+        Ok(format!("blake3:{}", self.reference().to_base58()).parse()?)
     }
 
     /// Verify this revision's structural integrity: the edition must match

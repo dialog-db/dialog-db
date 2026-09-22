@@ -1,4 +1,7 @@
+use dialog_capability::Did;
 use serde::{Deserialize, Serialize};
+
+use crate::Revision;
 
 use crate::history::VersionExt as _;
 use crate::{
@@ -186,5 +189,30 @@ impl RevisionRecord {
         let added = State::Added(datum);
 
         Ok(vec![(entity_key, added.clone()), (attribute_key, added)])
+    }
+    /// The record for `revision` —
+    /// everything the revision states about itself as one atomic fact,
+    /// ready to be signed and written into the tree.
+    ///
+    /// The `authority` (the profile the issuer acts for) is passed in: the
+    /// head does not carry it — its identity is the branch entity plus the
+    /// issuer — but the record keeps the attribution readable. The
+    /// revision's tree root is deliberately not in the record: the record
+    /// lives in that tree, so the root cannot appear inside itself.
+    pub fn create(
+        revision: &Revision,
+        authority: &Did,
+        parents: Vec<Version>,
+        skips: Vec<Version>,
+    ) -> Self {
+        Self {
+            format: REVISION_RECORD_FORMAT,
+            branch: revision.branch.clone(),
+            issuer: revision.issuer.to_string(),
+            authority: authority.to_string(),
+            parents,
+            skips,
+            signature: Vec::new(),
+        }
     }
 }

@@ -13,7 +13,7 @@ use std::{
 use base58::{FromBase58, ToBase58};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-use crate::{DialogArtifactsError, ENTITY_LENGTH, Uri};
+use super::{ENTITY_LENGTH, IdentityError, Uri};
 
 /// An [`Entity`] is the subject part of a semantic triple. An [`Entity`] can
 /// be embodied by any valid [`Uri`].
@@ -22,7 +22,7 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, Uri};
 pub struct Entity(Uri, [u8; ENTITY_LENGTH]);
 
 /// Serializes an entity to UTF-8 format for CSV export.
-pub(crate) fn to_utf8<S>(entity: &Entity, serializer: S) -> Result<S::Ok, S::Error>
+pub fn to_utf8<S>(entity: &Entity, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -30,7 +30,7 @@ where
 }
 
 /// Deserializes an entity from UTF-8 format for CSV import.
-pub(crate) fn from_utf8<'de, D>(deserializer: D) -> Result<Entity, D::Error>
+pub fn from_utf8<'de, D>(deserializer: D) -> Result<Entity, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -54,7 +54,7 @@ impl Deref for Entity {
 }
 
 impl TryFrom<Uri> for Entity {
-    type Error = DialogArtifactsError;
+    type Error = IdentityError;
 
     fn try_from(value: Uri) -> Result<Self, Self::Error> {
         let bytes = value.key_bytes()?;
@@ -63,7 +63,7 @@ impl TryFrom<Uri> for Entity {
 }
 
 impl FromStr for Entity {
-    type Err = DialogArtifactsError;
+    type Err = IdentityError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::try_from(Uri::from_str(s)?)
@@ -71,7 +71,7 @@ impl FromStr for Entity {
 }
 
 impl TryFrom<String> for Entity {
-    type Error = DialogArtifactsError;
+    type Error = IdentityError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         value.parse()
@@ -79,12 +79,12 @@ impl TryFrom<String> for Entity {
 }
 
 impl TryFrom<Vec<u8>> for Entity {
-    type Error = DialogArtifactsError;
+    type Error = IdentityError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Entity::try_from(
             String::from_utf8(value)
-                .map_err(|error| DialogArtifactsError::InvalidEntity(format!("{error}")))?,
+                .map_err(|error| IdentityError::InvalidEntity(format!("{error}")))?,
         )
     }
 }
@@ -107,7 +107,7 @@ const BLOB_SCHEME: &str = "blob:";
 impl Entity {
     /// Initialize a new [`Entity`] with a randomly generated, globally unique
     /// URI. The URI is formatted as an ed25519 DID Key.
-    pub fn new() -> Result<Entity, DialogArtifactsError> {
+    pub fn new() -> Result<Entity, IdentityError> {
         Self::try_from(Uri::unique()?)
     }
 
@@ -119,10 +119,10 @@ impl Entity {
     /// Reconstructs an [`Entity`] from a string read back out of the index,
     /// verifying it is a canonical URI rendering (see [`Uri::from_stored`]).
     /// A string that fails the check is a corrupt or foreign-written entry
-    /// and errors as [`CorruptEntry`](DialogArtifactsError::CorruptEntry),
+    /// and errors as [`CorruptEntry`](IdentityError::CorruptEntry),
     /// which scan paths treat as an ignorable row. The key bytes are still
     /// derived (they are not stored alongside the string).
-    pub(crate) fn from_stored(s: &str) -> Result<Self, DialogArtifactsError> {
+    pub fn from_stored(s: &str) -> Result<Self, IdentityError> {
         Self::try_from(Uri::from_stored(s)?)
     }
 
@@ -134,13 +134,13 @@ impl Entity {
 
     /// The canonical entity reference for a stored blob:
     /// `blob:<base58(hash)>`.
-    pub fn from_blob(hash: &dialog_storage::Blake3Hash) -> Result<Entity, DialogArtifactsError> {
+    pub fn from_blob(hash: &[u8; 32]) -> Result<Entity, IdentityError> {
         format!("{}{}", BLOB_SCHEME, hash.to_base58()).parse()
     }
 
     /// The blob hash carried by a `blob:` entity, if this entity
     /// is one and its payload decodes to 32 base58 bytes.
-    pub fn blob_hash(&self) -> Option<dialog_storage::Blake3Hash> {
+    pub fn blob_hash(&self) -> Option<[u8; 32]> {
         let payload = self.as_str().strip_prefix(BLOB_SCHEME)?;
         let bytes = payload.from_base58().ok()?;
         <[u8; 32]>::try_from(bytes).ok()
@@ -162,7 +162,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_round_trips_a_blob_entity() {
-        let hash: dialog_storage::Blake3Hash = [7u8; 32];
+        let hash: [u8; 32] = [7u8; 32];
         let entity = Entity::from_blob(&hash).expect("constructs");
         assert!(entity.as_str().starts_with("blob:"));
         assert_eq!(entity.blob_hash(), Some(hash));
@@ -178,5 +178,41 @@ mod tests {
         // Garbage after the scheme is not a hash.
         let bogus: Entity = "blob:notbase58!!!".parse().expect("still a valid uri");
         assert_eq!(bogus.blob_hash(), None);
+    }
+}
+
+/// Conversions to and from JavaScript values.
+///
+/// These live beside [`Entity`] rather than with the artifact web
+/// bindings because both `Entity` and `JsValue` are foreign to that
+/// crate now, and the orphan rule forbids the impls there.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod web {
+    use std::str::FromStr as _;
+
+    use wasm_bindgen::{JsCast as _, JsError, JsValue};
+    use wasm_bindgen_futures::js_sys::Uint8Array;
+
+    use super::{Entity, IdentityError};
+
+    impl From<Entity> for JsValue {
+        fn from(value: Entity) -> Self {
+            // TODO: Change this to pass a string when the query
+            // engine supports URI entities
+            JsValue::from(value.to_string().as_bytes().to_owned())
+        }
+    }
+
+    impl TryFrom<JsValue> for Entity {
+        type Error = JsError;
+
+        fn try_from(entity: JsValue) -> Result<Self, Self::Error> {
+            let bytes = entity
+                .dyn_into::<Uint8Array>()
+                .map_err(|_| JsError::new("entity is not a byte array"))?;
+            let string = String::from_utf8(bytes.to_vec())
+                .map_err(|error| IdentityError::InvalidEntity(format!("{error}")))?;
+            Ok(Entity::from_str(&string)?)
+        }
     }
 }

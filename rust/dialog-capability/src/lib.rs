@@ -188,6 +188,9 @@ pub use settings::*;
 
 pub mod history;
 
+/// The identity vocabulary: names, independent of storage.
+pub mod identity;
+
 mod ability;
 pub use ability::*;
 

@@ -548,7 +548,8 @@ where
         // covers everything the revision states about itself, and readers
         // (`TreeHistory::revision_record`) refuse records that don't verify
         // against the slot they were found at.
-        let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
+        let mut record =
+            RevisionRecord::create(&revision, &profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         debug_assert_eq!(record.version(), version);
         // The record's key carries its value through the tree's own
