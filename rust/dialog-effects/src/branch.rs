@@ -34,6 +34,7 @@ use crate::Rejection;
 use crate::method;
 use crate::{Method, Void};
 use dialog_capability::access::AuthorizeError;
+use dialog_capability::identity::Revision;
 use dialog_capability::{Attenuate, Attenuation, Constraint, Effect, Policy};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
@@ -136,11 +137,25 @@ impl Effect for List {
 
 /// Create a branch and record it in the `meta` branch.
 ///
-/// Creating a branch that already exists is not an error: the recorded
-/// fact is the same one, so a repeated create converges rather than
-/// conflicting.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
-pub struct Create;
+/// A branch points at a revision the way a git ref points at a commit:
+/// `revision` is stored in the branch's cell as it is, so any revision
+/// can be pointed at, including one minted on another branch. The
+/// branch's own first commit then mints onto it, scoped to this
+/// branch, with the pointed-at revision as its parent.
+///
+/// `None` creates an empty branch: recorded, with no revision yet.
+///
+/// Creating a branch that already points at this revision converges
+/// rather than conflicting. Creating over a branch that points
+/// elsewhere is refused -- a create never moves an existing branch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Attenuate)]
+pub struct Create {
+    /// The revision the new branch points at, or `None` for an empty
+    /// branch. Omitted from the parameters when absent, so an empty
+    /// create reads on the wire exactly as it always has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<Revision>,
+}
 
 impl Policy for Create {
     type Of = Branch<method::Put>;
@@ -157,12 +172,21 @@ impl Effect for Create {
 /// subject's data is not the same as being able to destroy the thing
 /// that holds it.
 ///
-/// The two halves cannot be one compare-and-swap, so the fact is
-/// authoritative and is retracted last. A failure part-way therefore
-/// leaves cells a later [`Create`] overwrites harmlessly, rather than a
-/// branch that lists but cannot be opened.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
-pub struct Delete;
+/// Deleting names the revision the branch is expected to point at, and
+/// is refused unless it points at exactly that one. A branch that moved
+/// since the caller last looked -- a commit landed, a pull advanced it
+/// -- is not the branch the caller decided to delete, so it is left
+/// alone rather than destroyed along with work the caller never saw.
+///
+/// The two halves cannot be one compare-and-swap, so the cells go first
+/// and the fact follows. A failure part-way therefore leaves a branch
+/// that is gone but still listed, rather than one that lists and is
+/// still there.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct Delete {
+    /// The revision the branch must point at for the delete to proceed.
+    pub revision: Revision,
+}
 
 impl Policy for Delete {
     type Of = Branch<Void>;
@@ -215,7 +239,18 @@ pub enum BranchError {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+    use dialog_capability::identity::{Entity, Revision, TreeReference};
     use dialog_capability::{Subject, did};
+
+    /// A revision to point at or to expect. Its content is irrelevant to
+    /// these tests, which are about paths and parameters.
+    fn head() -> Revision {
+        Revision::new(
+            TreeReference::default(),
+            "did:key:zMain".parse::<Entity>().expect("valid entity"),
+            did!("key:zIssuer"),
+        )
+    }
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -247,7 +282,7 @@ mod tests {
             .voider()
             .branches()
             .branch("main")
-            .delete();
+            .delete(head());
 
         assert_eq!(claim.ability(), "/void/dialog/branch");
     }
@@ -258,7 +293,7 @@ mod tests {
     fn it_keeps_deletion_out_of_the_use_root() {
         let subject = Subject::from(did!("key:zRepo"));
         let write = subject.clone().writer().branches().branch("main").create();
-        let destroy = subject.voider().branches().branch("main").delete();
+        let destroy = subject.voider().branches().branch("main").delete(head());
 
         assert!(write.ability().starts_with("/use/"));
         assert!(destroy.ability().starts_with("/void/"));
@@ -270,8 +305,13 @@ mod tests {
     #[dialog_common::test]
     fn it_scopes_by_name_without_changing_the_path() {
         let subject = Subject::from(did!("key:zRepo"));
-        let main = subject.clone().voider().branches().branch("main").delete();
-        let feature = subject.voider().branches().branch("feature").delete();
+        let main = subject
+            .clone()
+            .voider()
+            .branches()
+            .branch("main")
+            .delete(head());
+        let feature = subject.voider().branches().branch("feature").delete(head());
 
         assert_eq!(main.ability(), feature.ability());
         assert_ne!(main.name(), feature.name());
