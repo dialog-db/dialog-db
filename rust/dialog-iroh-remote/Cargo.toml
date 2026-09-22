@@ -1,0 +1,93 @@
+[package]
+name = "dialog-iroh-remote"
+description = "Peer-to-peer remote for dialog-db: effects over iroh QUIC streams."
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+helpers = []
+# The iroh-backed `Channel` and its accept loop. Off by default, so a
+# build that only wants the site -- `dialog-network`, which composes it
+# -- never pulls QUIC in. Not native-only: iroh runs in a browser over a
+# custom transport, which is how `tonk-rtc` puts QUIC streams on a WebRTC
+# data channel, and this module is the same iroh API calls either way.
+transport = ["dep:iroh", "dep:tracing", "dep:tokio", "dep:wasm-bindgen-futures"]
+integration-tests = ["dialog-common/integration-tests"]
+web-integration-tests = ["dialog-common/web-integration-tests"]
+
+[dependencies]
+async-trait = { workspace = true }
+base58 = { workspace = true }
+form_urlencoded = { workspace = true }
+futures-util = { workspace = true }
+blake3 = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-ucan = { workspace = true }
+dialog-ucan-core = { workspace = true }
+dialog-did-web = { workspace = true }
+dialog-varsig = { workspace = true }
+ipld-core = { workspace = true }
+# Pinned with iroh, and for the same reason: `IrohAddress` wraps an
+# `EndpointAddr` from here, and a peer address that crossed a version
+# boundary would be a different type on each side.
+iroh-base = { workspace = true, features = ["key"] }
+serde = { workspace = true, features = ["derive"] }
+serde_ipld_dagcbor = { workspace = true }
+thiserror = { workspace = true }
+
+# Pinned exactly, not by caret. `tonk-rtc` builds its endpoint with
+# iroh's `unstable-custom-transports`, and an `Endpoint` from a different
+# iroh is a different type: `IrohChannel::new` would stop accepting it.
+# An exact pin makes a divergence a resolver error rather than a puzzling
+# mismatch at the call site.
+#
+# `default-features = false` because iroh's defaults are for a process
+# that runs a node on a machine, and this one runs in a browser tab.
+# `metrics` pulls a metrics registry, `portmapper` a UPnP/NAT-PMP client,
+# and `fast-apple-datapath` a macOS socket path: a page has no router to
+# map ports on and no BSD sockets to speed up. `tls-ring` is kept because
+# QUIC needs TLS 1.3 and the only alternative, `tls-aws-lc-rs`, is also C
+# and heavier.
+iroh = { workspace = true, optional = true, features = ["tls-ring"] }
+tracing = { workspace = true, optional = true }
+
+# Detaching a task, per target. Native uses tokio; a browser has no
+# runtime to hand it to and uses the microtask queue instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt", "macros"], optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = { workspace = true, optional = true }
+
+[dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+wasm-bindgen-test = { workspace = true }
+async-trait = { workspace = true }
+dialog-credentials = { workspace = true }
+ed25519-dalek = { workspace = true }
+dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true }
+
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+# The wasm half of a cross-target test is a `wasm_bindgen_test`, whose
+# expansion names `wasm_bindgen` itself.
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+
+# The async tests run on tokio natively; in wasm `dialog_common::test`
+# expands to wasm-bindgen-test instead. Target-gated because tokio's
+# runtime pulls dependencies that do not build for wasm32.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\", \"helpers\", \"transport\"))",
+  "cfg(dialog_test_wasm_integration)",
+] }

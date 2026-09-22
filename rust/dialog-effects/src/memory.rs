@@ -314,7 +314,7 @@ impl Effect for Retract {
 pub mod prelude;
 
 /// Errors that can occur during memory operations.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, serde::Serialize, serde::Deserialize)]
 pub enum MemoryError {
     /// CAS edition mismatch.
     #[error("Version mismatch: expected {expected:?}, got {actual:?}")]

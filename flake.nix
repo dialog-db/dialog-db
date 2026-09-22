@@ -87,6 +87,7 @@
           rustToolchain
           wasm-bindgen-cli
           wbg-pool
+          wasmCcEnv
           ;
 
         developmentBuildInputs =
@@ -119,6 +120,11 @@
             # is trusted, so disable the sandbox for the pooled browser.
             "WBG_POOL_NO_SANDBOX" = "1";
           }
+          # A `cargo build --target wasm32` run in this shell compiles the
+          # same C as the wasm derivations do, so it needs the same
+          # compiler. See `wasmCcEnv` in nix/rust.nix for why the stdenv
+          # one will not do.
+          // wasmCcEnv
           // lib.optionalAttrs stdenv.isDarwin {
             "WASM_BINDGEN_TEST_WEBDRIVER_JSON" = webdriverConfig;
           };

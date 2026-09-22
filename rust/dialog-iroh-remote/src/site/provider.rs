@@ -1,0 +1,224 @@
+//! Signing an invocation for a peer, and sending it.
+//!
+//! Two halves of one exchange. [`SiteFork::authorize`] mints the
+//! container — the same proving step a UCAN site runs, plus the payload
+//! packed beside the invocation it commits to — and the
+//! [`Provider`] hands it to the [`Channel`](crate::channel::Channel) and
+//! reads the answer back.
+
+use dialog_capability::access::{
+    Access, Authorization as _, AuthorizeError, FromCapability, Protocol, Recourse, TimeRange,
+};
+use dialog_capability::{
+    Ability, Authorize as AuthorizeEffect, Capability, Constraint, Effect, ForkInvocation,
+    Provider, SiteFork, Subject,
+};
+use dialog_common::time::{self, UNIX_EPOCH};
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::Rejection;
+use dialog_effects::authority::{self, OperatorExt as _};
+use dialog_effects::{archive, memory, peer};
+use dialog_ucan::Ucan;
+use dialog_ucan_core::container::Container;
+use dialog_ucan_core::container::bundle::InvocationBundle;
+use serde::de::DeserializeOwned;
+
+use crate::carries::Carries;
+use crate::site::{Iroh, IrohAuthorization, IrohFork};
+use crate::wire::{Refusal, Response, decode};
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Fx, Env> SiteFork<Env> for IrohFork<Fx>
+where
+    Fx: Effect + Carries + Clone + ConditionalSend + ConditionalSync + 'static,
+    Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
+    Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
+    Env: Provider<AuthorizeEffect<Ucan>> + Provider<authority::Identify> + ConditionalSync,
+{
+    type Site = Iroh;
+    type Effect = Fx;
+
+    async fn authorize(self, env: &Env) -> Result<ForkInvocation<Iroh, Fx>, AuthorizeError> {
+        let identity =
+            authority::Identify
+                .perform(env)
+                .await
+                .map_err(|error| AuthorizeError::Malformed {
+                    detail: error.to_string(),
+                })?;
+        let profile = identity.profile().clone();
+        let operator = identity.did();
+
+        // `from_capability` is `Scope::invoke`, which projects payload
+        // fields through `Attenuate` — so the block this signs for
+        // becomes a digest and a checksum and does not go into the
+        // arguments. What ships it is `Carries`, below.
+        let scope = <Ucan as Protocol>::Access::from_capability(self.0.capability());
+
+        // Ask for a chain good at the instant of presentation rather
+        // than an unbounded one, for the reason `dialog-remote-ucan-s3`
+        // records: an unbounded request is covered by every window,
+        // including one that closed yesterday, and the responder does
+        // check its clock.
+        let at = time::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or_default();
+        let authorization = Subject::from(profile)
+            .attenuate(Access)
+            .invoke(
+                AuthorizeEffect::<Ucan>::new(operator, scope).during(TimeRange {
+                    not_before: Some(at),
+                    expiration: Some(at),
+                }),
+            )
+            .perform(env)
+            .await?;
+
+        let invocation = authorization.invoke().await?;
+        let blocks = dialog_capability::Policy::of(self.0.capability()).blocks();
+        let bundle = InvocationBundle::from_chain(invocation.chain(), blocks).map_err(|error| {
+            AuthorizeError::Malformed {
+                detail: format!("could not assemble the request: {error}"),
+            }
+        })?;
+        let container =
+            Container::from(&bundle)
+                .into_bytes()
+                .map_err(|error| AuthorizeError::Malformed {
+                    detail: format!("could not encode the request: {error}"),
+                })?;
+
+        Ok(self.0.attest(IrohAuthorization::new(container)))
+    }
+}
+
+/// Send an invocation and read its answer as a value.
+///
+/// The shared body of every [`Provider`] impl below. It is a free
+/// function rather than a blanket impl because the impls have to be
+/// enumerated — see [`performs_by_value`] for why — and because the
+/// blob effects need a different body entirely.
+async fn perform<Fx, T, E>(site: &Iroh, invocation: ForkInvocation<Iroh, Fx>) -> Result<T, E>
+where
+    Fx: Effect<Output = Result<T, E>> + 'static,
+    Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
+    Capability<Fx>: ConditionalSend + ConditionalSync,
+    T: ConditionalSend,
+    E: From<AuthorizeError> + From<Rejection> + ConditionalSend,
+    Result<T, E>: DeserializeOwned,
+{
+    let ForkInvocation {
+        address,
+        authorization,
+        ..
+    } = invocation;
+
+    // Connecting is part of reaching the peer, so a failure here is the
+    // same kind of answer as a dial that did not land: nothing was sent,
+    // and the request stands as retryable.
+    let connection = match site.connection().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            return Err(E::from(Rejection::Unavailable {
+                reason: error.to_string(),
+            }));
+        }
+    };
+
+    let answer = match connection
+        .exchange(&address, authorization.into_bytes())
+        .await
+    {
+        Ok(answer) => answer,
+        // The peer never answered, so nothing is known about the
+        // request: retryable as it stands. The site hears about it
+        // first — a failure that says the link is gone is what drops it,
+        // and the caller's retry is what brings it back.
+        Err(error) => {
+            site.broke(&connection, &error).await;
+            return Err(E::from(Rejection::Unavailable {
+                reason: error.to_string(),
+            }));
+        }
+    };
+
+    match decode::<Response>("response", &answer) {
+        Ok(Response::Performed(output)) => match decode::<Result<T, E>>("output", &output) {
+            Ok(outcome) => outcome,
+            Err(error) => Err(E::from(Rejection::Unclassified {
+                detail: format!("the peer's answer did not fit the command: {error}"),
+            })),
+        },
+        Ok(Response::Refused(refusal)) => Err(refused(refusal)),
+        Err(error) => Err(E::from(Rejection::Unclassified {
+            detail: format!("the peer did not answer in this protocol: {error}"),
+        })),
+    }
+}
+
+/// The effects whose answer is a value, listed rather than derived.
+///
+/// A blanket `impl<Fx> Provider<ForkInvocation<Iroh, Fx>> for Iroh`
+/// would be shorter and would claim more than is true: that this site
+/// performs *any* effect whose output deserializes, when
+/// [`Responder`](crate::serve::Responder) serves exactly the set below.
+/// Enumerating makes the two halves agree by construction — an effect
+/// added to one and not the other does not compile — and it is what
+/// makes room for the blob effects, whose answers are streaming handles
+/// that no deserializing body can produce and which coherence will not
+/// let a blanket impl share a type with.
+macro_rules! performs_by_value {
+    ($($effect:ty),+ $(,)?) => {
+        $(
+            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+            impl Provider<ForkInvocation<Iroh, $effect>> for Iroh {
+                async fn execute(
+                    &self,
+                    invocation: ForkInvocation<Iroh, $effect>,
+                ) -> <$effect as Effect>::Output {
+                    perform(self, invocation).await
+                }
+            }
+        )+
+    };
+}
+
+performs_by_value!(
+    peer::Hello,
+    peer::Spaces,
+    archive::Get,
+    archive::Put,
+    archive::Import,
+    memory::Resolve,
+    memory::Publish,
+    memory::Retract,
+);
+
+/// A peer's refusal, in the caller's own vocabulary.
+///
+/// Only [`Refusal::Unauthorized`] is an access decision, and it is the
+/// one a caller acts on differently — by fetching a fresh proof rather
+/// than retrying. The rest are this exchange failing, not authority
+/// being absent, so folding them into an access error would tell a
+/// caller to go looking for a delegation it already holds.
+fn refused<E: From<AuthorizeError> + From<Rejection>>(refusal: Refusal) -> E {
+    match refusal {
+        Refusal::Unauthorized(reason) => E::from(AuthorizeError::Declined {
+            // Presenting the same proof again gets the same answer; a
+            // caller that wants in needs different authority, not a
+            // retry.
+            recourse: Recourse::None,
+            reason,
+        }),
+        Refusal::UnknownCommand(command) => E::from(Rejection::Unclassified {
+            detail: format!("the peer does not serve {command}"),
+        }),
+        Refusal::Malformed(detail) => E::from(Rejection::Unclassified {
+            detail: format!("the peer could not read the request: {detail}"),
+        }),
+        Refusal::Internal(reason) => E::from(Rejection::Unavailable { reason }),
+    }
+}

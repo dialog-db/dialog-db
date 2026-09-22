@@ -36,6 +36,7 @@ members = [
     "rust/dialog-remote-ucan-s3",
     "rust/dialog-remote-ucan",
     "rust/dialog-remote-fs",
+    "rust/dialog-iroh-remote",
     "rust/dialog-network",
     "rust/dialog-identity",
     "rust/dialog-operator",
@@ -89,6 +90,14 @@ http-body-util = "0.1"
 hyper = "1"
 hyper-util = "0.1"
 ipld-core = { version = "0.4", features = ["serde"] }
+# Pinned exactly, not by caret: `tonk-rtc` builds its endpoint with iroh's
+# `unstable-custom-transports`, and an `Endpoint` from a different iroh is a
+# different type. An exact pin makes a divergence a resolver error rather than
+# a puzzling mismatch at the call site. `iroh-base` moves with it, since
+# `IrohAddress` wraps an `EndpointAddr` from there.
+iroh = { version = "=1.2.0", default-features = false }
+iroh-base = { version = "=1.2.0" }
+form_urlencoded = "1"
 # getrandom = "0.3"
 getrandom = "0.2"
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
@@ -138,7 +147,7 @@ memchr = "2"
 rkyv = "0.8"
 rsa = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
-s3s = "0.13"
+s3s = "0.14"
 serde = "1"
 serde-value = "0.7"
 serde-big-array = "0.5"
@@ -186,7 +195,13 @@ wasm-bindgen-cli-support = "=0.2.126"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
 wasmparser = "0.229"
-wasm-streams = "0.6"
+# Pinned to 0.5 to match the version `reqwest` uses, which `iroh` pulls
+# in. Both export the same wasm-bindgen describe symbols, so a wasm
+# cdylib linking dialog-storage and iroh together fails with duplicate
+# symbols if the two versions diverge — a link error with no line
+# number, in a build that type-checks cleanly. `ReadableStream::from_raw`
+# is unchanged between them, which is all this uses.
+wasm-streams = "0.5"
 web-sys = "0.3"
 web-time = "1"
 zerocopy = "0.8"
@@ -240,6 +255,9 @@ path = "./rust/dialog-remote-ucan-s3"
 
 [workspace.dependencies.dialog-remote-ucan]
 path = "./rust/dialog-remote-ucan"
+
+[workspace.dependencies.dialog-iroh-remote]
+path = "./rust/dialog-iroh-remote"
 
 [workspace.dependencies.dialog-remote-fs]
 path = "./rust/dialog-remote-fs"
