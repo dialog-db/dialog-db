@@ -3,6 +3,7 @@
 //! Build one via `Profile::derive()`.
 
 mod access;
+mod branch;
 mod builder;
 mod fork;
 mod hydrate;
