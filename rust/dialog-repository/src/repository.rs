@@ -9,8 +9,8 @@
 use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::space::SpaceSubjectExt;
+use dialog_identity::SpaceHandle;
 use dialog_identity::access::Access as ProfileAccess;
-use dialog_identity::{Profile, SpaceHandle};
 use dialog_varsig::Principal;
 
 mod access;
@@ -164,18 +164,6 @@ impl From<dialog_credentials::Signer> for Repository<SignerCredential> {
     }
 }
 
-impl From<Profile> for Repository<SignerCredential> {
-    fn from(profile: Profile) -> Self {
-        Self::new(profile.signer().clone())
-    }
-}
-
-impl From<&Profile> for Repository<SignerCredential> {
-    fn from(profile: &Profile) -> Self {
-        Self::new(profile.signer().clone())
-    }
-}
-
 /// Extension trait for opening repositories from a [`SpaceHandle`].
 ///
 /// Enables `profile.space("name").open().perform(&operator)`.
@@ -192,15 +180,15 @@ pub trait RepositoryExt {
 
 impl RepositoryExt for SpaceHandle {
     fn open(self) -> OpenRepository {
-        OpenRepository(self.profile_did.space(self.name))
+        OpenRepository(self.peer.space(self.name))
     }
 
     fn load(self) -> LoadRepository {
-        LoadRepository(self.profile_did.space(self.name))
+        LoadRepository(self.peer.space(self.name))
     }
 
     fn create(self) -> CreateRepository {
-        CreateRepository(self.profile_did.space(self.name))
+        CreateRepository(self.peer.space(self.name))
     }
 }
 #[cfg(test)]

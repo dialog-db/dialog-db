@@ -1593,7 +1593,8 @@ impl BenchEnv<Session<VolatileSpace>> {
             .open(Location::profile(unique_name("bench")))
             .await?;
         let operator = profile
-            .session(profile.derive(b"bench").await?)
+            .derive(b"bench")
+            .await?
             .allow(Subject::any())
             .build()
             .await?;
@@ -1610,7 +1611,8 @@ impl BenchEnv<Session<NativeTempSpace>> {
             .open(Location::profile(unique_name("bench")))
             .await?;
         let operator = profile
-            .session(profile.derive(b"bench").await?)
+            .derive(b"bench")
+            .await?
             .allow(Subject::any())
             .build()
             .await?;
@@ -1629,7 +1631,8 @@ impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
             .open(Location::profile(unique_name("bench")))
             .await?;
         let operator = profile
-            .session(profile.derive(b"bench").await?)
+            .derive(b"bench")
+            .await?
             .allow(Subject::any())
             .build()
             .await?;

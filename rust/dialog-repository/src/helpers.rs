@@ -27,7 +27,7 @@ pub async fn test_repo(
     use dialog_identity::SpaceHandle;
     use dialog_peer::helpers::unique_name;
     let handle = SpaceHandle {
-        profile_did: dialog_varsig::Principal::did(peer),
+        peer: dialog_varsig::Principal::did(peer),
         name: unique_name("repo"),
     };
     handle

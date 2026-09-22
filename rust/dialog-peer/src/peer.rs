@@ -19,7 +19,8 @@
 //!     .await?;
 //!
 //! let job = alice
-//!     .session(alice.derive(b"refactor").await?)
+//!     .derive(b"refactor")
+//!     .await?
 //!     .allow(Subject::any())
 //!     .build()
 //!     .await?;
@@ -42,7 +43,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::SignerCredential;
 use dialog_effects::storage::{Directory, Location};
 use dialog_identity::access::Access;
-use dialog_identity::{Authority, Profile, SpaceHandle};
+use dialog_identity::{Authority, CredentialHandle, OpenCredential, SpaceHandle};
 use dialog_network::{HydrationScheduler, Network};
 use dialog_repository::{ACCESS_BRANCH, Branch, Repository};
 use dialog_storage::provider::storage::Storage;
@@ -135,13 +136,10 @@ impl<S: Clone> Peer<S> {
         &self.inner.credential
     }
 
-    /// The identity handle over the same credential, for APIs that still
-    /// speak in profiles.
-    pub fn profile(&self) -> Profile {
-        Profile::try_from(dialog_credentials::Credential::Signer(
-            self.inner.credential.clone(),
-        ))
-        .unwrap_or_else(|_| unreachable!("a signer credential is a profile"))
+    /// Site secrets stored under the peer's DID: remote credentials,
+    /// handoff material and the like, until sealed facts replace them.
+    pub fn secrets(&self) -> CredentialHandle {
+        CredentialHandle::new(self.did())
     }
 
     /// Access handle for claiming and delegating with the peer's key.
@@ -156,7 +154,7 @@ impl<S: Clone> Peer<S> {
     /// the name resolves against the peer's base directory.
     pub fn space(&self, name: impl Into<String>) -> SpaceHandle {
         SpaceHandle {
-            profile_did: self.did(),
+            peer: self.did(),
             name: name.into(),
         }
     }
@@ -211,19 +209,25 @@ impl<S: Clone> Peer<S> {
         &self.inner.speculation
     }
 
-    /// Derive a session credential from this peer's key and `context`.
+    /// Start a session under a key derived from this peer's key and
+    /// `context`.
     ///
     /// Derivation is deterministic per `(peer, context)`, so a grant
-    /// issued to a derived DID is reusable across runs. Pass a random
+    /// issued to the derived DID is reusable across runs. Pass a random
     /// context for a disposable key. Requires an ed25519 peer key.
-    pub async fn derive(&self, context: impl AsRef<[u8]>) -> Result<SignerCredential, PeerError> {
-        derive_credential(&self.inner.credential, context.as_ref()).await
+    ///
+    /// The builder knows its [`did`](SessionBuilder::did) as soon as this
+    /// returns, so a certificate issued to it can be passed through
+    /// [`grant`](SessionBuilder::grant) before `build`.
+    pub async fn derive(&self, context: impl AsRef<[u8]>) -> Result<SessionBuilder<S>, PeerError> {
+        let credential = derive_credential(&self.inner.credential, context.as_ref()).await?;
+        Ok(self.session(credential))
     }
 
-    /// Start a session acting as `credential`: one this peer
-    /// [derived](Self::derive), or any other signer. The peer mints the
-    /// session's grants to it at build, so a supplied key is constrained
-    /// exactly as a derived one is.
+    /// Start a session acting as `credential`, a signer supplied from
+    /// outside. The peer mints the session's grants to it at build, so a
+    /// supplied key is constrained exactly as a [derived](Self::derive)
+    /// one is.
     pub fn session(&self, credential: impl Into<SignerCredential>) -> SessionBuilder<S> {
         SessionBuilder::new(self.clone(), credential.into())
     }
@@ -326,22 +330,34 @@ where
     /// Open the peer at `location`: load its credential, or generate and
     /// persist one if none is there.
     pub async fn open(self, location: Location) -> Result<Peer<S>, PeerError> {
-        let profile = Profile::open(location.name.clone())
-            .at(location.directory.clone())
-            .perform(&self.storage)
+        self.open_with(OpenCredential::open(location.name.clone()), location)
             .await
-            .map_err(|error| PeerError::Open(error.to_string()))?;
-        self.attach(profile.signer().clone()).await
     }
 
     /// Load the peer at `location`, failing if no credential is there.
     pub async fn load(self, location: Location) -> Result<Peer<S>, PeerError> {
-        let profile = Profile::load(location.name.clone())
-            .at(location.directory.clone())
+        self.open_with(OpenCredential::load(location.name.clone()), location)
+            .await
+    }
+
+    /// Create the peer at `location`, failing if a credential is already
+    /// there.
+    pub async fn create(self, location: Location) -> Result<Peer<S>, PeerError> {
+        self.open_with(OpenCredential::create(location.name.clone()), location)
+            .await
+    }
+
+    async fn open_with(
+        self,
+        command: OpenCredential,
+        location: Location,
+    ) -> Result<Peer<S>, PeerError> {
+        let credential = command
+            .at(location.directory)
             .perform(&self.storage)
             .await
             .map_err(|error| PeerError::Open(error.to_string()))?;
-        self.attach(profile.signer().clone()).await
+        self.attach(credential).await
     }
 }
 
@@ -442,6 +458,26 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn it_creates_a_peer_once() -> Result<()> {
+        let storage = Storage::<VolatileSpace>::volatile();
+        let location = Location::temp(unique_name("created"));
+
+        let created = Peer::new()
+            .storage(storage.clone())
+            .create(location.clone())
+            .await?;
+        let loaded = Peer::new()
+            .storage(storage.clone())
+            .load(location.clone())
+            .await?;
+        assert_eq!(created.did(), loaded.did());
+
+        let again = Peer::new().storage(storage).create(location).await;
+        assert!(matches!(again, Err(PeerError::Open(_))));
+        Ok(())
+    }
+
+    #[dialog_common::test]
     async fn it_refuses_to_load_a_missing_peer() -> Result<()> {
         let storage = Storage::<VolatileSpace>::volatile();
         let result = Peer::new()
@@ -461,9 +497,9 @@ mod tests {
             .open(Location::temp(unique_name("sessions")))
             .await?;
 
-        let a = peer.session(peer.derive(b"a").await?).build().await?;
-        let again = peer.session(peer.derive(b"a").await?).build().await?;
-        let b = peer.session(peer.derive(b"b").await?).build().await?;
+        let a = peer.derive(b"a").await?.build().await?;
+        let again = peer.derive(b"a").await?.build().await?;
+        let b = peer.derive(b"b").await?.build().await?;
 
         assert_eq!(a.did(), again.did());
         assert_ne!(a.did(), b.did());
@@ -541,14 +577,16 @@ mod tests {
         let space = Ed25519Signer::generate().await?;
 
         let first = peer
-            .session(peer.derive(b"first").await?)
+            .derive(b"first")
+            .await?
             .allow(Subject::any())
             .build()
             .await?;
         retain(&first, &peer.did(), &space).await;
 
         let second = peer
-            .session(peer.derive(b"second").await?)
+            .derive(b"second")
+            .await?
             .allow(Subject::any())
             .build()
             .await?;

@@ -467,7 +467,8 @@ mod tests {
                 .open(Location::profile(unique_name(name)))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;

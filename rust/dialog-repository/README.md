@@ -24,7 +24,7 @@ let alice = Peer::new()
 
 // A session scoped to this application.
 let session = alice
-    .session(alice.derive(b"my-app").await?)
+    .derive(b"my-app").await?
     .allow(Subject::any())
     .build()
     .await?;

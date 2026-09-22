@@ -20,7 +20,9 @@ mod tests {
             .unwrap();
 
         let operator = profile
-            .session(profile.derive(b"test").await.unwrap())
+            .derive(b"test")
+            .await
+            .unwrap()
             .build()
             .await
             .unwrap();
@@ -41,12 +43,16 @@ mod tests {
         // One peer, two contexts: two peers would prove nothing about
         // the context.
         let a = peer
-            .session(peer.derive(b"context-a").await.unwrap())
+            .derive(b"context-a")
+            .await
+            .unwrap()
             .build()
             .await
             .unwrap();
         let b = peer
-            .session(peer.derive(b"context-b").await.unwrap())
+            .derive(b"context-b")
+            .await
+            .unwrap()
             .build()
             .await
             .unwrap();
@@ -73,16 +79,8 @@ mod tests {
             .await
             .unwrap();
 
-        let first = peer
-            .session(peer.derive(b"test").await.unwrap())
-            .build()
-            .await
-            .unwrap();
-        let second = peer
-            .session(peer.derive(b"test").await.unwrap())
-            .build()
-            .await
-            .unwrap();
+        let first = peer.derive(b"test").await.unwrap().build().await.unwrap();
+        let second = peer.derive(b"test").await.unwrap().build().await.unwrap();
 
         assert_eq!(
             first.did(),
@@ -108,7 +106,9 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .session(profile.derive(b"alice").await.unwrap())
+                .derive(b"alice")
+                .await
+                .unwrap()
                 .build()
                 .await
                 .unwrap();
@@ -139,7 +139,9 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .session(profile.derive(b"alice").await.unwrap())
+                .derive(b"alice")
+                .await
+                .unwrap()
                 .build()
                 .await
                 .unwrap();
@@ -170,7 +172,9 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .session(profile.derive(b"alice").await.unwrap())
+                .derive(b"alice")
+                .await
+                .unwrap()
                 .allow(Subject::any().archive().catalog("index"))
                 .build()
                 .await
@@ -202,7 +206,9 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .session(profile.derive(b"alice").await.unwrap())
+                .derive(b"alice")
+                .await
+                .unwrap()
                 .allow(Subject::any().archive().catalog("index"))
                 .build()
                 .await
@@ -231,7 +237,9 @@ mod tests {
 
             use dialog_effects::storage as fx_storage;
             let operator = profile
-                .session(profile.derive(b"admin").await.unwrap())
+                .derive(b"admin")
+                .await
+                .unwrap()
                 .allow(Subject::any())
                 .build()
                 .await
@@ -263,7 +271,9 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .session(profile.derive(b"alice").await.unwrap())
+                .derive(b"alice")
+                .await
+                .unwrap()
                 .build()
                 .await
                 .unwrap();
@@ -290,7 +300,9 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .session(profile.derive(b"alice").await.unwrap())
+                .derive(b"alice")
+                .await
+                .unwrap()
                 .allow(Subject::any().archive().catalog("index"))
                 .build()
                 .await
@@ -336,7 +348,9 @@ mod tests {
                 .await
                 .unwrap();
             let operator = profile
-                .session(profile.derive(b"test").await.unwrap())
+                .derive(b"test")
+                .await
+                .unwrap()
                 .build()
                 .await
                 .unwrap();
@@ -699,7 +713,9 @@ mod tests {
                 .await
                 .unwrap();
             let operator = profile
-                .session(profile.derive(b"test").await.unwrap())
+                .derive(b"test")
+                .await
+                .unwrap()
                 .allow(Subject::any())
                 .build()
                 .await
@@ -735,7 +751,9 @@ mod tests {
                 .await
                 .unwrap();
             let operator = profile
-                .session(profile.derive(b"test").await.unwrap())
+                .derive(b"test")
+                .await
+                .unwrap()
                 .allow(Subject::any())
                 .build()
                 .await
@@ -778,7 +796,9 @@ mod tests {
                 .await
                 .unwrap();
             let operator = profile
-                .session(profile.derive(b"test").await.unwrap())
+                .derive(b"test")
+                .await
+                .unwrap()
                 .allow(Subject::any())
                 .build()
                 .await
@@ -832,7 +852,8 @@ mod tests {
                 .open(Location::profile(unique_name("s3-mem-pub")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -883,7 +904,8 @@ mod tests {
                 .open(Location::profile(unique_name("s3-mem-upd")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -942,7 +964,8 @@ mod tests {
                 .open(Location::profile(unique_name("s3-mem-cas")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1010,7 +1033,8 @@ mod tests {
                 .open(Location::profile(unique_name("s3-mem-ret")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1084,7 +1108,8 @@ mod tests {
                 .open(Location::profile(unique_name("ucan-get-miss")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1112,7 +1137,8 @@ mod tests {
                 .open(Location::profile(unique_name("ucan-put-get")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1152,7 +1178,8 @@ mod tests {
                 .open(Location::profile(unique_name("ucan-mem-miss")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1181,7 +1208,8 @@ mod tests {
                 .open(Location::profile(unique_name("ucan-mem-pub")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1223,7 +1251,8 @@ mod tests {
                 .open(Location::profile(unique_name("ucan-mem-upd")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1273,7 +1302,8 @@ mod tests {
                 .open(Location::profile(unique_name("ucan-mem-cas")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1335,7 +1365,8 @@ mod tests {
                 .open(Location::profile(unique_name("ucan-mem-ret")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1384,7 +1415,8 @@ mod tests {
                 .await?;
             // Only delegate archive access, not memory
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any().archive().catalog("allowed"))
                 .build()
                 .await?;
@@ -1446,7 +1478,8 @@ mod tests {
                 .open(Location::profile(unique_name("ucan-direct")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1491,7 +1524,8 @@ mod tests {
                 .open(Location::profile(unique_name("ucan-permits")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1545,7 +1579,8 @@ mod tests {
                 .open(Location::profile(unique_name("blob-route")))
                 .await?;
             let operator = profile
-                .session(profile.derive(b"test").await?)
+                .derive(b"test")
+                .await?
                 .allow(Subject::any())
                 .build()
                 .await?;
@@ -1593,7 +1628,9 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .session(profile.derive(b"test").await.unwrap())
+                .derive(b"test")
+                .await
+                .unwrap()
                 .allow(Subject::any())
                 .build()
                 .await
@@ -1621,7 +1658,9 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .session(profile.derive(b"test").await.unwrap())
+                .derive(b"test")
+                .await
+                .unwrap()
                 .allow(Subject::any())
                 .build()
                 .await

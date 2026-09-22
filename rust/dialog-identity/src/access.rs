@@ -1,8 +1,8 @@
-//! Access API for profile-based UCAN delegation.
+//! Access API for UCAN delegation with a peer's credential.
 //!
 //! Provides a fluent builder chain for claiming authority and delegating.
 
-use super::SaveDelegation;
+mod save;
 use dialog_capability::access::{self, Authorization as _, AuthorizeError, Proof as _};
 use dialog_capability::{Ability, Capability, Constraint, Provider, Subject};
 use dialog_common::ConditionalSync;
@@ -12,11 +12,12 @@ use dialog_ucan::{Ucan, UcanDelegation, UcanProof};
 use dialog_ucan_core::time::Timestamp;
 use dialog_varsig::{Did, Principal};
 use ipld_core::ipld::Ipld;
+pub use save::SaveDelegation;
 use std::collections::BTreeMap;
 
-/// Access handle scoped to a profile's credential.
+/// Access handle over a signing credential.
 ///
-/// Created via [`Profile::access()`](super::Profile::access).
+/// Created via `Peer::access` in `dialog-peer`.
 pub struct Access<'a> {
     credential: &'a SignerCredential,
 }
@@ -46,7 +47,7 @@ impl<'a> Access<'a> {
 
     /// Prove access to a capability, returning a proof chain.
     ///
-    /// The audience defaults to the profile DID but can be overridden
+    /// The audience defaults to the credential's DID but can be overridden
     /// via [`.audience()`](Prove::audience) for operator-scoped proofs.
     pub fn prove<C: Constraint>(&self, capability: impl Into<Capability<C>>) -> Prove<'a, C> {
         Prove {
@@ -58,7 +59,7 @@ impl<'a> Access<'a> {
         }
     }
 
-    /// Save a delegation chain under this profile.
+    /// Save a delegation chain under this credential's DID.
     pub fn save(&self, chain: UcanDelegation) -> SaveDelegation {
         SaveDelegation {
             did: self.credential.did(),
@@ -158,7 +159,7 @@ where
 /// An invocation request combining a claim with signing.
 ///
 /// Execute via [`.perform()`](Invoke::perform) to claim authority,
-/// bind the profile signer, and produce a signed UCAN invocation.
+/// bind the credential's signer, and produce a signed UCAN invocation.
 pub struct Invoke<'a, C: Constraint> {
     claim: Claim<'a, C>,
 }
@@ -193,7 +194,7 @@ fn signer_of(credential: &SignerCredential) -> dialog_credentials::Signer {
 /// A delegation request combining a claim with a target audience.
 ///
 /// Execute via [`.perform()`](Delegate::perform) to claim authority,
-/// bind the profile signer, and produce a signed delegation chain.
+/// bind the credential's signer, and produce a signed delegation chain.
 pub struct Delegate<'a, C: Constraint> {
     claim: Claim<'a, C>,
     audience: Did,
@@ -241,7 +242,7 @@ where
 
 /// A proof request for a capability with optional audience and time bounds.
 ///
-/// Created via [`Access::prove()`]. Defaults the audience to the profile DID.
+/// Created via [`Access::prove()`]. Defaults the audience to the credential's DID.
 /// Override with [`.audience()`](Prove::audience) for operator-scoped proofs.
 pub struct Prove<'a, C: Constraint> {
     by: &'a SignerCredential,
@@ -254,7 +255,7 @@ pub struct Prove<'a, C: Constraint> {
 impl<'a, C: Constraint> Prove<'a, C> {
     /// Set the audience (who is requesting access).
     ///
-    /// Defaults to the profile DID if not set.
+    /// Defaults to the credential's DID if not set.
     pub fn audience(mut self, audience: &impl Principal) -> Self {
         self.audience = Some(audience.did());
         self

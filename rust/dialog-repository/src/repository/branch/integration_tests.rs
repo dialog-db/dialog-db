@@ -84,8 +84,7 @@ async fn setup_repo_with_s3_remote(
     // Save S3 credentials so the Operator can authorize fork requests
     let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     profile
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_address)
         .save(authorization)
         .perform(operator)
@@ -206,7 +205,8 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
         .open(Location::profile(unique_name("ship-overlap")))
         .await?;
     let operator = profile
-        .session(profile.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -217,8 +217,7 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
         .await?;
     let site = s3_site_address(&s3);
     profile
-        .profile()
-        .credential()
+        .secrets()
         .site(&site)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator)
@@ -320,7 +319,8 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .open(Location::profile(unique_name("blob-ship-a")))
         .await?;
     let operator_a = profile_a
-        .session(profile_a.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -333,8 +333,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
 
     let site_a = s3_site_address(&s3);
     profile_a
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_a)
@@ -369,7 +368,8 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .open(Location::profile(unique_name("blob-ship-b")))
         .await?;
     let operator_b = profile_b
-        .session(profile_b.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -382,8 +382,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
 
     let site_b = s3_site_address(&s3);
     profile_b
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
@@ -444,7 +443,8 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("blob-retract-a")))
         .await?;
     let operator_a = profile_a
-        .session(profile_a.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -457,8 +457,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
 
     let site_a = s3_site_address(&s3);
     profile_a
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_a)
@@ -493,7 +492,8 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("blob-retract-b")))
         .await?;
     let operator_b = profile_b
-        .session(profile_b.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -504,8 +504,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .await?;
     let site_b = s3_site_address(&s3);
     profile_b
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
@@ -574,7 +573,8 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("blob-retract-c")))
         .await?;
     let operator_c = profile_c
-        .session(profile_c.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -585,8 +585,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .await?;
     let site_c = s3_site_address(&s3);
     profile_c
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_c)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_c)
@@ -652,7 +651,8 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("delegation-ship-a")))
         .await?;
     let operator_a = profile_a
-        .session(profile_a.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -663,8 +663,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .await?;
     let site_a = s3_site_address(&s3);
     profile_a
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_a)
@@ -714,7 +713,8 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("delegation-ship-b")))
         .await?;
     let operator_b = profile_b
-        .session(profile_b.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -725,8 +725,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .await?;
     let site_b = s3_site_address(&s3);
     profile_b
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
@@ -853,7 +852,8 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .open(Location::profile(unique_name("spill-ship-a")))
         .await?;
     let operator_a = profile_a
-        .session(profile_a.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -866,8 +866,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
 
     let site_a = s3_site_address(&s3);
     profile_a
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_a)
@@ -934,7 +933,8 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .open(Location::profile(unique_name("spill-ship-b")))
         .await?;
     let operator_b = profile_b
-        .session(profile_b.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -947,8 +947,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
 
     let site_b = s3_site_address(&s3);
     profile_b
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
@@ -1023,7 +1022,8 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .open(Location::profile(unique_name("spill-retract-a")))
         .await?;
     let operator_a = profile_a
-        .session(profile_a.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -1034,8 +1034,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .await?;
     let site_a = s3_site_address(&s3);
     profile_a
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_a)
@@ -1065,7 +1064,8 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .open(Location::profile(unique_name("spill-retract-b")))
         .await?;
     let operator_b = profile_b
-        .session(profile_b.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -1076,8 +1076,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .await?;
     let site_b = s3_site_address(&s3);
     profile_b
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
@@ -1156,7 +1155,8 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .open(Location::profile(unique_name("spill-sub-a")))
         .await?;
     let operator_a = profile_a
-        .session(profile_a.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -1167,8 +1167,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .await?;
     let site_a = s3_site_address(&s3);
     profile_a
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_a)
@@ -1193,7 +1192,8 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .open(Location::profile(unique_name("spill-sub-b")))
         .await?;
     let operator_b = profile_b
-        .session(profile_b.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -1204,8 +1204,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .await?;
     let site_b = s3_site_address(&s3);
     profile_b
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
@@ -1627,8 +1626,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
         ..s3.clone()
     };
     profile
-        .profile()
-        .credential()
+        .secrets()
         .site(s3_site_address(&b_address))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator)
@@ -2071,8 +2069,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
         ..s3.clone()
     };
     profile
-        .profile()
-        .credential()
+        .secrets()
         .site(s3_site_address(&b_address))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator)
@@ -2184,8 +2181,7 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
         ..s3.clone()
     };
     profile
-        .profile()
-        .credential()
+        .secrets()
         .site(s3_site_address(&b_address))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator)
@@ -2430,7 +2426,8 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
         .load(Location::profile(account_name))
         .await?;
     let account_operator = account_profile
-        .session(account_profile.derive(b"account-device").await?)
+        .derive(b"account-device")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -2492,7 +2489,8 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
         .open(Location::profile(unique_name("device")))
         .await?;
     let device_operator = device_profile
-        .session(device_profile.derive(b"device").await?)
+        .derive(b"device")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -2610,7 +2608,8 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         .load(Location::profile(account_name))
         .await?;
     let account_operator = account_profile
-        .session(account_profile.derive(b"account-device").await?)
+        .derive(b"account-device")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -2666,7 +2665,8 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         .open(Location::profile(unique_name("device")))
         .await?;
     let device_operator = device_profile
-        .session(device_profile.derive(b"device").await?)
+        .derive(b"device")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -2838,7 +2838,8 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
         .await?;
 
     let bob_operator = bob_profile
-        .session(bob_profile.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -2896,7 +2897,8 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
     // build time, so the post-migration operator sees the migrated
     // credentials. Resolving the remote branch revision now succeeds.
     let bob_operator = bob_profile
-        .session(bob_profile.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -3285,8 +3287,7 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> Result<()> {
     let site_address = s3_site_address(&s3);
     let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     profile
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_address)
         .save(authorization)
         .perform(&operator)
@@ -3349,8 +3350,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
     let site_address = s3_site_address(&s3);
     let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     alice_profile
-        .profile()
-        .credential()
+        .secrets()
         .site(&site_address)
         .save(authorization)
         .perform(&alice_operator)
@@ -3402,8 +3402,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
     let bob_site_address = s3_site_address(&s3);
     let bob_authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     bob_profile
-        .profile()
-        .credential()
+        .secrets()
         .site(&bob_site_address)
         .save(bob_authorization)
         .perform(&bob_operator)
@@ -3529,7 +3528,8 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
         .open(Location::profile(unique_name("reach-b")))
         .await?;
     let operator_b = profile_b
-        .session(profile_b.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -3539,8 +3539,7 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
         .perform(&operator_b)
         .await?;
     profile_b
-        .profile()
-        .credential()
+        .secrets()
         .site(s3_site_address(&s3))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
@@ -3693,7 +3692,8 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         .open(Location::profile(unique_name("retire-b")))
         .await?;
     let operator_b = profile_b
-        .session(profile_b.derive(b"test").await?)
+        .derive(b"test")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -3703,8 +3703,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         .perform(&operator_b)
         .await?;
     profile_b
-        .profile()
-        .credential()
+        .secrets()
         .site(s3_site_address(&s3))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
@@ -3843,7 +3842,8 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
         .load(Location::profile(account_name))
         .await?;
     let account_operator = account_profile
-        .session(account_profile.derive(b"account-device").await?)
+        .derive(b"account-device")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -3896,7 +3896,8 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
         .open(Location::profile(unique_name("device")))
         .await?;
     let device_operator = device_profile
-        .session(device_profile.derive(b"device").await?)
+        .derive(b"device")
+        .await?
         .allow(Subject::any())
         .build()
         .await?;
@@ -4832,7 +4833,8 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
             .open(Location::profile(unique_name(name)))
             .await?;
         let operator = profile
-            .session(profile.derive(b"test").await?)
+            .derive(b"test")
+            .await?
             .allow(Subject::any())
             .build()
             .await?;
@@ -4843,8 +4845,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
             .await?;
         let site = s3_site_address(s3);
         profile
-            .profile()
-            .credential()
+            .secrets()
             .site(&site)
             .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
             .perform(&operator)

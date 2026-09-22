@@ -62,7 +62,8 @@ impl DialogRepo<Session<VolatileSpace>> {
             .open(Location::profile(unique_name("baseline")))
             .await?;
         let operator = profile
-            .session(profile.derive(b"baseline").await?)
+            .derive(b"baseline")
+            .await?
             .allow(Subject::any())
             .build()
             .await?;
@@ -81,7 +82,8 @@ impl DialogRepo<Session<NativeTempSpace>> {
             .open(Location::profile(unique_name("baseline")))
             .await?;
         let operator = profile
-            .session(profile.derive(b"baseline").await?)
+            .derive(b"baseline")
+            .await?
             .allow(Subject::any())
             .build()
             .await?;

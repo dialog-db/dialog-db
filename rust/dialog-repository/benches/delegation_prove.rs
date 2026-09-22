@@ -63,7 +63,9 @@ async fn open_branch(name: &str) -> (Branch, Session<VolatileSpace>) {
         .await
         .unwrap();
     let operator = profile
-        .session(profile.derive(b"bench").await.unwrap())
+        .derive(b"bench")
+        .await
+        .unwrap()
         .allow(Subject::any())
         .build()
         .await
@@ -97,7 +99,9 @@ async fn operator_with_retained(
         .await
         .unwrap();
     let operator = profile
-        .session(profile.derive(b"bench").await.unwrap())
+        .derive(b"bench")
+        .await
+        .unwrap()
         .allow(Subject::any())
         .build()
         .await

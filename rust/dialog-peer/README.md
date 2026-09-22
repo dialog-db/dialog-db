@@ -28,7 +28,7 @@ let alice = Peer::new()
 
 // A session narrows the peer to one key and the scopes it may act on.
 let job = alice
-    .session(alice.derive(b"my-app").await?)
+    .derive(b"my-app").await?
     .allow(Subject::any())
     .build()
     .await?;

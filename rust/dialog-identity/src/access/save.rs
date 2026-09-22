@@ -4,11 +4,11 @@ use dialog_common::ConditionalSync;
 use dialog_ucan::{Ucan, UcanDelegation};
 use dialog_varsig::Did;
 
-use super::ProfileError;
+use crate::IdentityError;
 
 type RetainUcan = AccessRetain<Ucan>;
 
-/// Command to store a delegation chain under a profile's DID.
+/// Command to store a delegation chain under a credential's DID.
 pub struct SaveDelegation {
     pub(super) did: Did,
     pub(super) chain: UcanDelegation,
@@ -16,7 +16,7 @@ pub struct SaveDelegation {
 
 impl SaveDelegation {
     /// Execute against the environment.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), ProfileError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), IdentityError>
     where
         Env: Provider<RetainUcan> + ConditionalSync,
     {
@@ -25,6 +25,6 @@ impl SaveDelegation {
             .invoke(AccessRetain::<Ucan>::new(self.chain))
             .perform(env)
             .await
-            .map_err(|e| ProfileError::Storage(e.to_string()))
+            .map_err(|e| IdentityError::Storage(e.to_string()))
     }
 }

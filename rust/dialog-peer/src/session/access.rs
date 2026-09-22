@@ -584,7 +584,9 @@ mod tests {
             .await
             .unwrap();
         let operator = profile
-            .session(profile.derive(b"test").await.unwrap())
+            .derive(b"test")
+            .await
+            .unwrap()
             .build()
             .await
             .unwrap();
@@ -925,7 +927,9 @@ mod tests {
                 .await
                 .unwrap();
             let operator = profile
-                .session(profile.derive(b"test").await.unwrap())
+                .derive(b"test")
+                .await
+                .unwrap()
                 .allow(Subject::any())
                 .build()
                 .await
@@ -985,7 +989,9 @@ mod tests {
                 .await
                 .unwrap();
             let operator = profile
-                .session(profile.derive(b"test").await.unwrap())
+                .derive(b"test")
+                .await
+                .unwrap()
                 .allow(Subject::any())
                 .build()
                 .await
@@ -1037,10 +1043,7 @@ mod tests {
             .storage(storage.clone())
             .open(Location::profile(unique("bounded-session")))
             .await?;
-        let setup = profile
-            .session(profile.derive(b"setup").await?)
-            .build()
-            .await?;
+        let setup = profile.derive(b"setup").await?.build().await?;
         let space = Ed25519Signer::generate().await?;
         let now = now_s();
         let upstream_end = now + 7200;
@@ -1066,7 +1069,8 @@ mod tests {
             .await?;
         for session_end in [now + 3600, now + 10800, now - 60] {
             let operator = profile
-                .session(profile.derive(session_end.to_le_bytes()).await?)
+                .derive(session_end.to_le_bytes())
+                .await?
                 .allow(
                     profile
                         .access()
@@ -1124,7 +1128,8 @@ mod tests {
             .await?;
         let now = now_s();
         let operator = profile
-            .session(profile.derive(b"test").await?)
+            .derive(b"test")
+            .await?
             .allow(
                 profile
                     .access()

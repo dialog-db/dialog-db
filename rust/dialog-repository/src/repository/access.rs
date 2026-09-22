@@ -483,7 +483,8 @@ mod tests {
         profile.access().migrate().perform(&storage).await?;
 
         let operator = profile
-            .session(profile.derive(b"test").await?)
+            .derive(b"test")
+            .await?
             .allow(dialog_capability::Subject::any())
             .build()
             .await?;

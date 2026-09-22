@@ -11,7 +11,7 @@ dependent (tonk) follows.
 Four objects each own a slice of "who am I, what do I hold, where is it,
 and what may I do", and every product layer adds one more:
 
-- `Profile` is a persisted signer, opened at a `Location` through a
+- `Profile` was a persisted signer, opened at a `Location` through a
   bootstrap effect (`storage::Load`) that nothing else uses.
 - `Operator` bundles the acting signer, the in-memory session grants, the
   storage pool, the base directory, the network dispatch table, the
@@ -70,8 +70,7 @@ let alice = Peer::new()
     .open(Location::profile("alice"))      // or .load(..), or .attach(credential)
     .await?;
 
-let key = alice.derive(b"refactor").await?;      // deterministic per (peer, context)
-let job = alice.session(key)                     // or any other SignerCredential
+let job = alice.derive(b"refactor").await?       // deterministic per (peer, context)
     .allow(Subject::any())                       // unbounded, minted at build
     .allow(alice.access().claim(cap).expires(t)) // bounded: the claim carries the window
     .grant(certificate)                          // pre-minted to the session's key
@@ -83,16 +82,17 @@ branch.revision().resolve().perform(&alice).await?; // the peer is the unconstra
 ```
 
 The session key is always a `SignerCredential`, known before build:
-`derive` is the deterministic path, any other signer is the supplied one,
-and `SessionBuilder::did` names the audience a certificate for `grant`
-must carry. A bare capability in `allow` is an unbounded claim by the
+`derive` is the deterministic path and returns the builder once the key
+exists; `alice.session(signer)` is the supplied one; and
+`SessionBuilder::did` names the audience a certificate for `grant` must
+carry. A bare capability in `allow` is an unbounded claim by the
 peer; a `Claim` made through `peer.access()` carries its window, and a
 claim by any other issuer is refused at build.
 
 Planned (steps 4 and 5 below):
 
 ```rust
-let job = alice.session(alice.derive(b"refactor").await?)
+let job = alice.derive(b"refactor").await?
     .using(branch)                         // extra proof layers, repeatable
     .build().await?;
 Repository::open("notes").perform(&job).await?;            // registry lookup, mounts
@@ -206,7 +206,7 @@ by type.
 | today | becomes |
 | --- | --- |
 | `Profile::open(name).at(dir)` | `Peer::new().storage(storage).open(Location)` |
-| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.session(peer.derive(ctx).await?).allow(..).build()` |
+| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.derive(ctx).await?.allow(..).build()` |
 | `Operator<S>` | `Session<S>`; the crate is `dialog-peer` |
 | `Authority { profile, operator, account }` | `(peer, session)`; account is a link in the proof chain |
 | `OperatorBuilder::access_branch(name)` (#526) | `.using(BranchReference)` on the session; the peer's `.branch(..)` is the default |
@@ -281,7 +281,11 @@ Each step is one PR and leaves tonk compiling.
    `Connect` capability on the peer subject; pull/push/hydrate rewritten
    as effects against two envs.
 6. Retire the `Secret` effects for sealed facts.
-7. Rename `Profile` to `Peer` in the public API and drop the alias.
+7. **Done.** `Profile` is gone. `dialog-identity` keeps the credential
+   loader as `OpenCredential`, the access API, the site-secret handle and
+   `SpaceHandle`; `Peer` fronts all of them (`open`, `load`, `create`,
+   `access`, `secrets`, `space`). `Repository: From<Profile>` and
+   `Peer::profile` went with it.
 
 #519 (stacks) supplies the layer types steps 3 and 4 want for device-local
 state and rebases after step 2, since it touches `branch.rs` in the same
@@ -305,9 +309,8 @@ places.
 ## Migration guide (dialog-operator to dialog-peer)
 
 The crate is `dialog-peer`; the module path is `dialog_peer`. There is no
-`Operator`, `OperatorBuilder` or `DeriveOperator`. `Profile` still exists
-in `dialog-identity` and is re-exported, but nothing needs it to build a
-session any more.
+`Operator`, `OperatorBuilder`, `DeriveOperator` or `Profile`. The peer is
+the identity: what a profile did, a peer does.
 
 Opening the identity and building the environment:
 
@@ -332,7 +335,8 @@ let peer = Peer::new()
     .open(Location::new(Directory::Profile, name))
     .await?;
 let session = peer
-    .session(peer.derive(b"app").await?)   // was profile.derive(b"app")
+    .derive(b"app")                        // was profile.derive(b"app")
+    .await?
     .allow(Subject::any())
     .build()
     .await?;
@@ -358,7 +362,9 @@ mounted some other way.
 | `profile.access()` | `peer.access()` |
 | `profile.repository(name)` | `peer.space(name)` |
 | `profile.save(chain)` / `profile.access().save(chain)` | `peer.access().save(chain)` (goes away in step 4; use `branch.delegations().retain(chain)`) |
-| `profile.credential().site(id)` | `peer.profile().credential().site(id)` (goes away in step 6) |
+| `profile.credential().site(id)` | `peer.secrets().site(id)` (goes away in step 6) |
+| `Profile::open(name).at(dir).perform(&storage)` | `Peer::new().storage(storage).open(Location::new(dir, name))`; `load` and `create` likewise |
+| `Reactor::new(profile)` and other holders of a `Profile` | hold the `Peer`, or the `SignerCredential` from `peer.credential()` when only signing is needed |
 | `Repository::from(&profile)` | `Repository::from(&peer)` or `Repository::from(peer.credential().clone())` |
 | `Storage::default()` per call site | one `Storage` per process, owned by the peer; sessions share it |
 | `dialog_operator::helpers::test_operator()` | `dialog_peer::helpers::test_session()` |
@@ -374,8 +380,8 @@ Things the split makes possible that the old shape did not:
   tonk wrapped the operator to sign as another principal, build a session
   over that principal's credential and `.grant(certificate)` what it holds.
 - Key rotation without rebuilding the runtime: the worker's
-  `session::rotate` becomes a session over `peer.derive(random)` with a
-  bounded claim, on the peer it already holds. The scheduler and the preload queue
+  `session::rotate` becomes `peer.derive(random).await?` with a bounded
+  claim, on the peer it already holds. The scheduler and the preload queue
   survive the rotation.
 
 Tonk-specific notes:
