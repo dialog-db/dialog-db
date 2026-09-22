@@ -52,6 +52,8 @@ pub use load::*;
 
 mod metadata;
 
+pub mod registry;
+
 mod open;
 pub use open::*;
 

@@ -4,7 +4,7 @@ use super::cell::Cache;
 use crate::RetractError;
 use dialog_capability::Provider;
 use dialog_effects::memory::prelude::CellScope;
-use dialog_effects::memory::{self, Version, prelude::CellExt};
+use dialog_effects::memory::{self, Version};
 
 /// Command to empty a cell.
 ///
