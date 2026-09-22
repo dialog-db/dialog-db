@@ -29,34 +29,66 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_derives_different_operators_from_different_contexts() {
-        let storage1 = Storage::volatile();
-        let profile1 = Peer::new()
-            .storage(storage1.clone())
+    async fn it_derives_different_sessions_from_different_contexts() {
+        let storage = Storage::volatile();
+        let peer = Peer::new()
+            .storage(storage)
             .network(Network::default())
-            .open(Location::profile(unique_name("ctx1")))
+            .open(Location::profile(unique_name("ctx")))
             .await
             .unwrap();
-        let op1 = profile1
-            .session(profile1.derive(b"context-a").await.unwrap())
+
+        // One peer, two contexts: two peers would prove nothing about
+        // the context.
+        let a = peer
+            .session(peer.derive(b"context-a").await.unwrap())
+            .build()
+            .await
+            .unwrap();
+        let b = peer
+            .session(peer.derive(b"context-b").await.unwrap())
             .build()
             .await
             .unwrap();
 
-        let storage2 = Storage::volatile();
-        let profile2 = Peer::new()
-            .storage(storage2.clone())
+        assert_ne!(a.did(), b.did());
+    }
+
+    /// The session key must be a pure function of the peer key and the
+    /// context, on every platform.
+    ///
+    /// The derivation this replaced hashed a signature over a fixed message.
+    /// Ed25519 signatures are not required to be deterministic (WebKit's
+    /// hedge the nonce), so in Safari a peer derived a different session
+    /// key on every build, and that DID feeds `Origin`, which names a
+    /// sequential actor in the version clock. Every page load became a new
+    /// replica lineage. See `notes/operator-derivation.md`.
+    #[dialog_common::test]
+    async fn it_derives_the_same_session_key_every_time() {
+        let storage = Storage::volatile();
+        let peer = Peer::new()
+            .storage(storage)
             .network(Network::default())
-            .open(Location::profile(unique_name("ctx2")))
+            .open(Location::profile(unique_name("stable")))
             .await
             .unwrap();
-        let op2 = profile2
-            .session(profile2.derive(b"context-b").await.unwrap())
+
+        let first = peer
+            .session(peer.derive(b"test").await.unwrap())
+            .build()
+            .await
+            .unwrap();
+        let second = peer
+            .session(peer.derive(b"test").await.unwrap())
             .build()
             .await
             .unwrap();
 
-        assert_ne!(op1.did(), op2.did());
+        assert_eq!(
+            first.did(),
+            second.did(),
+            "rebuilding a session must re-mint the same identity"
+        );
     }
 
     mod delegation_tests {
