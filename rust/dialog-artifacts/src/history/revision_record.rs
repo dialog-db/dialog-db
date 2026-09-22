@@ -2,8 +2,6 @@ use dialog_capability::Did;
 use serde::{Deserialize, Serialize};
 
 use crate::Revision;
-
-use crate::history::VersionExt as _;
 use crate::{
     Artifact, Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value,
     key::artifact_index_keys,
