@@ -11,7 +11,7 @@
 //! subject.get().branches().list()          = /use/get/dialog/branch
 //! subject.put().branches().branch(n).create()
 //!                                          = /use/put/dialog/branch
-//! subject.discard().branches().branch(n).delete()
+//! subject.delete().branches().branch(n).delete()
 //!                                          = /void/delete/dialog/branch
 //! ```
 

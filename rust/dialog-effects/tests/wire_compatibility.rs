@@ -55,6 +55,7 @@ fn it_preserves_memory_commands() {
     );
     assert_eq!(
         subject()
+            .r#use()
             .delete()
             .memory()
             .space("branch/main")
@@ -179,6 +180,7 @@ fn it_preserves_the_whole_command_vocabulary() {
             .publish(b"c".to_vec(), None)
             .ability(),
         subject()
+            .r#use()
             .delete()
             .memory()
             .space("s")
@@ -265,9 +267,11 @@ fn it_names_a_path_from_the_method_alone() {
     assert_eq!(subject().get().ability(), "/use/get");
     assert_eq!(subject().put().ability(), "/use/put");
 
-    // Emptying a value sits under `use`; destroying what held it sits
-    // under `void`. Both read as `delete`, and the root is the only
-    // thing that tells them apart.
-    assert_eq!(subject().delete().ability(), "/use/delete");
-    assert_eq!(subject().discard().ability(), "/void/delete");
+    // A bare `delete` destroys the thing itself, so it needs no root
+    // spelled out. Emptying a value while leaving what held it is the
+    // odd one: it is reached through the root that says so, and exists
+    // for the one command that shipped spelling it that way.
+    assert_eq!(subject().delete().ability(), "/void/delete");
+    assert_eq!(subject().void().delete().ability(), "/void/delete");
+    assert_eq!(subject().r#use().delete().ability(), "/use/delete");
 }

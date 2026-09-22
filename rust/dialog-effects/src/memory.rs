@@ -384,6 +384,7 @@ mod tests {
         );
         assert_eq!(
             subject()
+                .r#use()
                 .delete()
                 .memory()
                 .space("local")

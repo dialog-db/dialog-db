@@ -244,7 +244,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_delete_claim_path() {
         let claim = Subject::from(did!("key:zRepo"))
-            .discard()
+            .delete()
             .branches()
             .branch("main")
             .delete();
@@ -258,7 +258,7 @@ mod tests {
     fn it_keeps_deletion_out_of_the_use_root() {
         let subject = Subject::from(did!("key:zRepo"));
         let write = subject.clone().put().branches().branch("main").create();
-        let destroy = subject.discard().branches().branch("main").delete();
+        let destroy = subject.delete().branches().branch("main").delete();
 
         assert!(write.ability().starts_with("/use/"));
         assert!(destroy.ability().starts_with("/void/"));
@@ -270,8 +270,8 @@ mod tests {
     #[dialog_common::test]
     fn it_scopes_by_name_without_changing_the_path() {
         let subject = Subject::from(did!("key:zRepo"));
-        let main = subject.clone().discard().branches().branch("main").delete();
-        let feature = subject.discard().branches().branch("feature").delete();
+        let main = subject.clone().delete().branches().branch("main").delete();
+        let feature = subject.delete().branches().branch("feature").delete();
 
         assert_eq!(main.ability(), feature.ability());
         assert_ne!(main.name(), feature.name());

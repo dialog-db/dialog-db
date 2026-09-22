@@ -41,17 +41,11 @@ where
 pub trait ReadBlobExt {
     /// Read a blob by hash.
     fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read>;
-    /// Read a blob, with a pre-built effect carrying its own range.
-    fn read_effect(self, effect: Read) -> Capability<Read>;
 }
 
 impl ReadBlobExt for Capability<Blob<method::Get>> {
     fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read> {
         self.invoke(Read::new(digest))
-    }
-
-    fn read_effect(self, effect: Read) -> Capability<Read> {
-        self.invoke(effect)
     }
 }
 

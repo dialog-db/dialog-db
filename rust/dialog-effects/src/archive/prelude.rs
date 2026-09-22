@@ -312,13 +312,13 @@ impl ArchiveScope {
     }
 
     /// The chain for reading blobs.
-    pub fn read_blob(&self) -> Capability<Blob<method::Get>> {
+    fn read_blob(&self) -> Capability<Blob<method::Get>> {
         use crate::blob::prelude::ArchiveBlobExt as _;
         self.subject.clone().get().archive().blob()
     }
 
     /// The chain for writing blobs.
-    pub fn write_blob(&self) -> Capability<Blob<method::Put>> {
+    fn write_blob(&self) -> Capability<Blob<method::Put>> {
         use crate::blob::prelude::ArchiveBlobExt as _;
         self.subject.clone().put().archive().blob()
     }

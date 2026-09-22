@@ -25,7 +25,7 @@
 use dialog_capability::{Capability, Constraint, Policy};
 
 use super::{Cell, Memory, Publish, Resolve, Retract, Space, Version};
-use crate::{Method, MethodExt as _, method};
+use crate::{Method, MethodExt as _, UseExt as _, method};
 
 /// Scope a method to the memory namespace.
 pub trait MemoryExt {
@@ -293,6 +293,7 @@ impl CellScope {
     pub fn empty(&self) -> Capability<Cell<method::Delete>> {
         self.subject
             .clone()
+            .r#use()
             .delete()
             .memory()
             .space(self.space.clone())

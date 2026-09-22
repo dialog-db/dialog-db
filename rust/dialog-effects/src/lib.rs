@@ -140,14 +140,13 @@ pub trait MethodExt: Sized {
         self.r#use().attenuate(method::Put)
     }
 
-    /// Empty a value while leaving what held it, under [`Use`]:
-    /// `/use/delete/...`.
-    fn delete(self) -> Capability<method::Delete> {
-        self.r#use().attenuate(method::Delete)
-    }
-
     /// Destroy the thing itself, under [`Void`]: `/void/delete/...`.
-    fn discard(self) -> Capability<method::Void> {
+    ///
+    /// Unqualified, because a bare `delete` is only ever this one.
+    /// Emptying a value while leaving what held it is reached through
+    /// the root that says so, [`UseExt::delete`], and exists for the
+    /// one command that shipped spelling it that way.
+    fn delete(self) -> Capability<method::Void> {
         self.void().attenuate(method::Void)
     }
 }
@@ -196,13 +195,13 @@ impl Chain<method::Put> for Subject {
 
 impl Chain<method::Delete> for Subject {
     fn under(self) -> Capability<method::Delete> {
-        self.delete()
+        self.r#use().delete()
     }
 }
 
 impl Chain<method::Void> for Subject {
     fn under(self) -> Capability<method::Void> {
-        self.discard()
+        self.delete()
     }
 }
 
@@ -235,11 +234,11 @@ impl UseExt for Capability<Use> {
 /// Attach the destroying method to [`Void`].
 pub trait VoidExt {
     /// Destroy: `/void/delete/...`.
-    fn discard(self) -> Capability<method::Void>;
+    fn delete(self) -> Capability<method::Void>;
 }
 
 impl VoidExt for Capability<Void> {
-    fn discard(self) -> Capability<method::Void> {
+    fn delete(self) -> Capability<method::Void> {
         self.attenuate(method::Void)
     }
 }
