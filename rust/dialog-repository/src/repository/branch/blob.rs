@@ -66,6 +66,7 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
     RepositoryMemoryExt as _, Revision, Snapshot, TreeReference, Upstream,
 };
+use dialog_artifacts::history::RevisionRecord;
 use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity};
@@ -568,7 +569,8 @@ where
         Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
         None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
     };
-    let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
+    let mut record =
+        RevisionRecord::create(&revision, &profile, parent.into_iter().collect(), skips);
     record.signature = Attest::new(record.payload()?).perform(env).await?;
     // The record's key carries its value through the tree's own
     // inline-vs-spill threshold, so read it off the tree rather than

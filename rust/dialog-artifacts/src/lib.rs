@@ -98,8 +98,7 @@ pub mod merge;
 pub mod position;
 pub mod tree;
 
-mod uri;
-pub use uri::*;
+pub use dialog_capability::identity::{ENTITY_LENGTH, Entity, IdentityError, Uri};
 
 /// Test helpers for generating deterministic test data.
 #[cfg(any(test, feature = "helpers"))]
