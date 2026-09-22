@@ -15,7 +15,8 @@
 //!                                          = /void/dialog/branch
 //! ```
 
-use dialog_capability::{Capability, Constraint, Policy};
+use dialog_capability::identity::Revision;
+use dialog_capability::{Capability, Constrained, Constraint, Policy};
 
 use super::{Branch, Branches, Create, Delete, List};
 use crate::{Method, Void, method};
@@ -70,25 +71,46 @@ impl ListBranchesExt for Capability<Branches<method::Get>> {
 
 /// Create a branch.
 pub trait CreateBranchExt {
-    /// Create it, recording the branch in the registry.
+    /// Create it empty, recording the branch in the registry. Refine
+    /// with [`revision`](CreateRevisionExt::revision) to have it point
+    /// at a revision instead.
     fn create(self) -> Capability<Create>;
 }
 
 impl CreateBranchExt for Capability<Branch<method::Put>> {
     fn create(self) -> Capability<Create> {
-        self.invoke(Create)
+        self.invoke(Create::default())
+    }
+}
+
+/// Point a branch being created at a revision.
+pub trait CreateRevisionExt {
+    /// Have the new branch point at `revision`.
+    fn revision(self, revision: Revision) -> Capability<Create>;
+}
+
+impl CreateRevisionExt for Capability<Create> {
+    fn revision(self, revision: Revision) -> Capability<Create> {
+        let Constrained { capability, .. } = self.into_inner();
+        Capability::new(Constrained {
+            constraint: Create {
+                revision: Some(revision),
+            },
+            capability,
+        })
     }
 }
 
 /// Delete a branch.
 pub trait DeleteBranchExt {
-    /// Delete it: retract its facts and its memory cells.
-    fn delete(self) -> Capability<Delete>;
+    /// Delete it, provided it still points at `revision`: retract its
+    /// memory cells and its facts.
+    fn delete(self, revision: Revision) -> Capability<Delete>;
 }
 
 impl DeleteBranchExt for Capability<Branch<Void>> {
-    fn delete(self) -> Capability<Delete> {
-        self.invoke(Delete)
+    fn delete(self, revision: Revision) -> Capability<Delete> {
+        self.invoke(Delete { revision })
     }
 }
 

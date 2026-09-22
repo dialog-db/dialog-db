@@ -7,11 +7,11 @@
 //! # Which half is authoritative
 //!
 //! Creating and deleting touch both halves, and the two cannot be one
-//! compare-and-swap. The fact is therefore written first on create and
-//! retracted last on delete, which fixes the direction a partial
-//! failure falls in: a crash leaves cells that a later create
-//! overwrites harmlessly, never a branch that lists but cannot be
-//! opened.
+//! compare-and-swap. The cell is the truth and the fact describes it,
+//! so the cell is written first on create and removed first on delete,
+//! with the fact following. A partial failure then always leaves a
+//! branch that exists but does not list, never one that lists but
+//! points at nothing.
 
 use super::Operator;
 use core::fmt::Display;
@@ -27,7 +27,9 @@ use dialog_effects::method;
 use dialog_query::{Output as _, Query, Term};
 use dialog_repository::registry::{forget, record};
 use dialog_repository::schema::{Branch as BranchConcept, Replica};
-use dialog_repository::{Branch, REGISTRY, RemoteSite, RepositoryMemoryExt};
+use dialog_repository::{
+    Branch, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt, RetractError,
+};
 
 /// The environment a branch operation runs against.
 ///
@@ -110,15 +112,39 @@ where
             });
         }
 
-        // The fact goes in first: a crash after this leaves a branch
-        // that lists and opens empty, which a later create converges
-        // with. The reverse order would leave cells nothing points at.
-        let registry = self.registry(&subject).await?;
-        let operator = self.build_authority(subject);
+        // The branch itself goes first: its cell is the truth, and the
+        // registry fact only describes it. A crash after the publish
+        // leaves a branch that exists but does not list, which a repeated
+        // create converges with (the same revision publishes as a no-op
+        // and the fact is recorded). The reverse order would leave a
+        // branch that lists but points at nothing.
+        if let Some(revision) = branch_fx::Create::of(&input).revision.clone() {
+            // A fresh cell, never resolved: publishing with no expected
+            // version is what refuses to move a branch that already
+            // points at a different revision, while one that already
+            // points at this revision converges.
+            let cell = Subject::from(subject.clone())
+                .branch(name.as_str())
+                .revision();
+            cell.publish(revision)
+                .perform(self)
+                .await
+                .map_err(|error| match error {
+                    PublishError::VersionMismatch { .. } => BranchError::Refused {
+                        name: name.clone(),
+                        operation: "created",
+                        reason: "it already points at a different revision",
+                    },
+                    error => failed(error),
+                })?;
+        }
 
-        // Through the registry, which writes under the machinery scope:
+        // Only once the branch exists is it recorded. Through the
+        // registry, which writes under the machinery scope:
         // `dialog.branch/*` is reserved, and an application write of it
         // is refused.
+        let registry = self.registry(&subject).await?;
+        let operator = self.build_authority(subject);
         record(&registry, &operator, name.as_str(), self)
             .await
             .map_err(failed)?;
@@ -186,16 +212,35 @@ where
             });
         }
 
-        // The cells go first. Each is resolved before it is retracted,
-        // because a retraction names the version it removes -- a cell
-        // this replica never read is one it must not destroy.
+        let expected = &branch_fx::Delete::of(&input).revision;
+        let moved = || BranchError::Refused {
+            name: name.clone(),
+            operation: "deleted",
+            reason: "it no longer points at the revision the delete expects",
+        };
+
+        // The cells go first, the head before the rest. It is checked
+        // against the revision the caller named: a branch that moved
+        // since they last looked is not the branch they decided to
+        // delete, and is left alone.
         let reference = Subject::from(subject.clone()).branch(name.as_str());
 
         let revision = reference.revision();
         revision.resolve().perform(self).await.map_err(failed)?;
-        if revision.content().is_some() {
-            revision.retract().perform(self).await.map_err(failed)?;
+        if revision.content().as_ref() != Some(expected) {
+            return Err(moved());
         }
+        // The retraction names the version just read, so a commit that
+        // lands between the check above and this point is refused by the
+        // store rather than destroyed.
+        revision
+            .retract()
+            .perform(self)
+            .await
+            .map_err(|error| match error {
+                RetractError::VersionMismatch { .. } => moved(),
+                error => failed(error),
+            })?;
 
         let upstream = reference.upstream();
         upstream.resolve().perform(self).await.map_err(failed)?;
@@ -209,8 +254,8 @@ where
             induction.retract().perform(self).await.map_err(failed)?;
         }
 
-        // And the fact goes last, so a crash leaves cells nothing
-        // points at rather than a branch that lists but cannot open.
+        // And the fact goes last: the branch is gone before it stops
+        // being listed, never the other way around.
         let registry = self.registry(&subject).await?;
         let operator = self.build_authority(subject);
 
@@ -228,23 +273,119 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::Operator;
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use dialog_capability::Subject;
+    use dialog_artifacts::Instruction;
+    use dialog_capability::{Did, Subject};
     use dialog_effects::MethodExt as _;
     use dialog_effects::branch::prelude::*;
-    use dialog_repository::REGISTRY;
+    use dialog_repository::{REGISTRY, RepositoryMemoryExt as _, Revision};
+    use dialog_storage::provider::storage::VolatileSpace;
+    use futures_util::stream;
 
-    /// A created branch is listed. The registry lists itself without
-    /// ever having been recorded, because its fact is synthesized into
-    /// the query's overlay rather than written.
+    /// Mint a real head on `name` by committing nothing to it.
+    async fn commit(
+        operator: &Operator<VolatileSpace>,
+        subject: &Did,
+        name: &str,
+    ) -> anyhow::Result<Revision> {
+        let branch = Subject::from(subject.clone())
+            .branch(name)
+            .open()
+            .perform(operator)
+            .await?;
+        Ok(branch
+            .commit(stream::iter(Vec::<Instruction>::new()))
+            .allow_empty()
+            .perform(operator)
+            .await?)
+    }
+
+    /// Where `name` points, as seen by opening it.
+    async fn head(
+        operator: &Operator<VolatileSpace>,
+        subject: &Did,
+        name: &str,
+    ) -> anyhow::Result<Option<Revision>> {
+        let branch = Subject::from(subject.clone())
+            .branch(name)
+            .open()
+            .perform(operator)
+            .await?;
+        Ok(branch.revision())
+    }
+
+    async fn listed(
+        operator: &Operator<VolatileSpace>,
+        subject: &Did,
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(Subject::from(subject.clone())
+            .reader()
+            .branches()
+            .list()
+            .perform(operator)
+            .await?)
+    }
+
+    /// Creating at a revision makes a branch that points at it -- one
+    /// minted on another branch, the way a git branch points at any
+    /// commit.
     #[dialog_common::test]
-    async fn it_creates_and_lists() -> anyhow::Result<()> {
+    async fn it_creates_a_branch_at_a_revision() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
-        let subject = Subject::from(repo.did());
+        let did = repo.did();
+        let source = commit(&operator, &did, "main").await?;
 
-        subject
-            .clone()
+        Subject::from(did.clone())
+            .writer()
+            .branches()
+            .branch("feature")
+            .create()
+            .revision(source.clone())
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(head(&operator, &did, "feature").await?, Some(source));
+        assert!(listed(&operator, &did).await?.contains(&"feature".into()));
+        Ok(())
+    }
+
+    /// The first commit on a branch created from another mints onto the
+    /// pointed-at revision: a head of its own, one edition on, so the
+    /// fork stays connected to where it came from.
+    #[dialog_common::test]
+    async fn it_commits_onto_the_revision_a_branch_was_created_at() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        let source = commit(&operator, &did, "main").await?;
+
+        Subject::from(did.clone())
+            .writer()
+            .branches()
+            .branch("feature")
+            .create()
+            .revision(source.clone())
+            .perform(&operator)
+            .await?;
+        let forked = commit(&operator, &did, "feature").await?;
+
+        assert_ne!(forked, source, "the fork mints a head of its own");
+        assert_eq!(forked.edition, source.edition.successor());
+        assert_eq!(head(&operator, &did, "main").await?, Some(source));
+        Ok(())
+    }
+
+    /// Without a revision the branch is created empty: recorded, with
+    /// nothing to point at yet.
+    #[dialog_common::test]
+    async fn it_creates_an_empty_branch() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+
+        Subject::from(did.clone())
             .writer()
             .branches()
             .branch("feature")
@@ -252,101 +393,165 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let names = subject
-            .clone()
-            .reader()
-            .branches()
-            .list()
-            .perform(&operator)
-            .await?;
-
+        assert_eq!(head(&operator, &did, "feature").await?, None);
+        let names = listed(&operator, &did).await?;
+        assert!(names.contains(&"feature".into()), "{names:?}");
         assert!(
-            names.contains(&"feature".to_string()),
-            "a created branch is listed: {names:?}"
-        );
-        assert!(
-            names.contains(&REGISTRY.to_string()),
+            names.contains(&REGISTRY.into()),
             "the registry lists itself: {names:?}"
         );
-
         Ok(())
     }
 
-    /// Creating is idempotent: the fact is derived from (replica, name),
-    /// so recording the same branch twice converges on one record
-    /// rather than listing it twice.
+    /// Creating the same branch at the same revision twice converges.
     #[dialog_common::test]
     async fn it_creates_idempotently() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
-        let subject = Subject::from(repo.did());
+        let did = repo.did();
+        let source = commit(&operator, &did, "main").await?;
 
         for _ in 0..2 {
-            subject
-                .clone()
+            Subject::from(did.clone())
                 .writer()
                 .branches()
                 .branch("twice")
                 .create()
+                .revision(source.clone())
                 .perform(&operator)
                 .await?;
         }
 
-        let names = subject
-            .clone()
-            .reader()
-            .branches()
-            .list()
-            .perform(&operator)
-            .await?;
-
-        assert_eq!(
-            names.iter().filter(|name| *name == "twice").count(),
-            1,
-            "creating twice converges on one record: {names:?}"
-        );
-
+        assert_eq!(head(&operator, &did, "twice").await?, Some(source));
+        let names = listed(&operator, &did).await?;
+        assert_eq!(names.iter().filter(|name| *name == "twice").count(), 1);
         Ok(())
     }
 
-    /// Deleting retracts the fact, so the branch stops being listed.
+    /// A create never moves an existing branch: pointing it somewhere
+    /// else is refused, and it stays where it was.
     #[dialog_common::test]
-    async fn it_deletes_and_forgets() -> anyhow::Result<()> {
+    async fn it_refuses_to_move_an_existing_branch() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
-        let subject = Subject::from(repo.did());
+        let did = repo.did();
+        let first = commit(&operator, &did, "main").await?;
+        let second = commit(&operator, &did, "main").await?;
 
-        subject
-            .clone()
+        let create = |revision: Revision| {
+            Subject::from(did.clone())
+                .writer()
+                .branches()
+                .branch("feature")
+                .create()
+                .revision(revision)
+        };
+        create(first.clone()).perform(&operator).await?;
+        let moved = create(second).perform(&operator).await;
+
+        assert!(moved.is_err(), "a create over another revision is refused");
+        assert_eq!(head(&operator, &did, "feature").await?, Some(first));
+        Ok(())
+    }
+
+    /// The branch is published before it is recorded, so a create that
+    /// fails to publish records nothing: it never lists a branch it did
+    /// not make.
+    #[dialog_common::test]
+    async fn it_records_only_a_branch_it_created() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        // `main` exists as cells but was never created through the
+        // capability, so it has no registry fact.
+        let existing = commit(&operator, &did, "main").await?;
+        let other = commit(&operator, &did, "scratch").await?;
+        assert_ne!(existing, other);
+
+        let refused = Subject::from(did.clone())
+            .writer()
+            .branches()
+            .branch("main")
+            .create()
+            .revision(other)
+            .perform(&operator)
+            .await;
+
+        assert!(refused.is_err());
+        let names = listed(&operator, &did).await?;
+        assert!(
+            !names.contains(&"main".into()),
+            "nothing recorded: {names:?}"
+        );
+        Ok(())
+    }
+
+    /// Deleting at the revision the branch points at removes it: it no
+    /// longer opens to a head, and it is no longer listed.
+    #[dialog_common::test]
+    async fn it_deletes_a_branch_at_its_revision() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        let source = commit(&operator, &did, "main").await?;
+
+        Subject::from(did.clone())
             .writer()
             .branches()
             .branch("doomed")
             .create()
+            .revision(source.clone())
             .perform(&operator)
             .await?;
-
-        subject
-            .clone()
+        Subject::from(did.clone())
             .voider()
             .branches()
             .branch("doomed")
-            .delete()
+            .delete(source)
             .perform(&operator)
             .await?;
 
-        let names = subject
-            .clone()
-            .reader()
+        assert_eq!(head(&operator, &did, "doomed").await?, None);
+        let names = listed(&operator, &did).await?;
+        assert!(!names.contains(&"doomed".into()), "{names:?}");
+        Ok(())
+    }
+
+    /// A branch that moved since the caller looked is not the branch
+    /// they decided to delete: the delete is refused and the branch is
+    /// left exactly as it was.
+    #[dialog_common::test]
+    async fn it_refuses_to_delete_a_branch_that_moved() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        let source = commit(&operator, &did, "main").await?;
+
+        Subject::from(did.clone())
+            .writer()
             .branches()
-            .list()
+            .branch("feature")
+            .create()
+            .revision(source.clone())
             .perform(&operator)
             .await?;
+        // Someone commits to it after the caller last looked.
+        let advanced = commit(&operator, &did, "feature").await?;
+
+        let refused = Subject::from(did.clone())
+            .voider()
+            .branches()
+            .branch("feature")
+            .delete(source)
+            .perform(&operator)
+            .await;
 
         assert!(
-            !names.contains(&"doomed".to_string()),
-            "a deleted branch stops being listed: {names:?}"
+            refused.is_err(),
+            "the delete names a revision it no longer holds"
         );
-
+        assert_eq!(head(&operator, &did, "feature").await?, Some(advanced));
+        assert!(listed(&operator, &did).await?.contains(&"feature".into()));
         Ok(())
     }
 
@@ -356,10 +561,10 @@ mod tests {
     async fn it_refuses_to_touch_the_registry() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
-        let subject = Subject::from(repo.did());
+        let did = repo.did();
+        let source = commit(&operator, &did, "main").await?;
 
-        let created = subject
-            .clone()
+        let created = Subject::from(did.clone())
             .writer()
             .branches()
             .branch(REGISTRY)
@@ -368,16 +573,14 @@ mod tests {
             .await;
         assert!(created.is_err(), "the registry is never created");
 
-        let deleted = subject
-            .clone()
+        let deleted = Subject::from(did.clone())
             .voider()
             .branches()
             .branch(REGISTRY)
-            .delete()
+            .delete(source)
             .perform(&operator)
             .await;
         assert!(deleted.is_err(), "the registry is never deleted");
-
         Ok(())
     }
 }
