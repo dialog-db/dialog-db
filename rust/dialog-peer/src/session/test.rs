@@ -763,8 +763,7 @@ mod tests {
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
 
             profile
-                .profile()
-                .credential()
+                .secrets()
                 .site(&address)
                 .save(credential)
                 .perform(&operator)
@@ -808,8 +807,7 @@ mod tests {
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
 
             profile
-                .profile()
-                .credential()
+                .secrets()
                 .site(&address)
                 .save(credential)
                 .perform(&operator)
@@ -861,8 +859,7 @@ mod tests {
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
             profile
-                .profile()
-                .credential()
+                .secrets()
                 .site(&address)
                 .save(credential)
                 .perform(&operator)
@@ -913,8 +910,7 @@ mod tests {
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
             profile
-                .profile()
-                .credential()
+                .secrets()
                 .site(&address)
                 .save(credential)
                 .perform(&operator)
@@ -973,8 +969,7 @@ mod tests {
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
             profile
-                .profile()
-                .credential()
+                .secrets()
                 .site(&address)
                 .save(credential)
                 .perform(&operator)
@@ -1042,8 +1037,7 @@ mod tests {
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
             profile
-                .profile()
-                .credential()
+                .secrets()
                 .site(&address)
                 .save(credential)
                 .perform(&operator)

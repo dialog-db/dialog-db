@@ -156,9 +156,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_varsig::Principal as _;
     use crate::OpenCredential;
     use dialog_storage::provider::storage::Storage;
+    use dialog_varsig::Principal as _;
 
     #[dialog_common::test]
     async fn it_saves_retracts_and_reloads_a_site_secret() {
