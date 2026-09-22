@@ -1500,7 +1500,9 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -1533,6 +1535,9 @@ dependencies = [
  "iroh-base",
  "serde",
  "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
