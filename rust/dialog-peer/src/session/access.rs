@@ -583,13 +583,7 @@ mod tests {
             .open(Location::profile(unique(name)))
             .await
             .unwrap();
-        let operator = profile
-            .derive(b"test")
-            .await
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
+        let operator = profile.session(b"test").build().await.unwrap();
         (operator, profile)
     }
 
@@ -927,9 +921,7 @@ mod tests {
                 .await
                 .unwrap();
             let operator = profile
-                .derive(b"test")
-                .await
-                .unwrap()
+                .session(b"test")
                 .allow(Subject::any())
                 .build()
                 .await
@@ -989,9 +981,7 @@ mod tests {
                 .await
                 .unwrap();
             let operator = profile
-                .derive(b"test")
-                .await
-                .unwrap()
+                .session(b"test")
                 .allow(Subject::any())
                 .build()
                 .await
@@ -1043,7 +1033,7 @@ mod tests {
             .storage(storage.clone())
             .open(Location::profile(unique("bounded-session")))
             .await?;
-        let setup = profile.derive(b"setup").await?.build().await?;
+        let setup = profile.session(b"setup").build().await?;
         let space = Ed25519Signer::generate().await?;
         let now = now_s();
         let upstream_end = now + 7200;
@@ -1069,8 +1059,7 @@ mod tests {
             .await?;
         for session_end in [now + 3600, now + 10800, now - 60] {
             let operator = profile
-                .derive(session_end.to_le_bytes())
-                .await?
+                .session(session_end.to_le_bytes())
                 .allow(
                     profile
                         .access()
@@ -1128,8 +1117,7 @@ mod tests {
             .await?;
         let now = now_s();
         let operator = profile
-            .derive(b"test")
-            .await?
+            .session(b"test")
             .allow(
                 profile
                     .access()

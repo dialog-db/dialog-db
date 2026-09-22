@@ -1,5 +1,6 @@
 //! [`SessionBuilder`]: narrows a [`Peer`] to a [`Session`].
 
+use std::fmt;
 use std::sync::Arc;
 
 use super::{PeerSpace, Session};
@@ -72,28 +73,118 @@ where
     }
 }
 
+/// The key a session acts under: derived from the peer's key for a
+/// context, or supplied from outside.
+///
+/// Bytes or a string name a context. Derivation is deterministic per
+/// `(peer, context)`, so a grant issued to the derived DID is reusable
+/// across runs; random bytes make a disposable key. It requires an
+/// ed25519 peer key and runs at [`build`](SessionBuilder::build), or
+/// earlier if the builder's [`did`](SessionBuilder::did) is asked for.
+///
+/// A [`SignerCredential`] (or a bare signer) is used as is. The peer mints
+/// the session's grants to it at build, so a supplied key is constrained
+/// exactly as a derived one is.
+#[derive(Clone)]
+pub enum SessionKey {
+    /// Derive the key from the peer's key and this context.
+    Derived(Vec<u8>),
+    /// Act as this credential.
+    Supplied(Box<SignerCredential>),
+}
+
+impl fmt::Debug for SessionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Derived(context) => f.debug_tuple("Derived").field(context).finish(),
+            Self::Supplied(credential) => {
+                f.debug_tuple("Supplied").field(&credential.did()).finish()
+            }
+        }
+    }
+}
+
+impl From<&[u8]> for SessionKey {
+    fn from(context: &[u8]) -> Self {
+        Self::Derived(context.to_vec())
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for SessionKey {
+    fn from(context: &[u8; N]) -> Self {
+        Self::Derived(context.to_vec())
+    }
+}
+
+impl<const N: usize> From<[u8; N]> for SessionKey {
+    fn from(context: [u8; N]) -> Self {
+        Self::Derived(context.to_vec())
+    }
+}
+
+impl From<Vec<u8>> for SessionKey {
+    fn from(context: Vec<u8>) -> Self {
+        Self::Derived(context)
+    }
+}
+
+impl From<&str> for SessionKey {
+    fn from(context: &str) -> Self {
+        Self::Derived(context.as_bytes().to_vec())
+    }
+}
+
+impl From<String> for SessionKey {
+    fn from(context: String) -> Self {
+        Self::Derived(context.into_bytes())
+    }
+}
+
+impl From<SignerCredential> for SessionKey {
+    fn from(credential: SignerCredential) -> Self {
+        Self::Supplied(Box::new(credential))
+    }
+}
+
+impl From<Ed25519Signer> for SessionKey {
+    fn from(signer: Ed25519Signer) -> Self {
+        Self::Supplied(Box::new(SignerCredential::from(signer)))
+    }
+}
+
 /// Builder for a [`Session`]. Created by [`Peer::session`].
 pub struct SessionBuilder<S: Clone> {
     peer: Peer<S>,
-    credential: SignerCredential,
+    key: SessionKey,
     allowed: Vec<Allowance>,
     certificates: Vec<UcanCertificate>,
 }
 
 impl<S: Clone> SessionBuilder<S> {
-    pub(crate) fn new(peer: Peer<S>, credential: SignerCredential) -> Self {
+    pub(crate) fn new(peer: Peer<S>, key: SessionKey) -> Self {
         Self {
             peer,
-            credential,
+            key,
             allowed: Vec::new(),
             certificates: Vec::new(),
         }
     }
 
-    /// The session's DID. Known before build, so a certificate someone
-    /// else issued to it can be passed through [`grant`](Self::grant).
-    pub fn did(&self) -> Did {
-        self.credential.did()
+    /// The session's DID, deriving the key now if it is not supplied.
+    ///
+    /// Known before build, so a certificate someone else issued to it can
+    /// be passed through [`grant`](Self::grant). The key derives once;
+    /// [`build`](Self::build) reuses it.
+    pub async fn did(&mut self) -> Result<Did, PeerError> {
+        let credential = match &self.key {
+            SessionKey::Supplied(credential) => return Ok(credential.did()),
+            SessionKey::Derived(context) => {
+                derive_credential(self.peer.credential(), context).await?
+            }
+        };
+        let did = credential.did();
+        self.key = SessionKey::Supplied(Box::new(credential));
+        Ok(did)
     }
 
     /// Allow a scope: the peer delegates it to the session at build.
@@ -117,7 +208,8 @@ impl<S: Clone> SessionBuilder<S> {
 }
 
 impl<S: PeerSpace> SessionBuilder<S> {
-    /// Build the session: mint its grants to its key.
+    /// Build the session: derive its key if it was not supplied, then
+    /// mint its grants to it.
     ///
     /// Every allowance becomes a peer-to-session delegation held **in
     /// memory**. Nothing is persisted: a derived key re-mints identical
@@ -125,9 +217,15 @@ impl<S: PeerSpace> SessionBuilder<S> {
     /// (one immortal certificate per session was exactly the field
     /// pathology).
     pub async fn build(self) -> Result<Session<S>, PeerError> {
+        let session_credential = match self.key {
+            SessionKey::Supplied(credential) => *credential,
+            SessionKey::Derived(context) => {
+                derive_credential(self.peer.credential(), &context).await?
+            }
+        };
         let peer_did = self.peer.did();
         let peer_signer = self.peer.credential().signer().clone();
-        let session_signer = self.credential.signer().clone();
+        let session_signer = session_credential.signer().clone();
         let session_did = session_signer.did();
         let authority = Authority::new("session", peer_signer.clone(), session_signer);
 

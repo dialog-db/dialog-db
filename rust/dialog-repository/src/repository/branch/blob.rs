@@ -718,8 +718,7 @@ mod tests {
             .open(Location::profile(unique_name("blob")))
             .await?;
         let operator = profile
-            .derive(b"test")
-            .await?
+            .session(b"test")
             .allow(Subject::any())
             .build()
             .await?;
@@ -780,8 +779,7 @@ mod tests {
             .open(Location::profile(unique_name("blob-retract")))
             .await?;
         let operator = profile
-            .derive(b"test")
-            .await?
+            .session(b"test")
             .allow(Subject::any())
             .build()
             .await?;
@@ -855,8 +853,7 @@ mod tests {
             .open(Location::profile(unique_name("blob-reject")))
             .await?;
         let operator = profile
-            .derive(b"test")
-            .await?
+            .session(b"test")
             .allow(Subject::any())
             .build()
             .await?;

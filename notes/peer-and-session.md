@@ -70,7 +70,7 @@ let alice = Peer::new()
     .open(Location::profile("alice"))      // or .load(..), or .attach(credential)
     .await?;
 
-let job = alice.derive(b"refactor").await?       // deterministic per (peer, context)
+let job = alice.session(b"refactor")       // deterministic per (peer, context)
     .allow(Subject::any())                       // unbounded, minted at build
     .allow(alice.access().claim(cap).expires(t)) // bounded: the claim carries the window
     .grant(certificate)                          // pre-minted to the session's key
@@ -92,7 +92,7 @@ claim by any other issuer is refused at build.
 Planned (steps 4 and 5 below):
 
 ```rust
-let job = alice.derive(b"refactor").await?
+let job = alice.session(b"refactor")
     .using(branch)                         // extra proof layers, repeatable
     .build().await?;
 Repository::open("notes").perform(&job).await?;            // registry lookup, mounts
@@ -206,7 +206,7 @@ by type.
 | today | becomes |
 | --- | --- |
 | `Profile::open(name).at(dir)` | `Peer::new().storage(storage).open(Location)` |
-| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.derive(ctx).await?.allow(..).build()` |
+| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.session(ctx).allow(..).build()` |
 | `Operator<S>` | `Session<S>`; the crate is `dialog-peer` |
 | `Authority { profile, operator, account }` | `(peer, session)`; account is a link in the proof chain |
 | `OperatorBuilder::access_branch(name)` (#526) | `.using(BranchReference)` on the session; the peer's `.branch(..)` is the default |
@@ -335,8 +335,7 @@ let peer = Peer::new()
     .open(Location::new(Directory::Profile, name))
     .await?;
 let session = peer
-    .derive(b"app")                        // was profile.derive(b"app")
-    .await?
+    .session(b"app")                        // was profile.derive(b"app").await?
     .allow(Subject::any())
     .build()
     .await?;
@@ -380,7 +379,7 @@ Things the split makes possible that the old shape did not:
   tonk wrapped the operator to sign as another principal, build a session
   over that principal's credential and `.grant(certificate)` what it holds.
 - Key rotation without rebuilding the runtime: the worker's
-  `session::rotate` becomes `peer.derive(random).await?` with a bounded
+  `session::rotate` becomes `peer.session(random)` with a bounded
   claim, on the peer it already holds. The scheduler and the preload queue
   survive the rotation.
 

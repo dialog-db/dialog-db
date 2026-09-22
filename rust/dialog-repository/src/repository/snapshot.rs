@@ -1042,8 +1042,7 @@ mod tests {
             .attach(stage.profile.credential().clone())
             .await?;
         Ok(peer
-            .derive(b"snapshot-destination")
-            .await?
+            .session(b"snapshot-destination")
             .allow(Subject::any())
             .build()
             .await?)

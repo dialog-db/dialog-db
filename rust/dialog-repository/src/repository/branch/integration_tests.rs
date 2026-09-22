@@ -205,8 +205,7 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
         .open(Location::profile(unique_name("ship-overlap")))
         .await?;
     let operator = profile
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -319,8 +318,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .open(Location::profile(unique_name("blob-ship-a")))
         .await?;
     let operator_a = profile_a
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -368,8 +366,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .open(Location::profile(unique_name("blob-ship-b")))
         .await?;
     let operator_b = profile_b
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -443,8 +440,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("blob-retract-a")))
         .await?;
     let operator_a = profile_a
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -492,8 +488,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("blob-retract-b")))
         .await?;
     let operator_b = profile_b
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -573,8 +568,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("blob-retract-c")))
         .await?;
     let operator_c = profile_c
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -651,8 +645,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("delegation-ship-a")))
         .await?;
     let operator_a = profile_a
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -713,8 +706,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .open(Location::profile(unique_name("delegation-ship-b")))
         .await?;
     let operator_b = profile_b
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -852,8 +844,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .open(Location::profile(unique_name("spill-ship-a")))
         .await?;
     let operator_a = profile_a
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -933,8 +924,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .open(Location::profile(unique_name("spill-ship-b")))
         .await?;
     let operator_b = profile_b
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -1022,8 +1012,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .open(Location::profile(unique_name("spill-retract-a")))
         .await?;
     let operator_a = profile_a
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -1064,8 +1053,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .open(Location::profile(unique_name("spill-retract-b")))
         .await?;
     let operator_b = profile_b
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -1155,8 +1143,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .open(Location::profile(unique_name("spill-sub-a")))
         .await?;
     let operator_a = profile_a
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -1192,8 +1179,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .open(Location::profile(unique_name("spill-sub-b")))
         .await?;
     let operator_b = profile_b
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -2426,8 +2412,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
         .load(Location::profile(account_name))
         .await?;
     let account_operator = account_profile
-        .derive(b"account-device")
-        .await?
+        .session(b"account-device")
         .allow(Subject::any())
         .build()
         .await?;
@@ -2489,8 +2474,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
         .open(Location::profile(unique_name("device")))
         .await?;
     let device_operator = device_profile
-        .derive(b"device")
-        .await?
+        .session(b"device")
         .allow(Subject::any())
         .build()
         .await?;
@@ -2608,8 +2592,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         .load(Location::profile(account_name))
         .await?;
     let account_operator = account_profile
-        .derive(b"account-device")
-        .await?
+        .session(b"account-device")
         .allow(Subject::any())
         .build()
         .await?;
@@ -2665,8 +2648,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         .open(Location::profile(unique_name("device")))
         .await?;
     let device_operator = device_profile
-        .derive(b"device")
-        .await?
+        .session(b"device")
         .allow(Subject::any())
         .build()
         .await?;
@@ -2838,8 +2820,7 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
         .await?;
 
     let bob_operator = bob_profile
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -2897,8 +2878,7 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
     // build time, so the post-migration operator sees the migrated
     // credentials. Resolving the remote branch revision now succeeds.
     let bob_operator = bob_profile
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -3528,8 +3508,7 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
         .open(Location::profile(unique_name("reach-b")))
         .await?;
     let operator_b = profile_b
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -3692,8 +3671,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         .open(Location::profile(unique_name("retire-b")))
         .await?;
     let operator_b = profile_b
-        .derive(b"test")
-        .await?
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await?;
@@ -3842,8 +3820,7 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
         .load(Location::profile(account_name))
         .await?;
     let account_operator = account_profile
-        .derive(b"account-device")
-        .await?
+        .session(b"account-device")
         .allow(Subject::any())
         .build()
         .await?;
@@ -3896,8 +3873,7 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
         .open(Location::profile(unique_name("device")))
         .await?;
     let device_operator = device_profile
-        .derive(b"device")
-        .await?
+        .session(b"device")
         .allow(Subject::any())
         .build()
         .await?;
@@ -4833,8 +4809,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
             .open(Location::profile(unique_name(name)))
             .await?;
         let operator = profile
-            .derive(b"test")
-            .await?
+            .session(b"test")
             .allow(Subject::any())
             .build()
             .await?;

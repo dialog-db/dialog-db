@@ -58,9 +58,7 @@ pub async fn test_session() -> Session<VolatileSpace> {
 pub async fn test_session_with_peer() -> (Session<VolatileSpace>, Peer<VolatileSpace>) {
     let peer = test_peer().await;
     let session = peer
-        .derive(b"test")
-        .await
-        .expect("failed to derive the session key")
+        .session(b"test")
         .allow(Subject::any())
         .build()
         .await

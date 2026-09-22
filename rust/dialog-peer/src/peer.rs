@@ -19,8 +19,7 @@
 //!     .await?;
 //!
 //! let job = alice
-//!     .derive(b"refactor")
-//!     .await?
+//!     .session(b"refactor")
 //!     .allow(Subject::any())
 //!     .build()
 //!     .await?;
@@ -52,8 +51,7 @@ use dialog_varsig::{Did, Principal};
 use parking_lot::Mutex;
 
 use crate::session::access::ChainCache;
-use crate::session::derive_credential;
-use crate::{PeerError, PeerSpace, Session, SessionBuilder};
+use crate::{PeerError, PeerSpace, Session, SessionBuilder, SessionKey};
 
 /// A site identified by a key, holding replicas.
 ///
@@ -209,27 +207,17 @@ impl<S: Clone> Peer<S> {
         &self.inner.speculation
     }
 
-    /// Start a session under a key derived from this peer's key and
-    /// `context`.
+    /// Start a session under `key`: a context to derive the session key
+    /// from (bytes or a string), or a supplied signer. See [`SessionKey`].
     ///
-    /// Derivation is deterministic per `(peer, context)`, so a grant
-    /// issued to the derived DID is reusable across runs. Pass a random
-    /// context for a disposable key. Requires an ed25519 peer key.
-    ///
-    /// The builder knows its [`did`](SessionBuilder::did) as soon as this
-    /// returns, so a certificate issued to it can be passed through
-    /// [`grant`](SessionBuilder::grant) before `build`.
-    pub async fn derive(&self, context: impl AsRef<[u8]>) -> Result<SessionBuilder<S>, PeerError> {
-        let credential = derive_credential(&self.inner.credential, context.as_ref()).await?;
-        Ok(self.session(credential))
-    }
-
-    /// Start a session acting as `credential`, a signer supplied from
-    /// outside. The peer mints the session's grants to it at build, so a
-    /// supplied key is constrained exactly as a [derived](Self::derive)
-    /// one is.
-    pub fn session(&self, credential: impl Into<SignerCredential>) -> SessionBuilder<S> {
-        SessionBuilder::new(self.clone(), credential.into())
+    /// `peer.session(b"app").allow(..).build().await?` is the derived
+    /// case, deterministic per `(peer, context)`; `peer.session(signer)`
+    /// acts as a key held elsewhere. The key derives at
+    /// [`build`](SessionBuilder::build), or earlier through the builder's
+    /// [`did`](SessionBuilder::did) so a certificate issued to it can be
+    /// passed through [`grant`](SessionBuilder::grant) first.
+    pub fn session(&self, key: impl Into<SessionKey>) -> SessionBuilder<S> {
+        SessionBuilder::new(self.clone(), key.into())
     }
 }
 
@@ -497,9 +485,9 @@ mod tests {
             .open(Location::temp(unique_name("sessions")))
             .await?;
 
-        let a = peer.derive(b"a").await?.build().await?;
-        let again = peer.derive(b"a").await?.build().await?;
-        let b = peer.derive(b"b").await?.build().await?;
+        let a = peer.session(b"a").build().await?;
+        let again = peer.session(b"a").build().await?;
+        let b = peer.session(b"b").build().await?;
 
         assert_eq!(a.did(), again.did());
         assert_ne!(a.did(), b.did());
@@ -576,17 +564,11 @@ mod tests {
             .await?;
         let space = Ed25519Signer::generate().await?;
 
-        let first = peer
-            .derive(b"first")
-            .await?
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let first = peer.session(b"first").allow(Subject::any()).build().await?;
         retain(&first, &peer.did(), &space).await;
 
         let second = peer
-            .derive(b"second")
-            .await?
+            .session(b"second")
             .allow(Subject::any())
             .build()
             .await?;
