@@ -290,10 +290,11 @@ places.
 ## Pitfalls already met
 
 - A delegation names its audience, so the session key must exist before
-  its grants are minted or passed in. Derivation is async (a
-  non-extractable browser key derives by signing), so `derive` is its own
-  awaited step and `session` takes the credential; the builder's `did` is
-  then known before build.
+  its grants are minted or passed in. Derivation is async (it runs a key
+  agreement, see `operator-derivation.md`), so `derive` is its own awaited
+  step and `session` takes the credential; the builder's `did` is then
+  known before build. The derivation label is still the operator's, so a
+  session is the operator the same context derived before the rename.
 - Deriving from a context alone (no peer key) is a key anyone can compute.
   A throwaway peer is `open` at a temp location over volatile storage.
 - `Storage::default()` creates a fresh pool each call; two pools over one

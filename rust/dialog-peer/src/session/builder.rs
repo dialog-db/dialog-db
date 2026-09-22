@@ -5,17 +5,22 @@ use std::sync::Arc;
 use super::{PeerSpace, Session};
 use crate::Peer;
 use dialog_capability::{Ability, Capability, Constraint, Subject};
-use dialog_credentials::key::KeyExport;
+use dialog_credentials::secret::Context;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_identity::Authority;
 use dialog_identity::access::Claim;
 use dialog_ucan::{Scope, UcanCertificate};
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-use dialog_varsig::Signer;
 use dialog_varsig::{Did, Principal as _};
 
-const SESSION_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
+/// The domain-separation label session keys derive under.
+///
+/// Versioned: `v2` is the key-agreement derivation that replaced signing a
+/// fixed message. The label is the one the operator derivation used, so a
+/// session derived here is the operator the same context derived before
+/// the rename. Bumping it re-derives every session key, which forks each
+/// peer's replica lineage, so it changes only when the derivation does.
+const SESSION_DERIVATION_CONTEXT: Context = Context::new("dialog-db/operator/v2");
 
 /// A scope the peer delegates to the session at build.
 ///
@@ -161,10 +166,22 @@ impl<S: PeerSpace> SessionBuilder<S> {
 
 /// Derive a session credential from `credential` and `context`.
 ///
-/// Deterministic per `(key, context)`. Assumes an ed25519 key (the blake3
-/// derivation and `did:key` session identity are ed25519-specific); a
-/// peer backed by another algorithm is rejected rather than deriving a
-/// wrong key.
+/// One derivation for every platform, and the same one: the signer runs a
+/// key agreement against its own agreement key and imports the result, so
+/// the session key arrives as a signer and the derived material is never a
+/// value this code holds. Deterministic per `(key, context)`.
+///
+/// It is NOT a signature, and the distinction is the whole point. The web
+/// arm used to sign a fixed message and hash the signature, which assumes
+/// a signature is a pseudo-random function. Ed25519 does not promise that:
+/// hedged nonces are conforming, WebKit's `Ed25519` uses them, and in
+/// Safari a peer therefore derived a different session key on every page
+/// load. Key agreement has no nonce to hedge. See
+/// `notes/operator-derivation.md`.
+///
+/// Assumes an ed25519 key (the agreement it derives through and the
+/// `did:key` session identity are ed25519-specific); a peer backed by
+/// another algorithm is rejected rather than deriving a wrong key.
 pub(crate) async fn derive_credential(
     credential: &SignerCredential,
     context: &[u8],
@@ -183,38 +200,11 @@ async fn derive_session(
     signer: &Ed25519Signer,
     context: &[u8],
 ) -> Result<Ed25519Signer, PeerError> {
-    let export = signer
-        .export()
+    signer
+        .secret(SESSION_DERIVATION_CONTEXT)
+        .derive(context)
         .await
-        .map_err(|e| PeerError::Key(e.to_string()))?;
-
-    match export {
-        KeyExport::Extractable(ref seed) => {
-            let mut key_material = seed.clone();
-            key_material.extend_from_slice(context);
-
-            let derived = blake3::derive_key(SESSION_DERIVATION_CONTEXT, &key_material);
-            Ed25519Signer::import(&derived)
-                .await
-                .map_err(|e| PeerError::Key(e.to_string()))
-        }
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        KeyExport::NonExtractable { .. } => {
-            let mut derivation_input = SESSION_DERIVATION_CONTEXT.as_bytes().to_vec();
-            derivation_input.extend_from_slice(context);
-
-            let signature = signer
-                .sign(&derivation_input)
-                .await
-                .map_err(|e| PeerError::Key(e.to_string()))?;
-
-            let sig_bytes: [u8; 64] = signature.into();
-            let derived = blake3::derive_key(SESSION_DERIVATION_CONTEXT, &sig_bytes);
-            Ed25519Signer::import(&derived)
-                .await
-                .map_err(|e| PeerError::Key(e.to_string()))
-        }
-    }
+        .map_err(|e| PeerError::Key(e.to_string()))
 }
 
 /// Errors that can occur when opening a peer or building a session.
@@ -231,4 +221,47 @@ pub enum PeerError {
     /// Opening or loading the peer's credential failed.
     #[error("Open error: {0}")]
     Open(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_credential;
+    use dialog_credentials::{Ed25519Signer, SignerCredential};
+    use dialog_varsig::Principal as _;
+
+    /// A fixture pinning the whole derivation: a fixed peer seed and a
+    /// fixed context derive one fixed session DID.
+    ///
+    /// The session tests show the derivation is stable within a run, which
+    /// a randomized derivation would also pass on any platform whose
+    /// Ed25519 does not hedge its nonce. This pins the value itself, so it
+    /// fails for a change anywhere in the chain that produces it: the
+    /// agreement key, the key agreement, the KDF, the context label, the
+    /// seed-to-Ed25519 import, or the `did:key` encoding. It fails
+    /// identically on native and wasm, which is what keeps the two
+    /// platforms from deriving different keys from one peer again.
+    ///
+    /// The expected DID is the one the operator derivation pinned under
+    /// the same label, so this also fixes the rename as identity-preserving.
+    /// `dialog_credentials`' known-answer vector pins the derived secret;
+    /// this pins what that secret becomes. If the derivation changes on
+    /// purpose, bump `SESSION_DERIVATION_CONTEXT` and record the new DID
+    /// deliberately. See `notes/operator-derivation.md`.
+    #[dialog_common::test]
+    async fn it_derives_a_fixed_session_did_from_a_fixed_seed() {
+        // RFC 8032 test vector 1, used here only as a stable arbitrary seed.
+        const PEER_SEED: [u8; 32] = [
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ];
+        const CONTEXT: &[u8] = b"fixture";
+        const EXPECTED_SESSION_DID: &str =
+            "did:key:z6MkgAajey1H5u8MLHYnN7YUPd8Pjcvi4MhBtUqqgaRFJbJe";
+
+        let peer = SignerCredential::from(Ed25519Signer::import(&PEER_SEED).await.unwrap());
+        let session = derive_credential(&peer, CONTEXT).await.unwrap();
+
+        assert_eq!(session.did().to_string(), EXPECTED_SESSION_DID);
+    }
 }
