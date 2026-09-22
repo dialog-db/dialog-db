@@ -31,9 +31,10 @@
 //! refused by name rather than silently missing.
 
 use dialog_capability::{Capability, Provider, Subject};
+use dialog_capability::{Constraint, Policy};
 use dialog_common::ConditionalSync;
 use dialog_did_web::{PerformingResolver, Resolve};
-use dialog_effects::{Use, archive, blob, memory, peer};
+use dialog_effects::{Chain, Method, archive, blob, memory, method, peer};
 use dialog_ucan_core::container::bundle::InvocationBundle;
 use dialog_ucan_core::{
     Environment, InvocationChain, VerificationContext, revocation::RevocationChecker,
@@ -202,8 +203,7 @@ where
             // A unit effect is constructed, never read: there is
             // nothing in the arguments to deserialize it from.
             ["use", "get", "peer"] => {
-                let capability = Subject::from(subject.clone())
-                    .attenuate(Use)
+                let capability = Chain::<method::Get>::under(Subject::from(subject.clone()))
                     .attenuate(peer::Peer)
                     .attenuate(peer::Hello);
                 Ok(Answer::Value(performed(
@@ -213,8 +213,7 @@ where
             // Also a unit effect, and for the same reason: what a peer
             // holds is not something the caller narrows.
             ["use", "get", "peer", "space"] => {
-                let capability = Subject::from(subject.clone())
-                    .attenuate(Use)
+                let capability = Chain::<method::Get>::under(Subject::from(subject.clone()))
                     .attenuate(peer::Peer)
                     .attenuate(peer::Spaces);
                 Ok(Answer::Value(performed(
@@ -222,7 +221,7 @@ where
                 )))
             }
             ["use", "get", "archive", "block"] => {
-                let capability = archive_claim::<archive::Get>(&subject, args)?;
+                let capability = archive_claim::<_, archive::Get>(&subject, args)?;
                 Ok(Answer::Value(performed(
                     Provider::<archive::Get>::execute(&self.store, capability).await,
                 )))
@@ -247,13 +246,13 @@ where
                 )))
             }
             ["use", "delete", "memory", "cell"] => {
-                let capability = memory_claim::<memory::Retract>(&subject, args)?;
+                let capability = memory_claim::<_, memory::Retract>(&subject, args)?;
                 Ok(Answer::Value(performed(
                     Provider::<memory::Retract>::execute(&self.store, capability).await,
                 )))
             }
             ["use", "get", "archive", "blob"] => {
-                let capability = blob_claim::<blob::Read>(&subject, args)?;
+                let capability = blob_claim::<_, blob::Read>(&subject, args)?;
                 Ok(
                     match Provider::<blob::Read>::execute(&self.store, capability).await {
                         Ok(reader) => Answer::Reading(reader),
@@ -278,7 +277,7 @@ where
     /// turn a verified replication into an unverified upload.
     async fn write_blob(&self, subject: &Did, args: &Args) -> Result<Answer, Refusal> {
         let outcome = if args.contains_key("digest") {
-            let capability = blob_claim::<blob::Import>(subject, args)?;
+            let capability = blob_claim::<_, blob::Import>(subject, args)?;
             Provider::<blob::Import>::execute(&self.store, capability).await
         } else {
             let capability = blob_leaf(subject, args, blob::Write)?;
@@ -404,75 +403,93 @@ fn from_args<T: DeserializeOwned>(args: &Args) -> Result<T, Refusal> {
         .map_err(|error| Refusal::Malformed(format!("arguments do not fit the command: {error}")))
 }
 
-/// `Subject -> Use -> Archive -> Catalog -> leaf`, with the leaf given
-/// rather than read from the arguments — which is how an effect that
-/// carries bytes is rebuilt around the bytes that were resolved.
-fn archive_leaf<Fx>(subject: &Did, args: &Args, leaf: Fx) -> Result<Capability<Fx>, Refusal>
+/// `Subject -> Use -> V -> Archive -> Catalog -> Block -> leaf`, with
+/// the leaf given rather than read from the arguments — which is how an
+/// effect that carries bytes is rebuilt around the bytes that were
+/// resolved. `V` is the verb the leaf's own `Of` fixes.
+fn archive_leaf<V, Fx>(subject: &Did, args: &Args, leaf: Fx) -> Result<Capability<Fx>, Refusal>
 where
-    Fx: dialog_capability::Policy<Of = archive::Catalog>,
-    <Fx as dialog_capability::Constraint>::Capability: dialog_capability::Ability,
+    V: Method,
+    V::Of: Constraint,
+    Subject: Chain<V>,
+    Fx: Policy<Of = archive::Block<V>>,
+    <Fx as Constraint>::Capability: dialog_capability::Ability,
 {
-    let catalog: archive::Catalog = from_args(args)?;
-    Ok(Subject::from(subject.clone())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
+    let catalog: archive::Catalog<V> = from_args(args)?;
+    Ok(Chain::<V>::under(Subject::from(subject.clone()))
+        .attenuate(archive::Archive::<V>::new())
         .attenuate(catalog)
+        .attenuate(archive::Block::<V>::new())
         .attenuate(leaf))
 }
 
-fn archive_claim<Fx>(subject: &Did, args: &Args) -> Result<Capability<Fx>, Refusal>
+fn archive_claim<V, Fx>(subject: &Did, args: &Args) -> Result<Capability<Fx>, Refusal>
 where
-    Fx: dialog_capability::Policy<Of = archive::Catalog> + DeserializeOwned,
-    <Fx as dialog_capability::Constraint>::Capability: dialog_capability::Ability,
+    V: Method,
+    V::Of: Constraint,
+    Subject: Chain<V>,
+    Fx: Policy<Of = archive::Block<V>> + DeserializeOwned,
+    <Fx as Constraint>::Capability: dialog_capability::Ability,
 {
     let leaf: Fx = from_args(args)?;
     archive_leaf(subject, args, leaf)
 }
 
-/// `Subject -> Use -> Archive -> Blob -> leaf`.
+/// `Subject -> Use -> V -> Archive -> Blob -> leaf`.
 ///
-/// One segment shorter than the archive's: a blob is addressed by its
-/// own hash, so there is no catalog naming where it lives.
-fn blob_leaf<Fx>(subject: &Did, _args: &Args, leaf: Fx) -> Result<Capability<Fx>, Refusal>
+/// No catalog: a blob is addressed by its own hash, so there is
+/// nothing naming where it lives.
+fn blob_leaf<V, Fx>(subject: &Did, _args: &Args, leaf: Fx) -> Result<Capability<Fx>, Refusal>
 where
-    Fx: dialog_capability::Policy<Of = blob::Blob>,
-    <Fx as dialog_capability::Constraint>::Capability: dialog_capability::Ability,
+    V: Method,
+    V::Of: Constraint,
+    Subject: Chain<V>,
+    Fx: Policy<Of = blob::Blob<V>>,
+    <Fx as Constraint>::Capability: dialog_capability::Ability,
 {
-    Ok(Subject::from(subject.clone())
-        .attenuate(Use)
-        .attenuate(archive::Archive)
-        .attenuate(blob::Blob)
+    Ok(Chain::<V>::under(Subject::from(subject.clone()))
+        .attenuate(archive::Archive::<V>::new())
+        .attenuate(blob::Blob::<V>::new())
         .attenuate(leaf))
 }
 
-fn blob_claim<Fx>(subject: &Did, args: &Args) -> Result<Capability<Fx>, Refusal>
+fn blob_claim<V, Fx>(subject: &Did, args: &Args) -> Result<Capability<Fx>, Refusal>
 where
-    Fx: dialog_capability::Policy<Of = blob::Blob> + DeserializeOwned,
-    <Fx as dialog_capability::Constraint>::Capability: dialog_capability::Ability,
+    V: Method,
+    V::Of: Constraint,
+    Subject: Chain<V>,
+    Fx: Policy<Of = blob::Blob<V>> + DeserializeOwned,
+    <Fx as Constraint>::Capability: dialog_capability::Ability,
 {
     let leaf: Fx = from_args(args)?;
     blob_leaf(subject, args, leaf)
 }
 
-fn memory_leaf<Fx>(subject: &Did, args: &Args, leaf: Fx) -> Result<Capability<Fx>, Refusal>
+/// `Subject -> Use -> V -> Memory -> Space -> Cell -> leaf`.
+fn memory_leaf<V, Fx>(subject: &Did, args: &Args, leaf: Fx) -> Result<Capability<Fx>, Refusal>
 where
-    Fx: dialog_capability::Policy<Of = memory::Cell>,
-    <Fx as dialog_capability::Constraint>::Capability: dialog_capability::Ability,
+    V: Method,
+    V::Of: Constraint,
+    Subject: Chain<V>,
+    Fx: Policy<Of = memory::Cell<V>>,
+    <Fx as Constraint>::Capability: dialog_capability::Ability,
 {
-    let space: memory::Space = from_args(args)?;
-    let cell: memory::Cell = from_args(args)?;
-    Ok(Subject::from(subject.clone())
-        .attenuate(Use)
-        .attenuate(memory::Memory)
+    let space: memory::Space<V> = from_args(args)?;
+    let cell: memory::Cell<V> = from_args(args)?;
+    Ok(Chain::<V>::under(Subject::from(subject.clone()))
+        .attenuate(memory::Memory::<V>::new())
         .attenuate(space)
         .attenuate(cell)
         .attenuate(leaf))
 }
 
-fn memory_claim<Fx>(subject: &Did, args: &Args) -> Result<Capability<Fx>, Refusal>
+fn memory_claim<V, Fx>(subject: &Did, args: &Args) -> Result<Capability<Fx>, Refusal>
 where
-    Fx: dialog_capability::Policy<Of = memory::Cell> + DeserializeOwned,
-    <Fx as dialog_capability::Constraint>::Capability: dialog_capability::Ability,
+    V: Method,
+    V::Of: Constraint,
+    Subject: Chain<V>,
+    Fx: Policy<Of = memory::Cell<V>> + DeserializeOwned,
+    <Fx as Constraint>::Capability: dialog_capability::Ability,
 {
     let leaf: Fx = from_args(args)?;
     memory_leaf(subject, args, leaf)
