@@ -511,6 +511,8 @@ fn scalar_from_pkcs8(der: &[u8]) -> Result<[u8; 32], WebCryptoError> {
 }
 
 impl ExtractableKey for SigningKey {
+    type Error = WebCryptoError;
+
     async fn generate() -> Result<Self, WebCryptoError> {
         generate(true).await
     }
