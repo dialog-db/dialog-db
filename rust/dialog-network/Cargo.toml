@@ -26,11 +26,18 @@ dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-remote-fs = { workspace = true }
 dialog-iroh-remote = { workspace = true, features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }
+wasm-bindgen-test = { workspace = true }
 dialog-operator = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true }
 dialog-did-web = { workspace = true }
 iroh-base = { workspace = true, features = ["key"] }
 async-trait = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+# The wasm half of a cross-target test is a `wasm_bindgen_test`, whose
+# expansion names `wasm_bindgen` itself.
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
 
 # The async tests run on tokio natively; in wasm `dialog_common::test`
 # expands to wasm-bindgen-test instead.
