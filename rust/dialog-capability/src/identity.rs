@@ -10,10 +10,12 @@
 
 mod entity;
 mod error;
+mod revision;
 mod uri;
 
 pub use entity::*;
 pub use error::*;
+pub use revision::*;
 pub use uri::*;
 
 /// Length of the padded entity byte representation carried by
