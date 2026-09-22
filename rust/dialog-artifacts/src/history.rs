@@ -90,24 +90,6 @@ pub const REVISION_ATTRIBUTE: &str = "dialog.db/revision";
 #[cfg(test)]
 mod tests;
 
-/// [`Version`] behaviour that needs an [`Entity`](crate::Entity), which lives
-/// in this crate rather than in `dialog-capability`.
-pub trait VersionExt {
-    /// The content-derived entity naming the revision this version
-    /// identifies. Any replica that knows the version derives the same
-    /// entity, so metadata can be attached to (or queried from) a revision
-    /// without holding it.
-    fn entity(&self) -> crate::Entity;
-}
-
-impl VersionExt for Version {
-    fn entity(&self) -> crate::Entity {
-        self.entity_did()
-            .parse()
-            .expect("a did:key URI formed from a 32-byte hash is always a valid entity")
-    }
-}
-
 impl From<HistoryError> for crate::DialogArtifactsError {
     fn from(error: HistoryError) -> Self {
         match error {

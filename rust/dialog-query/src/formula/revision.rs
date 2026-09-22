@@ -21,12 +21,10 @@
 //!   with the scan's `of` makes the join itself reject a valid record
 //!   replayed at another revision entity.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
-
-use dialog_artifacts::history::VersionExt as _;
 use dialog_artifacts::history::{RevisionRecord, verify_issuer_signature};
 use dialog_common::Blake3Hash;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use crate::formula::Input;
 use crate::types::RecordBytes;

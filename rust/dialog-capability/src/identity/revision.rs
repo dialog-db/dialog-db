@@ -12,9 +12,9 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 
-use dialog_capability::Did;
+use crate::Did;
 
-use crate::Entity;
+use super::Entity;
 use crate::history::{Context, Edition, HistoryError, Origin, Version, verify_issuer_signature};
 
 /// The raw 32-byte Blake3 hash a [`TreeReference`] wraps. Kept as a
@@ -270,7 +270,6 @@ impl Revision {
     /// onto which commit metadata can be associated, like on any other
     /// entity.
     pub fn entity(&self) -> Entity {
-        use crate::history::VersionExt as _;
         self.version().entity()
     }
 
