@@ -8,17 +8,17 @@
 //! A chain is written in the order the path reads:
 //!
 //! ```text
-//! subject.get().branches().list()          = /use/get/dialog/branch
-//! subject.put().branches().branch(n).create()
+//! subject.reader().branches().list()          = /use/get/dialog/branch
+//! subject.writer().branches().branch(n).create()
 //!                                          = /use/put/dialog/branch
-//! subject.delete().branches().branch(n).delete()
-//!                                          = /void/delete/dialog/branch
+//! subject.voider().branches().branch(n).delete()
+//!                                          = /void/dialog/branch
 //! ```
 
 use dialog_capability::{Capability, Constraint, Policy};
 
 use super::{Branch, Branches, Create, Delete, List};
-use crate::{Method, method};
+use crate::{Method, Void, method};
 
 /// Scope a method to the branch namespace.
 pub trait BranchesExt {
@@ -86,7 +86,7 @@ pub trait DeleteBranchExt {
     fn delete(self) -> Capability<Delete>;
 }
 
-impl DeleteBranchExt for Capability<Branch<method::Void>> {
+impl DeleteBranchExt for Capability<Branch<Void>> {
     fn delete(self) -> Capability<Delete> {
         self.invoke(Delete)
     }

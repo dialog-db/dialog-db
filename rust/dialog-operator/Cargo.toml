@@ -24,6 +24,7 @@ dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-identity = { workspace = true }
 dialog-network = { workspace = true }
+dialog-query = { workspace = true }
 dialog-repository = { workspace = true }
 dialog-ucan-core = { workspace = true }
 dialog-ucan = { workspace = true }
@@ -32,6 +33,7 @@ dialog-varsig = { workspace = true }
 anyhow = { workspace = true, optional = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
+blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }

@@ -72,9 +72,11 @@ use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Enti
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
+use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
 };
@@ -367,6 +369,7 @@ impl ReadBlob<'_> {
         let mut source = address
             .subject
             .clone()
+            .reader()
             .archive()
             .blob()
             .read(hash.clone())

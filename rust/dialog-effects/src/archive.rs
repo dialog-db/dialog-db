@@ -351,7 +351,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_get_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .get()
+            .reader()
             .archive()
             .catalog("index")
             .get([0u8; 32]);
@@ -363,7 +363,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_put_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .put()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(Vec::new()));
@@ -378,11 +378,11 @@ mod tests {
         let subject = Subject::from(did!("key:zSpace"));
         let index = subject
             .clone()
-            .get()
+            .reader()
             .archive()
             .catalog("index")
             .get([0u8; 32]);
-        let other = subject.get().archive().catalog("other").get([0u8; 32]);
+        let other = subject.reader().archive().catalog("other").get([0u8; 32]);
 
         assert_eq!(index.ability(), other.ability());
     }

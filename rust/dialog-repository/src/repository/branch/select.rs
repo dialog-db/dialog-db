@@ -5,14 +5,13 @@ use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactView, DialogArtifacts
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
 use dialog_search_tree::{Buffer, DialogSearchTreeError};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
-use dialog_effects::archive::prelude::CatalogScope;
+use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
 
 use crate::repository::source::SourceRef;
 use crate::{Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite};
@@ -44,7 +43,7 @@ impl<'a> Select<'a> {
 
     /// The catalog (archive index) scoped to this line's subject.
     pub fn catalog(&self) -> CatalogScope {
-        self.source.subject().archive().index()
+        ArchiveScope::new(self.source.subject()).index()
     }
 }
 

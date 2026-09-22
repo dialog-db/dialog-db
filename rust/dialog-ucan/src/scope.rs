@@ -257,6 +257,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_scope_from_archive_catalog() {
         let cap = Subject::from(did!("key:z6MkTest"))
+            .reader()
             .archive()
             .catalog("index")
             .get(Blake3Hash::hash(b"any"));
@@ -285,6 +286,7 @@ mod tests {
     fn it_builds_scope_from_archive_get() {
         let digest = Blake3Hash::hash(b"hello");
         let cap = Subject::from(did!("key:z6MkTest"))
+            .reader()
             .archive()
             .catalog("index")
             .get(digest.clone());

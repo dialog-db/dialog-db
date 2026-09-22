@@ -9,7 +9,7 @@
 //! namespace, then the resource, then the effect.
 //!
 //! ```text
-//! subject.get().memory().space(s).cell(c).resolve()
+//! subject.reader().memory().space(s).cell(c).resolve()
 //!         │     │                  │      └ the effect
 //!         │     │                  └ the resource: `cell`
 //!         │     └ the namespace: `memory`
@@ -42,25 +42,6 @@ where
     type Memory = Capability<Memory<M>>;
     fn memory(self) -> Self::Memory {
         self.attenuate(Memory::new())
-    }
-}
-
-/// A subject reaches its memory without naming a method, because a
-/// handle held across reads and writes has no one method to name. The
-/// operation performed on it picks the method.
-impl MemoryExt for dialog_capability::Subject {
-    type Memory = MemoryScope;
-    fn memory(self) -> Self::Memory {
-        MemoryScope { subject: self }
-    }
-}
-
-impl MemoryExt for dialog_capability::Did {
-    type Memory = MemoryScope;
-    fn memory(self) -> Self::Memory {
-        MemoryScope {
-            subject: dialog_capability::Subject::from(self),
-        }
     }
 }
 
@@ -273,7 +254,7 @@ impl CellScope {
     pub fn read(&self) -> Capability<Cell<method::Get>> {
         self.subject
             .clone()
-            .get()
+            .reader()
             .memory()
             .space(self.space.clone())
             .cell(self.cell.clone())
@@ -283,7 +264,7 @@ impl CellScope {
     pub fn write(&self) -> Capability<Cell<method::Put>> {
         self.subject
             .clone()
-            .put()
+            .writer()
             .memory()
             .space(self.space.clone())
             .cell(self.cell.clone())
@@ -293,7 +274,7 @@ impl CellScope {
     pub fn empty(&self) -> Capability<Cell<method::Delete>> {
         self.subject
             .clone()
-            .r#use()
+            .user()
             .delete()
             .memory()
             .space(self.space.clone())

@@ -149,8 +149,9 @@ mod tests {
     use dialog_common::{Blake3Hash, Buffer};
     use dialog_effects::prelude::*;
 
+    use dialog_effects::archive::prelude::CatalogScope;
     use dialog_effects::memory::Version;
-    use dialog_effects::memory::prelude::MemoryExt;
+    use dialog_effects::memory::prelude::CellScope;
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test_configure;
@@ -172,7 +173,7 @@ mod tests {
     #[dialog_common::test]
     fn it_reports_the_method_the_archive_translations_produce() {
         let digest = Blake3Hash::hash(b"content");
-        let catalog = || subject().archive().catalog("index");
+        let catalog = || CatalogScope::new(subject(), "index");
         method_matches(&catalog().get(digest));
         method_matches(&catalog().put(Buffer::from(vec![1, 2, 3])));
     }
@@ -180,13 +181,13 @@ mod tests {
     #[dialog_common::test]
     fn it_reports_the_method_the_blob_translations_produce() {
         let digest = Blake3Hash::hash(b"content");
-        method_matches(&subject().archive().blob().read(digest.clone()));
-        method_matches(&subject().archive().blob().import(digest, 3));
+        method_matches(&subject().reader().archive().blob().read(digest.clone()));
+        method_matches(&subject().writer().archive().blob().import(digest, 3));
     }
 
     #[dialog_common::test]
     fn it_reports_the_method_the_memory_translations_produce() {
-        let cell = || subject().memory().space("space").cell("cell");
+        let cell = || CellScope::new(subject(), "space", "cell");
         method_matches(&cell().resolve());
         method_matches(&cell().publish(vec![1, 2, 3], None));
         method_matches(&cell().retract(Version::from("v1".to_string())));

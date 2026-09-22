@@ -30,9 +30,9 @@
 //!                           └── Delete → Effect → Result<(), BranchError>
 //! ```
 
-use crate::Method;
 use crate::Rejection;
 use crate::method;
+use crate::{Method, Void};
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Attenuate, Attenuation, Constraint, Effect, Policy};
 use serde::{Deserialize, Serialize};
@@ -165,7 +165,7 @@ impl Effect for Create {
 pub struct Delete;
 
 impl Policy for Delete {
-    type Of = Branch<method::Void>;
+    type Of = Branch<Void>;
 }
 
 impl Effect for Delete {
@@ -222,7 +222,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_builds_list_claim_path() {
-        let claim = Subject::from(did!("key:zRepo")).get().branches().list();
+        let claim = Subject::from(did!("key:zRepo")).reader().branches().list();
 
         assert_eq!(claim.ability(), "/use/get/dialog/branch");
     }
@@ -230,7 +230,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_create_claim_path() {
         let claim = Subject::from(did!("key:zRepo"))
-            .put()
+            .writer()
             .branches()
             .branch("main")
             .create();
@@ -244,12 +244,12 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_delete_claim_path() {
         let claim = Subject::from(did!("key:zRepo"))
-            .delete()
+            .voider()
             .branches()
             .branch("main")
             .delete();
 
-        assert_eq!(claim.ability(), "/void/delete/dialog/branch");
+        assert_eq!(claim.ability(), "/void/dialog/branch");
     }
 
     /// A grant of everything under `/use` never reaches deletion, which
@@ -257,8 +257,8 @@ mod tests {
     #[dialog_common::test]
     fn it_keeps_deletion_out_of_the_use_root() {
         let subject = Subject::from(did!("key:zRepo"));
-        let write = subject.clone().put().branches().branch("main").create();
-        let destroy = subject.delete().branches().branch("main").delete();
+        let write = subject.clone().writer().branches().branch("main").create();
+        let destroy = subject.voider().branches().branch("main").delete();
 
         assert!(write.ability().starts_with("/use/"));
         assert!(destroy.ability().starts_with("/void/"));
@@ -270,8 +270,8 @@ mod tests {
     #[dialog_common::test]
     fn it_scopes_by_name_without_changing_the_path() {
         let subject = Subject::from(did!("key:zRepo"));
-        let main = subject.clone().delete().branches().branch("main").delete();
-        let feature = subject.delete().branches().branch("feature").delete();
+        let main = subject.clone().voider().branches().branch("main").delete();
+        let feature = subject.voider().branches().branch("feature").delete();
 
         assert_eq!(main.ability(), feature.ability());
         assert_ne!(main.name(), feature.name());

@@ -364,7 +364,7 @@ mod tests {
     fn it_builds_the_three_cell_commands() {
         assert_eq!(
             subject()
-                .get()
+                .reader()
                 .memory()
                 .space("local")
                 .cell("main")
@@ -374,7 +374,7 @@ mod tests {
         );
         assert_eq!(
             subject()
-                .put()
+                .writer()
                 .memory()
                 .space("local")
                 .cell("main")
@@ -384,7 +384,7 @@ mod tests {
         );
         assert_eq!(
             subject()
-                .r#use()
+                .user()
                 .delete()
                 .memory()
                 .space("local")
@@ -400,8 +400,8 @@ mod tests {
     /// the command reads.
     #[dialog_common::test]
     fn it_scopes_by_name_without_changing_the_path() {
-        let main = subject().get().memory().space("local").cell("main");
-        let other = subject().get().memory().space("local").cell("other");
+        let main = subject().reader().memory().space("local").cell("main");
+        let other = subject().reader().memory().space("local").cell("other");
 
         assert_eq!(main.resolve().ability(), other.resolve().ability());
     }
@@ -410,7 +410,7 @@ mod tests {
     #[dialog_common::test]
     fn it_keeps_its_subject() {
         let claim = subject()
-            .get()
+            .reader()
             .memory()
             .space("local")
             .cell("main")

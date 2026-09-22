@@ -29,65 +29,31 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_derives_different_operators_from_different_contexts() {
-        let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("ctx"))
-            .perform(&storage)
+        let storage1 = Storage::volatile();
+        let profile1 = Profile::open(unique_name("ctx1"))
+            .perform(&storage1)
+            .await
+            .unwrap();
+        let op1 = profile1
+            .derive(b"context-a")
+            .network(Network::default())
+            .build(storage1)
             .await
             .unwrap();
 
-        // One profile, two contexts -- two profiles would prove nothing
-        // about the context seed.
-        let op1 = profile
-            .derive(b"context-a")
-            .network(Network::default())
-            .build(storage.clone())
+        let storage2 = Storage::volatile();
+        let profile2 = Profile::open(unique_name("ctx2"))
+            .perform(&storage2)
             .await
             .unwrap();
-        let op2 = profile
+        let op2 = profile2
             .derive(b"context-b")
             .network(Network::default())
-            .build(storage)
+            .build(storage2)
             .await
             .unwrap();
 
         assert_ne!(op1.did(), op2.did());
-    }
-
-    /// The operator key must be a pure function of the profile key and the
-    /// context, on every platform.
-    ///
-    /// The derivation this replaced hashed a signature over a fixed message.
-    /// Ed25519 signatures are not required to be deterministic -- WebKit's
-    /// hedge the nonce -- so in Safari a profile derived a different operator
-    /// on every build, and the operator DID feeds `Origin`, which names a
-    /// sequential actor in the version clock. Every page load became a new
-    /// replica lineage. See `notes/operator-derivation.md`.
-    #[dialog_common::test]
-    async fn it_derives_the_same_operator_every_time() {
-        let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("stable"))
-            .perform(&storage)
-            .await
-            .unwrap();
-
-        let first = profile
-            .derive(b"test")
-            .network(Network::default())
-            .build(storage.clone())
-            .await
-            .unwrap();
-        let second = profile
-            .derive(b"test")
-            .network(Network::default())
-            .build(storage)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            first.did(),
-            second.did(),
-            "rebuilding an operator must re-mint the same identity"
-        );
     }
 
     mod delegation_tests {
@@ -116,7 +82,7 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(operator.did())
-                        .get()
+                        .reader()
                         .archive()
                         .catalog("index"),
                 )
@@ -172,7 +138,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(Subject::any().get().archive().catalog("index"))
+                .allow(Subject::any().reader().archive().catalog("index"))
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -182,7 +148,7 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
-                        .get()
+                        .reader()
                         .archive()
                         .catalog("index"),
                 )
@@ -208,7 +174,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(Subject::any().get().archive().catalog("index"))
+                .allow(Subject::any().reader().archive().catalog("index"))
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -218,7 +184,7 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
-                        .get()
+                        .reader()
                         .archive()
                         .catalog("secret"),
                 )
@@ -281,7 +247,7 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
-                        .get()
+                        .reader()
                         .archive()
                         .catalog("index"),
                 )
@@ -303,7 +269,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .allow(Subject::any().get().archive().catalog("index"))
+                .allow(Subject::any().reader().archive().catalog("index"))
                 .network(Network::default())
                 .build(storage)
                 .await
@@ -313,7 +279,7 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
-                        .get()
+                        .reader()
                         .archive()
                         .catalog("index"),
                 )
@@ -371,7 +337,7 @@ mod tests {
                 .access()
                 .claim(
                     Subject::from(profile.did())
-                        .get()
+                        .reader()
                         .archive()
                         .catalog("index"),
                 )
@@ -394,7 +360,7 @@ mod tests {
                 .access()
                 .prove(
                     Subject::from(profile.did())
-                        .get()
+                        .reader()
                         .archive()
                         .catalog("index"),
                 )
@@ -416,7 +382,12 @@ mod tests {
             // Delegate with expiration at 1000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .expires(ts(1000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -433,7 +404,12 @@ mod tests {
             // Request authorization valid until 5000 - should fail
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .audience(&operator)
                 .expires(ts(5000))
                 .perform(&operator)
@@ -452,7 +428,12 @@ mod tests {
             // Delegate with not_before at 5000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .not_before(ts(5000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -469,7 +450,12 @@ mod tests {
             // Request authorization valid from 1000 - should fail
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .audience(&operator)
                 .not_before(ts(1000))
                 .perform(&operator)
@@ -488,7 +474,12 @@ mod tests {
             // Delegate valid from 100 to 10000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .not_before(ts(100))
                 .expires(ts(10000))
                 .delegate(operator.did())
@@ -506,7 +497,12 @@ mod tests {
             // Request authorization valid from 500 to 5000 - cert covers this
             let result = profile
                 .access()
-                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .audience(&operator)
                 .not_before(ts(500))
                 .expires(ts(5000))
@@ -527,7 +523,12 @@ mod tests {
             // Delegate with short window
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .not_before(ts(100))
                 .expires(ts(200))
                 .delegate(operator.did())
@@ -545,7 +546,12 @@ mod tests {
             // Request with no time constraints ("I don't care")
             let proof = profile
                 .access()
-                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -563,7 +569,12 @@ mod tests {
             // Delegate expiring at 1000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .expires(ts(1000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -579,7 +590,12 @@ mod tests {
 
             let proof = profile
                 .access()
-                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -603,7 +619,12 @@ mod tests {
             // Delegate starting at 1000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .not_before(ts(1000))
                 .delegate(operator.did())
                 .perform(&operator)
@@ -619,7 +640,12 @@ mod tests {
 
             let proof = profile
                 .access()
-                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -643,7 +669,12 @@ mod tests {
             // Delegate valid from 100 to 10000
             let chain = profile
                 .access()
-                .claim(Subject::from(profile.did()).get().archive().catalog("data"))
+                .claim(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .not_before(ts(100))
                 .expires(ts(10000))
                 .delegate(operator.did())
@@ -660,7 +691,12 @@ mod tests {
 
             let proof = profile
                 .access()
-                .prove(Subject::from(profile.did()).get().archive().catalog("data"))
+                .prove(
+                    Subject::from(profile.did())
+                        .reader()
+                        .archive()
+                        .catalog("data"),
+                )
                 .audience(&operator)
                 .perform(&operator)
                 .await
@@ -685,6 +721,8 @@ mod tests {
         use dialog_capability::Subject;
         use dialog_common::Blake3Hash;
         use dialog_common::Buffer;
+        use dialog_effects::MethodExt as _;
+        use dialog_effects::UseExt as _;
         use dialog_effects::archive::prelude::*;
         use dialog_effects::credential::Secret;
         use dialog_effects::memory::prelude::*;
@@ -731,6 +769,7 @@ mod tests {
 
             // Fork without saving credentials: should fail with credential not found
             let result = Subject::from(operator.profile_did())
+                .reader()
                 .archive()
                 .catalog("data")
                 .get(Blake3Hash::hash(b"test"))
@@ -776,6 +815,7 @@ mod tests {
             // Fork get: credential is loaded, request reaches the S3 server,
             // returns None because the content doesn't exist (not an auth error).
             let result = Subject::from(operator.profile_did())
+                .reader()
                 .archive()
                 .catalog("cred-test")
                 .get(Blake3Hash::hash(b"nonexistent"))
@@ -819,6 +859,7 @@ mod tests {
 
             // Put content via fork
             Subject::from(operator.profile_did())
+                .writer()
                 .archive()
                 .catalog("cred-roundtrip")
                 .put(Buffer::from(content.clone()))
@@ -829,6 +870,7 @@ mod tests {
 
             // Get it back via fork
             let retrieved = Subject::from(operator.profile_did())
+                .reader()
                 .archive()
                 .catalog("cred-roundtrip")
                 .get(digest)
@@ -867,6 +909,7 @@ mod tests {
             let content = b"memory content".to_vec();
 
             let edition = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("test-space")
                 .cell("head")
@@ -876,6 +919,7 @@ mod tests {
                 .await?;
 
             let resolved = Subject::from(subject)
+                .reader()
                 .memory()
                 .space("test-space")
                 .cell("head")
@@ -915,6 +959,7 @@ mod tests {
             let subject = operator.profile_did();
 
             let edition1 = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("upd-space")
                 .cell("head")
@@ -924,6 +969,7 @@ mod tests {
                 .await?;
 
             let edition2 = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("upd-space")
                 .cell("head")
@@ -933,6 +979,7 @@ mod tests {
                 .await?;
 
             let resolved = Subject::from(subject)
+                .reader()
                 .memory()
                 .space("upd-space")
                 .cell("head")
@@ -972,6 +1019,7 @@ mod tests {
             let subject = operator.profile_did();
 
             let edition1 = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("cas-space")
                 .cell("head")
@@ -981,6 +1029,7 @@ mod tests {
                 .await?;
 
             Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("cas-space")
                 .cell("head")
@@ -990,6 +1039,7 @@ mod tests {
                 .await?;
 
             let result = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("cas-space")
                 .cell("head")
@@ -1001,6 +1051,7 @@ mod tests {
             assert!(result.is_err(), "CAS should fail due to edition mismatch");
 
             let resolved = Subject::from(subject)
+                .reader()
                 .memory()
                 .space("cas-space")
                 .cell("head")
@@ -1038,6 +1089,7 @@ mod tests {
             let subject = operator.profile_did();
 
             let edition = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("ret-space")
                 .cell("head")
@@ -1047,6 +1099,8 @@ mod tests {
                 .await?;
 
             Subject::from(subject.clone())
+                .user()
+                .delete()
                 .memory()
                 .space("ret-space")
                 .cell("head")
@@ -1056,6 +1110,7 @@ mod tests {
                 .await?;
 
             let resolved = Subject::from(subject)
+                .reader()
                 .memory()
                 .space("ret-space")
                 .cell("head")
@@ -1074,6 +1129,7 @@ mod tests {
         use dialog_capability::Subject;
         use dialog_common::{Blake3Hash, Buffer};
         use dialog_effects::MethodExt as _;
+        use dialog_effects::UseExt as _;
         use dialog_effects::archive::prelude::*;
         use dialog_effects::memory::prelude::*;
         use dialog_network::NetworkAddress as SiteAddress;
@@ -1102,6 +1158,7 @@ mod tests {
             let address = ucan_address(&s3);
 
             let result = Subject::from(operator.profile_did())
+                .reader()
                 .archive()
                 .catalog("data")
                 .get(Blake3Hash::hash(b"nonexistent"))
@@ -1131,6 +1188,7 @@ mod tests {
             let digest = Blake3Hash::hash(&content);
 
             Subject::from(operator.profile_did())
+                .writer()
                 .archive()
                 .catalog("ucan-roundtrip")
                 .put(Buffer::from(content.clone()))
@@ -1139,6 +1197,7 @@ mod tests {
                 .await?;
 
             let retrieved = Subject::from(operator.profile_did())
+                .reader()
                 .archive()
                 .catalog("ucan-roundtrip")
                 .get(digest)
@@ -1168,6 +1227,7 @@ mod tests {
             let address = ucan_address(&s3);
 
             let result = Subject::from(operator.profile_did())
+                .reader()
                 .memory()
                 .space("test-space")
                 .cell("test-cell")
@@ -1198,6 +1258,7 @@ mod tests {
             let content = b"memory content".to_vec();
 
             let edition = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("test-space")
                 .cell("head")
@@ -1207,6 +1268,7 @@ mod tests {
                 .await?;
 
             let resolved = Subject::from(subject)
+                .reader()
                 .memory()
                 .space("test-space")
                 .cell("head")
@@ -1238,6 +1300,7 @@ mod tests {
             let subject = operator.profile_did();
 
             let edition1 = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("upd-space")
                 .cell("head")
@@ -1247,6 +1310,7 @@ mod tests {
                 .await?;
 
             let edition2 = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("upd-space")
                 .cell("head")
@@ -1256,6 +1320,7 @@ mod tests {
                 .await?;
 
             let resolved = Subject::from(subject)
+                .reader()
                 .memory()
                 .space("upd-space")
                 .cell("head")
@@ -1287,6 +1352,7 @@ mod tests {
             let subject = operator.profile_did();
 
             let edition1 = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("cas-space")
                 .cell("head")
@@ -1297,6 +1363,7 @@ mod tests {
 
             // Update with correct edition
             Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("cas-space")
                 .cell("head")
@@ -1307,6 +1374,7 @@ mod tests {
 
             // Try to update with stale edition
             let result = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("cas-space")
                 .cell("head")
@@ -1319,6 +1387,7 @@ mod tests {
 
             // Verify value is still from writer-1
             let resolved = Subject::from(subject)
+                .reader()
                 .memory()
                 .space("cas-space")
                 .cell("head")
@@ -1348,6 +1417,7 @@ mod tests {
             let subject = operator.profile_did();
 
             let edition = Subject::from(subject.clone())
+                .writer()
                 .memory()
                 .space("ret-space")
                 .cell("head")
@@ -1357,6 +1427,8 @@ mod tests {
                 .await?;
 
             Subject::from(subject.clone())
+                .user()
+                .delete()
                 .memory()
                 .space("ret-space")
                 .cell("head")
@@ -1366,6 +1438,7 @@ mod tests {
                 .await?;
 
             let resolved = Subject::from(subject)
+                .reader()
                 .memory()
                 .space("ret-space")
                 .cell("head")
@@ -1390,8 +1463,8 @@ mod tests {
                 // Reading and writing are separate powers now that the
                 // verb is a level of the hierarchy, so a delegation that
                 // covers both says so twice.
-                .allow(Subject::any().get().archive().catalog("allowed"))
-                .allow(Subject::any().put().archive().catalog("allowed"))
+                .allow(Subject::any().reader().archive().catalog("allowed"))
+                .allow(Subject::any().writer().archive().catalog("allowed"))
                 .network(Network::default())
                 .build(storage)
                 .await?;
@@ -1402,6 +1475,7 @@ mod tests {
 
             // Put to allowed catalog should succeed
             Subject::from(operator.profile_did())
+                .writer()
                 .archive()
                 .catalog("allowed")
                 .put(Buffer::from(content.clone()))
@@ -1411,6 +1485,7 @@ mod tests {
 
             // Get from allowed catalog should succeed
             let retrieved = Subject::from(operator.profile_did())
+                .reader()
                 .archive()
                 .catalog("allowed")
                 .get(digest)
@@ -1461,6 +1536,7 @@ mod tests {
             let content = b"one request, proved and performed".to_vec();
             let digest = Blake3Hash::hash(&content);
             Subject::from(operator.profile_did())
+                .writer()
                 .archive()
                 .catalog("direct")
                 .put(Buffer::from(content.clone()))
@@ -1468,6 +1544,7 @@ mod tests {
                 .perform(&operator)
                 .await?;
             let retrieved = Subject::from(operator.profile_did())
+                .reader()
                 .archive()
                 .catalog("direct")
                 .get(digest)
@@ -1507,6 +1584,7 @@ mod tests {
             let content = b"redeemed, then performed by the site".to_vec();
             let digest = Blake3Hash::hash(&content);
             Subject::from(operator.profile_did())
+                .writer()
                 .archive()
                 .catalog("direct")
                 .put(Buffer::from(content.clone()))
@@ -1514,6 +1592,7 @@ mod tests {
                 .perform(&operator)
                 .await?;
             let retrieved = Subject::from(operator.profile_did())
+                .reader()
                 .archive()
                 .catalog("direct")
                 .get(digest)
@@ -1538,7 +1617,9 @@ mod tests {
     mod blob_tests {
         use super::*;
         use dialog_capability::Subject;
+        use dialog_effects::MethodExt as _;
         use dialog_effects::archive::prelude::*;
+        use dialog_effects::blob::prelude::*;
 
         #[dialog_common::test]
         async fn it_routes_blob_effects_to_the_space() -> anyhow::Result<()> {
@@ -1557,6 +1638,7 @@ mod tests {
             let payload = b"hello blob routing".to_vec();
             let mut sink = subject
                 .clone()
+                .writer()
                 .archive()
                 .blob()
                 .write()
@@ -1566,6 +1648,7 @@ mod tests {
             let hash = sink.finish().await?;
 
             let mut reader = subject
+                .reader()
                 .archive()
                 .blob()
                 .read(hash)

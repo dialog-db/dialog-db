@@ -95,6 +95,7 @@ mod tests {
     #[dialog_common::test]
     fn it_collects_parameters_from_archive_catalog_chain() {
         let cap = Subject::from(did!("key:z6MkTest"))
+            .reader()
             .archive()
             .catalog("index")
             .get(Blake3Hash::hash(b"any"));
@@ -106,6 +107,7 @@ mod tests {
     fn it_collects_parameters_from_archive_get_invocation() {
         let digest = Blake3Hash::hash(b"my-content");
         let cap = Subject::from(did!("key:z6MkTest"))
+            .reader()
             .archive()
             .catalog("data")
             .get(digest);
@@ -126,6 +128,7 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_equality_constraints_for_each_parameter() {
         let cap = Subject::from(did!("key:z6MkTest"))
+            .reader()
             .archive()
             .catalog("data")
             .get(Blake3Hash::hash(b"any"));
@@ -144,6 +147,7 @@ mod tests {
     fn it_produces_multiple_constraints_for_chain_with_payload() {
         let content = b"hello world";
         let cap = Subject::from(did!("key:z6MkTest"))
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.to_vec()));

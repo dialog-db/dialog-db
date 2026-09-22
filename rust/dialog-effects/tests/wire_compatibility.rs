@@ -24,6 +24,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use dialog_capability::{Subject, did};
 use dialog_common::Blake3Hash;
+use dialog_effects::UseExt as _;
 use dialog_effects::prelude::*;
 
 fn subject() -> Subject {
@@ -35,7 +36,7 @@ fn subject() -> Subject {
 fn it_preserves_memory_commands() {
     assert_eq!(
         subject()
-            .get()
+            .reader()
             .memory()
             .space("branch/main")
             .cell("revision")
@@ -45,7 +46,7 @@ fn it_preserves_memory_commands() {
     );
     assert_eq!(
         subject()
-            .put()
+            .writer()
             .memory()
             .space("branch/main")
             .cell("revision")
@@ -55,7 +56,7 @@ fn it_preserves_memory_commands() {
     );
     assert_eq!(
         subject()
-            .r#use()
+            .user()
             .delete()
             .memory()
             .space("branch/main")
@@ -75,7 +76,7 @@ fn it_preserves_archive_commands() {
 
     assert_eq!(
         subject()
-            .get()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest.clone())
@@ -84,7 +85,7 @@ fn it_preserves_archive_commands() {
     );
     assert_eq!(
         subject()
-            .put()
+            .writer()
             .archive()
             .catalog("index")
             .put(b"block".to_vec())
@@ -93,7 +94,7 @@ fn it_preserves_archive_commands() {
     );
     assert_eq!(
         subject()
-            .put()
+            .writer()
             .archive()
             .catalog("index")
             .import(vec![b"block".to_vec()])
@@ -111,11 +112,11 @@ fn it_defaults_the_catalog_without_moving_the_wire() {
     let digest = Blake3Hash::hash(b"block");
 
     let spelled = subject()
-        .get()
+        .reader()
         .archive()
         .catalog("index")
         .get(digest.clone());
-    let implied = subject().get().archive().get(digest.clone());
+    let implied = subject().reader().archive().get(digest.clone());
 
     assert_eq!(
         spelled.ability(),
@@ -134,7 +135,7 @@ fn it_preserves_blob_commands() {
 
     assert_eq!(
         subject()
-            .get()
+            .reader()
             .archive()
             .blob()
             .read(digest.clone())
@@ -142,12 +143,12 @@ fn it_preserves_blob_commands() {
         "/use/get/archive/blob"
     );
     assert_eq!(
-        subject().put().archive().blob().write().ability(),
+        subject().writer().archive().blob().write().ability(),
         "/use/put/archive/blob"
     );
     assert_eq!(
         subject()
-            .put()
+            .writer()
             .archive()
             .blob()
             .import(digest.clone(), 7)
@@ -166,21 +167,21 @@ fn it_preserves_the_whole_command_vocabulary() {
     let digest = Blake3Hash::hash(b"x");
     let mut commands = vec![
         subject()
-            .get()
+            .reader()
             .memory()
             .space("s")
             .cell("c")
             .resolve()
             .ability(),
         subject()
-            .put()
+            .writer()
             .memory()
             .space("s")
             .cell("c")
             .publish(b"c".to_vec(), None)
             .ability(),
         subject()
-            .r#use()
+            .user()
             .delete()
             .memory()
             .space("s")
@@ -188,24 +189,24 @@ fn it_preserves_the_whole_command_vocabulary() {
             .retract(b"v")
             .ability(),
         subject()
-            .get()
+            .reader()
             .archive()
             .catalog("i")
             .get(digest.clone())
             .ability(),
         subject()
-            .put()
+            .writer()
             .archive()
             .catalog("i")
             .put(b"c".to_vec())
             .ability(),
         subject()
-            .get()
+            .reader()
             .archive()
             .blob()
             .read(digest.clone())
             .ability(),
-        subject().put().archive().blob().write().ability(),
+        subject().writer().archive().blob().write().ability(),
     ];
     commands.sort();
     commands.dedup();
@@ -231,14 +232,14 @@ fn it_preserves_the_whole_command_vocabulary() {
 fn it_roots_every_command_under_use_or_void() {
     for ability in [
         subject()
-            .get()
+            .reader()
             .memory()
             .space("s")
             .cell("c")
             .resolve()
             .ability(),
         subject()
-            .put()
+            .writer()
             .memory()
             .space("s")
             .cell("c")
@@ -261,17 +262,17 @@ fn it_roots_every_command_under_use_or_void() {
 /// would widen or narrow every delegation minted from it.
 #[dialog_common::test]
 fn it_names_a_path_from_the_method_alone() {
-    assert_eq!(subject().r#use().ability(), "/use");
-    assert_eq!(subject().void().ability(), "/void");
+    assert_eq!(subject().user().ability(), "/use");
+    assert_eq!(subject().reader().ability(), "/use/get");
+    assert_eq!(subject().writer().ability(), "/use/put");
 
-    assert_eq!(subject().get().ability(), "/use/get");
-    assert_eq!(subject().put().ability(), "/use/put");
+    // `void` is already the method: nothing hangs under it but the
+    // destroying of what the chain goes on to name, so there is no
+    // second segment.
+    assert_eq!(subject().voider().ability(), "/void");
 
-    // A bare `delete` destroys the thing itself, so it needs no root
-    // spelled out. Emptying a value while leaving what held it is the
-    // odd one: it is reached through the root that says so, and exists
-    // for the one command that shipped spelling it that way.
-    assert_eq!(subject().delete().ability(), "/void/delete");
-    assert_eq!(subject().void().delete().ability(), "/void/delete");
-    assert_eq!(subject().r#use().delete().ability(), "/use/delete");
+    // Emptying a value while leaving what held it is the exception,
+    // reached through the root that says so. It exists for the one
+    // command that shipped spelling it that way.
+    assert_eq!(subject().user().delete().ability(), "/use/delete");
 }

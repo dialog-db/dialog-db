@@ -74,7 +74,7 @@ use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Key, Speculation, Sta
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::ArchiveExt as _;
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
@@ -609,7 +609,11 @@ where
             }
             _ => RemoteFallback::None,
         };
-        let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), remote);
+        let store = NetworkedIndex::new(
+            env,
+            ArchiveScope::new(self.branch.subject()).index(),
+            remote,
+        );
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));

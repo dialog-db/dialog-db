@@ -18,7 +18,6 @@ use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Did, Subject};
 use dialog_common::Blake3Hash;
-use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_query::query::Application;
 use dialog_search_tree::{Buffer, Cache};
@@ -260,7 +259,7 @@ impl Branch {
 
     /// Archive capability for this branch's subject.
     pub fn archive(&self) -> ArchiveScope {
-        self.subject().archive()
+        ArchiveScope::new(self.subject())
     }
 
     /// The recorded claim lineage at this branch's current revision, which

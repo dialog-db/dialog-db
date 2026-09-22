@@ -155,7 +155,12 @@ mod tests {
         let provider = Volatile::new();
         let subject = unique_subject("memory-resolve-none");
 
-        let effect = subject.memory().space("local").cell("missing").resolve();
+        let effect = subject
+            .reader()
+            .memory()
+            .space("local")
+            .cell("missing")
+            .resolve();
 
         let result = effect.perform(&provider).await?;
         assert!(result.is_none());
@@ -172,6 +177,7 @@ mod tests {
         // Publish new content (when = None means expect empty)
         let edition = subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -183,6 +189,7 @@ mod tests {
 
         // Resolve to verify
         let resolved = subject
+            .reader()
             .memory()
             .space("local")
             .cell("test")
@@ -205,6 +212,7 @@ mod tests {
         // Create initial content
         let edition1 = subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -215,6 +223,7 @@ mod tests {
         // Update with correct edition
         let edition2 = subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -226,6 +235,7 @@ mod tests {
 
         // Verify update
         let resolved = subject
+            .reader()
             .memory()
             .space("local")
             .cell("test")
@@ -247,6 +257,7 @@ mod tests {
         // Create initial content
         subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -257,6 +268,7 @@ mod tests {
         // Try to update with wrong edition
         let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -277,6 +289,7 @@ mod tests {
         // Create initial content
         subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -286,6 +299,7 @@ mod tests {
 
         // Try to create again (when = None means expect empty)
         let result = subject
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -306,6 +320,7 @@ mod tests {
         // Create content
         let edition = subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -316,6 +331,8 @@ mod tests {
         // Retract with correct edition
         subject
             .clone()
+            .user()
+            .delete()
             .memory()
             .space("local")
             .cell("test")
@@ -325,6 +342,7 @@ mod tests {
 
         // Verify deleted
         let resolved = subject
+            .reader()
             .memory()
             .space("local")
             .cell("test")
@@ -345,6 +363,7 @@ mod tests {
         // Create content
         subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -355,6 +374,8 @@ mod tests {
         // Try to retract with wrong edition
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
+            .user()
+            .delete()
             .memory()
             .space("local")
             .cell("test")
@@ -375,6 +396,7 @@ mod tests {
         // Publish to different spaces
         subject
             .clone()
+            .writer()
             .memory()
             .space("space1")
             .cell("cell")
@@ -384,6 +406,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .memory()
             .space("space2")
             .cell("cell")
@@ -394,6 +417,7 @@ mod tests {
         // Resolve from space1
         let result1 = subject
             .clone()
+            .reader()
             .memory()
             .space("space1")
             .cell("cell")
@@ -404,6 +428,7 @@ mod tests {
 
         // Resolve from space2
         let result2 = subject
+            .reader()
             .memory()
             .space("space2")
             .cell("cell")
@@ -424,6 +449,7 @@ mod tests {
         // Create initial content
         subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -434,6 +460,7 @@ mod tests {
         // Try to publish same content with wrong edition - should succeed
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -456,6 +483,7 @@ mod tests {
         // Create value at cell1
         let edition1 = subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("cell1")
@@ -465,6 +493,7 @@ mod tests {
 
         // Create same value at cell2
         let edition2 = subject
+            .writer()
             .memory()
             .space("local")
             .cell("cell2")
@@ -486,6 +515,8 @@ mod tests {
         // Try to retract non-existent cell - should succeed
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
+            .user()
+            .delete()
             .memory()
             .space("local")
             .cell("nonexistent")
@@ -507,6 +538,7 @@ mod tests {
         // Publish to nested space path
         let edition = subject
             .clone()
+            .writer()
             .memory()
             .space("parent/child/grandchild")
             .cell("cell")
@@ -518,6 +550,7 @@ mod tests {
 
         // Resolve to verify
         let resolved = subject
+            .reader()
             .memory()
             .space("parent/child/grandchild")
             .cell("cell")
@@ -539,6 +572,7 @@ mod tests {
 
         let edition = subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("empty")
@@ -549,6 +583,7 @@ mod tests {
         assert!(!edition.is_empty());
 
         let resolved = subject
+            .reader()
             .memory()
             .space("local")
             .cell("empty")
@@ -571,6 +606,7 @@ mod tests {
 
         let edition = subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("large")
@@ -581,6 +617,7 @@ mod tests {
         assert!(!edition.is_empty());
 
         let resolved = subject
+            .reader()
             .memory()
             .space("local")
             .cell("large")

@@ -175,6 +175,7 @@ mod tests {
 
     fn get_request(digest: [u8; 32]) -> S3Request {
         Subject::from(did!("key:zPermitCacheTest"))
+            .reader()
             .archive()
             .catalog("blocks")
             .get(digest)
@@ -226,6 +227,7 @@ mod tests {
     #[dialog_common::test]
     fn it_has_no_cache_key_for_a_mutating_request() {
         let put = Subject::from(did!("key:zPermitCacheTest"))
+            .writer()
             .archive()
             .catalog("blocks")
             .put(Buffer::from(vec![1, 2, 3]));

@@ -129,7 +129,7 @@ mod tests {
         let subject = unique_subject("archive-get-none");
         let digest = Blake3Hash::hash(b"nonexistent");
 
-        let effect = subject.archive().catalog("index").get(digest);
+        let effect = subject.reader().archive().catalog("index").get(digest);
 
         let result = effect.perform(&provider).await?;
         assert!(result.is_none());
@@ -146,6 +146,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()))
@@ -153,6 +154,7 @@ mod tests {
             .await?;
 
         let result = subject
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -174,6 +176,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("catalog1")
             .put(Buffer::from(content1.clone()))
@@ -182,6 +185,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("catalog2")
             .put(Buffer::from(content2.clone()))
@@ -190,6 +194,7 @@ mod tests {
 
         let result1 = subject
             .clone()
+            .reader()
             .archive()
             .catalog("catalog1")
             .get(digest1)
@@ -199,6 +204,7 @@ mod tests {
 
         let result2 = subject
             .clone()
+            .reader()
             .archive()
             .catalog("catalog2")
             .get(digest2.clone())
@@ -207,6 +213,7 @@ mod tests {
         assert_eq!(result2, Some(content2));
 
         let cross = subject
+            .reader()
             .archive()
             .catalog("catalog1")
             .get(digest2)
@@ -230,6 +237,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .import(blocks)
@@ -239,6 +247,7 @@ mod tests {
         for (i, digest) in digests.into_iter().enumerate() {
             let content = subject
                 .clone()
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)
@@ -274,6 +283,7 @@ mod tests {
         for block in &blocks {
             subject
                 .clone()
+                .writer()
                 .archive()
                 .catalog("puts")
                 .put(block.clone())
@@ -285,6 +295,7 @@ mod tests {
         let start = js_sys::Date::now();
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("import")
             .import(blocks)

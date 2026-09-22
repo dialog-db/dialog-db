@@ -648,7 +648,7 @@ mod tests {
             profile.access().save(chain).perform(&operator).await?;
 
             // Profile should be able to claim access to any memory space
-            let capability = repo.subject().get().memory().space("data");
+            let capability = repo.subject().reader().memory().space("data");
 
             let result = profile.access().claim(capability).perform(&operator).await;
             assert!(
@@ -670,7 +670,7 @@ mod tests {
                 .await?;
 
             // Repo delegates only memory/space("data") to the profile
-            let scoped_cap = repo.subject().get().memory().space("data");
+            let scoped_cap = repo.subject().reader().memory().space("data");
             let chain = repo
                 .access()
                 .claim(scoped_cap)
@@ -680,7 +680,7 @@ mod tests {
             profile.access().save(chain).perform(&operator).await?;
 
             // Claiming "data" space should succeed
-            let data_cap = repo.subject().get().memory().space("data");
+            let data_cap = repo.subject().reader().memory().space("data");
             let result = profile.access().claim(data_cap).perform(&operator).await;
             assert!(
                 result.is_ok(),
@@ -689,7 +689,7 @@ mod tests {
             );
 
             // Claiming "secret" space should fail
-            let secret_cap = repo.subject().get().memory().space("secret");
+            let secret_cap = repo.subject().reader().memory().space("secret");
             let result = profile.access().claim(secret_cap).perform(&operator).await;
             assert!(
                 result.is_err(),
@@ -709,7 +709,7 @@ mod tests {
                 .await?;
 
             // Repo delegates memory/space("data") to the profile
-            let scoped_cap = repo.subject().get().memory().space("data");
+            let scoped_cap = repo.subject().reader().memory().space("data");
             let chain = repo
                 .access()
                 .claim(scoped_cap)
@@ -719,7 +719,7 @@ mod tests {
             profile.access().save(chain).perform(&operator).await?;
 
             // Profile can re-delegate "data" space to operator
-            let data_cap = repo.subject().get().memory().space("data");
+            let data_cap = repo.subject().reader().memory().space("data");
             let result = profile
                 .access()
                 .claim(data_cap)
@@ -733,7 +733,7 @@ mod tests {
             );
 
             // Profile cannot delegate "secret" space (no chain)
-            let secret_cap = repo.subject().get().memory().space("secret");
+            let secret_cap = repo.subject().reader().memory().space("secret");
             let result = profile
                 .access()
                 .claim(secret_cap)

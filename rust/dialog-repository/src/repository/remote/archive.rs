@@ -2,9 +2,9 @@
 
 use crate::{RemoteRepository, RemoteSite, UploadError};
 use dialog_artifacts::{Datum, Key, State};
-use dialog_capability::{Fork, Provider};
+use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::{Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveExt, CatalogScope};
+use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_search_tree::{DialogSearchTreeError, PersistentNode};
 use dialog_storage::Blake3Hash;
@@ -19,7 +19,7 @@ impl<'a> RemoteArchive<'a> {
     /// The index catalog for tree node storage.
     pub fn index(&self) -> RemoteArchiveIndex<'a> {
         let address = self.repository.address();
-        let catalog = address.subject.clone().archive().catalog("index");
+        let catalog = ArchiveScope::new(Subject::from(address.subject.clone())).index();
 
         RemoteArchiveIndex {
             repository: self.repository,

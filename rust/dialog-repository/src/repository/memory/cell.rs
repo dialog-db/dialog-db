@@ -469,16 +469,11 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use dialog_capability::Subject;
-    use dialog_effects::memory::prelude::*;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
     fn test_cell<T>(name: &str) -> Cell<T> {
-        Subject::from(did!("key:zCellTests"))
-            .memory()
-            .space("branch/test")
-            .cell(name)
-            .into()
+        CellScope::new(Subject::from(did!("key:zCellTests")), "branch/test", name).into()
     }
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

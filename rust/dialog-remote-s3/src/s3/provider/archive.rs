@@ -165,6 +165,7 @@ mod tests {
         };
         let capability = || {
             Subject::from(did!("key:zSharedBlockReadTest"))
+                .reader()
                 .archive()
                 .catalog("index")
                 .get([4u8; 32])

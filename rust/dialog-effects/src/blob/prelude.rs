@@ -7,7 +7,7 @@
 //! A chain is written in the order the path reads:
 //!
 //! ```text
-//! subject.get().archive().blob().read(digest)
+//! subject.reader().archive().blob().read(digest)
 //!                              = /use/get/archive/blob
 //! ```
 

@@ -21,7 +21,7 @@
 //! // A chain is written in the order its path reads.
 //! let digest = Blake3Hash::hash(b"hello");
 //! let get_capability = Subject::from(did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"))
-//!     .get()                 // Method: read, under `/use`
+//!     .reader()              // Method: read, under `/use`
 //!     .archive()             // Namespace: the archive
 //!     .catalog("index")      // Policy: only the "index" catalog
 //!     .get(digest);          // Effect: this specific digest
@@ -57,7 +57,7 @@ pub mod storage;
 /// use dialog_effects::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::{MethodExt, UseExt, VoidExt};
+    pub use crate::{MethodExt, UseExt};
 
     pub use crate::archive::prelude::*;
     pub use crate::blob::prelude::*;
@@ -120,53 +120,49 @@ where
 
 /// Start a capability chain at a method.
 ///
-/// `.r#use().get()` spells the two links out; `.get()` is the same
-/// chain in one call, since a read is always under [`Use`]. Both land
-/// on `Capability<method::Get>`, which the namespaces hang from.
+/// A method is named for what its holder becomes, not for the segment
+/// it emits: a `reader()` reaches `/use/get`. `.user().reader()`
+/// spells the two links out; `.reader()` is the same chain in one
+/// call, since a read is always under [`Use`]. Both land on
+/// `Capability<method::Get>`, which the namespaces hang from.
 pub trait MethodExt: Sized {
-    /// Everything a holder needs to use the subject's data.
-    fn r#use(self) -> Capability<Use>;
+    /// Everything a holder needs to use the subject's data: `/use`.
+    fn user(self) -> Capability<Use>;
 
-    /// Operations that destroy rather than change.
-    fn void(self) -> Capability<Void>;
+    /// Destroying the thing itself rather than changing it: `/void`.
+    ///
+    /// Unlike [`user`](Self::user), this is already a method: nothing
+    /// hangs under `/void` but the destroying of what the chain goes
+    /// on to name, so there is no second link to write.
+    fn voider(self) -> Capability<Void>;
 
     /// Read, under [`Use`]: `/use/get/...`.
-    fn get(self) -> Capability<method::Get> {
-        self.r#use().attenuate(method::Get)
+    fn reader(self) -> Capability<method::Get> {
+        self.user().attenuate(method::Get)
     }
 
     /// Write, under [`Use`]: `/use/put/...`.
-    fn put(self) -> Capability<method::Put> {
-        self.r#use().attenuate(method::Put)
-    }
-
-    /// Destroy the thing itself, under [`Void`]: `/void/delete/...`.
-    ///
-    /// Unqualified, because a bare `delete` is only ever this one.
-    /// Emptying a value while leaving what held it is reached through
-    /// the root that says so, [`UseExt::delete`], and exists for the
-    /// one command that shipped spelling it that way.
-    fn delete(self) -> Capability<method::Void> {
-        self.void().attenuate(method::Void)
+    fn writer(self) -> Capability<method::Put> {
+        self.user().attenuate(method::Put)
     }
 }
 
 impl MethodExt for Subject {
-    fn r#use(self) -> Capability<Use> {
+    fn user(self) -> Capability<Use> {
         self.attenuate(Use)
     }
 
-    fn void(self) -> Capability<Void> {
+    fn voider(self) -> Capability<Void> {
         self.attenuate(Void)
     }
 }
 
 impl MethodExt for Did {
-    fn r#use(self) -> Capability<Use> {
+    fn user(self) -> Capability<Use> {
         Subject::from(self).attenuate(Use)
     }
 
-    fn void(self) -> Capability<Void> {
+    fn voider(self) -> Capability<Void> {
         Subject::from(self).attenuate(Void)
     }
 }
@@ -183,31 +179,31 @@ pub trait Chain<M: dialog_capability::Constraint> {
 
 impl Chain<method::Get> for Subject {
     fn under(self) -> Capability<method::Get> {
-        self.get()
+        self.reader()
     }
 }
 
 impl Chain<method::Put> for Subject {
     fn under(self) -> Capability<method::Put> {
-        self.put()
+        self.writer()
     }
 }
 
 impl Chain<method::Delete> for Subject {
     fn under(self) -> Capability<method::Delete> {
-        self.r#use().delete()
+        self.user().delete()
     }
 }
 
-impl Chain<method::Void> for Subject {
-    fn under(self) -> Capability<method::Void> {
-        self.delete()
+impl Chain<Void> for Subject {
+    fn under(self) -> Capability<Void> {
+        self.voider()
     }
 }
 
 /// Attach a method to a root that already exists.
 ///
-/// For a chain written out as `.r#use().get()` rather than `.get()`.
+/// For a chain written out as `.user().get()` rather than `.get()`.
 pub trait UseExt {
     /// Read: `/use/get/...`.
     fn get(self) -> Capability<method::Get>;
@@ -232,17 +228,6 @@ impl UseExt for Capability<Use> {
 }
 
 /// Attach the destroying method to [`Void`].
-pub trait VoidExt {
-    /// Destroy: `/void/delete/...`.
-    fn delete(self) -> Capability<method::Void>;
-}
-
-impl VoidExt for Capability<Void> {
-    fn delete(self) -> Capability<method::Void> {
-        self.attenuate(method::Void)
-    }
-}
-
 /// What a holder does to a subject's data.
 ///
 /// A method is a level of the hierarchy, not a prefix an effect spells
@@ -278,22 +263,5 @@ pub mod method {
 
     impl Attenuation for Delete {
         type Of = Use;
-    }
-
-    /// Destroying the thing itself, under [`Void`](super::Void):
-    /// `/void/delete/...`.
-    ///
-    /// Reads as `delete` like its sibling: what it does to the resource
-    /// is the same, and the root above it is what says one empties a
-    /// value while the other discards what held it.
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-    pub struct Void;
-
-    impl Attenuation for Void {
-        type Of = super::Void;
-
-        fn attenuation() -> &'static str {
-            "delete"
-        }
     }
 }

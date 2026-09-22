@@ -118,15 +118,12 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use dialog_capability::Subject;
+    use dialog_effects::archive::prelude::ArchiveScope;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    use dialog_effects::archive::prelude::ArchiveExt as _;
-
     fn test_catalog(name: &str) -> CatalogScope {
-        Subject::from(did!("key:zArchiveCasTest"))
-            .archive()
-            .catalog(name)
+        ArchiveScope::new(Subject::from(did!("key:zArchiveCasTest"))).catalog(name)
     }
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

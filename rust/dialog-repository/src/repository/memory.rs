@@ -1,7 +1,7 @@
 //! Memory capabilities: cells, publish/resolve commands, and caching.
 use crate::{BranchReference, RemoteReference};
 use dialog_capability::Subject;
-use dialog_effects::memory::prelude::MemoryExt;
+use dialog_effects::memory::prelude::SpaceScope;
 
 mod cell;
 pub use cell::*;
@@ -28,7 +28,7 @@ pub const REGISTRY: &str = "meta";
 ///
 /// Extends [`MemoryExt`] with repository-specific helpers for
 /// addressing branches and remotes by name.
-pub trait RepositoryMemoryExt: MemoryExt {
+pub trait RepositoryMemoryExt {
     /// Access a branch scoped to `branch/{name}`.
     fn branch(&self, name: impl Into<String>) -> BranchReference;
 
@@ -39,11 +39,11 @@ pub trait RepositoryMemoryExt: MemoryExt {
 impl RepositoryMemoryExt for Subject {
     fn branch(&self, name: impl Into<String>) -> BranchReference {
         let name = name.into();
-        self.clone().memory().space(format!("branch/{name}")).into()
+        SpaceScope::new(self.clone(), format!("branch/{name}")).into()
     }
 
     fn remote(&self, name: impl Into<String>) -> RemoteReference {
         let name = name.into();
-        self.clone().memory().space(format!("remote/{name}")).into()
+        SpaceScope::new(self.clone(), format!("remote/{name}")).into()
     }
 }

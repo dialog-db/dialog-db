@@ -217,7 +217,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_blob_read_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .get()
+            .reader()
             .archive()
             .blob()
             .read([0u8; 32]);
@@ -228,7 +228,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_blob_write_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .put()
+            .writer()
             .archive()
             .blob()
             .write();
@@ -238,7 +238,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_blob_import_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .put()
+            .writer()
             .archive()
             .blob()
             .import([0u8; 32], 4096);

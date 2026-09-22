@@ -189,6 +189,7 @@ mod tests {
     async fn it_retains_the_permit_after_a_transport_error() {
         let signer = Ed25519Signer::import(&[9u8; 32]).await.unwrap();
         let capability = Subject::from(did!("key:zPermitCacheTransportTest"))
+            .reader()
             .archive()
             .catalog("blobs")
             .get([0u8; 32]);
@@ -224,6 +225,7 @@ mod tests {
     #[dialog_common::test]
     fn it_scopes_cached_permits_to_the_site() {
         let capability = Subject::from(did!("key:zPermitCacheScopeTest"))
+            .reader()
             .archive()
             .catalog("blobs")
             .get([0u8; 32]);
@@ -297,6 +299,7 @@ mod tests {
             let signer = Ed25519Signer::import(&[11u8; 32]).await.unwrap();
             let capability = || {
                 Subject::from(did!("key:zSharedRedeemTest"))
+                    .reader()
                     .archive()
                     .catalog("blocks")
                     .get([3u8; 32])
@@ -350,6 +353,7 @@ mod tests {
             let signer = Ed25519Signer::import(&[7u8; 32]).await.unwrap();
             let digest = Blake3Hash::hash(b"not uploaded yet");
             let capability = Subject::from(did!("key:zPermitCacheProbeTest"))
+                .reader()
                 .archive()
                 .blob()
                 .read(digest);
@@ -399,6 +403,7 @@ mod tests {
 
             let signer = Ed25519Signer::import(&[8u8; 32]).await.unwrap();
             let capability = Subject::from(did!("key:zPermitCacheRejectTest"))
+                .reader()
                 .archive()
                 .catalog("blocks")
                 .get([2u8; 32]);

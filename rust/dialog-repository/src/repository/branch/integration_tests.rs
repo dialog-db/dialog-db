@@ -6,6 +6,9 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use dialog_effects::MethodExt as _;
+use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use dialog_operator::DeriveOperator as _;
 use std::collections::HashSet;
 
@@ -22,7 +25,6 @@ use dialog_artifacts::{
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
-use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 // Only the native-only tests below construct one.
 #[cfg(not(feature = "web-integration-tests"))]
@@ -40,7 +42,7 @@ use dialog_artifacts::{ShipmentRef, shipment_ref};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_capability::{Fork, Provider};
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _};
+use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _, GetBlockExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -1860,6 +1862,7 @@ async fn assert_remote_closure_complete(
         let found: Option<Vec<u8>> = address
             .subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(hash.clone())
@@ -1894,6 +1897,7 @@ async fn assert_remote_closure_complete(
                     let probe = address
                         .subject
                         .clone()
+                        .reader()
                         .archive()
                         .blob()
                         .read(digest.clone())
@@ -1917,6 +1921,7 @@ async fn assert_remote_closure_complete(
                     let found: Option<Vec<u8>> = address
                         .subject
                         .clone()
+                        .reader()
                         .archive()
                         .catalog("index")
                         .get(reference.clone())
@@ -2702,6 +2707,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
             .expect("delegation entities are blob entities");
         let mut reader = device_branch
             .subject()
+            .reader()
             .archive()
             .blob()
             .read(digest)
@@ -3577,7 +3583,7 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
     repository: &Repository<C>,
     revision: &Revision,
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
-    let catalog = repository.subject().archive().index();
+    let catalog = ArchiveScope::new(repository.subject()).index();
     let index = NetworkedIndex::new(env, catalog, None);
     let storage = TreeStorage::new(TreeStorageBridge(index));
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));

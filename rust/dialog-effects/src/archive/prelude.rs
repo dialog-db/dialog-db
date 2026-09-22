@@ -9,7 +9,7 @@
 //! namespace, then the resource, then the effect.
 //!
 //! ```text
-//! subject.get().archive().block().get(digest)
+//! subject.reader().archive().block().get(digest)
 //!                              = /use/get/archive/block
 //! ```
 //!
@@ -17,7 +17,7 @@
 //! names none reaches [`DEFAULT_CATALOG`]. Name one to reach another:
 //!
 //! ```text
-//! subject.get().archive().catalog("blobs").get(digest)
+//! subject.reader().archive().catalog("blobs").get(digest)
 //! ```
 
 use dialog_capability::{Capability, Constraint, Policy};
@@ -42,23 +42,6 @@ where
     type Archive = Capability<Archive<M>>;
     fn archive(self) -> Self::Archive {
         self.attenuate(Archive::new())
-    }
-}
-
-/// A subject reaches its archive without naming a method, because a
-/// handle held across reads and writes has no one method to name. The
-/// operation performed on it picks the method.
-impl ArchiveExt for dialog_capability::Subject {
-    type Archive = ArchiveScope;
-    fn archive(self) -> Self::Archive {
-        ArchiveScope::new(self)
-    }
-}
-
-impl ArchiveExt for dialog_capability::Did {
-    type Archive = ArchiveScope;
-    fn archive(self) -> Self::Archive {
-        ArchiveScope::new(dialog_capability::Subject::from(self))
     }
 }
 
@@ -248,7 +231,7 @@ impl CatalogScope {
     pub fn read(&self) -> Capability<Catalog<method::Get>> {
         self.subject
             .clone()
-            .get()
+            .reader()
             .archive()
             .catalog(self.catalog.clone())
     }
@@ -257,7 +240,7 @@ impl CatalogScope {
     pub fn write(&self) -> Capability<Catalog<method::Put>> {
         self.subject
             .clone()
-            .put()
+            .writer()
             .archive()
             .catalog(self.catalog.clone())
     }
@@ -314,13 +297,13 @@ impl ArchiveScope {
     /// The chain for reading blobs.
     fn read_blob(&self) -> Capability<Blob<method::Get>> {
         use crate::blob::prelude::ArchiveBlobExt as _;
-        self.subject.clone().get().archive().blob()
+        self.subject.clone().reader().archive().blob()
     }
 
     /// The chain for writing blobs.
     fn write_blob(&self) -> Capability<Blob<method::Put>> {
         use crate::blob::prelude::ArchiveBlobExt as _;
-        self.subject.clone().put().archive().blob()
+        self.subject.clone().writer().archive().blob()
     }
 
     /// The archive's blobs, named without choosing a method.

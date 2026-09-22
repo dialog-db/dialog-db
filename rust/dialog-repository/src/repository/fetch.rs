@@ -40,7 +40,7 @@ use futures_util::{Stream, StreamExt as _};
 use async_trait::async_trait;
 use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_effects::archive::prelude::ArchiveExt as _;
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{
     Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Traversable as _,
 };
@@ -218,7 +218,7 @@ where
         return Ok(());
     }
     let remote = source.as_ref().fallback(env).await;
-    let catalog = source.as_ref().subject().archive().index();
+    let catalog = ArchiveScope::new(source.as_ref().subject()).index();
     let store = NetworkedIndex::new(env, catalog, remote).with_priority(likelihood.into());
     let store = CacheThrough {
         cache: source.as_ref().node_cache(),

@@ -243,6 +243,7 @@ mod tests {
 
                 subject
                     .clone()
+                    .writer()
                     .archive()
                     .catalog("index")
                     .put(Buffer::from(content))
@@ -251,6 +252,7 @@ mod tests {
                     .unwrap();
 
                 let result = subject
+                    .reader()
                     .archive()
                     .catalog("index")
                     .get(digest)

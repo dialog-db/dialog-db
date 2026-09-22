@@ -651,6 +651,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content))
@@ -660,6 +661,7 @@ mod tests {
         // Memory creates "memory" store
         subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")

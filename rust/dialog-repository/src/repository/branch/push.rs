@@ -1,3 +1,6 @@
+use dialog_effects::MethodExt as _;
+use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use std::collections::HashSet;
 
 use dialog_artifacts::tree::TreeStorageBridge;
@@ -671,6 +674,7 @@ where
             let mut sink = address
                 .subject
                 .clone()
+                .writer()
                 .archive()
                 .blob()
                 .import(digest.clone(), size)
@@ -728,6 +732,7 @@ where
     let found: Option<Vec<u8>> = address
         .subject
         .clone()
+        .reader()
         .archive()
         .catalog("index")
         .get(hash.clone())
@@ -752,6 +757,7 @@ where
     address
         .subject
         .clone()
+        .reader()
         .archive()
         .catalog("index")
         .get(hash.clone())
@@ -853,6 +859,7 @@ where
     let probe = address
         .subject
         .clone()
+        .reader()
         .archive()
         .blob()
         .read(digest.clone())
@@ -886,6 +893,7 @@ where
             match origin_address
                 .subject
                 .clone()
+                .reader()
                 .archive()
                 .blob()
                 .read(digest.clone())
@@ -913,6 +921,7 @@ where
     let mut sink = address
         .subject
         .clone()
+        .writer()
         .archive()
         .blob()
         .import(digest, size)

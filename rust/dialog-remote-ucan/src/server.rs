@@ -495,7 +495,7 @@ where
             return Err(Failure::checksum_mismatch());
         }
         let capability = Subject::from(subject.clone())
-            .put()
+            .writer()
             .archive()
             .attenuate(Catalog::of(&attenuated).clone())
             .attenuate(archive::Block::new())
@@ -584,7 +584,7 @@ where
             return Err(Failure::checksum_mismatch());
         }
         let capability = Subject::from(subject.clone())
-            .put()
+            .writer()
             .memory()
             .attenuate(Space::of(&attenuated).clone())
             .attenuate(Cell::of(&attenuated).clone())

@@ -1,3 +1,5 @@
+use dialog_effects::archive::prelude::CatalogExt as _;
+use dialog_effects::archive::prelude::GetBlockExt as _;
 use std::sync::Arc;
 
 use crate::RemoteSite;
@@ -15,6 +17,7 @@ pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
 
 use super::local::LocalIndex;
 use crate::RemoteRepository;
+use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::CatalogScope;
 
 /// The remote half of a [`NetworkedIndex`]: what a local read miss means.
@@ -220,7 +223,7 @@ where
         return Ok(Some(Arc::new(bytes)));
     }
 
-    let remote_catalog = subject.archive().catalog("index");
+    let remote_catalog = subject.reader().archive().catalog("index");
     let remote_result = remote_catalog
         .get(digest.clone())
         .fork(&address)

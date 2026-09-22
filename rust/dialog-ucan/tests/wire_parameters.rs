@@ -21,7 +21,7 @@
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use dialog_capability::{Subject, did};
-use dialog_effects::prelude::*;
+use dialog_effects::memory::prelude::CellScope;
 use dialog_ucan::parameters;
 
 fn subject() -> Subject {
@@ -33,7 +33,7 @@ fn subject() -> Subject {
 /// delegation's caveats against, so they may not move or be renamed.
 #[dialog_common::test]
 fn it_preserves_memory_parameters() {
-    let cell = || subject().memory().space("branch/main").cell("revision");
+    let cell = || CellScope::new(subject(), "branch/main", "revision");
 
     let resolve = parameters(&cell().resolve());
     assert_eq!(resolve.get("space").unwrap(), &"branch/main".into());
@@ -60,7 +60,7 @@ fn it_preserves_memory_parameters() {
 /// cell, whichever verb it is reached through.
 #[dialog_common::test]
 fn it_derives_parameters_from_the_chain_not_the_effect() {
-    let cell = || subject().memory().space("branch/main").cell("revision");
+    let cell = || CellScope::new(subject(), "branch/main", "revision");
 
     let read = parameters(&cell().resolve());
     let write = parameters(&cell().publish(b"x".to_vec(), None));
@@ -84,7 +84,7 @@ fn it_derives_parameters_from_the_chain_not_the_effect() {
 /// are independent, which is the property a path refactor relies on.
 #[dialog_common::test]
 fn it_keeps_path_segments_out_of_parameters() {
-    let chain = || subject().memory().space("s").cell("c");
+    let chain = || CellScope::new(subject(), "s", "c");
 
     let prm = parameters(&chain().resolve());
     assert!(
