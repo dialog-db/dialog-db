@@ -39,6 +39,9 @@ pub use memory::*;
 mod open;
 pub use open::*;
 
+mod peer;
+pub use peer::*;
+
 mod remote;
 pub use remote::*;
 

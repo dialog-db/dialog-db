@@ -148,6 +148,18 @@ pub mod branch {
         pub u128,
     );
 
+    /// `dialog.branch/upstream` — a branch this one tracks, by entity:
+    /// a branch on this replica, or one on a peer's replica, derived
+    /// from `(replica, name)` like any other. One per tracked branch,
+    /// so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.branch")]
+    #[cardinality(many)]
+    pub struct Upstream(
+        /// The tracked branch's entity.
+        pub Entity,
+    );
+
     /// `dialog.branch/revision` — the content-derived entity of the
     /// current revision: the join key from "where is this branch now?"
     /// to everything recorded about that revision (see
@@ -199,6 +211,35 @@ pub mod replica {
         /// The active branch's entity (a [`Branch`](super::Branch)
         /// entity).
         pub Entity,
+    );
+}
+
+/// Attribute newtypes for [`Peer`] entities.
+///
+/// All attributes here live under the `dialog.peer` domain. A peer is
+/// whoever holds replicas: this device's profile, or a remote service
+/// reached at one or more addresses.
+pub mod peer {
+    use super::Attribute;
+
+    /// `dialog.peer/name` — the name the peer is known by locally.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.peer")]
+    pub struct Name(
+        /// The peer's local name.
+        pub String,
+    );
+
+    /// `dialog.peer/address` — an address the peer is reached at, as
+    /// the dag-cbor encoding of a
+    /// [`SiteAddress`](crate::SiteAddress). One per address, so
+    /// cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.peer")]
+    #[cardinality(many)]
+    pub struct Address(
+        /// The encoded site address.
+        pub Vec<u8>,
     );
 }
 
@@ -322,9 +363,12 @@ pub mod session {
 /// The peer is encoded under its old name, `profile`: the field name is
 /// part of the hash, and every replica entity -- and every branch
 /// entity derived from one -- already recorded depends on it.
+///
+/// Both fields are the DIDs' strings, which is how a [`Did`] encodes, so
+/// a replica can be derived from a peer entity without reparsing it.
 #[derive(Debug, Clone, Serialize)]
 enum ReplicaHash<'a> {
-    Replica { subject: &'a Did, profile: &'a Did },
+    Replica { subject: &'a str, profile: &'a str },
 }
 
 /// Hash input for [`Branch::this`].
@@ -376,14 +420,25 @@ pub struct Replica {
 impl Replica {
     /// Build a replica concept from a peer DID and a subject DID.
     pub fn new(peer: Did, subject: Did) -> Self {
+        Self::derive(peer.this(), subject.this())
+    }
+
+    /// Build a replica concept from the entities of its peer and
+    /// subject, each a DID viewed as an entity.
+    fn derive(peer: Entity, subject: Entity) -> Self {
         Self {
             this: Entity::of(&ReplicaHash::Replica {
-                subject: &subject,
-                profile: &peer,
+                subject: &subject.to_string(),
+                profile: &peer.to_string(),
             }),
-            subject: replica::Subject(subject.this()),
-            peer: replica::Peer(peer.this()),
+            subject: replica::Subject(subject),
+            peer: replica::Peer(peer),
         }
+    }
+
+    /// The branch named `name` on this replica.
+    pub fn branch(&self, name: impl Into<branch::Name>) -> Branch {
+        Branch::new(self, name)
     }
 }
 
@@ -462,6 +517,60 @@ impl AsRef<Entity> for Branch {
     fn as_ref(&self) -> &Entity {
         &self.this
     }
+}
+
+/// A peer: whoever holds replicas, identified by its DID.
+///
+/// A remote service's DID is derived from where it is reached (see
+/// [`Peer::at`]), so two replicas that name the same service converge
+/// on one peer.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Peer {
+    /// The peer's entity: its DID.
+    pub this: Entity,
+    /// The name the peer is known by locally.
+    pub name: peer::Name,
+}
+
+impl Peer {
+    /// Describe the peer with this DID under a local name.
+    pub fn new(did: &Did, name: impl Into<String>) -> Self {
+        Self {
+            this: did.this(),
+            name: peer::Name(name.into()),
+        }
+    }
+
+    /// This peer's replica of the repository `subject`.
+    pub fn repository(&self, subject: Did) -> Replica {
+        Replica::derive(self.this.clone(), subject.this())
+    }
+}
+
+impl AsRef<Entity> for Peer {
+    fn as_ref(&self) -> &Entity {
+        &self.this
+    }
+}
+
+/// One address a [`Peer`] is reached at. Cardinality-many: a peer
+/// reached several ways has one of these per address.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PeerAddress {
+    /// The peer's entity (same as [`Peer::this`]).
+    pub this: Entity,
+    /// The encoded address.
+    pub address: peer::Address,
+}
+
+/// One branch a branch tracks. Cardinality-many: a branch tracking
+/// several upstreams has one of these per upstream.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BranchUpstream {
+    /// The tracking branch's entity (same as [`Branch::this`]).
+    pub this: Entity,
+    /// The tracked branch's entity.
+    pub upstream: branch::Upstream,
 }
 
 /// The branch a replica has switched to.

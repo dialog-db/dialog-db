@@ -137,6 +137,38 @@ pub enum LoadRemoteError {
     Resolve(#[from] ResolveError),
 }
 
+/// Errors returned when carrying remotes and upstreams from their cells
+/// over into facts.
+#[derive(Error, Debug)]
+pub enum MigrateError {
+    /// A remote named by the caller or by an upstream could not be
+    /// loaded from its cell.
+    #[error("Failed to load remote {name}: {source}")]
+    Remote {
+        /// The remote name.
+        name: String,
+        /// Why it could not be loaded.
+        source: LoadRemoteError,
+    },
+
+    /// A branch's upstream cell could not be read.
+    #[error("Failed to read the upstreams of branch {name}: {source}")]
+    Upstream {
+        /// The branch name.
+        name: String,
+        /// Why it could not be read.
+        source: ResolveError,
+    },
+
+    /// A remote's address does not name a peer.
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+
+    /// The facts could not be committed to the registry.
+    #[error(transparent)]
+    Commit(#[from] CommitError),
+}
+
 /// Errors returned by the load branch command.
 #[derive(Error, Debug)]
 pub enum LoadBranchError {
