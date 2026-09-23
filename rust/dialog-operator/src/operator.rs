@@ -100,7 +100,8 @@ pub struct Operator<S: Clone> {
         credential::Retract<Secret>,
         memory::Resolve,
         memory::Publish,
-        memory::Retract
+        memory::Retract,
+        memory::List
     )]
     /// Storage — routes DID-based effects.
     storage: Storage<S>,

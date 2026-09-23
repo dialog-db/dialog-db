@@ -255,6 +255,13 @@ impl FileSystemHandle {
         backend::read_optional(self).await
     }
 
+    /// Every file under the directory at this location, by path relative
+    /// to it, including files in nested directories. Empty when the
+    /// directory does not exist.
+    pub async fn files(&self) -> Result<Vec<String>, FileSystemError> {
+        backend::files(self).await
+    }
+
     /// Write contents to the file at this location, creating parent dirs.
     pub async fn write(&self, contents: &[u8]) -> Result<(), FileSystemError> {
         backend::write(self, contents).await
