@@ -1185,14 +1185,15 @@ mod tests {
         let env_bound = adornment_bound.into_environment(&terms);
         let bound_plan = rules.plan(&terms, &bound);
 
-        // The entity-bound environment should contain "e"
+        // The entity-bound scope names the concept's `this` field, which
+        // the rule body is evaluated over; the free scope does not.
         assert!(
-            env_bound.contains("e"),
-            "Bound adornment should include entity variable in environment"
+            env_bound.contains("this"),
+            "Bound adornment should include the entity field in scope"
         );
         assert!(
-            !env_free.contains("e"),
-            "Free adornment should not include entity variable in environment"
+            !env_free.contains("this"),
+            "Free adornment should not include the entity field in scope"
         );
 
         // Verify the plans are structurally different

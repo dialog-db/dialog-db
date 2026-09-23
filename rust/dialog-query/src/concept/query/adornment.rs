@@ -57,20 +57,25 @@ impl Adornment {
         Adornment(bits)
     }
 
-    /// Reconstruct an `Environment` from this adornment and the concept's terms.
+    /// Reconstruct the scope a rule is planned in from this adornment and
+    /// the concept's terms.
     ///
-    /// Bridges the adornment back to the planner's `Environment` type so
-    /// existing `Conjunction::plan(&scope)` works without changes to the planner.
+    /// A rule's body is evaluated over the concept's own parameter names:
+    /// the caller's bindings are carried over under the field they are
+    /// given for, constants included (see `extract_parameters`). So the
+    /// scope names the *fields* that are bound -- not the caller's
+    /// variables, which the body never sees. Naming the caller's instead
+    /// planned every rule called with a constant, or with variables named
+    /// unlike its fields, as though those fields were free: a lookup by a
+    /// known entity became a scan of every entity.
     pub fn into_environment(self, terms: &Parameters) -> Environment {
         let mut sorted_keys: Vec<&String> = terms.keys().collect();
         sorted_keys.sort();
 
         let mut env = Environment::new();
         for (i, key) in sorted_keys.iter().enumerate() {
-            if self.0 & (1 << i) != 0
-                && let Some(param) = terms.get(key)
-            {
-                param.bind(&mut env);
+            if self.0 & (1 << i) != 0 {
+                env.add((*key).clone());
             }
         }
 
@@ -183,11 +188,14 @@ mod tests {
         let adornment = Adornment::derive(&terms, &frame);
         let env = adornment.into_environment(&terms);
 
-        // "name" is a constant — Environment.add ignores constants
-        // "this" maps to var "e" which is bound → should be in env
-        // "age" maps to var "a" which is free → should not be in env
-        assert!(env.contains("e"));
-        assert!(!env.contains("a"));
+        // The scope names the concept's fields, which the rule body is
+        // evaluated over -- never the caller's variables.
+        // "this" is bound through the caller's "e", "name" by a constant,
+        // and "age" is free.
+        assert!(env.contains("this"));
+        assert!(env.contains("name"));
+        assert!(!env.contains("age"));
+        assert!(!env.contains("e"), "the caller's variable is not in scope");
     }
 
     #[dialog_common::test]
