@@ -19,7 +19,7 @@
 //!   use [`DidExt::this`].
 //!
 //! - **Content-derived** — for entities defined by their inputs (an
-//!   replica is `(profile, subject)`, a branch is `(replica, name)`). The
+//!   replica is `(peer, subject)`, a branch is `(replica, name)`). The
 //!   entity URI is `did:key:z6Mk<base58(blake3(dag-cbor(inputs)))>`;
 //!   use [`EntityExt::of`]. Two parties independently describing the
 //!   same logical entity converge on the same URI.
@@ -36,6 +36,7 @@
 use base58::ToBase58;
 use dialog_artifacts::Entity;
 use dialog_common::Blake3Hash;
+use dialog_effects::branch::BranchRecord;
 use dialog_query::{Attribute, Concept};
 use dialog_varsig::Did;
 use serde::Serialize;
@@ -178,11 +179,11 @@ pub mod replica {
         pub Entity,
     );
 
-    /// `dialog.replica/profile` — the profile that owns this replica.
+    /// `dialog.replica/peer` — the peer that holds this replica.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.replica")]
-    pub struct Profile(
-        /// The profile entity (its DID as Entity).
+    pub struct Peer(
+        /// The peer entity (its DID as Entity).
         pub Entity,
     );
 
@@ -317,6 +318,10 @@ pub mod session {
 /// The single-variant enum shape tags the CBOR encoding with the
 /// concept name: two inputs with the same data but different
 /// concepts produce distinct hashes.
+///
+/// The peer is encoded under its old name, `profile`: the field name is
+/// part of the hash, and every replica entity -- and every branch
+/// entity derived from one -- already recorded depends on it.
 #[derive(Debug, Clone, Serialize)]
 enum ReplicaHash<'a> {
     Replica { subject: &'a Did, profile: &'a Did },
@@ -334,50 +339,50 @@ enum BranchHash<'a> {
 
 /// This device's view of a specific repository.
 ///
-/// `this` is content-derived from `(profile, subject)` (see
+/// `this` is content-derived from `(peer, subject)` (see
 /// [`ReplicaHash`]), so:
 ///
-/// - two devices holding the same profile converge on the same
-///   replica entity for a given repository, and
-/// - different profiles produce different replica entities even when
+/// - two devices acting as the same peer converge on the same replica
+///   entity for a given repository, and
+/// - different peers produce different replica entities even when
 ///   pointing at the same repository.
 ///
 /// # Redundant by design
 ///
-/// [`replica::Subject`] and [`replica::Profile`] carry the same two
+/// [`replica::Subject`] and [`replica::Peer`] carry the same two
 /// DIDs that went into the hash. The hash is one-way, so without
 /// these attributes it would be impossible to answer "find the
-/// replica this profile has for subject X" without re-hashing every
+/// replica this peer has for subject X" without re-hashing every
 /// candidate. The attributes make the relationships discoverable
 /// through normal queries.
 ///
 /// # No name field
 ///
-/// Dialog's `Replica` carries identity (`subject`, `profile`) only.
+/// Dialog's `Replica` carries identity (`subject`, `peer`) only.
 /// Downstream that wants a display name can assert a name attribute of
 /// its own (e.g. `app.meta/name` — the `dialog.` namespace is reserved)
 /// on the same `Replica.this`; that attribute composes at query time
 /// without affecting identity.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Replica {
-    /// The replica's entity. Derived from `(profile, subject)`.
+    /// The replica's entity. Derived from `(peer, subject)`.
     pub this: Entity,
     /// Reference to the repository this replica is a view of.
     pub subject: replica::Subject,
-    /// Reference to the profile that owns this replica.
-    pub profile: replica::Profile,
+    /// Reference to the peer that holds this replica.
+    pub peer: replica::Peer,
 }
 
 impl Replica {
-    /// Build an replica concept from a profile DID and a subject DID.
-    pub fn new(profile: Did, subject: Did) -> Self {
+    /// Build a replica concept from a peer DID and a subject DID.
+    pub fn new(peer: Did, subject: Did) -> Self {
         Self {
             this: Entity::of(&ReplicaHash::Replica {
                 subject: &subject,
-                profile: &profile,
+                profile: &peer,
             }),
             subject: replica::Subject(subject.this()),
-            profile: replica::Profile(profile.this()),
+            peer: replica::Peer(peer.this()),
         }
     }
 }
@@ -429,6 +434,26 @@ impl Branch {
             }),
             replica: branch::Replica::from(replica.clone()),
             name,
+        }
+    }
+}
+
+impl From<Branch> for BranchRecord {
+    fn from(branch: Branch) -> Self {
+        Self {
+            this: branch.this,
+            name: branch.name.0,
+            replica: branch.replica.0,
+        }
+    }
+}
+
+impl From<BranchRecord> for Branch {
+    fn from(record: BranchRecord) -> Self {
+        Self {
+            this: record.this,
+            name: branch::Name(record.name),
+            replica: branch::Replica(record.replica),
         }
     }
 }
@@ -645,12 +670,29 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_reflects_subject_and_profile_on_replica_attributes() {
-        let profile = did!("test:profile-x");
+    fn it_reflects_subject_and_peer_on_replica_attributes() {
+        let peer = did!("test:profile-x");
         let subject = did!("test:repo-y");
-        let replica = Replica::new(profile.clone(), subject.clone());
-        assert_eq!(replica.profile.0.to_string(), profile.as_str());
+        let replica = Replica::new(peer.clone(), subject.clone());
+        assert_eq!(replica.peer.0.to_string(), peer.as_str());
         assert_eq!(replica.subject.0.to_string(), subject.as_str());
+    }
+
+    /// Replica and branch entities are stored wherever a branch is
+    /// referenced, so their derivation may never change. Pinned to the
+    /// values it produced before `profile` was renamed to `peer`.
+    #[dialog_common::test]
+    fn it_derives_replica_and_branch_entities_stably() {
+        let replica = Replica::new(did!("test:peer"), did!("test:repo"));
+        let branch = Branch::new(&replica, "main");
+        assert_eq!(
+            replica.this.to_string(),
+            "did:key:z6Mk7M7sobJMZBRBsA5tiE1AWaNpnmE4dZzjj35c4LK2MQy1"
+        );
+        assert_eq!(
+            branch.this.to_string(),
+            "did:key:z6Mk67GBkC1e56fwjn3hQ3t6BqwRkP2cfTWJLSPjfVYoHTxC"
+        );
     }
 
     #[dialog_common::test]

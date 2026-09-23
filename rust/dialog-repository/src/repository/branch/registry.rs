@@ -171,12 +171,12 @@ pub async fn list<Env: RegistryEnv>(
     registry: &Branch,
     operator: &Capability<Operator>,
     env: &Env,
-) -> Result<Vec<String>, dialog_query::EvaluationError> {
+) -> Result<Vec<BranchConcept>, dialog_query::EvaluationError> {
     use dialog_query::{Output as _, Query, Term};
 
     let replica = Replica::new(operator.profile().clone(), registry.of().clone());
 
-    let rows: Vec<BranchConcept> = Box::pin(
+    Box::pin(
         registry
             .query()
             .select(Query::<BranchConcept> {
@@ -187,12 +187,7 @@ pub async fn list<Env: RegistryEnv>(
             .perform(env)
             .try_vec(),
     )
-    .await?;
-
-    let mut names: Vec<String> = rows.into_iter().map(|row| row.name.0).collect();
-    names.sort();
-    names.dedup();
-    Ok(names)
+    .await
 }
 
 #[cfg(test)]
@@ -228,7 +223,11 @@ mod tests {
             .open()
             .perform(&operator)
             .await?;
-        let names = super::list(&registry, &identity, &operator).await?;
+        let names: Vec<String> = super::list(&registry, &identity, &operator)
+            .await?
+            .into_iter()
+            .map(|branch| branch.name.0)
+            .collect();
 
         assert!(
             names.contains(&"feature".to_string()),

@@ -21,7 +21,7 @@
 //! ```text
 //! Subject (repository DID)
 //!   ├── Use
-//!   │     ├── Get → Branches → List → Result<Vec<String>, BranchError>
+//!   │     ├── Get → Branches → List → Result<Vec<BranchRecord>, BranchError>
 //!   │     └── Put → Branches
 //!   │                 ├── Branch { name } → Create → Result<(), BranchError>
 //!   │                 └── Switch { branch } → Result<(), BranchError>
@@ -134,7 +134,22 @@ impl Attenuation for List {
 }
 
 impl Effect for List {
-    type Output = Result<Vec<String>, BranchError>;
+    type Output = Result<Vec<BranchRecord>, BranchError>;
+}
+
+/// A branch as the registry records it: the fields of the repository's
+/// `Branch` concept, which converts to and from this.
+///
+/// A plain record rather than the concept itself because the concept is
+/// declared above this crate, where the query layer lives.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct BranchRecord {
+    /// The branch entity, derived from `(replica, name)`.
+    pub this: Entity,
+    /// The branch name on its replica.
+    pub name: String,
+    /// The replica the branch lives on.
+    pub replica: Entity,
 }
 
 /// Create a branch and record it in the `meta` branch.
