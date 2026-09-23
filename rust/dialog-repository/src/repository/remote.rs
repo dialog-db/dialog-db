@@ -3,7 +3,7 @@
 //! ```text
 //! repo.peer("origin").connect()             → PeerConnection
 //!   └── .repository(did)                    → PeerRepository
-//!         └── .branch("main").open()        → RemoteBranch
+//!         └── .branch("main").open()        → ConnectedBranch
 //! ```
 
 mod address;

@@ -8,7 +8,7 @@
 //! branch's `sync` cell.
 
 use crate::RemoteFallback;
-use crate::{Branch, RemoteBranch, RemoteRepository, Revision, SiteAddress, TreeReference};
+use crate::{Branch, ConnectedBranch, ConnectedReplica, Revision, SiteAddress, TreeReference};
 use dialog_artifacts::Entity;
 use dialog_capability::{Did, Subject};
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ pub enum Upstream {
     /// A branch of a repository held at a peer.
     Remote {
         /// The repository, at the peer.
-        remote: RemoteRepository,
+        remote: ConnectedReplica,
         /// The branch name there.
         branch: String,
         /// The tree at the last sync.
@@ -258,7 +258,7 @@ impl Route {
                 subject,
                 branch,
             } => Upstream::Remote {
-                remote: RemoteRepository::new(
+                remote: ConnectedReplica::new(
                     host.clone(),
                     peer.clone(),
                     name.clone(),
@@ -372,7 +372,7 @@ pub enum UpstreamBranch {
     /// and this enum is a short-lived constructor argument.
     Local(Box<Branch>),
     /// A branch at a peer.
-    Remote(Box<RemoteBranch>),
+    Remote(Box<ConnectedBranch>),
 }
 
 impl From<&Branch> for UpstreamBranch {
@@ -387,14 +387,14 @@ impl From<Branch> for UpstreamBranch {
     }
 }
 
-impl From<&RemoteBranch> for UpstreamBranch {
-    fn from(branch: &RemoteBranch) -> Self {
+impl From<&ConnectedBranch> for UpstreamBranch {
+    fn from(branch: &ConnectedBranch) -> Self {
         UpstreamBranch::Remote(Box::new(branch.clone()))
     }
 }
 
-impl From<RemoteBranch> for UpstreamBranch {
-    fn from(branch: RemoteBranch) -> Self {
+impl From<ConnectedBranch> for UpstreamBranch {
+    fn from(branch: ConnectedBranch) -> Self {
         UpstreamBranch::Remote(Box::new(branch))
     }
 }

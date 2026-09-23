@@ -24,7 +24,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use super::resolve::resolve;
 use crate::registry::RegistryEnv;
 use crate::{
-    Branch, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex, RemoteRepository,
+    Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex,
     RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
 use futures_util::future::try_join_all;
@@ -81,7 +81,7 @@ impl<'a> Push<'a> {
 
     /// Push to the given branch alone, instead of every upstream.
     ///
-    /// Accepts either a `&Branch` or a `&RemoteBranch` — the same inputs as
+    /// Accepts either a `&Branch` or a `&ConnectedBranch` — the same inputs as
     /// [`Branch::set_upstream`]. The tree last synced with that branch
     /// drives the fast-forward check and the novelty upload, or the empty
     /// base if it never was (only a target with no revision of its own
@@ -561,13 +561,13 @@ fn node_children(
 async fn tracked_remotes<Env>(
     branch: &Branch,
     env: &Env,
-) -> Result<Vec<RemoteRepository>, PushError>
+) -> Result<Vec<ConnectedReplica>, PushError>
 where
     Env: Provider<Resolve> + ConditionalSync + 'static,
 {
     fn gather(
         upstreams: &crate::Upstreams,
-        remotes: &mut Vec<RemoteRepository>,
+        remotes: &mut Vec<ConnectedReplica>,
         visited: &mut HashSet<String>,
         locals: &mut Vec<String>,
     ) {
@@ -588,7 +588,7 @@ where
         }
     }
 
-    let mut remotes: Vec<RemoteRepository> = Vec::new();
+    let mut remotes: Vec<ConnectedReplica> = Vec::new();
     let mut visited: HashSet<String> = HashSet::from([branch.name().to_string()]);
     let mut locals: Vec<String> = Vec::new();
     // Where content came from is every branch a branch synced with, not
@@ -619,9 +619,9 @@ where
 /// target lacks can be fetched from. The forwarder tries them in order
 /// and fails loudly only when content is available nowhere.
 fn source_remotes(
-    tracked: &[RemoteRepository],
-    target: &RemoteRepository,
-) -> Vec<RemoteRepository> {
+    tracked: &[ConnectedReplica],
+    target: &ConnectedReplica,
+) -> Vec<ConnectedReplica> {
     tracked
         .iter()
         .filter(|remote| !remote.same(target))
@@ -644,10 +644,10 @@ const SHIPMENT_CONCURRENCY: usize = 16;
 async fn ship<Env>(
     shipment: Result<ShipmentRef, dialog_artifacts::DialogArtifactsError>,
     branch: &Branch,
-    remote: &RemoteRepository,
+    remote: &ConnectedReplica,
     remote_index: &RemoteArchiveIndex<'_>,
     blob_store: &LocalIndex<'_, Env>,
-    sources: &[RemoteRepository],
+    sources: &[ConnectedReplica],
     sole_remote: bool,
     env: &Env,
 ) -> Result<(), PushError>
@@ -773,7 +773,7 @@ where
 /// point — and a dumb store offers nothing cheaper than a get.
 async fn remote_has_block<Env>(
     hash: &NodeHash,
-    remote: &RemoteRepository,
+    remote: &ConnectedReplica,
     env: &Env,
 ) -> Result<bool, PushError>
 where
@@ -801,7 +801,7 @@ where
 /// A block's bytes from `remote`, if it holds them.
 async fn remote_block<Env>(
     hash: &NodeHash,
-    remote: &RemoteRepository,
+    remote: &ConnectedReplica,
     env: &Env,
 ) -> Result<Option<Vec<u8>>, PushError>
 where
@@ -831,7 +831,7 @@ where
 async fn block_from_anywhere<Env>(
     hash: &NodeHash,
     branch: &Branch,
-    sources: &[RemoteRepository],
+    sources: &[ConnectedReplica],
     env: &Env,
 ) -> Result<Option<Vec<u8>>, PushError>
 where
@@ -861,8 +861,8 @@ where
 async fn ensure_block_on_target<Env>(
     hash: NodeHash,
     branch: &Branch,
-    target: &RemoteRepository,
-    sources: &[RemoteRepository],
+    target: &ConnectedReplica,
+    sources: &[ConnectedReplica],
     env: &Env,
 ) -> Result<(), PushError>
 where
@@ -900,8 +900,8 @@ async fn ensure_blob_on_target<Env>(
     digest: dialog_common::Blake3Hash,
     size: u64,
     branch: &Branch,
-    target: &RemoteRepository,
-    sources: &[RemoteRepository],
+    target: &ConnectedReplica,
+    sources: &[ConnectedReplica],
     env: &Env,
 ) -> Result<(), PushError>
 where
@@ -977,7 +977,7 @@ where
 async fn blob_source<Env>(
     digest: &dialog_common::Blake3Hash,
     branch: &Branch,
-    sources: &[RemoteRepository],
+    sources: &[ConnectedReplica],
     env: &Env,
 ) -> Result<BlobReader, BlobError>
 where
@@ -1029,8 +1029,8 @@ where
 async fn forward_subtree<Env>(
     root: NodeHash,
     branch: &Branch,
-    target: &RemoteRepository,
-    sources: &[RemoteRepository],
+    target: &ConnectedReplica,
+    sources: &[ConnectedReplica],
     target_may_have: bool,
     visited: &mut HashSet<NodeHash>,
     env: &Env,

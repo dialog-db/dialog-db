@@ -37,7 +37,7 @@ use dialog_storage::NativeTempSpace;
 // The aborted-push rig and its closure audit are native-only, like the
 // tests that use them.
 #[cfg(not(feature = "web-integration-tests"))]
-use crate::{RemoteRepository, RemoteSite};
+use crate::{ConnectedReplica, RemoteSite};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_artifacts::{ShipmentRef, shipment_ref};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -1859,7 +1859,7 @@ async fn assert_remote_closure_complete(
     operator: &Operator<VolatileSpace>,
     index: NetworkedIndex<'_, Operator<VolatileSpace>>,
     head: NodeHash,
-    remote: &RemoteRepository,
+    remote: &ConnectedReplica,
 ) -> Result<()> {
     // Walk the head tree, collecting per node: its hash, its children,
     // and the blob/spill references its entries carry (stored entries in

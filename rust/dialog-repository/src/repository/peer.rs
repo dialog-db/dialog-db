@@ -20,7 +20,7 @@ use url::Url;
 use crate::registry::{RegistryEnv, apply};
 use crate::schema::{Branch as BranchConcept, DidExt as _, Peer, PeerAddress, peer};
 use crate::{
-    AddAddressError, Branch, ConnectError, RemoteBranch, RemoteRepository, Repository,
+    AddAddressError, Branch, ConnectError, ConnectedBranch, ConnectedReplica, Repository,
     RepositoryMemoryExt as _, SiteAddress,
 };
 use dialog_artifacts::{Changes, Entity};
@@ -239,7 +239,7 @@ impl OpenPeerRepository {
     pub async fn perform<Env: RegistryEnv>(
         self,
         env: &Env,
-    ) -> Result<RemoteRepository, ConnectError> {
+    ) -> Result<ConnectedReplica, ConnectError> {
         let PeerRepository { peer, subject } = self.repository;
         let registry = peer.subject.registry().open().perform(env).await?;
         connect(&registry, &peer.subject, &peer.by, subject, env).await
@@ -270,7 +270,10 @@ pub struct OpenPeerBranch {
 impl OpenPeerBranch {
     /// Find the peer and its addresses, and open the branch there from
     /// its local cache; nothing crosses the network until it is fetched.
-    pub async fn perform<Env: RegistryEnv>(self, env: &Env) -> Result<RemoteBranch, ConnectError> {
+    pub async fn perform<Env: RegistryEnv>(
+        self,
+        env: &Env,
+    ) -> Result<ConnectedBranch, ConnectError> {
         let PeerBranch { repository, by } = self.branch;
         let PeerRepository { peer, subject } = repository;
         let registry = peer.subject.registry().open().perform(env).await?;
@@ -291,7 +294,7 @@ pub(crate) async fn connect<Env: RegistryEnv>(
     by: &By,
     subject: Did,
     env: &Env,
-) -> Result<RemoteRepository, ConnectError> {
+) -> Result<ConnectedReplica, ConnectError> {
     let peer = match by {
         By::Entity(entity) => entity.clone(),
         By::Name(name) => named(registry, name.clone(), env).await?,
@@ -307,7 +310,7 @@ pub(crate) async fn reach<Env: RegistryEnv>(
     peer: Entity,
     subject: Did,
     env: &Env,
-) -> Result<RemoteRepository, ConnectError> {
+) -> Result<ConnectedReplica, ConnectError> {
     let query = |error: dialog_query::EvaluationError| ConnectError::Query(error.to_string());
 
     let names: Vec<Peer> = Box::pin(
@@ -347,7 +350,7 @@ pub(crate) async fn reach<Env: RegistryEnv>(
         });
     }
 
-    Ok(RemoteRepository::new(
+    Ok(ConnectedReplica::new(
         host.clone(),
         peer,
         name,

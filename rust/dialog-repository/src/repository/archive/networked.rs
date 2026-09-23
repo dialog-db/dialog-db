@@ -16,7 +16,7 @@ use std::fmt::{Debug, Display};
 pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
 
 use super::local::LocalIndex;
-use crate::RemoteRepository;
+use crate::ConnectedReplica;
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::CatalogScope;
 
@@ -36,7 +36,7 @@ pub enum RemoteFallback {
     /// No remote is tracked; a local miss is an ordinary `None`.
     None,
     /// Local misses fetch through this remote and cache locally.
-    Remote(RemoteRepository),
+    Remote(ConnectedReplica),
     /// A remote is tracked but could not be loaded. Reads served by the
     /// local archive succeed; a local miss is an error naming the
     /// remote and the reason it is unavailable.
@@ -55,7 +55,7 @@ impl RemoteFallback {
     /// instead of being erased into a bare not-found.
     pub fn from_load(
         remote: impl Into<String>,
-        result: Result<RemoteRepository, impl Display>,
+        result: Result<ConnectedReplica, impl Display>,
     ) -> Self {
         match result {
             Ok(loaded) => Self::Remote(loaded),
@@ -67,8 +67,8 @@ impl RemoteFallback {
     }
 }
 
-impl From<Option<RemoteRepository>> for RemoteFallback {
-    fn from(remote: Option<RemoteRepository>) -> Self {
+impl From<Option<ConnectedReplica>> for RemoteFallback {
+    fn from(remote: Option<ConnectedReplica>) -> Self {
         match remote {
             Some(remote) => Self::Remote(remote),
             None => Self::None,
@@ -76,8 +76,8 @@ impl From<Option<RemoteRepository>> for RemoteFallback {
     }
 }
 
-impl From<RemoteRepository> for RemoteFallback {
-    fn from(remote: RemoteRepository) -> Self {
+impl From<ConnectedReplica> for RemoteFallback {
+    fn from(remote: ConnectedReplica) -> Self {
         Self::Remote(remote)
     }
 }

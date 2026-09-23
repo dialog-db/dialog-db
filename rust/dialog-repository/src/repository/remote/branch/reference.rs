@@ -1,12 +1,12 @@
 //! Reference for navigating to a named branch on a loaded remote.
 //!
-//! A [`RemoteBranchReference`] pairs a [`RemoteRepository`] with a
+//! A [`RemoteBranchReference`] pairs a [`ConnectedReplica`] with a
 //! [`BranchReference`] rooted at the remote's subject. Produced by
-//! [`RemoteRepository::branch`].
+//! [`ConnectedReplica::branch`].
 
 use crate::schema::Branch as BranchConcept;
 use crate::{
-    BranchReference, Cell, LoadRemoteBranch, OpenRemoteBranch, RemoteRepository,
+    BranchReference, Cell, ConnectedReplica, LoadRemoteBranch, OpenRemoteBranch,
     RepositoryMemoryExt, Revision,
 };
 use dialog_capability::Subject;
@@ -15,24 +15,24 @@ use dialog_effects::memory::prelude::SpaceScope;
 
 /// Cached snapshot of the remote branch's last known state: the remote
 /// revision paired with the remote's CAS version, so a fresh
-/// [`RemoteBranch`] can prime its in-memory upstream cell cache without
+/// [`ConnectedBranch`](crate::ConnectedBranch) can prime its in-memory upstream cell cache without
 /// hitting the network.
 pub type RemoteEdition = Edition<Revision>;
 
 /// A reference to a named branch on a loaded remote repository.
 ///
-/// Carries the parent [`RemoteRepository`] (already-loaded address) and
-/// names a branch on it. Produced by [`RemoteRepository::branch`].
+/// Carries the parent [`ConnectedReplica`] (already-loaded address) and
+/// names a branch on it. Produced by [`ConnectedReplica::branch`].
 #[derive(Debug, Clone)]
 pub struct RemoteBranchReference {
     /// The loaded remote repository this branch lives on.
-    pub repository: RemoteRepository,
+    pub repository: ConnectedReplica,
     /// Names the branch at the remote repository's subject. Rooted at
     /// the remote repo's subject; path `memory/branch/{branch_name}`.
     pub branch: BranchReference,
 }
 
-impl RemoteRepository {
+impl ConnectedReplica {
     /// A reference to a named branch at this remote repository.
     pub fn branch(&self, name: impl Into<String>) -> RemoteBranchReference {
         RemoteBranchReference {

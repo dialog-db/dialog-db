@@ -40,7 +40,7 @@ pub async fn test_repo(
 #[cfg(test)]
 use crate::registry::RegistryEnv;
 #[cfg(test)]
-use crate::{RemoteRepository, Repository, SiteAddress, peer_did};
+use crate::{ConnectedReplica, Repository, SiteAddress, peer_did};
 #[cfg(test)]
 use dialog_varsig::{Did, Principal};
 
@@ -54,7 +54,7 @@ pub async fn connect<C, Env>(
     address: impl Into<SiteAddress>,
     subject: Did,
     env: &Env,
-) -> anyhow::Result<RemoteRepository>
+) -> anyhow::Result<ConnectedReplica>
 where
     C: Principal,
     Env: RegistryEnv,
