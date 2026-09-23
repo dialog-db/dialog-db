@@ -80,6 +80,10 @@ pub enum OpenRepositoryError {
     /// Backend storage failed during load-or-create.
     #[error("Storage failed during open: {0}")]
     Storage(#[from] StorageError),
+
+    /// Opening the repository's registry branch failed.
+    #[error("Failed to open the branch registry: {0}")]
+    Registry(#[from] ResolveError),
 }
 
 /// Errors returned by the load repository command.
@@ -88,6 +92,10 @@ pub enum LoadRepositoryError {
     /// Backend storage failed during load.
     #[error("Storage failed during load: {0}")]
     Storage(#[from] StorageError),
+
+    /// Opening the repository's registry branch failed.
+    #[error("Failed to open the branch registry: {0}")]
+    Registry(#[from] ResolveError),
 }
 
 /// Errors returned by the create repository command.

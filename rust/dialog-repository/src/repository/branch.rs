@@ -53,6 +53,7 @@ pub use load::*;
 mod metadata;
 
 pub mod registry;
+pub use registry::{OpenRegistry, RegistryReference};
 
 pub(crate) mod resolve;
 

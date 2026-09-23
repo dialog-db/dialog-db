@@ -14,16 +14,17 @@
 //! scope, beside the delegation records that already use it.
 
 use dialog_artifacts::{Changes, Entity, Statement};
-use dialog_capability::{Capability, Fork, Provider};
+use dialog_capability::{Capability, Fork, Provider, Subject};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_query::{Output as _, Query, Term};
 use futures_util::stream;
+use std::sync::Arc;
 
 use crate::schema::{ActiveBranch, Branch as BranchConcept, BranchPull, BranchPush, Replica};
-use crate::{Branch, CommitError, RemoteSite};
+use crate::{Branch, CommitError, REGISTRY, RemoteSite, RepositoryMemoryExt as _, ResolveError};
 
 /// The environment a registry write runs against.
 pub trait RegistryEnv:
@@ -60,6 +61,61 @@ impl<T> RegistryEnv for T where
         + ConditionalSync
         + 'static
 {
+}
+
+/// The registry branch of a repository, addressed before it is opened.
+///
+/// Built by [`RepositoryMemoryExt::registry`](crate::RepositoryMemoryExt::registry).
+#[derive(Debug, Clone)]
+pub struct RegistryReference {
+    subject: Subject,
+}
+
+impl RegistryReference {
+    /// Address the registry branch of `subject`.
+    pub fn new(subject: Subject) -> Self {
+        Self { subject }
+    }
+
+    /// Open the registry branch, reusing the one the environment holds.
+    pub fn open(self) -> OpenRegistry {
+        OpenRegistry {
+            subject: self.subject,
+        }
+    }
+}
+
+/// Command to open a repository's registry branch.
+///
+/// The environment holds the opened branch, so every command that reads
+/// or writes the registry through the same environment shares one warm
+/// handle and its caches. A held handle has its head re-read before it
+/// is returned, so writes through other handles are seen.
+#[derive(Debug, Clone)]
+pub struct OpenRegistry {
+    subject: Subject,
+}
+
+impl OpenRegistry {
+    /// Execute against `env`.
+    pub async fn perform<Env: RegistryEnv>(self, env: &Env) -> Result<Branch, ResolveError> {
+        let key = held(&self.subject);
+        let held = env
+            .held(&key)
+            .and_then(|held| held.downcast_ref::<Branch>().cloned());
+        if let Some(registry) = held {
+            registry.refresh(env).await?;
+            return Ok(registry);
+        }
+        let registry = self.subject.branch(REGISTRY).open().perform(env).await?;
+        env.hold(key, Arc::new(registry.clone()));
+        Ok(registry)
+    }
+}
+
+/// The key the registry branch of `subject` is held under.
+fn held(subject: &Subject) -> String {
+    format!("dialog.registry:{}", subject.did())
 }
 
 /// Record `name` as a branch of the replica `operator` views.
@@ -234,12 +290,41 @@ mod tests {
 
     use crate::helpers::test_repo;
     use crate::schema::{Branch as BranchConcept, Replica};
-    use crate::{REGISTRY, RepositoryMemoryExt};
+    use crate::{REGISTRY, RepositoryExt as _, RepositoryMemoryExt};
     use dialog_artifacts::{ArtifactSelector, Value};
     use dialog_capability::Subject;
+    use dialog_common::Holds as _;
     use dialog_effects::authority::Identify;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
     use futures_util::StreamExt as _;
+
+    /// Opening or loading a repository leaves its registry held open, so
+    /// listing branches and resolving upstreams start from a warm branch.
+    /// Creating one does not: a new repository's registry is empty.
+    #[dialog_common::test]
+    async fn it_is_held_once_its_repository_is_opened() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+
+        let name = unique_name("opened");
+        let created = profile
+            .repository(name.clone())
+            .create()
+            .perform(&operator)
+            .await?;
+        assert!(operator.held(&super::held(&created.subject())).is_none());
+        let opened = profile.repository(name).open().perform(&operator).await?;
+        assert!(operator.held(&super::held(&opened.subject())).is_some());
+
+        let name = unique_name("loaded");
+        profile
+            .repository(name.clone())
+            .create()
+            .perform(&operator)
+            .await?;
+        let loaded = profile.repository(name).load().perform(&operator).await?;
+        assert!(operator.held(&super::held(&loaded.subject())).is_some());
+        Ok(())
+    }
 
     /// A recorded branch is listed; the registry lists itself without
     /// ever having been recorded.
