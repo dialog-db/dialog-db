@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::UseExt as _;
-use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
+use dialog_effects::memory::{Edition, List, MemoryError, Publish, Resolve, Retract, Version};
 use js_sys::Uint8Array;
+use rexie::KeyRange;
 use wasm_bindgen::{JsCast, JsValue};
 
 /// The single object store used for all memory operations.
@@ -182,6 +183,37 @@ impl Provider<Retract> for IndexedDb {
                 Ok(())
             })
             .await
+    }
+}
+
+#[async_trait(?Send)]
+impl Provider<List> for IndexedDb {
+    async fn execute(&self, effect: Capability<List>) -> Result<Vec<String>, MemoryError> {
+        // Every key under the space is `{space}/{cell}`, so the space's
+        // cells are one key range: from the prefix up to the highest
+        // code unit after it.
+        let prefix = format!("{}/", effect.space());
+        let lower = JsValue::from_str(&prefix);
+        let upper = JsValue::from_str(&format!("{prefix}\u{ffff}"));
+        let range = KeyRange::bound(&lower, &upper, None, None).map_err(storage_error)?;
+
+        let store = self.store(MEMORY).await?;
+        let keys = store
+            .query(|object_store| async move {
+                object_store
+                    .get_all_keys(Some(range), None)
+                    .await
+                    .map_err(storage_error)
+            })
+            .await?;
+
+        let mut paths: Vec<String> = keys
+            .into_iter()
+            .filter_map(|key| key.as_string())
+            .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
+            .collect();
+        paths.sort();
+        Ok(paths)
     }
 }
 
@@ -571,6 +603,45 @@ mod tests {
 
         assert!(result.is_ok());
 
+        Ok(())
+    }
+
+    /// Listing a space is a key range over `{space}/`: every cell under
+    /// it, nested spaces included, and nothing from a sibling that only
+    /// shares its name as a prefix.
+    #[dialog_common::test]
+    async fn it_lists_the_cells_under_a_space() -> anyhow::Result<()> {
+        let provider = IndexedDb::connect(unique_name("mem")).await?;
+        let subject = unique_subject("memory-list");
+
+        for (space, cell) in [
+            ("remote/origin", "address"),
+            ("remote/origin", "branch/main/revision"),
+            ("remote", "top"),
+            ("remotes", "elsewhere"),
+        ] {
+            subject
+                .clone()
+                .writer()
+                .memory()
+                .space(space)
+                .cell(cell)
+                .publish(b"x".to_vec(), None)
+                .perform(&provider)
+                .await?;
+        }
+
+        let listed = subject
+            .reader()
+            .memory()
+            .space("remote")
+            .list()
+            .perform(&provider)
+            .await?;
+        assert_eq!(
+            listed,
+            vec!["origin/address", "origin/branch/main/revision", "top"]
+        );
         Ok(())
     }
 }
