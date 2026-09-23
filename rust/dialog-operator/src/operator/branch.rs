@@ -25,7 +25,7 @@ use dialog_effects::branch::{self as branch_fx, BranchError};
 use dialog_effects::memory::{MemoryError, Publish, Resolve, Retract};
 use dialog_effects::method;
 use dialog_query::{Output as _, Query, Term};
-use dialog_repository::registry::{forget, record};
+use dialog_repository::registry::{forget, record, switch};
 use dialog_repository::schema::{Branch as BranchConcept, Replica};
 use dialog_repository::{
     Branch, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt, RetractError,
@@ -267,6 +267,30 @@ where
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<branch_fx::Switch> for Operator<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: BranchEnv + ConditionalSend,
+{
+    async fn execute(&self, input: Capability<branch_fx::Switch>) -> Result<(), BranchError> {
+        let subject = input.subject().clone();
+        let branch = &branch_fx::Switch::of(&input).branch;
+
+        // Only the record changes. The branch is pointed at, never
+        // looked up: it may live on another replica, where there is
+        // nothing here to find.
+        let registry = self.registry(&subject).await?;
+        let operator = self.build_authority(subject);
+        switch(&registry, &operator, branch, self)
+            .await
+            .map_err(failed)?;
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -275,10 +299,13 @@ mod tests {
 
     use crate::Operator;
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use dialog_artifacts::Instruction;
+    use dialog_artifacts::{Entity, Instruction};
     use dialog_capability::{Did, Subject};
     use dialog_effects::MethodExt as _;
+    use dialog_effects::authority::{Identify, OperatorExt as _};
     use dialog_effects::branch::prelude::*;
+    use dialog_query::{Output as _, Query, Term};
+    use dialog_repository::schema::{ActiveBranch, Branch as BranchConcept, Replica};
     use dialog_repository::{REGISTRY, RepositoryMemoryExt as _, Revision};
     use dialog_storage::provider::storage::VolatileSpace;
     use futures_util::stream;
@@ -313,6 +340,41 @@ mod tests {
             .perform(operator)
             .await?;
         Ok(branch.revision())
+    }
+
+    /// The branch the replica has switched to, if any.
+    async fn active(
+        operator: &Operator<VolatileSpace>,
+        subject: &Did,
+    ) -> anyhow::Result<Vec<Entity>> {
+        let identity = Identify.perform(operator).await?;
+        let replica = Replica::new(identity.profile().clone(), subject.clone());
+        let registry = Subject::from(subject.clone())
+            .branch(REGISTRY)
+            .open()
+            .perform(operator)
+            .await?;
+        let rows: Vec<ActiveBranch> = registry
+            .query()
+            .select(Query::<ActiveBranch> {
+                this: replica.this.into(),
+                branch: Term::var("branch"),
+            })
+            .perform(operator)
+            .try_vec()
+            .await?;
+        Ok(rows.into_iter().map(|row| row.branch.0).collect())
+    }
+
+    /// The entity of the branch `name` on the replica `operator` views.
+    async fn entity(
+        operator: &Operator<VolatileSpace>,
+        subject: &Did,
+        name: &str,
+    ) -> anyhow::Result<Entity> {
+        let identity = Identify.perform(operator).await?;
+        let replica = Replica::new(identity.profile().clone(), subject.clone());
+        Ok(BranchConcept::new(&replica, name).this)
     }
 
     async fn listed(
@@ -581,6 +643,50 @@ mod tests {
             .perform(&operator)
             .await;
         assert!(deleted.is_err(), "the registry is never deleted");
+        Ok(())
+    }
+
+    /// Switching records the branch as the replica's active one, and
+    /// switching again replaces it rather than adding a second.
+    #[dialog_common::test]
+    async fn it_switches_the_active_branch() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        assert_eq!(active(&operator, &did).await?, Vec::<Entity>::new());
+
+        let main = entity(&operator, &did, "main").await?;
+        let feature = entity(&operator, &did, "feature").await?;
+        for branch in [&main, &feature] {
+            Subject::from(did.clone())
+                .writer()
+                .branches()
+                .switch(branch.clone())
+                .perform(&operator)
+                .await?;
+        }
+
+        assert_eq!(active(&operator, &did).await?, vec![feature]);
+        Ok(())
+    }
+
+    /// The branch is pointed at, not looked up: one that is not on this
+    /// replica can be switched to.
+    #[dialog_common::test]
+    async fn it_switches_to_a_branch_it_does_not_hold() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        let elsewhere: Entity = "did:key:zElsewhere".parse()?;
+
+        Subject::from(did.clone())
+            .writer()
+            .branches()
+            .switch(elsewhere.clone())
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(active(&operator, &did).await?, vec![elsewhere]);
         Ok(())
     }
 }

@@ -140,3 +140,19 @@ fn it_carries_the_revision_a_create_or_delete_names() {
     assert!(create.contains_key("revision"), "{create:?}");
     assert!(delete.contains_key("revision"), "{delete:?}");
 }
+
+/// A switch carries the branch it points the replica at, and nothing
+/// that would scope it to a branch name: the branch need not be one the
+/// replica holds.
+#[dialog_common::test]
+fn it_carries_the_branch_a_switch_names() {
+    let branch: Entity = "did:key:zFeature".parse().expect("valid entity");
+    let switch = parameters(&subject().writer().branches().switch(branch.clone()));
+
+    assert_eq!(
+        switch.get("branch").unwrap(),
+        &branch.to_string().into(),
+        "a switch carries its branch: {switch:?}"
+    );
+    assert_eq!(switch.len(), 1, "and nothing else: {switch:?}");
+}
