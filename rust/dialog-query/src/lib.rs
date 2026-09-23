@@ -85,6 +85,8 @@ pub mod stream;
 /// Term types for pattern matching with variables and constants.
 pub mod term;
 
+mod memo;
+
 mod sort_order;
 pub use sort_order::*;
 

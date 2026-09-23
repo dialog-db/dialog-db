@@ -218,6 +218,12 @@ where
         return Ok(());
     }
     let remote = source.as_ref().fallback(env).await;
+    // Warming exists to fetch ahead of demand. With nowhere to fetch
+    // from, every block is local already and a demand read finds it; a
+    // walk here would only re-read, and re-hash, what is already there.
+    if matches!(remote, crate::RemoteFallback::None) {
+        return Ok(());
+    }
     let catalog = ArchiveScope::new(source.as_ref().subject()).index();
     let store = NetworkedIndex::new(env, catalog, remote).with_priority(likelihood.into());
     let store = CacheThrough {
