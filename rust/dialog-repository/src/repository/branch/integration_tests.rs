@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use crate::helpers::connect;
 use crate::{
     Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryExt as _, Revision,
-    SiteAddress, SnapshotError,
+    SiteAddress, SnapshotError, peer_did,
 };
 use anyhow::{Context as _, Result};
 use dialog_artifacts::tree::TreeStorageBridge;
@@ -177,6 +177,88 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
         !branch.pushes().is_empty(),
         "should have upstream after push"
     );
+
+    Ok(())
+}
+
+/// A peer reached at two addresses, the first of which nothing listens
+/// on: the push, and the fetch after it, go through the second.
+#[dialog_common::test]
+async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let repo = profile
+        .repository(unique_name("failover"))
+        .create()
+        .perform(&operator)
+        .await?;
+
+    let live = s3_site_address(&s3);
+    // Nothing listens on port 1 of the loopback, so connecting is refused.
+    let dead = S3SiteAddress::builder("http://127.0.0.1:1")
+        .region("us-east-1")
+        .bucket(&s3.bucket)
+        .build()?;
+    // Both have credentials, so what fails at the dead address is the
+    // connection, not authorization (which would be an answer).
+    for site in [&live, &dead] {
+        profile
+            .credential()
+            .site(site)
+            .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+            .perform(&operator)
+            .await?;
+    }
+
+    let peer = peer_did(&SiteAddress::from(live.clone()))?;
+    repo.peer(&peer)
+        .add_address(dead.clone())
+        .name("origin")
+        .perform(&operator)
+        .await?;
+    repo.peer(&peer)
+        .add_address(live)
+        .perform(&operator)
+        .await?;
+    let origin = repo
+        .peer("origin")
+        .connect()
+        .repository(repo.did())
+        .open()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        origin.addresses()[0],
+        SiteAddress::from(dead),
+        "the dead address must come first for this test to exercise failover"
+    );
+
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:1".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    let pushed = branch.push().perform(&operator).await?;
+    assert!(pushed.is_some(), "push should reach the live address");
+
+    let fetched = branch
+        .fetch()
+        .perform(&operator)
+        .await?
+        .into_iter()
+        .next()
+        .and_then(|fetched| fetched.revision);
+    assert_eq!(fetched, branch.revision());
 
     Ok(())
 }
