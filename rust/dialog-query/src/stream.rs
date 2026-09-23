@@ -1,9 +1,12 @@
 pub use async_stream::try_stream;
 pub use dialog_common::ConditionalSend;
+use futures_core::Stream;
 pub use futures_core::{Future, TryStream};
 pub use futures_util::{TryStreamExt, stream_select};
+use std::collections::VecDeque;
 use std::pin::Pin;
-use tokio::sync::mpsc::unbounded_channel;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use crate::EvaluationError;
 
@@ -23,67 +26,187 @@ impl<S, T> SendStream<T> for S where
 {
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn spawn<F>(future: F)
-where
-    F: Future<Output = ()> + 'static,
-{
-    wasm_bindgen_futures::spawn_local(future);
-}
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn<F>(future: F)
-where
-    // bare-send-ok: native-only fn feeding tokio::spawn, which requires real Send
-    F: Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(future);
-}
-
 type PinnedSendStream<T> = Pin<Box<dyn SendStream<T>>>;
 
-/// Split a stream into two independent streams that each receive a clone of every item
+/// Split a stream into two independent streams that each receive a clone of
+/// every item.
+///
+/// The two halves share the input and drive it themselves: whichever is
+/// polled with nothing queued pulls the next item, keeps it, and queues a
+/// clone for the other. Nothing is spawned and no channel sits between them,
+/// so a fork costs no scheduler round trip. That matters because the query
+/// engine forks once per disjunction per evaluation: a nested concept with a
+/// rule besides its implicit one forks for every row it is evaluated on, and
+/// a task plus two channels each time was most of what a small rule query
+/// spent waiting.
+///
+/// Each half keeps its own waker, so a half waiting on the input is woken
+/// when the other pulls an item for it, and a half dropped early wakes the
+/// survivor, which then drives the input alone. An input error reaches both
+/// halves and ends them.
 pub fn fork_stream<S, T>(input: S) -> (PinnedSendStream<T>, PinnedSendStream<T>)
 where
     S: SendStream<T> + ConditionalSend + 'static,
     T: Clone + ConditionalSend + 'static,
 {
-    let (left_tx, mut left_rx) = unbounded_channel();
-    let (right_tx, mut right_rx) = unbounded_channel();
+    let fanout = Arc::new(Mutex::new(Fanout {
+        input: Some(Box::pin(input)),
+        queues: [VecDeque::new(), VecDeque::new()],
+        open: [true, true],
+        wakers: [None, None],
+    }));
+    let left = Half {
+        fanout: fanout.clone(),
+        side: 0,
+    };
+    let right = Half { fanout, side: 1 };
+    (Box::pin(left), Box::pin(right))
+}
 
-    spawn(async move {
-        tokio::pin!(input);
+/// The state two halves of a [`fork_stream`] share.
+struct Fanout<T> {
+    /// The input, until it ends or fails.
+    input: Option<PinnedSendStream<T>>,
+    /// Items pulled by one half and not yet taken by the other.
+    queues: [VecDeque<Result<T, EvaluationError>>; 2],
+    /// Whether each half is still held.
+    open: [bool; 2],
+    /// The waker of each half last left waiting on the input.
+    wakers: [Option<Waker>; 2],
+}
 
-        // Track whether each consumer is still listening. Unbounded channel
-        // send only fails when the receiver has been dropped, so a send error
-        // means the consumer is gone — not a transient failure.
-        let mut left_open = true;
-        let mut right_open = true;
+/// One half of a [`fork_stream`].
+struct Half<T> {
+    fanout: Arc<Mutex<Fanout<T>>>,
+    side: usize,
+}
 
-        while let Ok(Some(item)) = input.try_next().await {
-            if left_open && left_tx.send(item.clone()).is_err() {
-                left_open = false;
+impl<T: Clone> Stream for Half<T> {
+    type Item = Result<T, EvaluationError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let side = self.side;
+        let other = 1 - side;
+        let mut fanout = self
+            .fanout
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        if let Some(item) = fanout.queues[side].pop_front() {
+            return Poll::Ready(Some(item));
+        }
+        let Some(input) = fanout.input.as_mut() else {
+            return Poll::Ready(None);
+        };
+
+        match input.as_mut().try_poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                let failed = item.is_err();
+                if fanout.open[other] {
+                    fanout.queues[other].push_back(item.clone());
+                    if let Some(waker) = fanout.wakers[other].take() {
+                        waker.wake();
+                    }
+                }
+                if failed {
+                    fanout.input = None;
+                }
+                Poll::Ready(Some(item))
             }
-            if right_open && right_tx.send(item).is_err() {
-                right_open = false;
+            Poll::Ready(None) => {
+                fanout.input = None;
+                if let Some(waker) = fanout.wakers[other].take() {
+                    waker.wake();
+                }
+                Poll::Ready(None)
             }
-            // Stop draining the input only when both consumers are gone.
-            if !left_open && !right_open {
-                break;
+            Poll::Pending => {
+                fanout.wakers[side] = Some(cx.waker().clone());
+                Poll::Pending
             }
         }
-    });
+    }
+}
 
-    let left = Box::pin(try_stream! {
-        while let Some(item) = left_rx.recv().await {
-                yield item;
+impl<T> Drop for Half<T> {
+    fn drop(&mut self) {
+        let mut fanout = self
+            .fanout
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        fanout.open[self.side] = false;
+        fanout.queues[self.side].clear();
+        // The input may have been left holding this half's waker; wake the
+        // survivor so it polls the input and registers its own.
+        if let Some(waker) = fanout.wakers[1 - self.side].take() {
+            waker.wake();
         }
-    });
+    }
+}
 
-    let right = Box::pin(try_stream! {
-        while let Some(item) = right_rx.recv().await {
-                yield item;
-        }
-    });
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    (left, right)
+    use super::fork_stream;
+    use crate::EvaluationError;
+    use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+
+    fn items(values: Vec<Result<u32, EvaluationError>>) -> impl super::SendStream<u32> {
+        stream::iter(values)
+    }
+
+    /// Each half sees every item, whichever order the halves are
+    /// drained in -- including one drained fully before the other
+    /// starts.
+    #[dialog_common::test]
+    async fn it_gives_each_half_every_item() -> anyhow::Result<()> {
+        let (left, right) = fork_stream(items(vec![Ok(1), Ok(2), Ok(3)]));
+        let left: Vec<u32> = left.try_collect().await?;
+        let right: Vec<u32> = right.try_collect().await?;
+        assert_eq!(left, vec![1, 2, 3]);
+        assert_eq!(right, vec![1, 2, 3]);
+        Ok(())
+    }
+
+    /// Items interleave across the halves without being lost or
+    /// repeated.
+    #[dialog_common::test]
+    async fn it_interleaves_the_halves() -> anyhow::Result<()> {
+        let (mut left, mut right) = fork_stream(items(vec![Ok(1), Ok(2), Ok(3)]));
+        assert_eq!(left.next().await, Some(Ok(1)));
+        assert_eq!(right.next().await, Some(Ok(1)));
+        assert_eq!(right.next().await, Some(Ok(2)));
+        assert_eq!(left.next().await, Some(Ok(2)));
+        assert_eq!(left.next().await, Some(Ok(3)));
+        assert_eq!(left.next().await, None);
+        assert_eq!(right.next().await, Some(Ok(3)));
+        assert_eq!(right.next().await, None);
+        Ok(())
+    }
+
+    /// Dropping one half leaves the other with every item.
+    #[dialog_common::test]
+    async fn it_survives_a_dropped_half() -> anyhow::Result<()> {
+        let (left, mut right) = fork_stream(items(vec![Ok(1), Ok(2)]));
+        assert_eq!(right.next().await, Some(Ok(1)));
+        drop(left);
+        let rest: Vec<u32> = right.try_collect().await?;
+        assert_eq!(rest, vec![2]);
+        Ok(())
+    }
+
+    /// An input error reaches both halves and ends them.
+    #[dialog_common::test]
+    async fn it_delivers_an_error_to_both_halves() {
+        let error = EvaluationError::Store("broken".into());
+        let (mut left, mut right) = fork_stream(items(vec![Ok(1), Err(error.clone()), Ok(2)]));
+        assert_eq!(left.next().await, Some(Ok(1)));
+        assert_eq!(left.next().await, Some(Err(error.clone())));
+        assert_eq!(left.next().await, None);
+        assert_eq!(right.next().await, Some(Ok(1)));
+        assert_eq!(right.next().await, Some(Err(error)));
+        assert_eq!(right.next().await, None);
+    }
 }
