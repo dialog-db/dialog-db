@@ -63,6 +63,7 @@ pub trait SpaceProvider:
     + Provider<memory::Resolve>
     + Provider<memory::Publish>
     + Provider<memory::Retract>
+    + Provider<memory::List>
     + Provider<credential::Load<Credential>>
     + Provider<credential::Save<Credential>>
     + Provider<credential::Load<Secret>>
@@ -82,6 +83,7 @@ impl<T> SpaceProvider for T where
         + Provider<memory::Resolve>
         + Provider<memory::Publish>
         + Provider<memory::Retract>
+        + Provider<memory::List>
         + Provider<credential::Load<Credential>>
         + Provider<credential::Save<Credential>>
         + Provider<credential::Load<Secret>>
@@ -102,7 +104,7 @@ pub struct Space<A, M, C, D, B> {
     pub archive: A,
 
     /// Memory provider.
-    #[provide(memory::Resolve, memory::Publish, memory::Retract)]
+    #[provide(memory::Resolve, memory::Publish, memory::Retract, memory::List)]
     pub memory: M,
 
     /// Credential provider.

@@ -8,6 +8,7 @@
 //! Subject (repository DID)
 //!   └── Memory (ability: /memory)
 //!         └── Space { space: String }
+//!               ├── List → Effect → Result<Vec<String>, MemoryError>
 //!               └── Cell { cell: String }
 //!                     ├── Resolve → Effect → Result<Option<Edition<Vec<u8>>>, MemoryError>
 //!                     ├── Publish { content, when } → Effect → Result<Bytes, MemoryError>
@@ -251,6 +252,33 @@ impl Effect for Resolve {
     type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
 }
 
+/// List operation - names every cell stored under a space.
+///
+/// Answers each cell's path relative to the space, including cells in
+/// the spaces nested below it: listing `remote` finds
+/// `origin/address` as well as `origin/branch/main/revision`. Space and
+/// cell names may both contain `/`, and a store keeps only the joined
+/// path, so the split between them is not recoverable: the paths are
+/// what a caller resolves against the listed space.
+///
+/// Names only, never content: a cell still has to be resolved to be
+/// read. Its command names the space, `/use/get/memory/space`, since
+/// the space is what is read.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
+pub struct List;
+
+impl Attenuation for List {
+    type Of = Space<method::Get>;
+
+    fn attenuation() -> &'static str {
+        "space"
+    }
+}
+
+impl Effect for List {
+    type Output = Result<Vec<String>, MemoryError>;
+}
+
 /// Publish operation - sets cell content with CAS semantics.
 ///
 /// - If `when` is `None`, expects cell to be empty (first publish)
@@ -393,6 +421,15 @@ mod tests {
                 .ability(),
             "/use/delete/memory/cell"
         );
+    }
+
+    /// Listing reads a space rather than a cell, so its command names
+    /// the space, and a grant of cell reads does not cover it.
+    #[dialog_common::test]
+    fn it_builds_the_list_command() {
+        let list = subject().reader().memory().space("remote").list();
+        assert_eq!(list.ability(), "/use/get/memory/space");
+        assert_eq!(list.space(), "remote");
     }
 
     /// The space and cell names scope the capability without appearing
