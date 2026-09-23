@@ -316,7 +316,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::type_system::{Primitive, Type as Kind};
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
     /// Construct an optional `is` variable. The query derives its
     /// resolution from the `is` term, so typing the slot as optional
@@ -340,7 +340,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_evaluates() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -387,7 +387,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_single_value_for_cardinality_one() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -450,7 +450,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_via_eav_scan() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -492,7 +492,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_via_aev_scan() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -538,7 +538,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_via_vae_scan() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -607,7 +607,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_picks_deterministic_winner() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -662,7 +662,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_from_the() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -699,7 +699,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -736,7 +736,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_facts() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -796,7 +796,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_mixes_constants_and_variables() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -832,7 +832,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_without_descriptor() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -874,7 +874,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_accepts_string_literal_as_value_term() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -905,7 +905,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_via_dynamic_expression() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -952,7 +952,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_via_typed_expression() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1053,7 +1053,7 @@ mod tests {
     /// outside the term's kind are filtered, not errors.
     #[dialog_common::test]
     async fn it_filters_values_outside_the_terms_kind() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1099,7 +1099,7 @@ mod tests {
     /// kind. The Absent fallback lives in `OptionalAttributeQuery`, not here.
     #[dialog_common::test]
     async fn it_yields_zero_rows_on_miss() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

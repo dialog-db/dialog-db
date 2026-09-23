@@ -1,14 +1,22 @@
-//! Profile identity: the long-lived signing credential and its access API.
+//! Identity primitives: the long-lived signing credential a peer holds,
+//! how it is opened, and the access API for claiming and delegating with
+//! it.
 //!
-//! A [`Profile`] is the durable identity a person holds: it opens from a
-//! named credential, claims and delegates capabilities, and derives the
-//! session material operators are built from. This crate holds only the
-//! identity primitives; storage routing lives in `dialog-storage` and the
-//! operating environment composed from a profile lives in
-//! `dialog-operator`, above the repository layer.
+//! This crate holds only the primitives. Storage routing lives in
+//! `dialog-storage`, and the operating environment composed over such a
+//! credential, the peer and its sessions, lives in `dialog-peer`, above
+//! the repository layer.
 
+pub mod access;
 mod authority;
-mod profile;
+mod error;
+mod open;
+mod secret;
+mod space;
 
+pub use access::{Claim, ClaimExt, SaveDelegation};
 pub use authority::*;
-pub use profile::*;
+pub use error::IdentityError;
+pub use open::OpenCredential;
+pub use secret::*;
+pub use space::SpaceHandle;

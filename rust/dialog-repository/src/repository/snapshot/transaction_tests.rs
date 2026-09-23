@@ -12,7 +12,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
-use dialog_operator::helpers::test_operator_with_profile;
+use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::The;
 use dialog_query::query::Output;
 use dialog_query::{Query, Term, the};
@@ -137,13 +137,13 @@ fn fact(of: &str, is: &str) -> Artifact {
 
 /// A branch with one committed fact and a snapshot of it.
 async fn staged() -> Result<(
-    dialog_operator::Operator<VolatileSpace>,
-    dialog_identity::Profile,
+    dialog_peer::Peer<VolatileSpace>,
+    dialog_peer::Peer<VolatileSpace>,
     Repository,
     Branch,
     Snapshot,
 )> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
@@ -601,7 +601,7 @@ async fn it_refuses_a_commit_built_on_a_stale_head() -> Result<()> {
 async fn it_induces_on_commit() -> Result<()> {
     use dialog_query::InductiveRule;
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
 

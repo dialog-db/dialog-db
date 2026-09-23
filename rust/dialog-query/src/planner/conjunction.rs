@@ -392,7 +392,7 @@ mod tests {
         Environment, Formula, Negation, Parameters, Premise, Proposition, Term, Type, Value,
     };
     use dialog_artifacts::Entity;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::{TryStreamExt, stream};
 
     /// A two-attribute conjunction over a shared entity is structurally merge
@@ -403,7 +403,7 @@ mod tests {
     /// back to the nested-loop fold instead of scanning every range in full.
     #[dialog_common::test]
     async fn it_prefers_the_fold_when_one_scan_is_selective() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -485,7 +485,7 @@ mod tests {
     /// out exactly as the fold alone produces them.
     #[dialog_common::test]
     async fn it_decides_merge_or_fold_per_run_of_bindings() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -581,7 +581,7 @@ mod tests {
     /// the left-join that binds `?nickname`.
     #[dialog_common::test]
     async fn it_takes_present_source_over_coalesce_fallback() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -670,7 +670,7 @@ mod tests {
     /// it had every banned one.
     #[dialog_common::test]
     async fn it_negates_absent_as_matching_nothing() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -752,7 +752,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_filters_concept_rows_with_absent_field_from_required_formula() -> anyhow::Result<()>
     {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -843,7 +843,7 @@ mod tests {
     /// share a single type is a non-match — no promotion, no error.
     #[dialog_common::test]
     async fn it_sums_signed_integers_and_filters_mixed_rows() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -913,7 +913,7 @@ mod tests {
     /// other way around.
     #[dialog_common::test]
     async fn it_adapts_integer_literals_to_the_rows_type() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -969,7 +969,7 @@ mod tests {
     /// the predicate.
     #[dialog_common::test]
     async fn it_filters_rows_through_type_predicates() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1018,7 +1018,7 @@ mod tests {
     /// default instead of exclusion.
     #[dialog_common::test]
     async fn it_narrows_optional_formula_input_to_a_filter() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

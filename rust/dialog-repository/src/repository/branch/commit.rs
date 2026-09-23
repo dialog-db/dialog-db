@@ -610,7 +610,7 @@ mod tests {
     use crate::TreeReference;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use futures_util::{StreamExt, stream};
@@ -626,7 +626,7 @@ mod tests {
     /// fact was deleted as a "superseded prior".
     #[dialog_common::test]
     async fn it_keeps_both_facts_across_two_commits() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -670,7 +670,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_and_selects() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -720,7 +720,7 @@ mod tests {
     async fn it_fails_a_commit_racing_another_then_reconciles_on_refresh() -> Result<()> {
         use crate::PublishError;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // Two independent handles to the same branch — both snapshot the same
@@ -802,7 +802,7 @@ mod history_tests {
 
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::history::{
         Causality, History as _, HistorySelector, causality, common_ancestor,
@@ -824,7 +824,7 @@ mod history_tests {
     /// conflict detection, and every revision's DAG edge is recorded.
     #[dialog_common::test]
     async fn it_records_claim_lineage_across_commits() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -919,7 +919,7 @@ mod history_tests {
     /// adopts on pull — breaks verification.
     #[dialog_common::test]
     async fn it_signs_the_published_head() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -960,7 +960,7 @@ mod history_tests {
     async fn it_rejects_writes_to_the_reserved_dialog_namespace() -> Result<()> {
         use dialog_artifacts::DialogArtifactsError;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -998,7 +998,7 @@ mod history_tests {
     /// edition, no new history.
     #[dialog_common::test]
     async fn it_keeps_the_revision_for_an_empty_commit() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1047,7 +1047,7 @@ mod history_tests {
     /// so the branch keeps its revision and mints no new edition.
     #[dialog_common::test]
     async fn it_keeps_the_revision_when_a_commit_only_retracts_absent_facts() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1088,7 +1088,7 @@ mod history_tests {
     /// `VersionMismatch` and the caller refreshes and retries.
     #[dialog_common::test]
     async fn it_does_not_treat_a_stale_snapshot_as_a_noop() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let seed = repo.branch("main").open().perform(&operator).await?;
@@ -1150,7 +1150,7 @@ mod history_tests {
     /// version, so later commits can derive what they supersede.
     #[dialog_common::test]
     async fn it_tags_committed_data_with_the_revision_version() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

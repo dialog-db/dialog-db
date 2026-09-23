@@ -258,7 +258,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::resolve;
-    use crate::helpers::{flaky_operator_with_profile, test_repo};
+    use crate::helpers::{flaky_session_with_peer, test_repo};
     use crate::registry::{RegistryEnv, apply, pull};
     use crate::schema::{Peer, Replica};
     use crate::{
@@ -268,17 +268,17 @@ mod tests {
     use anyhow::Result;
     use dialog_artifacts::Changes;
     use dialog_credentials::Credential;
-    use dialog_identity::Profile;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::PeerSpace;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::Statement as _;
     use dialog_varsig::did;
 
     /// Routes that resolve to `main` and `dev` on this replica: the
     /// second is recorded straight into the registry, so the branch's
     /// tracking cell still holds the routes from when only `main` was.
-    async fn two_upstreams_one_recorded<Env>(
+    async fn two_upstreams_one_recorded<S: PeerSpace, Env>(
         repo: &Repository<Credential>,
-        profile: &Profile,
+        peer: &dialog_peer::Peer<S>,
         env: &Env,
     ) -> Result<Branch>
     where
@@ -289,7 +289,7 @@ mod tests {
         feature.pull_from(&main).perform(env).await?;
         assert_eq!(feature.pulls().iter().count(), 1);
 
-        let local = Replica::new(profile.did(), repo.did());
+        let local = Replica::new(peer.did(), repo.did());
         let dev = local.branch("dev");
         let mut changes = Changes::new();
         dev.clone().assert(&mut changes);
@@ -312,11 +312,15 @@ mod tests {
     /// registry moved.
     #[dialog_common::test]
     async fn it_records_its_routes_however_often_the_cell_moves() -> Result<()> {
-        let (operator, profile, storage) = flaky_operator_with_profile().await;
+        let (operator, profile) = flaky_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let feature = two_upstreams_one_recorded(&repo, &profile, &operator).await?;
 
-        let memory = storage.space(&repo.did()).expect("mounted").memory;
+        let memory = profile
+            .storage()
+            .space(&repo.did())
+            .expect("mounted")
+            .memory;
         memory.lose_next_publishes("branch/feature", "tracking", 3);
         resolve(&feature, &operator).await?;
 
@@ -343,11 +347,15 @@ mod tests {
     /// than answering with the routes unrecorded.
     #[dialog_common::test]
     async fn it_gives_up_on_a_cell_that_never_stops_moving() -> Result<()> {
-        let (operator, profile, storage) = flaky_operator_with_profile().await;
+        let (operator, profile) = flaky_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let feature = two_upstreams_one_recorded(&repo, &profile, &operator).await?;
 
-        let memory = storage.space(&repo.did()).expect("mounted").memory;
+        let memory = profile
+            .storage()
+            .space(&repo.did())
+            .expect("mounted")
+            .memory;
         memory.lose_publishes("branch/feature", "tracking", 0..);
         let resolved = resolve(&feature, &operator).await;
         assert!(
@@ -362,7 +370,7 @@ mod tests {
     /// next time this one resolves, because the registry moved.
     #[dialog_common::test]
     async fn it_resolves_again_when_the_registry_moves() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
         let dev = repo.branch("dev").open().perform(&operator).await?;
@@ -394,7 +402,7 @@ mod tests {
     /// why.
     #[dialog_common::test]
     async fn it_keeps_an_unreachable_upstream_and_says_why() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let feature = repo.branch("feature").open().perform(&operator).await?;
 

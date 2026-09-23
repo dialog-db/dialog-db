@@ -1,7 +1,7 @@
 //! Repository layer for Dialog-DB.
 //!
 //! This crate layers a capability-based repository abstraction on top of
-//! the operator (`dialog-operator`) and effect (`dialog-effects`) crates.
+//! the operator (`dialog-peer`) and effect (`dialog-effects`) crates.
 //! It provides:
 //!
 //! - [`Repository`] — a subject-scoped handle over a space, generic over

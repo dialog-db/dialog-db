@@ -87,7 +87,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::types::Any;
     use crate::{Environment, Premise, Term, Value};
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
 
     /// Lower a single negated premise to its compiled `Plan` and
@@ -106,7 +106,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_passes_match_when_negated_equality_not_satisfied() -> Result<(), EvaluationError> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await.unwrap();
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -133,7 +133,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_filters_match_when_negated_equality_satisfied() -> Result<(), EvaluationError> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await.unwrap();
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
