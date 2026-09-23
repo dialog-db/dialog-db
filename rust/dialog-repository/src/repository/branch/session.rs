@@ -27,6 +27,7 @@ use futures_util::future::try_join_all;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
+use crate::REGISTRY;
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
@@ -34,8 +35,10 @@ use crate::rules::{
     assemble, builtin, conclusion_attr, conclusion_selector, hydrate, overlay_rules, rule_entities,
     source_attr, source_bytes, source_selector,
 };
-use crate::schema::{DidExt as _, Session, SessionBranch, session};
-use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Snapshot};
+use crate::schema::{
+    Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
+};
+use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -156,6 +159,22 @@ impl<'a> QueryLayer<'a> {
         for source in &self.sources {
             if let Some(entity) = source.metadata(operator, &mut changes) {
                 branch_entities.push(entity);
+            }
+        }
+
+        // The registry describes itself here rather than in its own
+        // tree: a branch registry that had to record itself would have
+        // to exist before it could be created. Synthesizing the fact
+        // means a listing sees `meta` like any other branch while
+        // nothing about it is ever stored.
+        //
+        // One per repository in scope, since each has its own registry.
+        let mut described = HashSet::new();
+        for source in &self.sources {
+            let subject = source.subject();
+            if described.insert(subject.did().clone()) {
+                let replica = Replica::new(operator.profile().clone(), subject.did().clone());
+                BranchConcept::new(&replica, REGISTRY).assert(&mut changes);
             }
         }
 

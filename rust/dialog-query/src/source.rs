@@ -24,7 +24,7 @@ pub(crate) mod test {
     use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
     use dialog_peer::Peer as DialogOperator;
-    use dialog_repository::{Branch, NetworkedIndex, RepositoryArchiveExt as _};
+    use dialog_repository::{Branch, NetworkedIndex};
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_storage::{Blake3Hash, StorageBackend};
 

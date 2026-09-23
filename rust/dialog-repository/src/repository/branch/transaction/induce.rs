@@ -744,7 +744,6 @@ where
         + ConditionalSync
         + 'static,
 {
-    use crate::RepositoryArchiveExt as _;
     use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled};
     use dialog_artifacts::{EntityKey, Key, KeyViewConstruct, State};
     use dialog_common::Blake3Hash as NodeHash;

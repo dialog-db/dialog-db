@@ -250,6 +250,7 @@ mod tests {
         let digest = Blake3Hash::hash(&content);
 
         did.clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()))
@@ -258,6 +259,7 @@ mod tests {
             .unwrap();
 
         let result = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -283,6 +285,7 @@ mod tests {
 
         let etag = did
             .clone()
+            .writer()
             .memory()
             .space("data")
             .cell("head")
@@ -294,6 +297,7 @@ mod tests {
         assert!(!etag.is_empty());
 
         let resolved = did
+            .reader()
             .memory()
             .space("data")
             .cell("head")
@@ -323,6 +327,7 @@ mod tests {
 
         let result = subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get([0u8; 32])
@@ -362,7 +367,8 @@ mod tests {
         let content = b"dave only".to_vec();
         let digest = Blake3Hash::hash(&content);
 
-        did1.archive()
+        did1.writer()
+            .archive()
             .catalog("index")
             .put(Buffer::from(content))
             .perform(&env)
@@ -370,6 +376,7 @@ mod tests {
             .unwrap();
 
         let result = did2
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -465,6 +472,7 @@ mod tests {
             let digest = Blake3Hash::hash(&content);
 
             did.clone()
+                .writer()
                 .archive()
                 .catalog("index")
                 .put(Buffer::from(content.clone()))
@@ -473,6 +481,7 @@ mod tests {
                 .unwrap();
 
             let result = did
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)
@@ -619,6 +628,7 @@ mod tests {
             let content = b"opfs archive blob".to_vec();
             let digest = Blake3Hash::hash(&content);
             did.clone()
+                .writer()
                 .archive()
                 .catalog("index")
                 .put(Buffer::from(content.clone()))
@@ -627,6 +637,7 @@ mod tests {
                 .unwrap();
             let got = did
                 .clone()
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)
@@ -638,6 +649,7 @@ mod tests {
             // Memory (-> OPFS).
             let cell = b"opfs cell value".to_vec();
             did.clone()
+                .writer()
                 .memory()
                 .space("data")
                 .cell("head")
@@ -646,6 +658,7 @@ mod tests {
                 .await
                 .unwrap();
             let resolved = did
+                .reader()
                 .memory()
                 .space("data")
                 .cell("head")
@@ -679,6 +692,7 @@ mod tests {
 
             let mut sink = did
                 .clone()
+                .writer()
                 .archive()
                 .blob()
                 .write()
@@ -689,7 +703,14 @@ mod tests {
             let hash = sink.finish().await.unwrap();
             assert_eq!(hash, expected);
 
-            let mut reader = did.archive().blob().read(hash).perform(&env).await.unwrap();
+            let mut reader = did
+                .reader()
+                .archive()
+                .blob()
+                .read(hash)
+                .perform(&env)
+                .await
+                .unwrap();
             let mut out = Vec::new();
             while let Some(chunk) = reader.next().await.unwrap() {
                 out.extend(chunk);
@@ -734,6 +755,7 @@ mod tests {
                 .did();
 
             did.clone()
+                .writer()
                 .memory()
                 .space("data")
                 .cell("head")
@@ -744,6 +766,7 @@ mod tests {
 
             // A second IfNoneMatch publish must fail: the cell already exists.
             let result = did
+                .writer()
                 .memory()
                 .space("data")
                 .cell("head")
@@ -772,6 +795,7 @@ mod tests {
             let content = b"alice only".to_vec();
             let digest = Blake3Hash::hash(&content);
             alice
+                .writer()
                 .archive()
                 .catalog("index")
                 .put(Buffer::from(content))
@@ -780,6 +804,7 @@ mod tests {
                 .unwrap();
 
             let seen = bob
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)
@@ -803,6 +828,7 @@ mod tests {
             let content: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
             let digest = Blake3Hash::hash(&content);
             did.clone()
+                .writer()
                 .archive()
                 .catalog("index")
                 .put(Buffer::from(content.clone()))
@@ -810,6 +836,7 @@ mod tests {
                 .await
                 .unwrap();
             let got = did
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)

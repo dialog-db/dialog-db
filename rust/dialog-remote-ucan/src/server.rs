@@ -23,11 +23,14 @@ use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Did, Policy, Provider, Subject};
 use dialog_common::{Blake3Hash, Buffer, Checksum, ConditionalSync};
 use dialog_did_web::{CachingResolver, Resolve, WebResolver};
+use dialog_effects::MethodExt as _;
+use dialog_effects::Rejection;
+use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{self, Catalog, PutAttenuation};
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{self, BlobError, BlobReader};
+use dialog_effects::memory::prelude::MemoryExt as _;
 use dialog_effects::memory::{self, Cell, PublishAttenuation, Space};
-use dialog_effects::{Rejection, Use};
 use dialog_remote_ucan_s3::{Args, FromUcanArgs, verify_invocation};
 use dialog_ucan_core::revocation::RevocationChecker;
 use dialog_ucan_core::{Container, InvocationChain, UnverifiedRevocations};
@@ -492,9 +495,10 @@ where
             return Err(Failure::checksum_mismatch());
         }
         let capability = Subject::from(subject.clone())
-            .attenuate(Use)
-            .attenuate(archive::Archive)
+            .writer()
+            .archive()
             .attenuate(Catalog::of(&attenuated).clone())
+            .attenuate(archive::Block::new())
             .invoke(archive::Put::new(Buffer::from(payload)));
         Provider::<archive::Put>::execute(&self.provider, capability).await?;
         Ok(Response::status(200))
@@ -580,8 +584,8 @@ where
             return Err(Failure::checksum_mismatch());
         }
         let capability = Subject::from(subject.clone())
-            .attenuate(Use)
-            .attenuate(memory::Memory)
+            .writer()
+            .memory()
             .attenuate(Space::of(&attenuated).clone())
             .attenuate(Cell::of(&attenuated).clone())
             .invoke(memory::Publish::new(payload, bound.when.clone()));

@@ -18,6 +18,7 @@ use anyhow::Result;
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_capability::Subject;
 use dialog_credentials::{Credential, SignerCredential};
+use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::*;
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::Location;
@@ -274,6 +275,7 @@ async fn it_denies_a_read_without_authorization() -> Result<()> {
 
     let digest = dialog_common::Blake3Hash::hash(b"anything");
     let result = Subject::from(other_repo.did())
+        .reader()
         .archive()
         .catalog("index")
         .get(digest)
@@ -307,6 +309,7 @@ async fn it_allows_read_but_denies_write_with_read_only_delegation() -> Result<(
         .access()
         .claim(
             Subject::from(repo.did())
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest.clone()),
@@ -318,6 +321,7 @@ async fn it_allows_read_but_denies_write_with_read_only_delegation() -> Result<(
 
     // Read is authorized (returns None: nothing written yet).
     let read = Subject::from(repo.did())
+        .reader()
         .archive()
         .catalog("index")
         .get(digest)
@@ -331,6 +335,7 @@ async fn it_allows_read_but_denies_write_with_read_only_delegation() -> Result<(
 
     // Write is denied: no /archive/put in the delegation.
     let write = Subject::from(repo.did())
+        .writer()
         .archive()
         .catalog("index")
         .put(content)
@@ -363,6 +368,7 @@ async fn it_allows_resolve_but_denies_publish_with_resolve_only_delegation() -> 
         .access()
         .claim(
             Subject::from(repo.did())
+                .reader()
                 .memory()
                 .space("local")
                 .cell("head")
@@ -375,6 +381,7 @@ async fn it_allows_resolve_but_denies_publish_with_resolve_only_delegation() -> 
 
     // Resolve is authorized (returns None: nothing published yet).
     let resolved = Subject::from(repo.did())
+        .reader()
         .memory()
         .space("local")
         .cell("head")
@@ -389,6 +396,7 @@ async fn it_allows_resolve_but_denies_publish_with_resolve_only_delegation() -> 
 
     // Publish is denied: no /memory/publish in the delegation.
     let published = Subject::from(repo.did())
+        .writer()
         .memory()
         .space("local")
         .cell("head")
@@ -432,6 +440,7 @@ async fn it_denies_when_subject_is_not_the_directory() -> Result<()> {
 
     let digest = dialog_common::Blake3Hash::hash(b"anything");
     let result = Subject::from(repo.did())
+        .reader()
         .archive()
         .catalog("index")
         .get(digest)

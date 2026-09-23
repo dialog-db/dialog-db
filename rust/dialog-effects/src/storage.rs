@@ -130,8 +130,11 @@ impl LocationExt for Capability<Location> {
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Load;
 
-impl Effect for Load {
+impl Attenuation for Load {
     type Of = Location;
+}
+
+impl Effect for Load {
     type Output = Result<Credential, StorageError>;
 }
 
@@ -152,8 +155,11 @@ impl Create {
     }
 }
 
-impl Effect for Create {
+impl Attenuation for Create {
     type Of = Location;
+}
+
+impl Effect for Create {
     type Output = Result<Credential, StorageError>;
 }
 

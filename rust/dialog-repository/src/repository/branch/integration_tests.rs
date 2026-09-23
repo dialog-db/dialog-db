@@ -6,11 +6,15 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use dialog_effects::storage::Location;
+
+use dialog_effects::MethodExt as _;
+use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use std::collections::HashSet;
 
 use crate::{
-    Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryArchiveExt as _,
-    RepositoryExt as _, Revision, SiteAddress, SnapshotError,
+    Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryExt as _, Revision,
+    SiteAddress, SnapshotError,
 };
 use anyhow::{Context as _, Result};
 use dialog_artifacts::tree::TreeStorageBridge;
@@ -21,7 +25,6 @@ use dialog_artifacts::{
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_peer::OpenCredential;
 use dialog_peer::helpers::{open_peer, test_session_with_peer, unique_name};
 // Only the native-only tests below construct one.
@@ -40,9 +43,9 @@ use dialog_artifacts::{ShipmentRef, shipment_ref};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_capability::{Fork, Provider};
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _};
+use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _, GetBlockExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::{
     Rejection,
@@ -1817,6 +1820,7 @@ async fn assert_remote_closure_complete(
         let found: Option<Vec<u8>> = address
             .subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(hash.clone())
@@ -1851,6 +1855,7 @@ async fn assert_remote_closure_complete(
                     let probe = address
                         .subject
                         .clone()
+                        .reader()
                         .archive()
                         .blob()
                         .read(digest.clone())
@@ -1874,6 +1879,7 @@ async fn assert_remote_closure_complete(
                     let found: Option<Vec<u8>> = address
                         .subject
                         .clone()
+                        .reader()
                         .archive()
                         .catalog("index")
                         .get(reference.clone())
@@ -2511,8 +2517,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
 async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result<()> {
     use dialog_capability::access::{Access as AccessAttenuation, Retain};
     use dialog_credentials::{Credential as RawCredential, Ed25519Signer, SignerCredential};
-    use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
-    use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+    use dialog_effects::archive::prelude::ArchiveExt as _;
     use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
     use dialog_ucan::{Ucan, UcanDelegation};
     use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -2666,6 +2671,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
             .expect("delegation entities are blob entities");
         let mut reader = device_branch
             .subject()
+            .reader()
             .archive()
             .blob()
             .read(digest)
@@ -3525,7 +3531,7 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
     repository: &Repository<C>,
     revision: &Revision,
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
-    let catalog = repository.subject().archive().index();
+    let catalog = ArchiveScope::new(repository.subject()).index();
     let index = NetworkedIndex::new(env, catalog, None);
     let storage = TreeStorage::new(TreeStorageBridge(index));
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));

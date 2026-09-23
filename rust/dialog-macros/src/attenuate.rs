@@ -301,14 +301,16 @@ fn generate_for_named_struct(
             fn into_attenuation(self) -> Self { self }
         }
 
-        // The generated projection struct mirrors the source's position in
-        // the capability chain: same `Of` and same ability-path segment.
-        // The source must be an `Attenuation` — which `Effect` implies via
-        // blanket impl.
-        impl ::dialog_capability::Attenuation for #attenuation_name {
-            type Of = <#name as ::dialog_capability::Attenuation>::Of;
-            fn attenuation() -> &'static str {
-                <#name as ::dialog_capability::Attenuation>::attenuation()
+        // The generated projection struct mirrors the source's position
+        // in the capability chain: same `Of`, and the same choice about
+        // naming itself. `Policy` is what every link implements --
+        // directly when it stays out of the ability path, through the
+        // `Attenuation` blanket impl when it names itself -- so
+        // mirroring it carries either kind.
+        impl ::dialog_capability::Policy for #attenuation_name {
+            type Of = <#name as ::dialog_capability::Policy>::Of;
+            fn attenuation() -> ::core::option::Option<&'static str> {
+                <#name as ::dialog_capability::Policy>::attenuation()
             }
         }
 

@@ -14,66 +14,122 @@
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
 
-use crate::Use;
+use crate::Method;
+use crate::method;
 use std::fmt;
+use std::marker::PhantomData;
 use std::str;
 
 use crate::Rejection;
 use base58::ToBase58;
 use dialog_capability::access::AuthorizeError;
 pub use dialog_capability::{
-    Attenuate, Attenuation, Capability, Effect, Policy, StorageError, Subject,
+    Attenuate, Attenuation, Capability, Constraint, Effect, Policy, StorageError, Subject,
 };
 use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Root attenuation for memory operations.
+/// The memory namespace, under a verb: `/use/get/memory/...`.
 ///
-/// Attaches to Subject. Contributes no ability segment of its own: the
-/// effects name the whole command (`/use/get/memory/cell`), so the verb
-/// sits above the resource in the path.
+/// Generic over the verb it hangs from, because the same namespace is
+/// reached by reading, writing and deleting. The verb sits above it in
+/// the chain, so the path reads verb-then-namespace without any link
+/// having to spell the combination out.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Memory;
+pub struct Memory<V = method::Get>(PhantomData<V>);
 
-impl Policy for Memory {
-    type Of = Use;
+impl<V> Memory<V> {
+    /// The memory namespace under `V`.
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<V> Default for Memory<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: Method> Attenuation for Memory<M>
+where
+    M::Of: Constraint,
+{
+    type Of = M;
+
+    fn attenuation() -> &'static str {
+        "memory"
+    }
 }
 
 /// Space policy that scopes operations to a memory space.
+///
+/// Silent in the ability path: the space *name* scopes the capability
+/// and travels in the invocation's parameters, but `space` is not a
+/// path segment -- `/use/get/memory/cell` names the kind of thing
+/// reached, not which one.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Space {
+pub struct Space<V = method::Get> {
     /// The space name (typically a DID).
     pub space: String,
+    /// The verb this policy hangs from. A type-level marker: it holds
+    /// no data and never reaches the wire.
+    #[serde(skip)]
+    pub verb: PhantomData<V>,
 }
 
-impl Space {
+impl<V> Space<V> {
     /// Create a new Space policy.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { space: name.into() }
+        Self {
+            space: name.into(),
+            verb: PhantomData,
+        }
     }
 }
 
-impl Policy for Space {
-    type Of = Memory;
+impl<M: Method> Policy for Space<M>
+where
+    M::Of: Constraint,
+{
+    type Of = Memory<M>;
 }
 
 /// Cell policy that scopes operations to a specific cell within a space.
+///
+/// Contributes `cell` to the ability path: it is the resource the verb
+/// applies to, and so completes the command. The cell *name* scopes the
+/// capability and travels in the parameters, as the space name does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Cell {
+pub struct Cell<V = method::Get> {
     /// The cell name.
     pub cell: String,
+    /// The verb this policy hangs from. A type-level marker: it holds
+    /// no data and never reaches the wire.
+    #[serde(skip)]
+    pub verb: PhantomData<V>,
 }
 
-impl Cell {
+impl<V> Cell<V> {
     /// Create a new Cell policy.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { cell: name.into() }
+        Self {
+            cell: name.into(),
+            verb: PhantomData,
+        }
     }
 }
 
-impl Policy for Cell {
-    type Of = Space;
+impl<M: Method> Attenuation for Cell<M>
+where
+    M::Of: Constraint,
+{
+    type Of = Space<M>;
+
+    fn attenuation() -> &'static str {
+        "cell"
+    }
 }
 
 /// Opaque version identifier for CAS operations.
@@ -187,13 +243,12 @@ pub struct Edition<T> {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
 pub struct Resolve;
 
-impl Effect for Resolve {
-    type Of = Cell;
-    type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
+impl Policy for Resolve {
+    type Of = Cell<method::Get>;
+}
 
-    fn command() -> &'static str {
-        "get/memory/cell"
-    }
+impl Effect for Resolve {
+    type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
 }
 
 /// Publish operation - sets cell content with CAS semantics.
@@ -223,13 +278,12 @@ impl Publish {
     }
 }
 
-impl Effect for Publish {
-    type Of = Cell;
-    type Output = Result<Version, MemoryError>;
+impl Policy for Publish {
+    type Of = Cell<method::Put>;
+}
 
-    fn command() -> &'static str {
-        "put/memory/cell"
-    }
+impl Effect for Publish {
+    type Output = Result<Version, MemoryError>;
 }
 
 /// Retract operation - removes cell content with CAS semantics.
@@ -249,13 +303,12 @@ impl Retract {
     }
 }
 
-impl Effect for Retract {
-    type Of = Cell;
-    type Output = Result<(), MemoryError>;
+impl Policy for Retract {
+    type Of = Cell<method::Delete>;
+}
 
-    fn command() -> &'static str {
-        "delete/memory/cell"
-    }
+impl Effect for Retract {
+    type Output = Result<(), MemoryError>;
 }
 
 pub mod prelude;
@@ -294,77 +347,75 @@ impl From<StorageError> for MemoryError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use dialog_capability::did;
+    use crate::prelude::*;
+    use dialog_capability::{Subject, did};
 
-    #[test]
-    fn it_builds_memory_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Memory);
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    fn subject() -> Subject {
+        Subject::from(did!("key:zSpace"))
+    }
+
+    /// The method sits above the namespace, so the same cell reads,
+    /// writes and deletes through three different chains -- each named
+    /// in the order its path reads.
+    #[dialog_common::test]
+    fn it_builds_the_three_cell_commands() {
+        assert_eq!(
+            subject()
+                .reader()
+                .memory()
+                .space("local")
+                .cell("main")
+                .resolve()
+                .ability(),
+            "/use/get/memory/cell"
+        );
+        assert_eq!(
+            subject()
+                .writer()
+                .memory()
+                .space("local")
+                .cell("main")
+                .publish(b"test".to_vec(), None)
+                .ability(),
+            "/use/put/memory/cell"
+        );
+        assert_eq!(
+            subject()
+                .user()
+                .delete()
+                .memory()
+                .space("local")
+                .cell("main")
+                .retract(b"v1")
+                .ability(),
+            "/use/delete/memory/cell"
+        );
+    }
+
+    /// The space and cell names scope the capability without appearing
+    /// in the path: two cells differ in what they authorize, not in how
+    /// the command reads.
+    #[dialog_common::test]
+    fn it_scopes_by_name_without_changing_the_path() {
+        let main = subject().reader().memory().space("local").cell("main");
+        let other = subject().reader().memory().space("local").cell("other");
+
+        assert_eq!(main.resolve().ability(), other.resolve().ability());
+    }
+
+    /// The chain keeps the subject it started from.
+    #[dialog_common::test]
+    fn it_keeps_its_subject() {
+        let claim = subject()
+            .reader()
+            .memory()
+            .space("local")
+            .cell("main")
+            .resolve();
 
         assert_eq!(claim.subject(), &did!("key:zSpace"));
-        assert_eq!(claim.ability(), "/use");
-    }
-
-    #[test]
-    fn it_builds_space_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Memory)
-            .attenuate(Space::new("local"));
-
-        assert_eq!(claim.subject(), &did!("key:zSpace"));
-        // Space is Policy, not Ability, so it doesn't add to path
-        assert_eq!(claim.ability(), "/use");
-    }
-
-    #[test]
-    fn it_builds_cell_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("main"));
-
-        assert_eq!(claim.subject(), &did!("key:zSpace"));
-        // Cell is Policy, not Ability, so it doesn't add to path
-        assert_eq!(claim.ability(), "/use");
-    }
-
-    #[test]
-    fn it_builds_resolve_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("main"))
-            .invoke(Resolve);
-
-        assert_eq!(claim.ability(), "/use/get/memory/cell");
-    }
-
-    #[test]
-    fn it_builds_publish_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("main"))
-            .invoke(Publish::new(b"test", None));
-
-        assert_eq!(claim.ability(), "/use/put/memory/cell");
-    }
-
-    #[test]
-    fn it_builds_retract_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Use)
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("main"))
-            .invoke(Retract::new(b"v1"));
-
-        assert_eq!(claim.ability(), "/use/delete/memory/cell");
     }
 }

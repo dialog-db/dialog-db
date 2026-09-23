@@ -14,9 +14,7 @@
 //! # use dialog_capability::{Fork, Provider};
 //! # use dialog_effects::archive::{Get, Import, Put};
 //! # use dialog_effects::authority::{Attest, Identify};
-//! # use dialog_effects::blob::{
-//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
-//! # };
+//! # use dialog_effects::blob::{//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite, //! #};
 //! # use dialog_effects::memory::{Publish, Resolve};
 //! # use dialog_repository::{Blob, Branch, CommitError, RemoteSite};
 //! # async fn example<Env>(
@@ -66,8 +64,7 @@
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Snapshot, TreeReference,
-    Upstream,
+    RepositoryMemoryExt as _, Revision, Snapshot, TreeReference, Upstream,
 };
 use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
@@ -75,10 +72,11 @@ use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Enti
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveSubjectExt as _, CatalogExt as _};
+use dialog_effects::MethodExt as _;
+use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
 };
@@ -371,6 +369,7 @@ impl ReadBlob<'_> {
         let mut source = address
             .subject
             .clone()
+            .reader()
             .archive()
             .blob()
             .read(hash.clone())

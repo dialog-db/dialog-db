@@ -1,7 +1,7 @@
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
-    RepositoryArchiveExt as _, Revision, Snapshot, TreeReference, origin_of,
+    Revision, Snapshot, TreeReference, origin_of,
 };
 use dialog_artifacts::history::{
     Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
@@ -11,7 +11,6 @@ use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, St
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
@@ -1162,7 +1161,7 @@ mod history_tests {
             .await?;
 
         // Read the datum back through the artifact tree and check the tag.
-        use crate::{Index, NetworkedIndex, RepositoryArchiveExt as _};
+        use crate::{Index, NetworkedIndex};
         use dialog_artifacts::tree::ArtifactTreeExt as _;
         use dialog_common::Blake3Hash as NodeHash;
 

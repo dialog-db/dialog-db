@@ -90,8 +90,11 @@ impl SpaceExt for Capability<Space> {
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Load;
 
-impl Effect for Load {
+impl Attenuation for Load {
     type Of = Space;
+}
+
+impl Effect for Load {
     type Output = Result<Credential, StorageError>;
 }
 
@@ -112,7 +115,10 @@ impl Create {
     }
 }
 
-impl Effect for Create {
+impl Attenuation for Create {
     type Of = Space;
+}
+
+impl Effect for Create {
     type Output = Result<Credential, StorageError>;
 }

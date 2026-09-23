@@ -632,6 +632,65 @@ mod tests {
         Prove::<Ucan>::new(holder.did(), storage_scope(space))
     }
 
+    /// An operator built for a named access branch retains into it and
+    /// proves from it, and leaves the default branch untouched.
+    ///
+    /// A profile that keeps one branch per account names the active one:
+    /// the authority it proves with has to be that account's, and a grant
+    /// retained for one account must not be provable from another's
+    /// branch.
+    #[dialog_common::test]
+    async fn it_keeps_proofs_on_the_configured_access_branch() -> Result<()> {
+        use dialog_repository::ACCESS_BRANCH;
+
+        let storage = Storage::volatile();
+        let profile =
+            open_peer(storage.clone(), Location::profile(unique("access-branch"))).await?;
+        let operator = profile.worker(b"test").branch("account/test").await?;
+
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        operator
+            .resolve(claim(&holder, &space))
+            .await
+            .expect("the operator proves from the branch it retained into");
+
+        let configured = profile
+            .repository()
+            .branch("account/test")
+            .open()
+            .perform(&operator)
+            .await?;
+        assert!(
+            configured
+                .delegations()
+                .prove(holder.did(), storage_scope(&space))
+                .perform(&operator)
+                .await
+                .is_ok(),
+            "the grant is on the configured branch",
+        );
+
+        let default = profile
+            .repository()
+            .branch(ACCESS_BRANCH)
+            .open()
+            .perform(&operator)
+            .await?;
+        assert!(
+            default
+                .delegations()
+                .prove(holder.did(), storage_scope(&space))
+                .perform(&operator)
+                .await
+                .is_err(),
+            "nothing was retained on the default branch",
+        );
+        Ok(())
+    }
+
     /// A retain succeeds after another handle advanced the access branch.
     ///
     /// The access branch IS the profile repository's [`ACCESS_BRANCH`], so

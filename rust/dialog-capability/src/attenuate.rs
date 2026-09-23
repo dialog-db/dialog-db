@@ -31,15 +31,17 @@ use serde::de::DeserializeOwned;
 /// # use serde::{Serialize, Deserialize};
 /// # use dialog_macros::Attenuate;
 /// # use dialog_common::Checksum;
-/// # use dialog_capability::{Effect, Subject};
+/// # use dialog_capability::{Effect, Policy, Subject};
 /// #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 /// pub struct Put {
 ///     pub digest: Vec<u8>,
 ///     #[attenuate(into = Checksum, with = Checksum::sha256, rename = checksum)]
 ///     pub content: Vec<u8>,
 /// }
-/// # impl Effect for Put {
+/// # impl Policy for Put {
 /// #     type Of = Subject;
+/// # }
+/// # impl Effect for Put {
 /// #     type Output = ();
 /// # }
 /// // Generates:
@@ -64,11 +66,12 @@ pub trait Attenuate {
 
 #[cfg(test)]
 mod tests {
+    use crate::Policy;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::{Attenuation, Effect, Subject};
+    use crate::{Effect, Subject};
     use serde::{Deserialize, Serialize};
     use std::marker::PhantomData;
     use std::mem::size_of_val;
@@ -120,8 +123,11 @@ mod tests {
         content: Vec<u8>,
     }
 
-    impl Effect for Put {
+    impl Policy for Put {
         type Of = Subject;
+    }
+
+    impl Effect for Put {
         type Output = ();
     }
 
@@ -144,8 +150,11 @@ mod tests {
         content: Vec<u8>,
     }
 
-    impl Effect for Publish {
+    impl Policy for Publish {
         type Of = Subject;
+    }
+
+    impl Effect for Publish {
         type Output = ();
     }
 
@@ -175,20 +184,20 @@ mod tests {
     #[dialog_common::test]
     fn it_preserves_ability_path_on_attenuation_struct() {
         // The generated *Attenuation struct must occupy the same position
-        // in the capability chain as its source: same `Of` and same
-        // ability-path segment. This is what makes it safe to substitute
-        // for the source in delegations/invocations.
+        // in the capability chain as its source: same `Of` and the same
+        // choice about naming itself. This is what makes it safe to
+        // substitute for the source in delegations/invocations.
         assert_eq!(
-            <PublishAttenuation as Attenuation>::attenuation(),
-            <Publish as Attenuation>::attenuation()
+            <PublishAttenuation as Policy>::attenuation(),
+            <Publish as Policy>::attenuation()
         );
         assert_eq!(
-            <PutAttenuation as Attenuation>::attenuation(),
-            <Put as Attenuation>::attenuation()
+            <PutAttenuation as Policy>::attenuation(),
+            <Put as Policy>::attenuation()
         );
         assert_eq!(
-            <UploadAttenuation as Attenuation>::attenuation(),
-            <Upload as Attenuation>::attenuation()
+            <UploadAttenuation as Policy>::attenuation(),
+            <Upload as Policy>::attenuation()
         );
     }
 
@@ -205,8 +214,11 @@ mod tests {
         payload: Vec<u8>,
     }
 
-    impl Effect for Upload {
+    impl Policy for Upload {
         type Of = Subject;
+    }
+
+    impl Effect for Upload {
         type Output = ();
     }
 

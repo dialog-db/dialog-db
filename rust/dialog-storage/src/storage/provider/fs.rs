@@ -582,7 +582,8 @@ mod tests {
         let content = b"hello archive layout".to_vec();
         let digest = Blake3Hash::hash(&content);
 
-        did.archive()
+        did.writer()
+            .archive()
             .catalog("index")
             .put(Buffer::from(content))
             .perform(&provider)
@@ -612,7 +613,8 @@ mod tests {
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = Principal::did(&signer);
 
-        did.memory()
+        did.writer()
+            .memory()
             .space("local")
             .cell("head")
             .publish(b"cell content", None)
@@ -711,6 +713,7 @@ mod tests {
 
         // Provider should find it
         let loaded = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -744,6 +747,7 @@ mod tests {
 
         // Provider should resolve it with correct edition
         let resolved = did
+            .reader()
             .memory()
             .space("local")
             .cell("head")

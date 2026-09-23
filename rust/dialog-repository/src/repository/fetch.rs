@@ -40,16 +40,14 @@ use futures_util::{Stream, StreamExt as _};
 use async_trait::async_trait;
 use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{
     Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Traversable as _,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 
 use crate::repository::source::Source;
-use crate::{
-    EMPTY_TREE_HASH, Hydrate, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-};
+use crate::{EMPTY_TREE_HASH, Hydrate, Index, NetworkedIndex, RemoteSite};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
@@ -220,7 +218,7 @@ where
         return Ok(());
     }
     let remote = source.as_ref().fallback(env).await;
-    let catalog = source.as_ref().subject().archive().index();
+    let catalog = ArchiveScope::new(source.as_ref().subject()).index();
     let store = NetworkedIndex::new(env, catalog, remote).with_priority(likelihood.into());
     let store = CacheThrough {
         cache: source.as_ref().node_cache(),

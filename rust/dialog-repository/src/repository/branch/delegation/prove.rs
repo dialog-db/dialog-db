@@ -1019,7 +1019,6 @@ mod tests {
             .await
             .certificates()
             .remove(0);
-        use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
         let bytes: Vec<u8> = certificate
             .encode()
             .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -1075,7 +1074,6 @@ mod tests {
         .expect("forge a delegation");
         let certificate = UcanCertificate(forged);
 
-        use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
         let bytes: Vec<u8> = certificate
             .encode()
             .map_err(|error| anyhow::anyhow!("{error}"))?;

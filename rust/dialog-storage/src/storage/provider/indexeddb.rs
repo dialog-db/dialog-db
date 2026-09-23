@@ -651,21 +651,21 @@ mod tests {
 
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(content)))
+            .writer()
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content))
             .perform(&db)
             .await?;
 
         // Memory creates "memory" store
         subject
             .clone()
-            .attenuate(Use)
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("head"))
-            .invoke(Publish::new(b"value", None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("head")
+            .publish(b"value", None)
             .perform(&db)
             .await?;
 
