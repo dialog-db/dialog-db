@@ -17,8 +17,12 @@ use dialog_varsig::{Did, Principal};
 use thiserror::Error;
 use url::Url;
 
-use crate::SiteAddress;
-use crate::schema::{Peer, PeerAddress, peer};
+use crate::registry::{RegistryEnv, apply};
+use crate::schema::{DidExt as _, Peer, PeerAddress, peer};
+use crate::{AddAddressError, Branch, REGISTRY, Repository, RepositoryMemoryExt as _, SiteAddress};
+use dialog_artifacts::{Changes, Entity};
+use dialog_capability::Subject;
+use dialog_query::{Output as _, Query, Statement as _, Term};
 
 /// Why an address does not name a peer.
 #[derive(Debug, Error)]
@@ -43,12 +47,12 @@ impl Peer {
 }
 
 impl PeerAddress {
-    /// Record that `peer` is reached at `address`.
-    pub fn new(peer: &Peer, address: &SiteAddress) -> Result<Self, PeerError> {
+    /// Record that the peer with entity `peer` is reached at `address`.
+    pub fn new(peer: &Entity, address: &SiteAddress) -> Result<Self, PeerError> {
         let bytes = serde_ipld_dagcbor::to_vec(address)
             .map_err(|error| PeerError::Encoding(error.to_string()))?;
         Ok(Self {
-            this: peer.this.clone(),
+            this: peer.clone(),
             address: peer::Address(bytes),
         })
     }
@@ -57,6 +61,155 @@ impl PeerAddress {
     pub fn site(&self) -> Result<SiteAddress, PeerError> {
         serde_ipld_dagcbor::from_slice(&self.address.0)
             .map_err(|error| PeerError::Encoding(error.to_string()))
+    }
+}
+
+/// How a peer is picked out: by the name it is known by locally, or by
+/// its entity -- its DID.
+///
+/// Only an entity can make a new peer. A name is something a peer is
+/// given, so it can find a peer that has one but cannot conjure one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum By {
+    /// The peer known locally by this name.
+    Name(String),
+    /// The peer with this entity.
+    Entity(Entity),
+}
+
+impl From<&str> for By {
+    fn from(name: &str) -> Self {
+        Self::Name(name.to_string())
+    }
+}
+
+impl From<String> for By {
+    fn from(name: String) -> Self {
+        Self::Name(name)
+    }
+}
+
+impl From<Entity> for By {
+    fn from(entity: Entity) -> Self {
+        Self::Entity(entity)
+    }
+}
+
+impl From<Did> for By {
+    fn from(did: Did) -> Self {
+        Self::Entity(did.this())
+    }
+}
+
+impl From<&Did> for By {
+    fn from(did: &Did) -> Self {
+        Self::Entity(did.this())
+    }
+}
+
+impl<C: Principal> Repository<C> {
+    /// A peer of this repository, picked out by name or by entity.
+    pub fn peer(&self, by: impl Into<By>) -> PeerReference {
+        PeerReference {
+            subject: self.subject(),
+            by: by.into(),
+        }
+    }
+}
+
+/// A reference to a peer. Nothing is read until a command on it is
+/// performed.
+#[derive(Debug, Clone)]
+pub struct PeerReference {
+    subject: Subject,
+    by: By,
+}
+
+impl PeerReference {
+    /// Record that the peer is reached at `address`.
+    ///
+    /// A peer picked out by entity is recorded if it is new; one picked
+    /// out by name must already have that name.
+    pub fn add_address(self, address: impl Into<SiteAddress>) -> AddAddress {
+        AddAddress {
+            peer: self,
+            address: address.into(),
+            name: None,
+        }
+    }
+}
+
+/// Command to add an address to a peer. Created by
+/// [`PeerReference::add_address`].
+pub struct AddAddress {
+    peer: PeerReference,
+    address: SiteAddress,
+    name: Option<String>,
+}
+
+impl AddAddress {
+    /// Also give the peer this local name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Record the address, and the name if one was given, answering the
+    /// peer's entity.
+    pub async fn perform<Env: RegistryEnv>(self, env: &Env) -> Result<Entity, AddAddressError> {
+        let registry = self
+            .peer
+            .subject
+            .branch(REGISTRY)
+            .open()
+            .perform(env)
+            .await?;
+        let this = match self.peer.by {
+            By::Entity(entity) => entity,
+            By::Name(name) => named(&registry, name, env).await?,
+        };
+
+        let mut changes = Changes::new();
+        if let Some(name) = self.name {
+            Peer {
+                this: this.clone(),
+                name: peer::Name(name),
+            }
+            .assert(&mut changes);
+        }
+        PeerAddress::new(&this, &self.address)?.assert(&mut changes);
+        apply(&registry, changes, env).await?;
+
+        Ok(this)
+    }
+}
+
+/// The one peer recorded under `name`.
+async fn named<Env: RegistryEnv>(
+    registry: &Branch,
+    name: String,
+    env: &Env,
+) -> Result<Entity, AddAddressError> {
+    let rows: Vec<Peer> = Box::pin(
+        registry
+            .query()
+            .select(Query::<Peer> {
+                this: Term::var("this"),
+                name: name.clone().into(),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await
+    .map_err(|error| AddAddressError::Query(error.to_string()))?;
+
+    let mut peers: Vec<Entity> = rows.into_iter().map(|row| row.this).collect();
+    peers.sort();
+    peers.dedup();
+    match peers.len() {
+        0 => Err(AddAddressError::NotFound { name }),
+        1 => Ok(peers.remove(0)),
+        _ => Err(AddAddressError::Ambiguous { name }),
     }
 }
 
@@ -116,11 +269,19 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::did;
-    use crate::SiteAddress;
-    use crate::schema::{Peer, PeerAddress};
+    use crate::helpers::test_repo;
+    use crate::schema::{DidExt as _, Peer, PeerAddress};
+    use crate::{AddAddressError, REGISTRY, Repository, RepositoryMemoryExt as _, SiteAddress};
+    use dialog_artifacts::Entity;
+    use dialog_capability::Subject;
     use dialog_effects::storage::{Directory, Location};
+    use dialog_operator::Operator;
+    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_query::{Output as _, Query, Term};
+    use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address;
     use dialog_remote_ucan::UcanAddress;
+    use dialog_storage::provider::storage::VolatileSpace;
     use dialog_varsig::did;
 
     /// A UCAN service is the `did:web` of its origin; the path it is
@@ -164,7 +325,7 @@ mod tests {
     #[dialog_common::test]
     fn it_names_a_directory_by_a_key_seeded_from_it() -> anyhow::Result<()> {
         let at = |name: &str| {
-            SiteAddress::Fs(dialog_remote_fs::FsAddress::new(Location::new(
+            SiteAddress::Fs(FsAddress::new(Location::new(
                 Directory::At("/var/dialog".into()),
                 name,
             )))
@@ -181,7 +342,128 @@ mod tests {
     fn it_recovers_the_address_a_peer_is_reached_at() -> anyhow::Result<()> {
         let address = SiteAddress::from(UcanAddress::new("https://tonk.network/ucan/"));
         let peer = Peer::at("origin", &address)?;
-        assert_eq!(PeerAddress::new(&peer, &address)?.site()?, address);
+        assert_eq!(PeerAddress::new(&peer.this, &address)?.site()?, address);
+        Ok(())
+    }
+
+    /// Which peers the registry holds, and at which addresses.
+    async fn recorded(
+        operator: &Operator<VolatileSpace>,
+        repo: &Repository,
+    ) -> anyhow::Result<(Vec<Peer>, Vec<(Entity, SiteAddress)>)> {
+        let registry = Subject::from(repo.did())
+            .branch(REGISTRY)
+            .open()
+            .perform(operator)
+            .await?;
+        let peers: Vec<Peer> = registry
+            .query()
+            .select(Query::<Peer> {
+                this: Term::var("this"),
+                name: Term::var("name"),
+            })
+            .perform(operator)
+            .try_vec()
+            .await?;
+        let mut addresses = Vec::new();
+        for row in registry
+            .query()
+            .select(Query::<PeerAddress> {
+                this: Term::var("this"),
+                address: Term::var("address"),
+            })
+            .perform(operator)
+            .try_vec()
+            .await?
+        {
+            let row: PeerAddress = row;
+            addresses.push((row.this.clone(), row.site()?));
+        }
+        addresses.sort_by_key(|(this, site)| (this.clone(), format!("{site:?}")));
+        Ok((peers, addresses))
+    }
+
+    /// A peer picked out by its DID is recorded with the address, and
+    /// named if a name is given; by that name it is then found again and
+    /// a second address is added to the same peer.
+    #[dialog_common::test]
+    async fn it_adds_addresses_to_a_peer_by_did_then_by_name() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let origin = did!("web:tonk.network");
+        let first = SiteAddress::from(UcanAddress::new("https://tonk.network/ucan/"));
+        let second = SiteAddress::from(UcanAddress::new("https://backup.tonk.network/ucan/"));
+
+        let entity = repo
+            .peer(&origin)
+            .add_address(first.clone())
+            .name("origin")
+            .perform(&operator)
+            .await?;
+        assert_eq!(entity, origin.this());
+
+        let again = repo
+            .peer("origin")
+            .add_address(second.clone())
+            .perform(&operator)
+            .await?;
+        assert_eq!(again, entity, "the name finds the same peer");
+
+        let (peers, addresses) = recorded(&operator, &repo).await?;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].name.0, "origin");
+        let mut expected = vec![(entity.clone(), first), (entity, second)];
+        expected.sort_by_key(|(this, site)| (this.clone(), format!("{site:?}")));
+        assert_eq!(addresses, expected);
+        Ok(())
+    }
+
+    /// A name finds a peer but cannot make one: an unknown name is
+    /// refused and nothing is recorded.
+    #[dialog_common::test]
+    async fn it_refuses_an_unknown_name() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let refused = repo
+            .peer("origin")
+            .add_address(UcanAddress::new("https://tonk.network/ucan/"))
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(refused, Err(AddAddressError::NotFound { ref name }) if name == "origin"),
+            "{refused:?}"
+        );
+        let (peers, addresses) = recorded(&operator, &repo).await?;
+        assert!(peers.is_empty() && addresses.is_empty());
+        Ok(())
+    }
+
+    /// A name two peers share picks out neither.
+    #[dialog_common::test]
+    async fn it_refuses_an_ambiguous_name() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        for (did, endpoint) in [
+            (did!("web:one.example"), "https://one.example/"),
+            (did!("web:two.example"), "https://two.example/"),
+        ] {
+            repo.peer(did)
+                .add_address(UcanAddress::new(endpoint))
+                .name("shared")
+                .perform(&operator)
+                .await?;
+        }
+
+        let refused = repo
+            .peer("shared")
+            .add_address(UcanAddress::new("https://three.example/"))
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(refused, Err(AddAddressError::Ambiguous { ref name }) if name == "shared"),
+            "{refused:?}"
+        );
         Ok(())
     }
 }

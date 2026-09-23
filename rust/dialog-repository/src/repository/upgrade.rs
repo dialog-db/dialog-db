@@ -213,7 +213,7 @@ fn carry(
     let peer = Peer::at(name, &address.address)?;
     peers.push(Carried {
         name: name.to_string(),
-        address: PeerAddress::new(&peer, &address.address)?,
+        address: PeerAddress::new(&peer.this, &address.address)?,
         peer: peer.clone(),
         subject: address.subject.clone(),
     });
@@ -246,10 +246,14 @@ mod tests {
 
     use super::{CELL, SPACE, Upgraded, VERSION};
     use crate::helpers::test_repo;
-    use crate::{Cell, REGISTRY, RepositoryMemoryExt as _, UpgradeError};
+    use crate::schema::{BranchPull, BranchPush, Peer, PeerAddress, Replica};
+    use crate::{Cell, REGISTRY, RepositoryMemoryExt as _, SiteAddress, UpgradeError};
     use dialog_capability::Subject;
-    use dialog_effects::memory::prelude::SpaceScope;
+    use dialog_effects::memory::prelude::{CellScope, SpaceScope};
     use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_query::{Output as _, Query, Term};
+    use dialog_remote_ucan::UcanAddress;
+    use dialog_varsig::did;
 
     /// Storage from before versioning is at version 0, and upgrading it
     /// carries the remotes and upstreams stored in cells over into facts.
@@ -261,13 +265,6 @@ mod tests {
     /// entry older releases wrote.
     #[dialog_common::test]
     async fn it_upgrades_remotes_and_upstreams_from_cells() -> anyhow::Result<()> {
-        use crate::SiteAddress;
-        use crate::schema::{BranchPull, BranchPush, Peer, PeerAddress, Replica};
-        use dialog_effects::memory::prelude::CellScope;
-        use dialog_query::{Output as _, Query, Term};
-        use dialog_remote_ucan::UcanAddress;
-        use dialog_varsig::did;
-
         // `remote/origin/address`: a UCAN service at
         // https://tonk.network/ucan/ holding the repository below.
         const REMOTE: &str = "a26761646472657373a1645563616ea168656e64706f696e74781a68747470733a2f2f746f6e6b2e6e6574776f726b2f7563616e2f677375626a65637478386469643a6b65793a7a364d6b68615867425a44766f74446b4c353235376661697a74694769433251744b4c4770626e6e4547746132646f4b";

@@ -137,6 +137,40 @@ pub enum LoadRemoteError {
     Resolve(#[from] ResolveError),
 }
 
+/// Errors returned when adding an address to a peer.
+#[derive(Error, Debug)]
+pub enum AddAddressError {
+    /// No peer is known by the name the peer was picked out by.
+    #[error("No peer is named {name}")]
+    NotFound {
+        /// The name looked up.
+        name: String,
+    },
+
+    /// More than one peer is known by the name, so it picks out none.
+    #[error("More than one peer is named {name}")]
+    Ambiguous {
+        /// The name looked up.
+        name: String,
+    },
+
+    /// The registry branch could not be opened.
+    #[error("Failed to read local storage: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// Looking the peer up by name failed.
+    #[error("Failed to look up the peer: {0}")]
+    Query(String),
+
+    /// The address could not be encoded.
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+
+    /// The facts could not be committed.
+    #[error(transparent)]
+    Commit(#[from] CommitError),
+}
+
 /// Errors returned when upgrading a repository's local storage.
 #[derive(Error, Debug)]
 pub enum UpgradeError {

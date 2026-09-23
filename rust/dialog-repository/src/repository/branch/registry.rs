@@ -19,11 +19,10 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_query::{Output as _, Query, Term};
 use futures_util::stream;
 
-use crate::schema::{
-    ActiveBranch, Branch as BranchConcept, BranchPull, BranchPush, Peer, PeerAddress, Replica,
-};
+use crate::schema::{ActiveBranch, Branch as BranchConcept, BranchPull, BranchPush, Replica};
 use crate::{Branch, CommitError, RemoteSite};
 
 /// The environment a registry write runs against.
@@ -140,63 +139,6 @@ pub async fn switch<Env: RegistryEnv>(
     apply(registry, changes, env).await
 }
 
-/// Record `peer` and the addresses it is reached at.
-///
-/// Converges: the peer is its DID, so recording the same peer again adds
-/// nothing, and a new address joins the ones already recorded.
-pub async fn add_peer<Env: RegistryEnv>(
-    registry: &Branch,
-    peer: &Peer,
-    addresses: &[PeerAddress],
-    env: &Env,
-) -> Result<(), CommitError> {
-    let mut changes = Changes::new();
-    peer.clone().assert(&mut changes);
-    for address in addresses {
-        address.clone().assert(&mut changes);
-    }
-    apply(registry, changes, env).await
-}
-
-/// Record that `branch` pulls from `upstream`: a branch on this
-/// replica, or one on a peer's, each named by entity.
-pub async fn pull_from<Env: RegistryEnv>(
-    registry: &Branch,
-    branch: &BranchConcept,
-    upstream: &BranchConcept,
-    env: &Env,
-) -> Result<(), CommitError> {
-    let mut changes = Changes::new();
-    pull(branch, upstream).assert(&mut changes);
-    apply(registry, changes, env).await
-}
-
-/// Record that `branch` pushes to `upstream`, as for [`pull_from`].
-pub async fn push_to<Env: RegistryEnv>(
-    registry: &Branch,
-    branch: &BranchConcept,
-    upstream: &BranchConcept,
-    env: &Env,
-) -> Result<(), CommitError> {
-    let mut changes = Changes::new();
-    push(branch, upstream).assert(&mut changes);
-    apply(registry, changes, env).await
-}
-
-/// Record that `branch` both pulls from and pushes to `upstream`, the
-/// way a git upstream is tracked in both directions.
-pub async fn set_upstream<Env: RegistryEnv>(
-    registry: &Branch,
-    branch: &BranchConcept,
-    upstream: &BranchConcept,
-    env: &Env,
-) -> Result<(), CommitError> {
-    let mut changes = Changes::new();
-    pull(branch, upstream).assert(&mut changes);
-    push(branch, upstream).assert(&mut changes);
-    apply(registry, changes, env).await
-}
-
 pub(crate) fn pull(branch: &BranchConcept, upstream: &BranchConcept) -> BranchPull {
     BranchPull {
         this: branch.this.clone(),
@@ -245,8 +187,6 @@ pub async fn list<Env: RegistryEnv>(
     operator: &Capability<Operator>,
     env: &Env,
 ) -> Result<Vec<BranchConcept>, dialog_query::EvaluationError> {
-    use dialog_query::{Output as _, Query, Term};
-
     let replica = Replica::new(operator.profile().clone(), registry.of().clone());
 
     Box::pin(
@@ -270,10 +210,13 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::test_repo;
+    use crate::schema::{Branch as BranchConcept, Replica};
     use crate::{REGISTRY, RepositoryMemoryExt};
+    use dialog_artifacts::{ArtifactSelector, Value};
     use dialog_capability::Subject;
     use dialog_effects::authority::Identify;
     use dialog_operator::helpers::test_operator_with_profile;
+    use futures_util::StreamExt as _;
 
     /// A recorded branch is listed; the registry lists itself without
     /// ever having been recorded.
@@ -320,10 +263,6 @@ mod tests {
     /// rather than through the concept that also defines it.
     #[dialog_common::test]
     async fn it_records_the_active_branch_by_name() -> anyhow::Result<()> {
-        use crate::schema::{Branch as BranchConcept, Replica};
-        use dialog_artifacts::{ArtifactSelector, Value};
-        use futures_util::StreamExt as _;
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let identity = Identify.perform(&operator).await?;
@@ -353,87 +292,6 @@ mod tests {
         assert_eq!(rows.len(), 1, "one active branch recorded: {}", rows.len());
         let artifact = rows.into_iter().next().expect("one row")?;
         assert_eq!(artifact.to_owned()?.is, Value::Entity(feature));
-        Ok(())
-    }
-
-    /// A peer is added with its address, and a local branch pulls from
-    /// one branch on the peer's replica and pushes to another, each
-    /// navigated to from the peer. `set_upstream` records both ways.
-    #[dialog_common::test]
-    async fn it_pulls_from_and_pushes_to_branches_on_a_peer() -> anyhow::Result<()> {
-        use crate::SiteAddress;
-        use crate::schema::{BranchPull, BranchPush, Peer, PeerAddress, Replica};
-        use dialog_query::{Output as _, Query, Term};
-        use dialog_remote_ucan::UcanAddress;
-        use dialog_varsig::did;
-
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let registry = Subject::from(repo.did())
-            .branch(REGISTRY)
-            .open()
-            .perform(&operator)
-            .await?;
-
-        let address = SiteAddress::from(UcanAddress::new("https://tonk.network/ucan/"));
-        let peer = Peer::at("tonk", &address)?;
-        super::add_peer(
-            &registry,
-            &peer,
-            &[PeerAddress::new(&peer, &address)?],
-            &operator,
-        )
-        .await?;
-
-        let local = Replica::new(profile.did(), repo.did()).branch("main");
-        let alice = peer.repository(did!("key:zAlice"));
-        let (shared, review, mirror) = (
-            alice.branch("main"),
-            alice.branch("review"),
-            alice.branch("mirror"),
-        );
-        super::pull_from(&registry, &local, &review, &operator).await?;
-        super::push_to(&registry, &local, &mirror, &operator).await?;
-        super::set_upstream(&registry, &local, &shared, &operator).await?;
-
-        let registry = Subject::from(repo.did())
-            .branch(REGISTRY)
-            .open()
-            .perform(&operator)
-            .await?;
-        let mut pulls: Vec<_> = registry
-            .query()
-            .select(Query::<BranchPull> {
-                this: local.this.clone().into(),
-                pull: Term::var("pull"),
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?
-            .into_iter()
-            .map(|row: BranchPull| row.pull.0)
-            .collect();
-        let mut pushes: Vec<_> = registry
-            .query()
-            .select(Query::<BranchPush> {
-                this: local.this.clone().into(),
-                push: Term::var("push"),
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?
-            .into_iter()
-            .map(|row: BranchPush| row.push.0)
-            .collect();
-        pulls.sort();
-        pushes.sort();
-
-        let mut expected_pulls = vec![shared.this.clone(), review.this];
-        let mut expected_pushes = vec![shared.this, mirror.this];
-        expected_pulls.sort();
-        expected_pushes.sort();
-        assert_eq!(pulls, expected_pulls);
-        assert_eq!(pushes, expected_pushes);
         Ok(())
     }
 }
