@@ -224,6 +224,39 @@ pub(super) async fn read_optional(
     }
 }
 
+pub(super) async fn files(handle: &FileSystemHandle) -> Result<Vec<String>, FileSystemError> {
+    let io = |error: io::Error| FileSystemError::Io(error.to_string());
+    let mut files = Vec::new();
+    let mut pending: Vec<(PathBuf, String)> = vec![(handle.try_into()?, String::new())];
+
+    while let Some((directory, prefix)) = pending.pop() {
+        let mut entries = match fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io(error)),
+        };
+        while let Some(entry) = entries.next_entry().await.map_err(io)? {
+            let name = entry.file_name().into_string().map_err(|name| {
+                FileSystemError::Io(format!("file name {name:?} is not valid UTF-8"))
+            })?;
+            #[cfg(windows)]
+            let name = decode_reserved(&name);
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if entry.file_type().await.map_err(io)?.is_dir() {
+                pending.push((entry.path(), path));
+            } else {
+                files.push(path);
+            }
+        }
+    }
+
+    Ok(files)
+}
+
 pub(super) async fn write(
     handle: &FileSystemHandle,
     contents: &[u8],

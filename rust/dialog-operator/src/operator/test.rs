@@ -1663,6 +1663,55 @@ mod tests {
         }
     }
 
+    mod memory_list_tests {
+        use super::*;
+        use dialog_capability::Subject;
+        use dialog_effects::MethodExt as _;
+        use dialog_effects::memory::prelude::*;
+
+        /// A listing through the operator reaches the space the cells
+        /// were published to, so what one effect wrote the other finds.
+        #[dialog_common::test]
+        async fn it_routes_memory_listing_to_the_space() -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("memory-list-route"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+            let subject = Subject::from(profile.did());
+
+            for cell in ["address", "branch/main/revision"] {
+                subject
+                    .clone()
+                    .writer()
+                    .memory()
+                    .space("remote/origin")
+                    .cell(cell)
+                    .publish(b"x".to_vec(), None)
+                    .perform(&operator)
+                    .await?;
+            }
+
+            let listed = subject
+                .reader()
+                .memory()
+                .space("remote")
+                .list()
+                .perform(&operator)
+                .await?;
+            assert_eq!(
+                listed,
+                vec!["origin/address", "origin/branch/main/revision"]
+            );
+            Ok(())
+        }
+    }
+
     mod space_tests {
         use super::*;
         use dialog_capability::{Subject, did};
