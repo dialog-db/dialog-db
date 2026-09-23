@@ -32,8 +32,8 @@ use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
-    assemble, builtin, conclusion_attr, conclusion_selector, hydrate, overlay_rules, rule_entities,
-    source_attr, source_bytes, source_selector,
+    assemble, builtin, conclusion_attr, conclusion_selector, has_overlay_rules, hydrate,
+    overlay_rules, rule_entities, source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -153,6 +153,18 @@ impl<'a> QueryLayer<'a> {
     /// `operator` (from [`Identify`]) supplies the profile + operator
     /// DIDs the schema entities are derived from.
     pub fn metadata(&self, operator: &Capability<Operator>) -> Changes {
+        // Every query folds this in, and for a layer over one branch it
+        // depends only on the profile, the operator and the head, so the
+        // branch keeps it: deriving it hashes and base58-renders entities
+        // and re-parses both DIDs each time.
+        if let [SourceRef::Branch(branch)] = self.sources.as_slice() {
+            return branch.layer_metadata(operator, || self.derive_metadata(operator));
+        }
+        self.derive_metadata(operator)
+    }
+
+    /// Derive what [`metadata`](Self::metadata) folds in.
+    fn derive_metadata(&self, operator: &Capability<Operator>) -> Changes {
         let mut changes = Changes::new();
 
         let mut branch_entities = Vec::with_capacity(self.sources.len());
@@ -755,6 +767,27 @@ where
     /// [`RuleRegistry::acquire`]: dialog_query::session::RuleRegistry::acquire
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let concept = input.this();
+
+        // An assembled rule set depends only on the layers it was resolved
+        // from, so while none has moved -- and the overlay installs no
+        // rules, which are read fresh -- the last one assembled stands.
+        let roots: Vec<_> = self
+            .sources
+            .iter()
+            .map(|source| source.as_ref().root())
+            .collect();
+        let cache = self
+            .sources
+            .first()
+            .map(|source| source.as_ref().rule_cache())
+            .filter(|_| !has_overlay_rules(&self.changes));
+        if let Some(bundle) = cache
+            .as_ref()
+            .and_then(|cache| cache.bundle(&concept, &roots))
+        {
+            return Ok(self.continuing(&concept, bundle));
+        }
+
         let mut rules: Vec<DeductiveRule> = Vec::new();
 
         // Built-in rules first: the derived version-control concepts
@@ -784,17 +817,29 @@ where
         let bundle = assemble(&input, rules, plan_cache);
         let analysis = self.program_analysis(&input, &bundle).await?;
         analysis.check(&input)?;
-        Ok(if analysis.is_recursive(&concept) {
-            let bundle = bundle.with_recursion(analysis);
-            match &self.fixpoint {
-                Some((entity, continuation)) if *entity == concept => {
-                    bundle.with_continuation(continuation.clone())
-                }
-                _ => bundle,
-            }
+        let bundle = if analysis.is_recursive(&concept) {
+            bundle.with_recursion(analysis)
         } else {
             bundle
-        })
+        };
+        if let Some(cache) = cache {
+            cache.record_bundle(concept.clone(), roots, bundle.clone());
+        }
+        Ok(self.continuing(&concept, bundle))
+    }
+}
+
+impl<Env> QueryEnv<'_, Env> {
+    /// `bundle` carrying this query's retained fixpoint, when a polling
+    /// subscription is evaluating `concept` recursively. Attached per
+    /// query, never cached: it belongs to the subscription.
+    fn continuing(&self, concept: &Entity, bundle: ConceptRules) -> ConceptRules {
+        match &self.fixpoint {
+            Some((entity, continuation)) if entity == concept && bundle.recursion().is_some() => {
+                bundle.with_continuation(continuation.clone())
+            }
+            _ => bundle,
+        }
     }
 }
 

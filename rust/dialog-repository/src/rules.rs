@@ -306,6 +306,13 @@ struct RuleCacheInner {
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
+    /// A concept's assembled rule set -- built-in, committed, and its
+    /// program analysis attached -- as of the tree root of every layer
+    /// it was resolved from. Assembling it is most of what planning a
+    /// warm query costs, and it changes only when a layer does. Only
+    /// sets resolved without overlay rules are kept, since those are
+    /// read fresh per query.
+    bundles: HashMap<Entity, (Vec<[u8; 32]>, ConceptRules)>,
 }
 
 impl RuleCache {
@@ -330,6 +337,27 @@ impl RuleCache {
             .write()
             .discovery
             .insert(concept, (head, entities));
+    }
+
+    /// The rule set assembled for `concept` over layers at `roots`, if
+    /// one was recorded at exactly those roots.
+    pub(crate) fn bundle(&self, concept: &Entity, roots: &[[u8; 32]]) -> Option<ConceptRules> {
+        let inner = self.inner.read();
+        match inner.bundles.get(concept) {
+            Some((at, bundle)) if at.as_slice() == roots => Some(bundle.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the rule set assembled for `concept` over layers at
+    /// `roots`, replacing one recorded at other roots.
+    pub(crate) fn record_bundle(
+        &self,
+        concept: Entity,
+        roots: Vec<[u8; 32]>,
+        bundle: ConceptRules,
+    ) {
+        self.inner.write().bundles.insert(concept, (roots, bundle));
     }
 
     /// A cached hydrated body by rule entity, if present.
@@ -434,6 +462,16 @@ pub(crate) fn assemble(
         concept_rules.install(rule);
     }
     concept_rules
+}
+
+/// Whether an overlay [`Changes`] batch installs any rule at all. Rule
+/// sets resolved from an overlay without rules can be cached with the
+/// committed layers alone.
+pub(crate) fn has_overlay_rules(changes: &Changes) -> bool {
+    let conclusion = conclusion_attr();
+    changes
+        .iter()
+        .any(|(_, attribute, _)| *attribute == conclusion)
 }
 
 /// Read rules from an overlay [`Changes`] batch concluding `concept`.

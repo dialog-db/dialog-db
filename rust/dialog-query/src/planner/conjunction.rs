@@ -161,15 +161,38 @@ impl Conjunction {
     where
         Env: Provider<Estimate> + ConditionalSync,
     {
+        let selectors: Vec<_> = self
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Plan::Scan(_, query) => Some((query, query.resolved_selector(base))),
+                _ => None,
+            })
+            .collect();
+
+        // A cardinality-one scan with its entity and attribute both bound
+        // reads at most one live value. Scans that are all like that are
+        // the same size by construction, so they are balanced, and walking
+        // the tree to estimate each range would only confirm it -- a second
+        // walk per scan, per row, on the lookups rules are made of.
+        let point = selectors.iter().all(|(query, selector)| {
+            matches!(query.as_ref(), DynamicAttributeQuery::Only(_))
+                && selector.as_ref().is_ok_and(|selector| {
+                    selector.entity().is_some() && selector.attribute().is_some()
+                })
+        });
+        if !selectors.is_empty() && point {
+            return true;
+        }
+
         let mut min_size = u64::MAX;
         let mut max_size = 0u64;
-        for step in &self.steps {
-            let Plan::Scan(_, query) = step else { continue };
+        for (_, selector) in selectors {
             // A selector build failure or an unavailable estimate means
             // "range size unknown"; treat as maximally broad so an all-broad
             // join stays eligible and a genuinely selective one is never
             // wrongly merged on a missing estimate.
-            let size = match query.resolved_selector(base) {
+            let size = match selector {
                 Ok(selector) => Provider::<Estimate>::execute(env, selector)
                     .await
                     .ok()
