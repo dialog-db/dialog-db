@@ -137,12 +137,38 @@ pub enum LoadRemoteError {
     Resolve(#[from] ResolveError),
 }
 
-/// Errors returned when carrying remotes and upstreams from their cells
-/// over into facts.
+/// Errors returned when upgrading a repository's local storage.
 #[derive(Error, Debug)]
-pub enum MigrateError {
-    /// A remote named by the caller or by an upstream could not be
-    /// loaded from its cell.
+pub enum UpgradeError {
+    /// The storage was upgraded by a newer release, to a layout this one
+    /// does not know. It is left alone rather than misread.
+    #[error("Storage is at version {found}, newer than the {supported} this release supports")]
+    Newer {
+        /// The version the storage records.
+        found: u32,
+        /// The newest version this release knows.
+        supported: u32,
+    },
+
+    /// Local storage -- the version cell, or the registry branch --
+    /// could not be read.
+    #[error("Failed to read local storage: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// The new version could not be recorded, possibly because another
+    /// upgrade recorded one first.
+    #[error("Failed to record the storage version: {0}")]
+    Record(#[from] PublishError),
+
+    /// The operator could not say who it acts for.
+    #[error(transparent)]
+    Authority(#[from] AuthorityError),
+
+    /// The cells stored under a space could not be listed.
+    #[error("Failed to list stored cells: {0}")]
+    List(#[from] MemoryError),
+
+    /// A remote could not be loaded from its cell.
     #[error("Failed to load remote {name}: {source}")]
     Remote {
         /// The remote name.

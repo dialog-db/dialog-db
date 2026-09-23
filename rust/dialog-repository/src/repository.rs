@@ -48,6 +48,9 @@ pub use remote::*;
 mod snapshot;
 pub use snapshot::*;
 
+mod upgrade;
+pub use upgrade::*;
+
 pub(crate) mod source;
 
 // `Revision` and `TreeReference` moved to `dialog-capability` (the
