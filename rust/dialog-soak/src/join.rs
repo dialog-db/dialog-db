@@ -46,8 +46,8 @@ use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::{Directory, Location};
+use dialog_peer::Peer;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
-use dialog_peer::{Peer, Session};
 use dialog_query::rule::DeductiveRuleDescriptor;
 use dialog_query::{
     Concept, ConceptConclusion, ConceptDescriptor, ConceptQuery, DeductiveRule, Entity,
@@ -313,7 +313,7 @@ async fn seed_vault(repo: &Repository<SignerCredential>, location: &Location) ->
 /// Open a repository for `profile`, wire `origin` at `address` for the
 /// server's subject, and track its `main` branch.
 async fn mount_client(
-    operator: &Session<VolatileSpace>,
+    operator: &Peer<VolatileSpace>,
     profile: &Peer<VolatileSpace>,
     server: &Repository<SignerCredential>,
     address: &FsAddress,
@@ -340,7 +340,7 @@ async fn mount_client(
 /// — a phase must observe real data, not a lazily erred stream.
 async fn select_count(
     branch: &Branch,
-    operator: &Session<VolatileSpace>,
+    operator: &Peer<VolatileSpace>,
     selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
 ) -> Result<usize> {
     let rows = branch

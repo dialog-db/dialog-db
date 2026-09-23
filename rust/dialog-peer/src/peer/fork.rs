@@ -1,10 +1,10 @@
-//! Fork dispatch provider for Session.
+//! Fork dispatch provider for [`Peer`].
 //!
 //! Calls [`Fork::authorize`] to produce a [`ForkInvocation`], then
 //! delegates execution to the network layer. The site's own fork
 //! wrapper fetches identity from the env via `authority::Identify`.
 
-use crate::Session;
+use super::Peer;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Effect, Fork, ForkInvocation, Provider, Site, SiteFork};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -27,7 +27,7 @@ impl<T, E: From<AuthorizeError>> FromAuthError for Result<T, E> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<A, At, Fx> Provider<Fork<At, Fx>> for Session<A>
+impl<A, At, Fx> Provider<Fork<At, Fx>> for Peer<A>
 where
     // The peer's storage provider type
     A: Clone + ConditionalSend + ConditionalSync + 'static,
@@ -47,7 +47,7 @@ where
 {
     async fn execute(&self, input: Fork<At, Fx>) -> Fx::Output {
         match input.authorize(self).await {
-            Ok(invocation) => invocation.perform(self.peer().network()).await,
+            Ok(invocation) => invocation.perform(self.network()).await,
             Err(e) => FromAuthError::from_auth_error(e),
         }
     }

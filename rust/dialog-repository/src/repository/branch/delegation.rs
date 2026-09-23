@@ -386,15 +386,14 @@ mod tests {
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::blob::BlobReader;
     use dialog_effects::storage::Location;
-    use dialog_network::Network;
-    use dialog_peer::{Peer, Session};
+    use dialog_peer::Peer;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan_core::subject::Subject as UcanSubject;
     use dialog_ucan_core::{DelegationBuilder, DelegationChain};
     use dialog_varsig::Principal as _;
     use futures_util::StreamExt as _;
 
-    use dialog_peer::helpers::unique_name;
+    use dialog_peer::helpers::{open_peer, unique_name};
 
     async fn delegate(
         issuer: &Ed25519Signer,
@@ -412,18 +411,10 @@ mod tests {
         UcanDelegation::new(DelegationChain::new(delegation))
     }
 
-    async fn open_branch(name: &str) -> Result<(crate::Branch, Session<VolatileSpace>)> {
+    async fn open_branch(name: &str) -> Result<(crate::Branch, Peer<VolatileSpace>)> {
         let storage = Storage::volatile();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(Network::default())
-            .open(Location::profile(unique_name(name)))
-            .await?;
-        let operator = profile
-            .session(b"test")
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name(name))).await?;
+        let operator = profile.worker(b"test").allow(Subject::any()).await?;
         let repo = profile
             .space(unique_name("repo"))
             .open()

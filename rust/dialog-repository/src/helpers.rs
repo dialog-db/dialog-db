@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 /// as the effect environment.
 #[cfg(test)]
 pub async fn test_repo(
-    session: &dialog_peer::Session<VolatileSpaceForTests>,
+    session: &dialog_peer::Peer<VolatileSpaceForTests>,
     peer: &dialog_peer::Peer<VolatileSpaceForTests>,
 ) -> crate::Repository<dialog_credentials::Credential> {
     use crate::RepositoryExt as _;

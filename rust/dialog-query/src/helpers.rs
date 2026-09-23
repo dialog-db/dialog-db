@@ -38,9 +38,8 @@ use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
-use dialog_network::Network;
-use dialog_peer::helpers::{generate_data, unique_name};
-use dialog_peer::{Peer, Session};
+use dialog_peer::Peer;
+use dialog_peer::helpers::{generate_data, open_peer, unique_name};
 use dialog_repository::{
     Branch, NetworkedIndex, RemoteSite, Repository, RepositoryArchiveExt as _, RepositoryExt as _,
 };
@@ -563,7 +562,7 @@ pub struct BenchEnv<Env> {
     branch: String,
 }
 
-impl BenchEnv<Session<VolatileSpace>> {
+impl BenchEnv<Peer<VolatileSpace>> {
     /// Build a volatile (in-memory) benchmark environment.
     ///
     /// Use for CPU/memory-read isolated signals — no disk I/O.
@@ -574,7 +573,7 @@ impl BenchEnv<Session<VolatileSpace>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl BenchEnv<Session<NativeTempSpace>> {
+impl BenchEnv<Peer<NativeTempSpace>> {
     /// Build an on-disk benchmark environment rooted in the platform
     /// temp directory.
     ///
@@ -1585,35 +1584,19 @@ where
     }
 }
 
-impl BenchEnv<Session<VolatileSpace>> {
+impl BenchEnv<Peer<VolatileSpace>> {
     async fn with_storage(storage: Storage<VolatileSpace>) -> Result<Self> {
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(Network::default())
-            .open(Location::profile(unique_name("bench")))
-            .await?;
-        let operator = profile
-            .session(b"bench")
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
+        let operator = profile.worker(b"bench").allow(Subject::any()).await?;
         Self::assemble(operator, &profile).await
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl BenchEnv<Session<NativeTempSpace>> {
+impl BenchEnv<Peer<NativeTempSpace>> {
     async fn with_storage(storage: Storage<NativeTempSpace>) -> Result<Self> {
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(Network::default())
-            .open(Location::profile(unique_name("bench")))
-            .await?;
-        let operator = profile
-            .session(b"bench")
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
+        let operator = profile.worker(b"bench").allow(Subject::any()).await?;
         Self::assemble(operator, &profile).await
     }
 }
@@ -1623,16 +1606,8 @@ impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
     async fn with_storage(
         storage: Storage<::dialog_storage::provider::storage::WebSpace>,
     ) -> Result<Self> {
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(Network::default())
-            .open(Location::profile(unique_name("bench")))
-            .await?;
-        let operator = profile
-            .session(b"bench")
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
+        let operator = profile.worker(b"bench").allow(Subject::any()).await?;
         Self::assemble(operator, &profile).await
     }
 }

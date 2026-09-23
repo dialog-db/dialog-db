@@ -9,23 +9,19 @@
 #![cfg_attr(not(test), warn(clippy::large_futures))]
 #![cfg_attr(not(test), deny(clippy::panic))]
 
-//! Peers and sessions for Dialog-DB.
-//!
-//! A [`Peer`] is a site identified by a key, holding replicas: the
-//! persisted signer, the storage its spaces are mounted in, the network
-//! dispatch and the branch of its own repository that serves as registry.
-//! A [`Session`] is a constrained peer: one acting key and the grants it
-//! was built with, and the environment every `perform` takes. See
-//! `notes/peer-and-session.md`.
+//! Peers: the runtime capability environment for Dialog. One type, built
+//! over a key, a storage and the branch of a repository that holds the
+//! peer's own state; a worker is a peer with grants from another. See
+//! [`Peer`].
 
 pub use dialog_identity::*;
 
-mod session;
-pub use session::{Allowance, PeerError, PeerSpace, Session, SessionBuilder, SessionKey};
-
 mod peer;
-pub use peer::*;
+pub use peer::{
+    Allowance, OpenFuture, OpenPeer, Peer, PeerBuilder, PeerError, PeerKey, PeerSpace, Runtime,
+    Unset,
+};
 
-/// Test helpers for setting up peers, sessions, and test data.
+/// Test helpers: unique names, peers over volatile storage, sample data.
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;

@@ -68,6 +68,28 @@ impl<'a> Access<'a> {
     }
 }
 
+/// Claim a capability by a credential: `Subject::any().claim(&credential)`.
+///
+/// The same [`Claim`] that [`Access::claim`] builds, reached from the
+/// capability instead of from the credential's access handle, so a grant
+/// reads as what is granted and by whom.
+pub trait ClaimExt<C: Constraint> {
+    /// Claim this capability by `credential`.
+    fn claim(self, credential: &SignerCredential) -> Claim<'_, C>;
+}
+
+impl<C: Constraint> ClaimExt<C> for Capability<C> {
+    fn claim(self, credential: &SignerCredential) -> Claim<'_, C> {
+        Access::new(credential).claim(self)
+    }
+}
+
+impl ClaimExt<Subject> for Subject {
+    fn claim(self, credential: &SignerCredential) -> Claim<'_, Subject> {
+        Access::new(credential).claim(self)
+    }
+}
+
 /// A claimed capability with optional time bounds.
 ///
 /// Can be executed directly via [`.perform()`](Claim::perform) to get a
@@ -93,10 +115,14 @@ impl<'a, C: Constraint> Claim<'a, C> {
         self
     }
 
-    /// Chain into a delegation to the given audience.
     /// The credential making the claim.
     pub fn issuer(&self) -> Did {
         self.by.did()
+    }
+
+    /// The credential making the claim, to sign with.
+    pub fn by(&self) -> &'a SignerCredential {
+        self.by
     }
 
     /// The capability claimed.
@@ -114,6 +140,7 @@ impl<'a, C: Constraint> Claim<'a, C> {
         self.expiration
     }
 
+    /// Chain into a delegation to the given audience.
     pub fn delegate(self, audience: impl Into<Did>) -> Delegate<'a, C> {
         Delegate {
             claim: self,

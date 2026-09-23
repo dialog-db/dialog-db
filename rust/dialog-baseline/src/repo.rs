@@ -23,9 +23,8 @@ use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
-use dialog_network::Network;
+use dialog_peer::Peer;
 use dialog_peer::helpers::unique_name;
-use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, RemoteSite, RepositoryExt as _};
 use dialog_storage::NativeTempSpace;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
@@ -51,40 +50,32 @@ pub struct DialogRepo<Env> {
     branch: Branch,
 }
 
-impl DialogRepo<Session<VolatileSpace>> {
+impl DialogRepo<Peer<VolatileSpace>> {
     /// Open a fresh volatile (in-memory) repository — the CPU-isolation
     /// signal, like `dialog_mem`.
     pub async fn volatile() -> Result<Self> {
         let storage = Storage::volatile();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(Network::default())
-            .open(Location::profile(unique_name("baseline")))
-            .await?;
-        let operator = profile
-            .session(b"baseline")
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let profile = dialog_peer::helpers::open_peer(
+            storage.clone(),
+            Location::profile(unique_name("baseline")),
+        )
+        .await?;
+        let operator = profile.worker(b"baseline").allow(Subject::any()).await?;
         Self::assemble(operator, &profile).await
     }
 }
 
-impl DialogRepo<Session<NativeTempSpace>> {
+impl DialogRepo<Peer<NativeTempSpace>> {
     /// Open a fresh repository rooted in the platform temp directory — the
     /// real-latency signal, like `dialog_disk`.
     pub async fn temp() -> Result<Self> {
         let storage = Storage::temp();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(Network::default())
-            .open(Location::profile(unique_name("baseline")))
-            .await?;
-        let operator = profile
-            .session(b"baseline")
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let profile = dialog_peer::helpers::open_peer(
+            storage.clone(),
+            Location::profile(unique_name("baseline")),
+        )
+        .await?;
+        let operator = profile.worker(b"baseline").allow(Subject::any()).await?;
         Self::assemble(operator, &profile).await
     }
 }

@@ -21,8 +21,8 @@ use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::archive::prelude::*;
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::Location;
+use dialog_peer::Peer;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
-use dialog_peer::{Peer, Session};
 use dialog_remote_fs::FsAddress;
 use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
 use dialog_storage::provider::FileSystem;
@@ -53,7 +53,7 @@ async fn seed_vault(repo: &Repository<SignerCredential>) -> Result<(Location, Fs
 /// vault as the repo's space, and add it as the `origin` remote with an
 /// upstream-tracking `main` branch.
 async fn setup_repo_with_fs_remote(
-    operator: &Session<VolatileSpace>,
+    operator: &Peer<VolatileSpace>,
     profile: &Peer<VolatileSpace>,
     name: &str,
 ) -> Result<(Repository<SignerCredential>, Location, Branch)> {

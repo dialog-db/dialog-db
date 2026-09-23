@@ -1018,7 +1018,7 @@ mod tests {
     }
 
     struct Stage {
-        env: dialog_peer::Session<VolatileSpace>,
+        env: dialog_peer::Peer<VolatileSpace>,
         profile: dialog_peer::Peer<VolatileSpace>,
         repository: crate::Repository,
         revision: Revision,
@@ -1027,7 +1027,7 @@ mod tests {
 
     /// A second environment with the same repository mounted, so imported
     /// content has somewhere to land.
-    async fn destination_for(stage: &Stage) -> Result<dialog_peer::Session<VolatileSpace>> {
+    async fn destination_for(stage: &Stage) -> Result<dialog_peer::Peer<VolatileSpace>> {
         let destination = Storage::<VolatileSpace>::volatile();
         StorageFx::profile(unique_name("snapshot-profile"))
             .create(Credential::Signer(stage.profile.credential().clone()))
@@ -1037,14 +1037,13 @@ mod tests {
             .create(stage.repository.credential().clone())
             .perform(&destination)
             .await?;
-        let peer = dialog_peer::Peer::new()
+        let peer = dialog_peer::Peer::open(stage.profile.home().clone())
+            .credential(stage.profile.credential().clone())
             .storage(destination)
-            .attach(stage.profile.credential().clone())
             .await?;
         Ok(peer
-            .session(b"snapshot-destination")
+            .worker(b"snapshot-destination")
             .allow(Subject::any())
-            .build()
             .await?)
     }
 
@@ -1272,7 +1271,7 @@ mod tests {
     // without depending on the order the export yields them in.
     async fn tree_only_destination(
         stage: &Stage,
-    ) -> Result<(dialog_peer::Session<VolatileSpace>, crate::Repository)> {
+    ) -> Result<(dialog_peer::Peer<VolatileSpace>, crate::Repository)> {
         let (blocks, _) = drain(
             stage
                 .repository

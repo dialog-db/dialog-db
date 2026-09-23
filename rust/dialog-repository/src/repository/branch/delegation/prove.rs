@@ -440,9 +440,8 @@ mod tests {
     use dialog_capability::access::{CertificateStore, Delegation as _, Prove};
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::storage::Location;
-    use dialog_network::Network;
-    use dialog_peer::helpers::unique_name;
-    use dialog_peer::{Peer, Session};
+    use dialog_peer::Peer;
+    use dialog_peer::helpers::{open_peer, unique_name};
     use dialog_storage::provider::Volatile;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan::{Parameters, Ucan, UcanDelegation};
@@ -454,23 +453,15 @@ mod tests {
     /// must agree.
     struct Harness {
         branch: crate::Branch,
-        operator: Session<VolatileSpace>,
+        operator: Peer<VolatileSpace>,
         legacy: Volatile,
     }
 
     impl Harness {
         async fn new(name: &str) -> Result<Self> {
             let storage = Storage::volatile();
-            let profile = Peer::new()
-                .storage(storage.clone())
-                .network(Network::default())
-                .open(Location::profile(unique_name(name)))
-                .await?;
-            let operator = profile
-                .session(b"test")
-                .allow(Subject::any())
-                .build()
-                .await?;
+            let profile = open_peer(storage.clone(), Location::profile(unique_name(name))).await?;
+            let operator = profile.worker(b"test").allow(Subject::any()).await?;
             let repo = profile
                 .space(unique_name("repo"))
                 .open()

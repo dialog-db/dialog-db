@@ -683,7 +683,6 @@ impl RetractBlob<'_> {
 #[cfg(test)]
 mod tests {
     use dialog_effects::storage::Location;
-    use dialog_peer::Peer;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -693,8 +692,7 @@ mod tests {
     use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_effects::blob::{BlobError, BlobReader, ByteRange};
-    use dialog_network::Network;
-    use dialog_peer::helpers::unique_name;
+    use dialog_peer::helpers::{open_peer, unique_name};
 
     use dialog_storage::provider::storage::Storage;
     use futures_util::stream;
@@ -712,16 +710,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_writes_a_blob_and_reads_it_back_by_entity() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(Network::default())
-            .open(Location::profile(unique_name("blob")))
-            .await?;
-        let operator = profile
-            .session(b"test")
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("blob"))).await?;
+        let operator = profile.worker(b"test").allow(Subject::any()).await?;
         let repo = profile
             .space(unique_name("repo"))
             .open()
@@ -773,16 +763,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_retracts_a_blob_from_the_index_but_not_the_store() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(Network::default())
-            .open(Location::profile(unique_name("blob-retract")))
-            .await?;
-        let operator = profile
-            .session(b"test")
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("blob-retract")),
+        )
+        .await?;
+        let operator = profile.worker(b"test").allow(Subject::any()).await?;
         let repo = profile
             .space(unique_name("repo"))
             .open()
@@ -847,16 +833,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_rejects_a_non_blob_entity() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(Network::default())
-            .open(Location::profile(unique_name("blob-reject")))
-            .await?;
-        let operator = profile
-            .session(b"test")
-            .allow(Subject::any())
-            .build()
-            .await?;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("blob-reject")),
+        )
+        .await?;
+        let operator = profile.worker(b"test").allow(Subject::any()).await?;
         let repo = profile
             .space(unique_name("repo"))
             .open()

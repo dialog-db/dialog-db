@@ -1668,7 +1668,7 @@ mod resolver_tests {
     use crate::{Branch, Repository};
     use base58::ToBase58;
     use dialog_artifacts::{Entity, Value};
-    use dialog_peer::Session;
+    use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output as _;
     use dialog_query::{
@@ -1682,7 +1682,7 @@ mod resolver_tests {
     /// carries it).
     async fn committed_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Session<VolatileSpace>,
+        operator: &Peer<VolatileSpace>,
     ) -> anyhow::Result<(Branch, String)> {
         let branch = repo.branch("main").open().perform(operator).await?;
         let mut tx = branch.transaction();
@@ -1778,7 +1778,7 @@ mod resolver_tests {
     /// span/descent surface runs against a real multi-level tree.
     async fn committed_wide_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Session<VolatileSpace>,
+        operator: &Peer<VolatileSpace>,
         count: usize,
     ) -> anyhow::Result<(Branch, String)> {
         let branch = repo.branch("main").open().perform(operator).await?;

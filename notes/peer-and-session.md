@@ -1,10 +1,10 @@
 # Peers and sessions
 
-Status: design, agreed in discussion; step 2 of the order below is
-implemented (the `dialog-peer` crate). Supersedes the profile / operator
-split described in `repository.md` and `space-and-storage.md`, which this
-note treats as the "today" column. The migration guide at the end is what a
-dependent (tonk) follows.
+Status: design, agreed in discussion; steps 2, 7 and 8 of the order below
+are implemented (the `dialog-peer` crate, one `Peer` type). Supersedes the
+profile / operator split described in `repository.md` and
+`space-and-storage.md`, which this note treats as the "today" column. The
+migration guide at the end is what a dependent (tonk) follows.
 
 ## Why
 
@@ -37,10 +37,16 @@ branch handle races every other handle on the same head.
 - A **peer** is a site identified by a public key that holds replicas of
   repositories. A replica is per peer: `Replica.this = hash(peer, subject)`,
   and a device may host several peers (the browser registry does).
-- A **session** is what acts: a signer, in-memory grants, and the layers it
-  proves from. A session contributes only the **origin**
-  (`hash(branch, session key)`) to what it commits; the replica is the
-  peer's. A session is a constrained peer.
+- A **worker** is a peer built over a derived (or supplied) key with
+  grants from another peer: a signer, in-memory grants, and the branch it
+  proves from. It contributes only the **origin** (`hash(branch, key)`) to
+  what it commits; the replica is its **home**'s. A worker is a peer, not
+  a second type; what used to be called a session is one.
+- A peer's **home** is the repository holding its own state: where it
+  finds delegations, retains them, and keeps its registry facts. A root
+  peer's home is the repository its own key names; a worker's is usually
+  its parent's. The home DID is the replica identity every entity the
+  peer writes derives from.
 - A **remote peer** is a peer whose key you do not hold. You connect to it;
   you cannot open it. `did:web:network.tonk` is one; an iroh node is one
   (its node id is already a `did:key`).
@@ -62,66 +68,122 @@ is located by facts in that space.
 Implemented today (`dialog-peer`):
 
 ```rust
-let alice = Peer::new()
-    .storage(disk)                         // Storage<S>; volatile for tests
-    .network(net)                          // optional, Network::default()
-    .base(Directory::Current)              // optional; where space names resolve, until the registry
-    .branch("main")                        // optional; registry + default proof source
-    .open(Location::profile("alice"))      // or .load(..), or .attach(credential)
+// The credential is opened apart from the peer; here from the storage.
+let credential = OpenCredential::open("alice").perform(&storage).await?;
+
+let alice = Peer::open(credential.did())      // home: the repository holding own state
+    .credential(credential)                   // the acting key; Into<SignerCredential>
+    .storage(storage)                         // Storage<S>; volatile for tests
+    .at(Location::profile("alice"))           // optional; mounts the home space if not yet
+    .network(net)                             // optional, Network::default()
+    .runtime(runtime)                         // optional; share a scheduler with other peers
+    .base(Directory::Current)                 // optional; where space names resolve, until the registry
+    .branch("main")                           // optional; the state branch, default main
     .await?;
 
-let job = alice.session(b"refactor")       // deterministic per (peer, context)
-    .allow(Subject::any())                       // unbounded, minted at build
-    .allow(alice.access().claim(cap).expires(t)) // bounded: the claim carries the window
-    .grant(certificate)                          // pre-minted to the session's key
-    .build()
+let job = Peer::open(credential.did())        // a worker: no handle on the parent needed
+    .credential(credential.derive(b"refactor").await?) // deterministic per (credential, context)
+    .storage(storage)
+    .allow(Subject::any().claim(&credential))          // unbounded, minted at open, deliberate
+    .grant(cap.claim(&credential).expires(t))          // bounded: the claim carries the window
+    .grant(certificate)                                // pre-minted to the worker's key
+    .ephemeral()                                       // optional: no state branch, memory only
     .await?;
 
-alice.space("notes").open().perform(&job).await?;   // named space under the peer
-branch.revision().resolve().perform(&alice).await?; // the peer is the unconstrained env
+let job = alice.worker(b"refactor")           // the same, pre-filled from alice
+    .allow(Subject::any())                    // bare capabilities are claimed by alice
+    .await?;
+
+alice.space("notes").open().perform(&job).await?;   // named space under the home
+branch.revision().resolve().perform(&alice).await?; // the root is the unconstrained env
 ```
 
-The session key is always a `SignerCredential`, known before build:
-`derive` is the deterministic path and returns the builder once the key
-exists; `alice.session(signer)` is the supplied one; and
-`SessionBuilder::did` names the audience a certificate for `grant` must
-carry. A bare capability in `allow` is an unbounded claim by the
-peer; a `Claim` made through `peer.access()` carries its window, and a
-claim by any other issuer is refused at build.
+The key is resolved at open: `credential(..)` takes a credential or bare
+signer, and a [`PeerKey::Derived`] (what `worker` builds) derives it then.
+`grant` refuses a claim without an expiration; `allow` is the unbounded
+form under its own name. A bare capability needs an issuer to claim it,
+which `worker` supplies and `issuer(..)` sets otherwise.
 
-Planned (steps 4 and 5 below):
+Planned (steps 4, 5, 9 and 10 below):
 
 ```rust
-let job = alice.session(b"refactor")
+let job = alice.worker(b"refactor")
     .using(branch)                         // extra proof layers, repeatable
-    .build().await?;
-Repository::open("notes").perform(&job).await?;            // registry lookup, mounts
+    .await?;
+Repository::open(did).perform(&job).await?;               // registry lookup, mounts
 let there = job.connect(did).await?;                       // registry lookup; NoAddress otherwise
 let head = branch.revision().resolve().perform(&there).await?;   // same effect, remote
 ```
 
 Rules the surface encodes:
 
-- `Peer` is the unconstrained env: `perform(&alice)` acts with the peer's
-  own key and proves from its branch. `alice.session(key)` narrows it and
-  can add proof layers, never swap storage or network.
-- Every session starts from a key that exists. `open` for a root (load or
-  generate and persist), `derive` for a child. There is no session that
-  starts from a delegation, because a delegation names its audience.
-- `derive` is deterministic per `(peer, context)` so that a grant issued
-  to a derived DID is reusable across runs. A caller that wants a
-  disposable key passes a random context (the worker does).
-- `connect` is on the session: it reads the registry, proves `Connect`
-  once, and returns the env bound to that peer. A remote peer is never
-  derived or opened, only bound. `connect` never resolves or records on
-  its own.
-  Introducing a peer is asserting `Peer { did, address }` facts. Resolution
-  (did:web documents, Pkarr/DNS for did:key) is a separate operation that
-  produces the same facts, and once recorded they are pinned.
+- One type. A root peer holds no grants and proves self-issued authority
+  from its branch; a worker holds grants and proves through its issuer's
+  authority; an ephemeral worker holds no branch. `perform(&peer)` works
+  for all three.
+- Every peer starts from a key that exists: `OpenCredential` for a root
+  (load or generate and persist), `credential.derive(ctx)` for a worker.
+  There is no peer that starts from a delegation, because a delegation
+  names its audience.
+- `derive` is deterministic per `(credential, context)` so that a grant
+  issued to a derived DID is reusable across runs. A caller that wants a
+  disposable key passes a random context (the worker does), and should
+  make that peer ephemeral: a persistent branch under a rotating key
+  accumulates dead grants.
+- The proof for a worker is `walk(issuer, claim) ++ grant`: the walk
+  proves the grant's issuer, read from the grant itself, so a worker
+  needs no handle on its parent and may hold grants from several.
+- A principal's authority over its own subject is self-issued: the empty
+  chain, resolved without a branch, so an ephemeral worker and a peer
+  still opening its branch prove it alike.
+- `connect` reads the registry, proves `Connect` once, and returns the env
+  bound to that peer. A remote peer is never derived or opened, only
+  bound. `connect` never resolves or records on its own. Introducing a
+  peer is asserting `Peer { did, address }` facts. Resolution (did:web
+  documents, Pkarr/DNS for did:key) is a separate operation that produces
+  the same facts, and once recorded they are pinned.
 - A `Peer` fact's addresses are `NetworkAddress` values (the `#[derive(Site)]`
   enum). `S3` and `Fs` are addresses of the local peer, places it holds
   credentials for. `Ucan` (and later `Iroh`) is a remote peer's. S3 is never
   a peer: it has no key, cannot be an audience, cannot sign.
+
+## Placement and owners
+
+Agreed, not yet built (steps 9 and 10):
+
+- **Pointers as facts, no mount set.** Creating a repository takes a
+  location and records `(subject, address)` in the home branch; opening
+  by DID looks the pointer up, so local and remote replicas are one kind
+  of fact (`Replica` with an address). First open by explicit location
+  records too, so a space handed over out of band is discovered next
+  time. The one location that cannot be discovered is the home's, which
+  is what `at` is for. Stored locations use the symbolic `Directory`
+  variants, so the branch stays valid if it ever replicates.
+- **Providers have owners.** `Storage::new(owner)`, `Fs::new(owner)` and
+  the client side of the network take the DID whose delegations direct
+  them. The guarded operations are the ones that attach a resource to the
+  peer's world: `storage/load`, `storage/create` and `mount` at a
+  location, and `dial` to an address. Everything after attachment is
+  authorized against the subject, as today. A self-issued `storage::Load`
+  proves nothing about the storage; one rooted at the owner does. The
+  root peer is the owner, so it pays nothing; a worker needs a grant:
+
+  ```rust
+  Subject::from(owner).storage().create().at(Directory::At(root))
+  Subject::from(owner).storage().load().at(Location::profile("tonk"))
+  Subject::from(owner).dial().via("https").to("tonk.xyz")
+  ```
+
+  Read versus write is the command (`load` versus `create`); which
+  locations or addresses is policy on the argument, matched as structured
+  values (the `Directory` variant first, the name second), never as path
+  strings. Enforcement runs in the provider, which means these local
+  effects become invocations carrying proofs, so the same providers work
+  behind a sandbox. A `UcanSite`'s DID is its identity, not an owner.
+- **Two connects.** `Dial` is the local owner's "you may reach that
+  address through my network"; `Connect` is the remote's "you may connect
+  to me", checked there as the invocation's audience. A worker with one
+  and not the other is refused by whichever side it lacks.
 
 ## Capabilities
 
@@ -205,17 +267,17 @@ by type.
 
 | today | becomes |
 | --- | --- |
-| `Profile::open(name).at(dir)` | `Peer::new().storage(storage).open(Location)` |
-| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.session(ctx).allow(..).build()` |
-| `Operator<S>` | `Session<S>`; the crate is `dialog-peer` |
-| `Authority { profile, operator, account }` | `(peer, session)`; account is a link in the proof chain |
-| `OperatorBuilder::access_branch(name)` (#526) | `.using(BranchReference)` on the session; the peer's `.branch(..)` is the default |
+| `Profile::open(name).at(dir)` | `OpenCredential::open(name).at(dir).perform(&storage)`, then `Peer::open(did).credential(c).storage(storage)` |
+| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.worker(ctx).allow(..)`, or `Peer::open(home).credential(c.derive(ctx).await?)..` |
+| `Operator<S>` | `Peer<S>`; the crate is `dialog-peer` |
+| `Authority { profile, operator, account }` | `(home, key)`; account is a link in the proof chain |
+| `OperatorBuilder::access_branch(name)` (#526) | `PeerBuilder::branch(name)`; `.using(BranchReference)` adds layers later |
 | `Directory::Current` base + `space::Load` by name | registry lookup: name → subject → address; physical placement keyed by subject DID |
 | `remote/{name}/address`, `RemoteAddress`, `Upstream::Remote { remote }` | `Peer`/`PeerAddress`/`Replica` facts; `Upstream::Remote { peer, subject }` |
 | `Network` as composite site | address dispatch under a peer; invocation audience = peer DID |
 | `credential().site(id).save(secret)` | sealed facts in the device layer |
 | `profile.save(chain)` / operator `Retain` | `branch.delegations().retain(chain)` |
-| `AccountBoundOperator` | a session `.using(account_branch)` |
+| `AccountBoundOperator` | a worker `.using(account_branch)` |
 | `WalkReach` closures | "the env a proof runs under is never bound" |
 | `Storage`'s `Loader` mounts table | registry facts; the pool stays as a handle cache |
 | `Space<A, M, C, D, B>` | `Space<A, M, B>` once the certificate and secret slots go |
@@ -225,11 +287,12 @@ by type.
 - Should a revision record reference the proof CIDs it was made under, so
   a peer without the issuer's chain can verify it offline? Delegations are
   already blobs, so the reference is cheap.
-- A session with no `.using()` and no state layer: error, or a session that
-  proves only self-issued authority? Proposed: the latter.
-- Whether a registry can live in a repository other than the peer's own.
-  The model allows it (the self-repo can point anywhere); do not build the
-  pointer until something needs it.
+- **Settled:** a peer with no state branch (`ephemeral`) proves its
+  in-memory grants and self-issued authority and retains nothing.
+- **Settled:** the registry is the branch of the peer's home, named on
+  the builder; a worker's home is usually its parent's. Whether a worker's
+  branch forks `main` (sees the parent's delegations as of the fork) or
+  starts empty (needs `using(main)`) is the open half.
 - `Identify` returns a fixed `(subject, profile, operator)` chain today.
   Proposed: return the `(peer, session)` pair, with the chain available
   through proving.
@@ -247,16 +310,18 @@ by type.
   is name-keyed. To settle first: what a caller names when creating a
   repository (no DID exists until the key does), and whether a name index
   is then a product-layer fact rather than a peer API.
-- One type or two. With the session key always a credential, a session is
-  a peer plus `(authority, grants)`, and `Peer::as_session` is the
-  embedding with empty grants. The review proposes an enum (`Root`,
-  `Delegate`, and after step 5 `Bound { remote }`) so a session is a
-  constrained peer, not a second type. What the split buys is a
-  type-level "unconstrained" (`perform(&peer)`) that no dependent asks
-  for by type: `Peer<_>` appears in their signatures only as the thing to
-  derive from or read a DID off. What it costs is `session.peer()` at 41
-  sites and two builders. Proposed: fold in its own PR after this one,
-  since it touches every `Provider` impl in the crate.
+- **Settled:** one type. `Session` folded into `Peer`; a worker is a
+  peer with grants, an ephemeral one a peer without a branch.
+- Who writes the pointer fact for a space created by another tool, and
+  whether creation records one at all or scanning the home directory is
+  the fallback. Proposed: creation and first open both record.
+- Whether locations get their own DIDs (shareable across owners, at the
+  cost of a key per location) or stay policy on the owner's subject.
+  Proposed: policy; `owner.derive(location)` can mint a key later without
+  a new DID method if a location must outlive its owner.
+- Whether the network client's owner guards forks by destination, by
+  subject, or both. `Dial` guards the destination; the subject stays the
+  second dimension.
 
 ## Order
 
@@ -283,9 +348,24 @@ Each step is one PR and leaves tonk compiling.
 6. Retire the `Secret` effects for sealed facts.
 7. **Done.** `Profile` is gone. `dialog-identity` keeps the credential
    loader as `OpenCredential`, the access API, the site-secret handle and
-   `SpaceHandle`; `Peer` fronts all of them (`open`, `load`, `create`,
-   `access`, `secrets`, `space`). `Repository: From<Profile>` and
-   `Peer::profile` went with it.
+   `SpaceHandle`; `Peer` fronts all of them (`access`, `secrets`, `space`).
+   `Repository: From<Profile>` and `Peer::profile` went with it.
+8. **Done.** `Session` folded into `Peer`. The builder is
+   `Peer::open(home).credential(..).storage(..)`, awaited; the credential
+   is opened apart from the peer (`OpenCredential`), and derives its own
+   workers (`SignerCredential::derive`). `Authority` takes the home DID
+   rather than a second signer. Grants carry their issuer, and the walk
+   proves that issuer, so a worker needs no handle on its parent. The
+   scheduler and preload queue moved to a `Runtime` handle the builder
+   shares; the chain cache stays per peer. `grant` is bounded, `allow`
+   unbounded, `ephemeral` drops the branch.
+9. Pointers as facts: creation and first open record `(subject,
+   address)` in the home branch; `Repository::open(did)` resolves it; the
+   `Loader` mounts table and `base` go. Names leave the peer API; tonk's
+   name index is a product fact.
+10. Owners on providers and guarded placement: `Storage::new(owner)`,
+    `storage/load`, `storage/create` and `mount` as owner-rooted
+    capabilities with location policy; `Dial` on the network client.
 
 #519 (stacks) supplies the layer types steps 3 and 4 want for device-local
 state and rebases after step 2, since it touches `branch.rs` in the same
@@ -309,8 +389,9 @@ places.
 ## Migration guide (dialog-operator to dialog-peer)
 
 The crate is `dialog-peer`; the module path is `dialog_peer`. There is no
-`Operator`, `OperatorBuilder`, `DeriveOperator` or `Profile`. The peer is
-the identity: what a profile did, a peer does.
+`Operator`, `OperatorBuilder`, `DeriveOperator`, `Profile` or `Session`.
+One type, `Peer`, is the identity and the environment: what a profile did,
+a peer does; what an operator or session did, a worker peer does.
 
 Opening the identity and building the environment:
 
@@ -327,73 +408,83 @@ let operator = profile
     .await?;
 
 // after
-let peer = Peer::new()
-    .storage(Storage::<NativeSpace>::default())
-    .base(Directory::At(root))             // was OperatorBuilder::base
-    .network(Network::default())           // was OperatorBuilder::network
-    .branch("main")                        // was OperatorBuilder::access_branch
-    .open(Location::new(Directory::Profile, name))
+let storage = Storage::<NativeSpace>::default();
+let credential = OpenCredential::open(name)         // the credential, apart from the peer
+    .at(Directory::Profile)
+    .perform(&storage)
     .await?;
-let session = peer
-    .session(b"app")                        // was profile.derive(b"app").await?
-    .allow(Subject::any())
-    .build()
+let peer = Peer::open(credential.did())             // home: the repository the key names
+    .credential(credential)
+    .storage(storage)
+    .base(Directory::At(root))                      // was OperatorBuilder::base
+    .network(Network::default())                    // was OperatorBuilder::network
+    .branch("main")                                 // was OperatorBuilder::access_branch
+    .await?;
+let worker = peer
+    .worker(b"app")                                 // was profile.derive(b"app")
+    .allow(Subject::any())                          // claimed by peer
     .await?;
 ```
 
-`Peer::open` mounts the credential and opens the registry branch; there is
-no separate "mount the profile then derive" step, and a peer cannot be
-built from an unmounted handle. `Peer::load` fails when the credential is
-absent; `Peer::new().storage(storage).attach(credential)` builds over a credential
-mounted some other way.
+`OpenCredential` mounts the credential's space; `Peer::open(..)` opens the
+state branch. `OpenCredential::load` fails when the credential is absent,
+`create` when it is present. A worker needs no handle on its parent:
+`Peer::open(home).credential(credential.derive(ctx).await?).storage(storage)
+.allow(Subject::any().claim(&credential))` is `peer.worker(ctx).allow(..)`
+spelled out.
 
 | before | after |
 | --- | --- |
-| `Operator<S>` | `Session<S>` |
+| `Operator<S>`, `Session<S>` | `Peer<S>` |
 | `OperatorError` | `PeerError` |
-| `.allow_until(cap, t)` | `.allow(peer.access().claim(cap).expires(t))` |
-| a session over a supplied signer | `peer.session(signer)` |
-| `operator.did()` | `session.did()` |
-| `operator.profile_did()` | `session.peer().did()` |
-| `operator.hydration()` | `session.hydration()` or `session.peer().hydration()` |
+| `.allow_until(cap, t)` | `.grant(peer.access().claim(cap).expires(t))` |
+| `.allow(cap)` on a session builder | `.allow(cap)` on `peer.worker(ctx)`, or `.allow(cap.claim(&credential))` |
+| a session over a supplied signer | `Peer::open(home).credential(signer)..allow(cap.claim(&parent))` |
+| `operator.did()` | `worker.did()` |
+| `operator.profile_did()`, `session.peer().did()` | `worker.home().clone()` |
+| `operator.hydration()` | `worker.hydration()`, shared through `Runtime` |
 | `profile.did()` | `peer.did()` |
 | `profile.signer()` | `peer.credential()` |
 | `profile.access()` | `peer.access()` |
 | `profile.repository(name)` | `peer.space(name)` |
 | `profile.save(chain)` / `profile.access().save(chain)` | `peer.access().save(chain)` (goes away in step 4; use `branch.delegations().retain(chain)`) |
 | `profile.credential().site(id)` | `peer.secrets().site(id)` (goes away in step 6) |
-| `Profile::open(name).at(dir).perform(&storage)` | `Peer::new().storage(storage).open(Location::new(dir, name))`; `load` and `create` likewise |
+| `Profile::open(name).at(dir).perform(&storage)` | `OpenCredential::open(name).at(dir).perform(&storage)`, then `Peer::open(c.did()).credential(c).storage(storage)`; `load` and `create` likewise |
+| `Peer::new().storage(s).attach(credential)` | `Peer::open(credential.did()).credential(credential).storage(s)` |
 | `Reactor::new(profile)` and other holders of a `Profile` | hold the `Peer`, or the `SignerCredential` from `peer.credential()` when only signing is needed |
-| `Repository::from(&profile)` | `Repository::from(&peer)` or `Repository::from(peer.credential().clone())` |
-| `Storage::default()` per call site | one `Storage` per process, owned by the peer; sessions share it |
+| `Repository::from(&profile)` | `peer.repository()` (the home, by DID) or `Repository::from(peer.credential().clone())` |
+| `Storage::default()` per call site | one `Storage` per process; every peer over it shares it |
 | `dialog_operator::helpers::test_operator()` | `dialog_peer::helpers::test_session()` |
-| `dialog_operator::helpers::test_operator_with_profile()` | `dialog_peer::helpers::test_session_with_peer()`, returns `(Session, Peer)` |
-| `test_repo(&operator, &profile)` | `test_repo(&session, &peer)` |
+| `dialog_operator::helpers::test_operator_with_profile()` | `dialog_peer::helpers::test_session_with_peer()`, returns `(worker, peer)` |
+| `test_repo(&operator, &profile)` | `test_repo(&worker, &peer)` |
 
-Things the split makes possible that the old shape did not:
+Things the fold makes possible that the old shape did not:
 
-- `perform(&peer)`: the peer is the unconstrained environment, acting with
-  its own key. Where tonk built a "full" operator with `Subject::any()`
-  and a fixed context only to act as the profile, use the peer.
-- `peer.session(signer)`: a supplied session key. Where
-  tonk wrapped the operator to sign as another principal, build a session
-  over that principal's credential and `.grant(certificate)` what it holds.
+- `perform(&peer)`: the root peer is the unconstrained environment, acting
+  with its own key. Where tonk built a "full" operator with
+  `Subject::any()` and a fixed context only to act as the profile, use
+  the peer.
+- A worker from a credential alone. Where tonk wrapped the operator to
+  sign as another principal, build a peer over that principal's
+  credential and `.grant(certificate)` what it holds.
 - Key rotation without rebuilding the runtime: the worker's
-  `session::rotate` becomes `peer.session(random)` with a bounded
-  claim, on the peer it already holds. The scheduler and the preload queue
-  survive the rotation.
+  `session::rotate` becomes `peer.worker(random).grant(bounded claim)`,
+  sharing the parent's `Runtime`. Make it `ephemeral` once nothing it
+  retains needs to outlive it: a persistent branch under a rotating key
+  accumulates dead grants.
 
 Tonk-specific notes:
 
 - `AccountBoundOperator` forwards every effect to the inner operator and
-  overrides `Authorize` to splice the account chain in. Under the split,
-  the inner operator is a `Session`; the wrapper keeps working unchanged
-  until step 4 lets a session prove from the account branch directly.
+  overrides `Authorize` to splice the account chain in. Under the fold,
+  the inner operator is a worker `Peer`; the wrapper keeps working
+  unchanged until step 4 lets a peer prove from the account branch
+  directly.
 - `account_state::operator_with_profile` remounts the profile by name to
   derive a second operator because a derived operator needed a mounted
-  profile in its own storage. A `Peer` already holds its storage; derive
-  the second session from the same peer instead.
+  profile in its own storage. A `Peer` already holds its storage; build
+  the second worker from the same peer instead.
 - `site.rs` retains a fresh expiring session grant on every open
-  (`profile.access().save(session)`). Delete it: the session's grant is in
+  (`profile.access().save(session)`). Delete it: the worker's grant is in
   memory, and the retained copies were the accumulation the in-memory
   session was introduced to stop.

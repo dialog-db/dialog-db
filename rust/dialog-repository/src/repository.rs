@@ -135,6 +135,14 @@ impl From<Credential> for Repository {
     }
 }
 
+/// A repository named by its DID alone: enough to open its branches and
+/// invoke against it, with authority proven by whoever performs.
+impl From<Did> for Repository<Did> {
+    fn from(did: Did) -> Self {
+        Self::new(did)
+    }
+}
+
 impl From<SignerCredential> for Repository<SignerCredential> {
     fn from(credential: SignerCredential) -> Self {
         Self::new(credential)

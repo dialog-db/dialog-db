@@ -259,7 +259,7 @@ impl MigrateCertificates {
         // Retain the representatives into the access branch as one commit,
         // with the profile itself as the revision's issuer.
         let env = MigrateEnv {
-            authority: Authority::new("profile", self.credential.clone(), self.credential.clone()),
+            authority: Authority::new("profile", self.credential.did(), self.credential.clone()),
             storage: storage.clone(),
         };
         let repository = crate::Repository::from(self.credential.clone());
@@ -311,7 +311,7 @@ mod tests {
     use dialog_effects::storage::Location;
     use dialog_peer::Peer;
 
-    use dialog_peer::helpers::unique_name;
+    use dialog_peer::helpers::{open_peer, unique_name};
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan_core::DelegationBuilder;
     use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -362,10 +362,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_migrates_compacts_and_drains() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .open(Location::profile(unique_name("migrate")))
-            .await?;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("migrate"))).await?;
         let space = signer().await;
         let other_space = signer().await;
         let profile_signer = profile.credential().signer().as_ed25519().unwrap().clone();
@@ -421,7 +418,7 @@ mod tests {
 
         // The branch holds the migrated delegation records.
         let env = MigrateEnv {
-            authority: Authority::new("profile", profile_signer.clone(), profile_signer.clone()),
+            authority: Authority::new("profile", profile_signer.did(), profile_signer.clone()),
             storage: storage.clone(),
         };
         let branch = crate::Repository::from(profile_signer.clone())
@@ -463,11 +460,11 @@ mod tests {
         use dialog_ucan_core::command::Command as UcanCommand;
 
         let storage = Storage::volatile();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .network(dialog_network::Network::default())
-            .open(Location::profile(unique_name("migrate-prove")))
-            .await?;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("migrate-prove")),
+        )
+        .await?;
         let space = signer().await;
 
         // Legacy: space grants the profile.
@@ -483,9 +480,8 @@ mod tests {
         profile.access().migrate().perform(&storage).await?;
 
         let operator = profile
-            .session(b"test")
+            .worker(b"test")
             .allow(dialog_capability::Subject::any())
-            .build()
             .await?;
 
         let mut claim = Prove::<Ucan>::new(
@@ -522,10 +518,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_migrates_the_filesystem_store() -> Result<()> {
         let storage = Storage::temp();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .open(Location::profile(unique_name("migrate-fs")))
-            .await?;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("migrate-fs")),
+        )
+        .await?;
         let space = signer().await;
         let profile_signer = profile.credential().signer().as_ed25519().unwrap().clone();
 
@@ -584,10 +581,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_completes_the_drain_on_rerun() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .open(Location::profile(unique_name("migrate-rerun")))
-            .await?;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("migrate-rerun")),
+        )
+        .await?;
         let space = signer().await;
         let profile_signer = profile.credential().signer().as_ed25519().unwrap().clone();
 
@@ -604,7 +602,7 @@ mod tests {
         // (as a completed first attempt would have), but the legacy store
         // still holds it.
         let env = MigrateEnv {
-            authority: Authority::new("profile", profile_signer.clone(), profile_signer.clone()),
+            authority: Authority::new("profile", profile_signer.did(), profile_signer.clone()),
             storage: storage.clone(),
         };
         let branch = crate::Repository::from(profile_signer.clone())
@@ -634,10 +632,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_is_a_noop_on_an_empty_store() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Peer::new()
-            .storage(storage.clone())
-            .open(Location::profile(unique_name("migrate-empty")))
-            .await?;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("migrate-empty")),
+        )
+        .await?;
         let retained = profile.access().migrate().perform(&storage).await?;
         assert!(retained.is_empty());
         Ok(())

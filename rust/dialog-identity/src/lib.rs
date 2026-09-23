@@ -14,7 +14,7 @@ mod open;
 mod secret;
 mod space;
 
-pub use access::SaveDelegation;
+pub use access::{Claim, ClaimExt, SaveDelegation};
 pub use authority::*;
 pub use error::IdentityError;
 pub use open::OpenCredential;

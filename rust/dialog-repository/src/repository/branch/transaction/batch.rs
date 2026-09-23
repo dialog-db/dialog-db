@@ -548,7 +548,7 @@ mod tests {
     use crate::{Branch, CommitError, PublishError};
     use anyhow::Result;
     use dialog_artifacts::history::Edition;
-    use dialog_peer::Session;
+    use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
     use dialog_query::{Concept, Entity, Query, Term};
@@ -572,7 +572,7 @@ mod tests {
         })
     }
 
-    async fn bodies(branch: &Branch, operator: &Session<VolatileSpace>) -> Result<Vec<String>> {
+    async fn bodies(branch: &Branch, operator: &Peer<VolatileSpace>) -> Result<Vec<String>> {
         let mut bodies: Vec<String> = branch
             .query()
             .select(Query::<Note> {
