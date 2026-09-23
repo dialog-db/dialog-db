@@ -19,14 +19,11 @@ use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Void;
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::OperatorExt as _;
 use dialog_effects::authority::{Attest, Identify};
-use dialog_effects::branch::{self as branch_fx, BranchError};
+use dialog_effects::branch::{self as branch_fx, BranchError, BranchRecord};
 use dialog_effects::memory::{MemoryError, Publish, Resolve, Retract};
 use dialog_effects::method;
-use dialog_query::{Output as _, Query, Term};
-use dialog_repository::registry::{forget, record, switch};
-use dialog_repository::schema::{Branch as BranchConcept, Replica};
+use dialog_repository::registry::{forget, list, record, switch};
 use dialog_repository::{
     Branch, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt, RetractError,
 };
@@ -163,33 +160,13 @@ where
     async fn execute(
         &self,
         input: Capability<branch_fx::List>,
-    ) -> Result<Vec<String>, BranchError> {
+    ) -> Result<Vec<BranchRecord>, BranchError> {
         let subject = input.subject().clone();
         let registry = self.registry(&subject).await?;
-        let operator = self.build_authority(subject.clone());
-        let replica = Replica::new(operator.profile().clone(), subject);
+        let operator = self.build_authority(subject);
 
-        // Every branch recorded on this replica. The registry itself
-        // comes back among them without ever having been recorded --
-        // its fact is synthesized into the query's overlay.
-        let rows: Vec<BranchConcept> = Box::pin(
-            registry
-                .query()
-                .select(Query::<BranchConcept> {
-                    this: Term::var("this"),
-                    name: Term::var("name"),
-                    replica: replica.this.clone().into(),
-                })
-                .perform(self)
-                .try_vec(),
-        )
-        .await
-        .map_err(failed)?;
-
-        let mut names: Vec<String> = rows.into_iter().map(|row| row.name.0).collect();
-        names.sort();
-        names.dedup();
-        Ok(names)
+        let branches = list(&registry, &operator, self).await.map_err(failed)?;
+        Ok(branches.into_iter().map(BranchRecord::from).collect())
     }
 }
 
@@ -303,6 +280,7 @@ mod tests {
     use dialog_capability::{Did, Subject};
     use dialog_effects::MethodExt as _;
     use dialog_effects::authority::{Identify, OperatorExt as _};
+    use dialog_effects::branch::BranchRecord;
     use dialog_effects::branch::prelude::*;
     use dialog_query::{Output as _, Query, Term};
     use dialog_repository::schema::{ActiveBranch, Branch as BranchConcept, Replica};
@@ -386,7 +364,10 @@ mod tests {
             .branches()
             .list()
             .perform(operator)
-            .await?)
+            .await?
+            .into_iter()
+            .map(|branch| branch.name)
+            .collect())
     }
 
     /// Creating at a revision makes a branch that points at it -- one
@@ -687,6 +668,40 @@ mod tests {
             .await?;
 
         assert_eq!(active(&operator, &did).await?, vec![elsewhere]);
+        Ok(())
+    }
+
+    /// Listing returns each branch as the registry records it: the
+    /// entity derived from `(replica, name)`, its name, and its replica.
+    #[dialog_common::test]
+    async fn it_lists_branch_records() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+
+        Subject::from(did.clone())
+            .writer()
+            .branches()
+            .branch("feature")
+            .create()
+            .perform(&operator)
+            .await?;
+
+        let identity = Identify.perform(&operator).await?;
+        let replica = Replica::new(identity.profile().clone(), did.clone());
+        let expected = BranchRecord::from(BranchConcept::new(&replica, "feature"));
+
+        let records = Subject::from(did.clone())
+            .reader()
+            .branches()
+            .list()
+            .perform(&operator)
+            .await?;
+        assert!(records.contains(&expected), "{records:?}");
+        assert!(
+            records.iter().all(|record| record.replica == replica.this),
+            "every branch is on this replica: {records:?}"
+        );
         Ok(())
     }
 }
