@@ -14,6 +14,7 @@ mod test;
 
 pub use builder::{DeriveOperator, OperatorBuilder, OperatorError};
 
+use dialog_common::{Held, Holdings, Holds};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
@@ -138,6 +139,12 @@ pub struct Operator<S: Clone> {
     /// work lives only while some `.perform` call drives it.
     hydration: Arc<dialog_network::HydrationScheduler>,
 
+    /// Handles code running on this operator keeps warm between calls --
+    /// each repository's registry branch, opened when the repository is
+    /// -- held type-erased, so the operator needs to know nothing of
+    /// what it holds (see [`Holds`]).
+    holdings: Holdings,
+
     /// The ambient speculative-fetch queue `Preload` hints land in and
     /// driven evaluation streams pop from (see `operator/preload.rs`).
     /// Pure data: selectors and a budget, no futures and no tasks —
@@ -178,6 +185,16 @@ impl<S: Clone> Operator<S> {
     /// Build the authority chain for a given subject DID.
     pub fn build_authority(&self, subject: Did) -> Capability<AuthOperator> {
         self.authority.build_authority(subject)
+    }
+}
+
+impl<S: Clone> Holds for Operator<S> {
+    fn held(&self, key: &str) -> Option<Held> {
+        self.holdings.held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        self.holdings.hold(key, handle)
     }
 }
 
