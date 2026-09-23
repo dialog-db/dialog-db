@@ -8,6 +8,7 @@ use dialog_query::concept::query::PlanCache;
 
 use crate::NetworkedIndex;
 use crate::repository::source::{Caches, SourceRef};
+use dialog_artifacts::Changes;
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::Entity;
 use dialog_artifacts::history::Origin;
@@ -16,9 +17,10 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
-use dialog_capability::{Did, Subject};
+use dialog_capability::{Capability, Did, Subject};
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
+use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_query::query::Application;
 use dialog_search_tree::{Buffer, Cache};
 use std::sync::{Arc, Mutex};
@@ -185,7 +187,54 @@ pub struct Branch {
     /// (profile, issuer) pair so a branch handle driven under a different
     /// authority re-derives rather than serving a stale identity.
     identity_cache: Arc<Mutex<Option<CommitIdentity>>>,
+    /// Memo of the schema metadata every query folds into its overlay.
+    /// Deriving it hashes and base58-renders the replica, branch, and
+    /// revision entities, and it is asked for on every query, yet it only
+    /// changes with the profile or the head. Keyed by both, so a handle
+    /// under another profile or at another head re-derives.
+    metadata_cache: MetadataMemo,
+    /// Memo of the metadata a query layer over this branch alone folds
+    /// into its overlay: this branch's, the registry's self-description,
+    /// and the session's. Keyed by profile, operator, and head.
+    layer_metadata_cache: LayerMetadataMemo,
 }
+
+impl Branch {
+    /// The metadata a query layer over this branch alone folds in, as
+    /// `derive` computes it, reused while the profile, operator, and head
+    /// are those it was derived under.
+    pub(crate) fn layer_metadata(
+        &self,
+        operator: &Capability<Operator>,
+        derive: impl FnOnce() -> Changes,
+    ) -> Changes {
+        let profile = operator.profile();
+        let did = operator.did();
+        let revision = self.revision();
+        let mut cache = self
+            .layer_metadata_cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some((cached_profile, cached_operator, cached_revision, changes)) = cache.as_ref()
+            && cached_profile == profile
+            && *cached_operator == did
+            && *cached_revision == revision
+        {
+            return changes.clone();
+        }
+        let changes = derive();
+        *cache = Some((profile.clone(), did, revision, changes.clone()));
+        changes
+    }
+}
+
+/// A branch's metadata memo: the profile and head it was derived under,
+/// and what was derived.
+type MetadataMemo = Arc<Mutex<Option<(Did, Option<Revision>, metadata::BranchMetadata)>>>;
+
+/// A single-branch query layer's metadata memo: the profile, operator,
+/// and head it was derived under, and what was derived.
+type LayerMetadataMemo = Arc<Mutex<Option<(Did, Did, Option<Revision>, Changes)>>>;
 
 /// A memoized commit identity: the (profile, issuer) inputs it was derived
 /// from, and the derived branch entity and origin. See
