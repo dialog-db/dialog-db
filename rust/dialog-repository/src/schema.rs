@@ -148,15 +148,25 @@ pub mod branch {
         pub u128,
     );
 
-    /// `dialog.branch/upstream` — a branch this one tracks, by entity:
+    /// `dialog.branch/pull` — a branch this one pulls from, by entity:
     /// a branch on this replica, or one on a peer's replica, derived
-    /// from `(replica, name)` like any other. One per tracked branch,
-    /// so cardinality-many.
+    /// from `(replica, name)` like any other. A pull takes from every
+    /// one, so cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
     #[cardinality(many)]
-    pub struct Upstream(
-        /// The tracked branch's entity.
+    pub struct Pull(
+        /// The pulled-from branch's entity.
+        pub Entity,
+    );
+
+    /// `dialog.branch/push` — a branch this one pushes to, by entity,
+    /// as for [`Pull`]. A push goes to every one, so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.branch")]
+    #[cardinality(many)]
+    pub struct Push(
+        /// The pushed-to branch's entity.
         pub Entity,
     );
 
@@ -563,14 +573,24 @@ pub struct PeerAddress {
     pub address: peer::Address,
 }
 
-/// One branch a branch tracks. Cardinality-many: a branch tracking
-/// several upstreams has one of these per upstream.
+/// One branch a branch pulls from. Cardinality-many: a branch pulling
+/// from several has one of these per branch, and a pull takes from all.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct BranchUpstream {
-    /// The tracking branch's entity (same as [`Branch::this`]).
+pub struct BranchPull {
+    /// The pulling branch's entity (same as [`Branch::this`]).
     pub this: Entity,
-    /// The tracked branch's entity.
-    pub upstream: branch::Upstream,
+    /// The pulled-from branch's entity.
+    pub pull: branch::Pull,
+}
+
+/// One branch a branch pushes to. Cardinality-many: a branch pushing to
+/// several has one of these per branch, and a push goes to all.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BranchPush {
+    /// The pushing branch's entity (same as [`Branch::this`]).
+    pub this: Entity,
+    /// The pushed-to branch's entity.
+    pub push: branch::Push,
 }
 
 /// The branch a replica has switched to.
