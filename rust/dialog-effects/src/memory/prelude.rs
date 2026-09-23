@@ -24,7 +24,7 @@
 
 use dialog_capability::{Capability, Constraint, Policy};
 
-use super::{Cell, Memory, Publish, Resolve, Retract, Space, Version};
+use super::{Cell, List, Memory, Publish, Resolve, Retract, Space, Version};
 use crate::{Method, MethodExt as _, UseExt as _, method};
 
 /// Scope a method to the memory namespace.
@@ -91,6 +91,30 @@ where
     type Cell = Capability<Cell<M>>;
     fn cell(self, name: impl Into<String>) -> Self::Cell {
         self.attenuate(Cell::new(name))
+    }
+}
+
+/// List the cells in a space.
+pub trait ListSpaceExt {
+    /// Name every cell under this space, by its path relative to it.
+    fn list(self) -> Capability<List>;
+}
+
+impl ListSpaceExt for Capability<Space<method::Get>> {
+    fn list(self) -> Capability<List> {
+        self.invoke(List)
+    }
+}
+
+/// Field accessors on `Capability<List>`.
+pub trait ListExt {
+    /// Get the space name from the capability chain.
+    fn space(&self) -> &str;
+}
+
+impl ListExt for Capability<List> {
+    fn space(&self) -> &str {
+        &Space::of(self).space
     }
 }
 
