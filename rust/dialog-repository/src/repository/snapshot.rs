@@ -989,13 +989,13 @@ mod tests {
     use futures_util::stream;
 
     use super::*;
+
     use dialog_capability::Subject;
     use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
 
     use crate::Blob;
     use crate::helpers::test_repo;
-    use dialog_operator::DeriveOperator as _;
-    use dialog_operator::helpers::{generate_data, test_operator_with_profile, unique_name};
+    use dialog_peer::helpers::{generate_data, test_session_with_peer, unique_name};
 
     /// A blob source over bytes held in memory.
     struct Bytes(Option<Vec<u8>>);
@@ -1035,8 +1035,8 @@ mod tests {
     }
 
     struct Stage {
-        env: dialog_operator::Operator<VolatileSpace>,
-        profile: dialog_operator::Profile,
+        env: dialog_peer::Peer<VolatileSpace>,
+        profile: dialog_peer::Peer<VolatileSpace>,
         repository: crate::Repository,
         revision: Revision,
         blob_bytes: Vec<u8>,
@@ -1044,22 +1044,23 @@ mod tests {
 
     /// A second environment with the same repository mounted, so imported
     /// content has somewhere to land.
-    async fn destination_for(stage: &Stage) -> Result<dialog_operator::Operator<VolatileSpace>> {
+    async fn destination_for(stage: &Stage) -> Result<dialog_peer::Peer<VolatileSpace>> {
         let destination = Storage::<VolatileSpace>::volatile();
         StorageFx::profile(unique_name("snapshot-profile"))
-            .create(Credential::Signer(stage.profile.signer().clone()))
+            .create(Credential::Signer(stage.profile.credential().clone()))
             .perform(&destination)
             .await?;
         StorageFx::profile(unique_name("snapshot-repository"))
             .create(stage.repository.credential().clone())
             .perform(&destination)
             .await?;
-        Ok(stage
-            .profile
-            .derive(b"snapshot-destination")
+        let peer = dialog_peer::Peer::open(stage.profile.home().clone())
+            .credential(stage.profile.credential().clone())
+            .storage(destination)
+            .await?;
+        Ok(peer
+            .worker(b"snapshot-destination")
             .allow(Subject::any())
-            .network(dialog_network::Network::default())
-            .build(destination)
             .await?)
     }
 
@@ -1067,7 +1068,7 @@ mod tests {
     /// a value too large to inline (so it spills to its own block), and a
     /// blob.
     async fn stage() -> Result<Stage> {
-        let (env, profile) = test_operator_with_profile().await;
+        let (env, profile) = test_session_with_peer().await;
         let repository = test_repo(&env, &profile).await;
         let branch = repository.branch("main").open().perform(&env).await?;
 
@@ -1288,7 +1289,7 @@ mod tests {
     // without depending on the order the export yields them in.
     async fn tree_only_destination(
         stage: &Stage,
-    ) -> Result<(dialog_operator::Operator<VolatileSpace>, crate::Repository)> {
+    ) -> Result<(dialog_peer::Peer<VolatileSpace>, crate::Repository)> {
         let (blocks, _) = drain(
             stage
                 .repository

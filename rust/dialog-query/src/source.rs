@@ -23,7 +23,7 @@ pub(crate) mod test {
     use dialog_artifacts::selector::Constrained;
     use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
-    use dialog_operator::Operator as DialogOperator;
+    use dialog_peer::Peer as DialogOperator;
     use dialog_repository::{Branch, NetworkedIndex};
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_storage::{Blake3Hash, StorageBackend};

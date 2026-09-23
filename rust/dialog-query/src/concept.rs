@@ -401,7 +401,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use anyhow::Result;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
 
     // Define a Person concept for testing via `#[derive(Concept)]`.
@@ -645,7 +645,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_empty_for_no_matches() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -680,7 +680,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_with_concept_dsl() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -766,7 +766,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_negates_concept_with_not_operator() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -892,7 +892,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_negates_relation_with_not_operator() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -989,7 +989,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_asserts_concept_with_attribute_fields() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1046,7 +1046,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_concept_with_attribute_fields() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1099,7 +1099,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_concept_with_constant_term() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1145,7 +1145,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_reuses_attributes_across_concepts() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1227,7 +1227,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_concept_with_attributes() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1351,7 +1351,7 @@ mod tests {
     /// entity does not satisfy the target concept.
     #[dialog_common::test]
     async fn it_enforces_conformance_structurally() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1412,7 +1412,7 @@ mod tests {
         use crate::rule::deductive::DeductiveRule;
         use crate::{Cardinality, ConceptDescriptor};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1504,7 +1504,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_concept_via_shortcut() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
@@ -1562,7 +1562,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_filters_concept_query_via_shortcut() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
@@ -1642,7 +1642,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_single_attribute() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1681,7 +1681,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_multi_attribute_with_constants() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1717,7 +1717,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_multi_attribute_variable_limitation() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

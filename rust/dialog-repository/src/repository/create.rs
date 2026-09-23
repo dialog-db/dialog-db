@@ -36,7 +36,7 @@ impl CreateRepository {
     ///
     /// ```no_run
     /// # async fn example<Env>(
-    /// #     profile: &dialog_operator::Profile,
+    /// #     peer: &dialog_peer::Peer<dialog_storage::provider::storage::VolatileSpace>,
     /// #     operator: &Env,
     /// # ) -> Result<(), Box<dyn std::error::Error>>
     /// # where Env: dialog_capability::Provider<dialog_effects::space::Create> + dialog_common::ConditionalSync {
@@ -48,8 +48,8 @@ impl CreateRepository {
     /// let did = signer.did().to_string();
     /// let name = &did[did.len() - 8..];
     ///
-    /// let repo = profile
-    ///     .repository(name)
+    /// let repo = peer
+    ///     .space(name)
     ///     .create()
     ///     .with_credential(signer)
     ///     .perform(operator)

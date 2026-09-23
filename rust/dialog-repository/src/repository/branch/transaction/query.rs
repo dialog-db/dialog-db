@@ -177,7 +177,7 @@ mod tests {
     use crate::schema;
     use crate::schema::DidExt as _;
     use dialog_artifacts::Entity;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
     use dialog_query::{Concept, Query, Term, the};
 
@@ -212,7 +212,7 @@ mod tests {
     async fn it_integrates_external_changes_into_branch_transaction() -> anyhow::Result<()> {
         use dialog_artifacts::Changes;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -289,7 +289,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_surfaces_pending_asserts_through_transaction_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -317,7 +317,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_tombstones_pending_retracts_through_transaction_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -360,7 +360,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_keeps_value_when_retract_is_followed_by_assert() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -404,7 +404,7 @@ mod tests {
     /// Counterpart to `repository::tests::it_auto_includes_session_facts`.
     #[dialog_common::test]
     async fn it_auto_includes_session_facts_in_transaction_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -446,7 +446,7 @@ mod tests {
     /// land zero metadata facts on the branch tree.
     #[dialog_common::test]
     async fn it_does_not_leak_session_metadata_into_commits() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -505,7 +505,7 @@ mod tests {
     /// `repository::tests::it_auto_includes_session_branch_attribute_per_branch_in_scope`.
     #[dialog_common::test]
     async fn it_auto_includes_session_branch_in_transaction_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
 
@@ -537,7 +537,7 @@ mod tests {
     /// [`QueryEnv`](crate::repository::branch::session::QueryEnv).
     #[dialog_common::test]
     async fn it_resolves_derived_revision_concepts_in_a_transaction() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -605,7 +605,7 @@ mod tests {
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptQuery, Parameters};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -660,7 +660,7 @@ mod tests {
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptQuery, Parameters};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
