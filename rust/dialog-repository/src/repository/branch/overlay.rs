@@ -84,7 +84,7 @@ impl Overlay {
     /// subscriptions re-evaluate against the restored facts.
     pub fn import(&self, changes: Changes) -> &Self {
         let mut state = self.state.lock().expect("overlay lock");
-        state.changes.extend(changes);
+        state.changes.merge(changes);
         state.epoch += 1;
         self
     }

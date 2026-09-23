@@ -3,20 +3,12 @@
 //! This module defines the [`Instruction`] enum which represents operations
 //! that can be applied to artifacts during commit transactions.
 
-use serde::{Deserialize, Serialize};
-
 use crate::Artifact;
 
 #[cfg(doc)]
 use crate::ArtifactStoreMut;
 
 /// The instruction variants that are accepted by [`ArtifactStoreMut::commit`].
-///
-/// Serializes as a single-key map naming the operation, e.g.
-/// `{"assert": <artifact>}`, so a batch of changes (see
-/// [`Changes`](crate::Changes)) can be carried as bytes and replayed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum Instruction {
     /// Add this [`Artifact`] to the [`ArtifactStoreMut`]. Purely additive:
     /// any prior entries at the same `(entity, attribute)` are left in
