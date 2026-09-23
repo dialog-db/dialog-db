@@ -44,6 +44,7 @@ pub struct Storage<S: Clone> {
         memory::Resolve,
         memory::Publish,
         memory::Retract,
+        memory::List,
         credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,
