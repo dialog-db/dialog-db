@@ -59,6 +59,12 @@ impl ConceptRules {
         Self::with_plan_cache(descriptor, PlanCache::default())
     }
 
+    /// The plan cache this bundle plans through, to share with another
+    /// assembled for the same query.
+    pub fn plan_cache(&self) -> &PlanCache {
+        &self.plan_cache
+    }
+
     /// Create a new `ConceptRules` sharing `plan_cache` with its owner.
     ///
     /// The repository assembles a fresh `ConceptRules` per query from its
@@ -66,7 +72,7 @@ impl ConceptRules {
     /// plans the previous one computed (see [`PlanCache`]).
     pub fn with_plan_cache(descriptor: &ConceptDescriptor, plan_cache: PlanCache) -> Self {
         Self {
-            implicit: DeductiveRule::from(descriptor),
+            implicit: descriptor.implicit_rule(),
             installed: Vec::new(),
             plans: Arc::new(RwLock::new(HashMap::new())),
             plan_cache,

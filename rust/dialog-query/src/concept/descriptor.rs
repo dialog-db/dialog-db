@@ -23,11 +23,14 @@ use crate::{
 };
 use dialog_artifacts::Update;
 
+use crate::memo::Memo;
+use crate::rule::DeductiveRule;
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 use serde_ipld_dagcbor::to_vec as to_cbor_vec;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Not;
+use std::sync::Arc;
 
 /// A concept descriptor: a named set of attribute descriptors that together
 /// describe an entity type. Concepts are similar to tables in relational
@@ -61,6 +64,18 @@ pub struct ConceptDescriptor {
     /// row. A concept must still declare at least one *required*
     /// attribute.
     with: NamedAttributes,
+    /// The concept's identity, computed on first use. Hashing every
+    /// attribute is not free, and rule dispatch, analysis and checking
+    /// all ask for it on every query; the attributes never change once
+    /// the descriptor is built, so neither does the identity.
+    #[serde(skip)]
+    identity: Memo<Entity>,
+    /// The concept's implicit rule -- matching an entity that carries
+    /// every required attribute -- analyzed on first use. It depends
+    /// only on the attributes, and every query assembling rules for the
+    /// concept needs it.
+    #[serde(skip)]
+    implicit: Memo<Arc<DeductiveRule>>,
 }
 
 impl ConceptDescriptor {
@@ -78,6 +93,9 @@ impl ConceptDescriptor {
     /// with no doc comment doesn't serialize a blank field.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         let description = description.into();
+        // The implicit rule concludes this descriptor, description and
+        // all, so a copy with another description needs its own.
+        self.implicit = Memo::default();
         self.description = if description.is_empty() {
             None
         } else {
@@ -217,10 +235,23 @@ impl ConceptDescriptor {
     /// Identityfier for this concept (as in type identifier and not instance
     /// identifier)
     pub fn this(&self) -> Entity {
-        let encoded = self.hash().as_bytes().as_ref().to_base58();
-        format!("concept:{encoded}")
-            .parse()
-            .expect("valid entity URI")
+        self.identity
+            .get_or_init(|| {
+                let encoded = self.hash().as_bytes().as_ref().to_base58();
+                format!("concept:{encoded}")
+                    .parse()
+                    .expect("valid entity URI")
+            })
+            .clone()
+    }
+
+    /// The concept's implicit rule: an entity carrying every required
+    /// attribute is an instance.
+    pub fn implicit_rule(&self) -> DeductiveRule {
+        self.implicit
+            .get_or_init(|| Arc::new(DeductiveRule::from(self)))
+            .as_ref()
+            .clone()
     }
 
     /// Creates a query application for this concept descriptor.
@@ -273,6 +304,8 @@ fn descriptor_from_with(with: NamedAttributes) -> ConceptDescriptor {
     ConceptDescriptor {
         description: None,
         with,
+        identity: Memo::default(),
+        implicit: Memo::default(),
     }
 }
 

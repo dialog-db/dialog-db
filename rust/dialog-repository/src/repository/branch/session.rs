@@ -14,8 +14,8 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
+use dialog_query::concept::query::ConceptRules;
 use dialog_query::concept::query::fixpoint::Continuation;
-use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
@@ -928,7 +928,10 @@ where
                         rules.extend(self.session_rules(source, &entity)?);
                     }
                     rules.extend(overlay_rules(&self.changes, &entity));
-                    let bundle = assemble(&descriptor, rules, PlanCache::default());
+                    // The analysis reads premises and never plans, so
+                    // these bundles share the root's cache rather than
+                    // allocating one each.
+                    let bundle = assemble(&descriptor, rules, root_bundle.plan_cache().clone());
                     Ok::<_, EvaluationError>((entity, bundle))
                 }))
                 .await?;
