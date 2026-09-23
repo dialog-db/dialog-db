@@ -83,10 +83,10 @@ where
     S: Clone,
     Self: BranchEnv,
 {
-    /// Open the registry branch for `subject`.
+    /// The registry branch for `subject`, held open by this operator.
     async fn registry(&self, subject: &dialog_varsig::Did) -> Result<Branch, BranchError> {
         Subject::from(subject.clone())
-            .branch(REGISTRY)
+            .registry()
             .open()
             .perform(self)
             .await

@@ -4,10 +4,10 @@ use dialog_artifacts::Changes;
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_query::Statement as _;
 
-use super::resolve::{registry, resolve};
+use super::resolve::resolve;
 use crate::registry::{RegistryEnv, apply, pull, push};
 use crate::schema::Replica;
-use crate::{Branch, SetUpstreamError, UpstreamBranch};
+use crate::{Branch, RepositoryMemoryExt as _, SetUpstreamError, UpstreamBranch};
 
 /// Which relations a [`SetUpstream`] records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +95,7 @@ impl SetUpstream<'_> {
             push(&this, &target).assert(&mut changes);
         }
 
-        let registry = registry(&branch.subject(), env).await?;
+        let registry = branch.subject().registry().open().perform(env).await?;
         apply(&registry, changes, env).await?;
         resolve(branch, env).await?;
         Ok(())

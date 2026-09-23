@@ -35,8 +35,8 @@ use super::branch::upstream::legacy;
 use crate::registry::{RegistryEnv, apply, pull, push};
 use crate::schema::{Peer, PeerAddress, Replica};
 use crate::{
-    Branch, Cell, REGISTRY, RemoteAddress, RemoteEdition, Repository, RepositoryMemoryExt as _,
-    Resolved, Route, SiteAddress, Tracking, UpgradeError,
+    Branch, Cell, RemoteAddress, RemoteEdition, Repository, RepositoryMemoryExt as _, Resolved,
+    Route, SiteAddress, Tracking, UpgradeError,
 };
 use dialog_artifacts::Entity;
 
@@ -101,7 +101,7 @@ impl Upgrade {
         }
 
         let operator = Identify.perform(env).await?;
-        let registry = self.subject.branch(REGISTRY).open().perform(env).await?;
+        let registry = self.subject.registry().open().perform(env).await?;
 
         if from < 1 {
             carry_over(&self.subject, &registry, &operator, env).await?;
