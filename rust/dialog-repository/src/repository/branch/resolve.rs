@@ -8,10 +8,8 @@
 //! revision it was resolved at. A sync re-resolves only when the registry
 //! has moved since.
 
-use std::sync::Arc;
-
 use dialog_artifacts::Entity;
-use dialog_capability::{Did, Subject};
+use dialog_capability::Did;
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_query::{Output as _, Query, Term};
 
@@ -20,26 +18,6 @@ use crate::schema::{
     BranchPull, BranchPush, Peer, PeerAddress, PullUpstream, PushUpstream, Replica,
 };
 use crate::{Branch, REGISTRY, RepositoryMemoryExt as _, ResolveUpstreamsError, Resolved, Route};
-
-/// The registry branch of `subject`, held warm by `env`: opened the first
-/// time it is asked for, and reused after, with its head re-read so
-/// writes through other handles are seen.
-pub(crate) async fn registry<Env: RegistryEnv>(
-    subject: &Subject,
-    env: &Env,
-) -> Result<Branch, crate::ResolveError> {
-    let key = format!("dialog.registry:{}", subject.did());
-    let held = env
-        .held(&key)
-        .and_then(|held| held.downcast_ref::<Branch>().cloned());
-    if let Some(registry) = held {
-        registry.refresh(env).await?;
-        return Ok(registry);
-    }
-    let registry = subject.branch(REGISTRY).open().perform(env).await?;
-    env.hold(key, Arc::new(registry.clone()));
-    Ok(registry)
-}
 
 /// Bring `branch`'s cached routes up to date with the registry: a no-op
 /// while the registry has not moved since they were resolved.
@@ -50,7 +28,7 @@ pub(crate) async fn resolve<Env: RegistryEnv>(
     if branch.name() == REGISTRY {
         return Ok(());
     }
-    let registry = registry(&branch.subject(), env).await?;
+    let registry = branch.subject().registry().open().perform(env).await?;
     let at = registry.revision();
     if matches!(&branch.tracked().resolved, Some(resolved) if resolved.at == at) {
         return Ok(());
@@ -265,11 +243,11 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::{registry, resolve};
+    use super::resolve;
     use crate::helpers::test_repo;
     use crate::registry::{apply, pull};
     use crate::schema::{Peer, Replica};
-    use crate::{PullError, Route, Upstream};
+    use crate::{PullError, RepositoryMemoryExt as _, Route, Upstream};
     use anyhow::Result;
     use dialog_artifacts::Changes;
     use dialog_operator::helpers::test_operator_with_profile;
@@ -326,7 +304,7 @@ mod tests {
         target.clone().assert(&mut changes);
         pull(&local.branch("feature"), &target).assert(&mut changes);
         apply(
-            &registry(&repo.subject(), &operator).await?,
+            &repo.subject().registry().open().perform(&operator).await?,
             changes,
             &operator,
         )

@@ -20,7 +20,7 @@ use url::Url;
 use crate::registry::{RegistryEnv, apply};
 use crate::schema::{Branch as BranchConcept, DidExt as _, Peer, PeerAddress, peer};
 use crate::{
-    AddAddressError, Branch, ConnectError, REGISTRY, RemoteBranch, RemoteRepository, Repository,
+    AddAddressError, Branch, ConnectError, RemoteBranch, RemoteRepository, Repository,
     RepositoryMemoryExt as _, SiteAddress,
 };
 use dialog_artifacts::{Changes, Entity};
@@ -160,13 +160,7 @@ impl AddAddress {
     /// Record the address, and the name if one was given, answering the
     /// peer's entity.
     pub async fn perform<Env: RegistryEnv>(self, env: &Env) -> Result<Entity, AddAddressError> {
-        let registry = self
-            .peer
-            .subject
-            .branch(REGISTRY)
-            .open()
-            .perform(env)
-            .await?;
+        let registry = self.peer.subject.registry().open().perform(env).await?;
         let this = match self.peer.by {
             By::Entity(entity) => entity,
             By::Name(name) => named(&registry, name, env).await?,
@@ -247,7 +241,7 @@ impl OpenPeerRepository {
         env: &Env,
     ) -> Result<RemoteRepository, ConnectError> {
         let PeerRepository { peer, subject } = self.repository;
-        let registry = peer.subject.branch(REGISTRY).open().perform(env).await?;
+        let registry = peer.subject.registry().open().perform(env).await?;
         connect(&registry, &peer.subject, &peer.by, subject, env).await
     }
 }
@@ -279,7 +273,7 @@ impl OpenPeerBranch {
     pub async fn perform<Env: RegistryEnv>(self, env: &Env) -> Result<RemoteBranch, ConnectError> {
         let PeerBranch { repository, by } = self.branch;
         let PeerRepository { peer, subject } = repository;
-        let registry = peer.subject.branch(REGISTRY).open().perform(env).await?;
+        let registry = peer.subject.registry().open().perform(env).await?;
         let remote = connect(&registry, &peer.subject, &peer.by, subject, env).await?;
         let name = match by {
             By::Name(name) => name,
