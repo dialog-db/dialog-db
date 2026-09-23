@@ -12,7 +12,7 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get, Put};
-use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
+use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{
     ArchivedNodeBody, ContentAddressedStorage as TreeStorage, MissingBlocks, MissingPolicy,
@@ -664,7 +664,6 @@ where
         + ConditionalSync
         + 'static,
 {
-    let address = remote.address();
     match shipment? {
         // Removals ship nothing; the remote keeps its bytes.
         ShipmentRef::BlobRemoved(_) => Ok(()),
@@ -684,7 +683,7 @@ where
                 .read(digest.clone())
                 .perform(env)
                 .await;
-            let mut source = match source {
+            let source = match source {
                 Ok(source) => source,
                 // Bytes this replica never held: the record rode into the
                 // head by reference. Sole remote -> the target stores them
@@ -698,20 +697,45 @@ where
                 }
                 Err(error) => return Err(error.into()),
             };
-            let mut sink = address
-                .subject
-                .clone()
-                .writer()
-                .archive()
-                .blob()
-                .import(digest.clone(), size)
-                .fork(address.site())
-                .perform(env)
+            // An attempt is the whole transfer, since an import can fail
+            // at any point up to its finish. The source opened above
+            // serves the first; one that follows a failed attempt reads
+            // the bytes again.
+            let mut opened = Some(source);
+            remote
+                .reach(|address| {
+                    let digest = digest.clone();
+                    let opened = opened.take();
+                    async move {
+                        let mut source = match opened {
+                            Some(source) => source,
+                            None => {
+                                branch
+                                    .archive()
+                                    .blob()
+                                    .read(digest.clone())
+                                    .perform(env)
+                                    .await?
+                            }
+                        };
+                        let mut sink = address
+                            .subject
+                            .clone()
+                            .writer()
+                            .archive()
+                            .blob()
+                            .import(digest, size)
+                            .fork(address.site())
+                            .perform(env)
+                            .await?;
+                        while let Some(chunk) = source.next().await? {
+                            sink.write_all(&chunk).await?;
+                        }
+                        sink.finish().await?;
+                        Ok::<_, BlobError>(())
+                    }
+                })
                 .await?;
-            while let Some(chunk) = source.next().await? {
-                sink.write_all(&chunk).await?;
-            }
-            sink.finish().await?;
             Ok(())
         }
         // A value larger than the inline threshold lives as a
@@ -755,16 +779,19 @@ async fn remote_has_block<Env>(
 where
     Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    let address = remote.address();
-    let found: Option<Vec<u8>> = address
-        .subject
-        .clone()
-        .reader()
-        .archive()
-        .catalog("index")
-        .get(hash.clone())
-        .fork(&address.address)
-        .perform(env)
+    let found: Option<Vec<u8>> = remote
+        .reach(|address| async move {
+            address
+                .subject
+                .clone()
+                .reader()
+                .archive()
+                .catalog("index")
+                .get(hash.clone())
+                .fork(&address.address)
+                .perform(env)
+                .await
+        })
         .await
         .map_err(dialog_storage::DialogStorageError::from)
         .map_err(dialog_search_tree::DialogSearchTreeError::from)?;
@@ -780,16 +807,19 @@ async fn remote_block<Env>(
 where
     Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    let address = remote.address();
-    address
-        .subject
-        .clone()
-        .reader()
-        .archive()
-        .catalog("index")
-        .get(hash.clone())
-        .fork(&address.address)
-        .perform(env)
+    remote
+        .reach(|address| async move {
+            address
+                .subject
+                .clone()
+                .reader()
+                .archive()
+                .catalog("index")
+                .get(hash.clone())
+                .fork(&address.address)
+                .perform(env)
+                .await
+        })
         .await
         .map_err(dialog_storage::DialogStorageError::from)
         .map_err(dialog_search_tree::DialogSearchTreeError::from)
@@ -882,16 +912,22 @@ where
         + ConditionalSync
         + 'static,
 {
-    let address = target.address();
-    let probe = address
-        .subject
-        .clone()
-        .reader()
-        .archive()
-        .blob()
-        .read(digest.clone())
-        .fork(address.site())
-        .perform(env)
+    let probe = target
+        .reach(|address| {
+            let digest = digest.clone();
+            async move {
+                address
+                    .subject
+                    .clone()
+                    .reader()
+                    .archive()
+                    .blob()
+                    .read(digest)
+                    .fork(address.site())
+                    .perform(env)
+                    .await
+            }
+        })
         .await;
     match probe {
         // Present; the unconsumed reader is dropped. (A ranged 1-byte
@@ -902,64 +938,85 @@ where
         Err(error) => return Err(error.into()),
     }
 
-    // Local bytes first (free), then each source remote.
-    let mut source = match branch
+    // An attempt is the whole transfer, since an import can fail at any
+    // point up to its finish. The source found here serves the first;
+    // one that follows a failed attempt is found again.
+    let mut opened = Some(blob_source(&digest, branch, sources, env).await?);
+    target
+        .reach(|address| {
+            let digest = digest.clone();
+            let opened = opened.take();
+            async move {
+                let mut source = match opened {
+                    Some(source) => source,
+                    None => blob_source(&digest, branch, sources, env).await?,
+                };
+                let mut sink = address
+                    .subject
+                    .clone()
+                    .writer()
+                    .archive()
+                    .blob()
+                    .import(digest, size)
+                    .fork(address.site())
+                    .perform(env)
+                    .await?;
+                while let Some(chunk) = source.next().await? {
+                    sink.write_all(&chunk).await?;
+                }
+                sink.finish().await?;
+                Ok::<_, BlobError>(())
+            }
+        })
+        .await?;
+    Ok(())
+}
+
+/// A reader of blob `digest` from wherever this replica can reach it:
+/// the local archive first (free), then each source remote.
+async fn blob_source<Env>(
+    digest: &dialog_common::Blake3Hash,
+    branch: &Branch,
+    sources: &[RemoteRepository],
+    env: &Env,
+) -> Result<BlobReader, BlobError>
+where
+    Env: Provider<BlobRead> + Provider<Fork<RemoteSite, BlobRead>> + ConditionalSync,
+{
+    match branch
         .archive()
         .blob()
         .read(digest.clone())
         .perform(env)
         .await
     {
-        Ok(reader) => Some(reader),
-        Err(BlobError::NotFound(_)) => None,
-        Err(error) => return Err(error.into()),
-    };
-    if source.is_none() {
-        for origin in sources {
-            let origin_address = origin.address();
-            match origin_address
-                .subject
-                .clone()
-                .reader()
-                .archive()
-                .blob()
-                .read(digest.clone())
-                .fork(origin_address.site())
-                .perform(env)
-                .await
-            {
-                Ok(reader) => {
-                    source = Some(reader);
-                    break;
-                }
-                Err(BlobError::NotFound(_)) => continue,
-                Err(error) => return Err(error.into()),
-            }
+        Err(BlobError::NotFound(_)) => {}
+        found => return found,
+    }
+    for origin in sources {
+        let found = origin
+            .reach(|address| async move {
+                address
+                    .subject
+                    .clone()
+                    .reader()
+                    .archive()
+                    .blob()
+                    .read(digest.clone())
+                    .fork(address.site())
+                    .perform(env)
+                    .await
+            })
+            .await;
+        match found {
+            Err(BlobError::NotFound(_)) => continue,
+            found => return found,
         }
     }
-    let Some(mut source) = source else {
-        return Err(BlobError::NotFound(format!(
-            "blob {digest:?} is referenced by the head but reachable from no store: \
-             not local, not on the push target, not on any tracked remote"
-        ))
-        .into());
-    };
-
-    let mut sink = address
-        .subject
-        .clone()
-        .writer()
-        .archive()
-        .blob()
-        .import(digest, size)
-        .fork(address.site())
-        .perform(env)
-        .await?;
-    while let Some(chunk) = source.next().await? {
-        sink.write_all(&chunk).await?;
-    }
-    sink.finish().await?;
-    Ok(())
+    Err(BlobError::NotFound(format!(
+        "blob {digest:?} is referenced by the head but reachable from no store: \
+         not local, not on the push target, not on any tracked remote"
+    )))
 }
 
 /// Transfer a by-reference subtree to the target, minimally: probe each

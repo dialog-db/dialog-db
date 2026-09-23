@@ -797,29 +797,37 @@ impl SnapshotExport {
                         // bytes are cached like every other download), then
                         // serve the read from the now-local copy.
                         (Err(BlobError::NotFound(_)), Some(remote)) => {
-                            let address = remote.address();
-                            let mut source = address
-                                .subject
-                                .clone()
-                                .reader()
-                                .archive()
-                                .blob()
-                                .read(digest.clone())
-                                .fork(address.site())
-                                .perform(env)
+                            // An attempt is the whole transfer, since
+                            // the read can fail at any point.
+                            let (digest, subject) = (&digest, &subject);
+                            let size = record.size;
+                            remote
+                                .reach(|address| async move {
+                                    let mut source = address
+                                        .subject
+                                        .clone()
+                                        .reader()
+                                        .archive()
+                                        .blob()
+                                        .read(digest.clone())
+                                        .fork(address.site())
+                                        .perform(env)
+                                        .await?;
+                                    let mut sink = subject
+                                        .clone()
+                                        .writer()
+                                        .archive()
+                                        .blob()
+                                        .import(digest.clone(), size)
+                                        .perform(env)
+                                        .await?;
+                                    while let Some(chunk) = source.next().await? {
+                                        sink.write_all(&chunk).await?;
+                                    }
+                                    sink.finish().await?;
+                                    Ok::<_, BlobError>(())
+                                })
                                 .await?;
-                            let mut sink = subject
-                                .clone()
-                                .writer()
-                                .archive()
-                                .blob()
-                                .import(digest.clone(), record.size)
-                                .perform(env)
-                                .await?;
-                            while let Some(chunk) = source.next().await? {
-                                sink.write_all(&chunk).await?;
-                            }
-                            sink.finish().await?;
                             subject
                                 .clone()
                                 .reader()

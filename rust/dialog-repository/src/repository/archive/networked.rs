@@ -178,15 +178,20 @@ where
         // guards it, the local write-back, and any sharing of the work
         // with concurrent readers of the same digest are the env's own
         // effect (see [`Hydrate`]).
-        let route = remote.address();
-        let request = HydrationRequest {
-            address: route.address,
-            subject: route.subject,
-            catalog: self.local.catalog().clone(),
-            digest: dialog_common::Blake3Hash::from(*key),
-            priority: self.priority,
-        };
-        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
+        let (local, priority) = (&self.local, self.priority);
+        let digest = dialog_common::Blake3Hash::from(*key);
+        let hydrated = remote
+            .reach(|route| {
+                let request = HydrationRequest {
+                    address: route.address,
+                    subject: route.subject,
+                    catalog: local.catalog().clone(),
+                    digest: digest.clone(),
+                    priority,
+                };
+                Provider::<Hydrate>::execute(local.env(), request)
+            })
+            .await?;
         Ok(hydrated.map(|bytes| bytes.as_ref().clone()))
     }
 }

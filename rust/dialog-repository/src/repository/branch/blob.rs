@@ -352,37 +352,41 @@ impl ReadBlob<'_> {
             return Err(BlobError::NotFound(miss_key).into());
         };
 
-        let address = remote.address();
-
-        // Full-blob read from the remote, forked to its site.
-        let mut source = address
-            .subject
-            .clone()
-            .reader()
-            .archive()
-            .blob()
-            .read(hash.clone())
-            .fork(address.site())
-            .perform(env)
+        // Full-blob read from the remote, forked to its site, written
+        // through a local digest-verified import sink. An attempt is the
+        // whole transfer, since the read can fail at any point.
+        let hash = &hash;
+        remote
+            .reach(|address| async move {
+                let mut source = address
+                    .subject
+                    .clone()
+                    .reader()
+                    .archive()
+                    .blob()
+                    .read(hash.clone())
+                    .fork(address.site())
+                    .perform(env)
+                    .await?;
+                let mut sink = line
+                    .archive()
+                    .blob()
+                    .import(hash.clone(), size)
+                    .perform(env)
+                    .await?;
+                while let Some(chunk) = source.next().await? {
+                    sink.write_all(&chunk).await?;
+                }
+                sink.finish().await?;
+                Ok::<_, BlobError>(())
+            })
             .await?;
-
-        // Write the bytes through a local digest-verified import sink.
-        let mut sink = line
-            .archive()
-            .blob()
-            .import(hash.clone(), size)
-            .perform(env)
-            .await?;
-        while let Some(chunk) = source.next().await? {
-            sink.write_all(&chunk).await?;
-        }
-        sink.finish().await?;
 
         // Serve the requested read from the now-local copy.
         line.archive()
             .blob()
             .invoke(BlobRead {
-                digest: hash,
+                digest: hash.clone(),
                 range,
             })
             .perform(env)

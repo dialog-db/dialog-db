@@ -25,16 +25,20 @@ impl<'a> PublishRemoteBranch<'a> {
     where
         Env: Provider<Fork<RemoteSite, Publish>> + Provider<Publish> + ConditionalSync,
     {
-        let address = self.branch.address();
-
         // Publish to the upstream via fork. The in-memory upstream cell
         // picks up the new CAS edition internally; we then snapshot it
         // below.
+        let upstream = self.branch.upstream();
+        let revision = &self.revision;
         self.branch
-            .upstream()
-            .publish(self.revision)
-            .fork(address.site())
-            .perform(env)
+            .repository()
+            .reach(|address| async move {
+                upstream
+                    .publish(revision.clone())
+                    .fork(address.site())
+                    .perform(env)
+                    .await
+            })
             .await?;
 
         // Persist the upstream edition so that a future open/load can
