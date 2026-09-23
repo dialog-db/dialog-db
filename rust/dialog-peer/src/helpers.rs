@@ -4,8 +4,8 @@ use crate::{OpenPeer, Peer, PeerError, PeerSpace};
 use anyhow::Result;
 use base58::ToBase58;
 use dialog_artifacts::{Artifact, Attribute, Entity, Value};
-use dialog_capability::{Provider, Subject};
-use dialog_effects::storage::{Create, Load, Location};
+use dialog_capability::Subject;
+use dialog_effects::storage::Location;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -41,11 +41,10 @@ pub fn unique_name(prefix: &str) -> String {
 }
 
 /// Open a root peer whose credential lives at `location` in `storage`.
-pub async fn open_peer<S>(storage: Storage<S>, location: Location) -> Result<Peer<S>, PeerError>
-where
-    S: PeerSpace,
-    Storage<S>: Provider<Load> + Provider<Create>,
-{
+pub async fn open_peer<S: PeerSpace>(
+    storage: Storage<S>,
+    location: Location,
+) -> Result<Peer<S>, PeerError> {
     OpenPeer::open(location).perform(&storage).await
 }
 

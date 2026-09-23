@@ -60,7 +60,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
 use dialog_effects::credential::Secret;
-use dialog_effects::storage::Directory;
+use dialog_effects::storage::{Directory, Location};
 use dialog_effects::{archive, blob, credential, memory};
 use dialog_identity::access::Access;
 use dialog_identity::{Authority, CredentialHandle, SpaceHandle};
@@ -68,6 +68,7 @@ use dialog_network::{HydrationScheduler, Network};
 use dialog_repository::{Branch, RemoteSite, Repository};
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
+use dialog_storage::resource::Resource;
 use dialog_ucan::UcanCertificate;
 use dialog_varsig::{Did, Principal};
 use parking_lot::Mutex;
@@ -75,9 +76,11 @@ use parking_lot::Mutex;
 use access::ChainCache;
 
 /// The space provider bound a peer's storage must satisfy for the peer
-/// to provide every effect, including the remote forks.
+/// to provide every effect, including the remote forks, and to mount its
+/// home at a location.
 pub trait PeerSpace:
     SpaceProvider
+    + Resource<Location, Error: fmt::Display>
     + Provider<blob::Read>
     + Provider<blob::Write>
     + Provider<blob::Import>
@@ -90,6 +93,7 @@ pub trait PeerSpace:
 
 impl<T> PeerSpace for T where
     T: SpaceProvider
+        + Resource<Location, Error: fmt::Display>
         + Provider<blob::Read>
         + Provider<blob::Write>
         + Provider<blob::Import>

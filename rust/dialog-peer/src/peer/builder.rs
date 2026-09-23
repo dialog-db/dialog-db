@@ -4,7 +4,7 @@ use std::fmt;
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 
-use dialog_capability::{Ability, Capability, Constraint, Provider, Subject, did};
+use dialog_capability::{Ability, Capability, Constraint, Subject, did};
 use dialog_credentials::{Ed25519Signer, Signer, SignerCredential};
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
 use dialog_identity::access::Claim;
@@ -364,11 +364,7 @@ impl<K> PeerBuilder<K, Unset> {
     }
 }
 
-impl<S> PeerBuilder<PeerKey, Storage<S>>
-where
-    S: PeerSpace,
-    Storage<S>: Provider<storage_fx::Load>,
-{
+impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>> {
     /// Open the peer: resolve its key, mount its home space when told
     /// where, mint its grants, and open its state branch.
     ///
@@ -495,11 +491,7 @@ pub type OpenFuture<S> = Pin<Box<dyn Future<Output = Result<Peer<S>, PeerError>>
 #[cfg(target_arch = "wasm32")]
 pub type OpenFuture<S> = Pin<Box<dyn Future<Output = Result<Peer<S>, PeerError>>>>;
 
-impl<S> IntoFuture for PeerBuilder<PeerKey, Storage<S>>
-where
-    S: PeerSpace,
-    Storage<S>: Provider<storage_fx::Load>,
-{
+impl<S: PeerSpace> IntoFuture for PeerBuilder<PeerKey, Storage<S>> {
     type Output = Result<Peer<S>, PeerError>;
     type IntoFuture = OpenFuture<S>;
 

@@ -6,8 +6,7 @@
 //! its credential lives; this is the convenience for when the two share
 //! one space, which every root peer today does.
 
-use dialog_capability::Provider;
-use dialog_effects::storage::{self as storage_fx, Directory, Location};
+use dialog_effects::storage::{Directory, Location};
 use dialog_identity::OpenCredential;
 use dialog_network::Network;
 use dialog_storage::provider::storage::Storage;
@@ -89,11 +88,7 @@ impl OpenPeer {
     }
 
     /// Open the credential in `storage` and the peer over it.
-    pub async fn perform<S>(self, storage: &Storage<S>) -> Result<Peer<S>, PeerError>
-    where
-        S: PeerSpace,
-        Storage<S>: Provider<storage_fx::Load> + Provider<storage_fx::Create>,
-    {
+    pub async fn perform<S: PeerSpace>(self, storage: &Storage<S>) -> Result<Peer<S>, PeerError> {
         let name = self.location.name.clone();
         let command = match self.mode {
             Mode::Open => OpenCredential::open(name),
