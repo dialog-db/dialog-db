@@ -54,7 +54,7 @@ impl<'a> Pull<'a> {
 
     /// Pull from the given branch alone, instead of every upstream.
     ///
-    /// Accepts either a `&Branch` or a `&RemoteBranch` — the same inputs as
+    /// Accepts either a `&Branch` or a `&ConnectedBranch` — the same inputs as
     /// [`Branch::set_upstream`]. The merge runs from the tree last synced
     /// with that branch, or from the empty base if it never was (correct,
     /// just unable to skip anything). A successful pull records how far it
