@@ -8,8 +8,8 @@ use dialog_capability::{Command, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use parking_lot::Mutex;
 
-// Operator-dependent helpers (test_operator, unique_name, ...) live in
-// `dialog_operator::helpers`: the operator sits above this crate, so tests
+// Operator-dependent helpers (test_session, unique_name, ...) live in
+// `dialog_peer::helpers`: the operator sits above this crate, so tests
 // import them from there via the dev-dependency. `test_repo` is the one
 // exception: it returns THIS crate's types, and through the dev-dependency
 // cycle the operator's copy of this crate is a distinct compilation — its
@@ -20,19 +20,19 @@ use parking_lot::Mutex;
 /// as the effect environment.
 #[cfg(test)]
 pub async fn test_repo(
-    operator: &dialog_operator::Operator<VolatileSpaceForTests>,
-    profile: &dialog_identity::Profile,
+    session: &dialog_peer::Peer<VolatileSpaceForTests>,
+    peer: &dialog_peer::Peer<VolatileSpaceForTests>,
 ) -> crate::Repository<dialog_credentials::Credential> {
     use crate::RepositoryExt as _;
     use dialog_identity::SpaceHandle;
-    use dialog_operator::helpers::unique_name;
+    use dialog_peer::helpers::unique_name;
     let handle = SpaceHandle {
-        profile_did: dialog_varsig::Principal::did(profile),
+        peer: dialog_varsig::Principal::did(peer),
         name: unique_name("repo"),
     };
     handle
         .open()
-        .perform(operator)
+        .perform(session)
         .await
         .expect("test_repo: failed to open repository")
 }

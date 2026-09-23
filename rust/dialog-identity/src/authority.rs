@@ -1,7 +1,8 @@
-//! Authority — opened profile with signers and authority chain.
+//! Authority — the acting signer and the replica identity it acts for.
 //!
-//! [`Authority`] holds the profile and operator signers and implements
-//! the provider traits needed by `Operator` for identity effects.
+//! [`Authority`] holds the acting signer and the DID of the replica the
+//! chain describes, and implements the provider traits a peer needs for
+//! identity effects.
 
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_credentials::Signer;
@@ -12,38 +13,41 @@ use dialog_varsig::{Did, Principal, Signer as _};
 // repository we're operating on. We use the profile DID as the subject
 // of the returned chain since that's the identity the chain describes.
 
-/// An opened profile with profile and operator signers.
+/// The acting signer and the replica identity the chain describes.
+///
+/// `profile` is the replica identity: the DID of the peer whose repository
+/// holds the acting key's state, and the DID every replica, line and
+/// branch entity derives from. `operator` is the key that signs. For a
+/// root peer they are the same principal; for a worker the profile is
+/// its parent's DID.
 ///
 /// Implements `Provider<Identify>` and `Principal` so the capability
-/// system can resolve identity.
-/// Built by [`OperatorBuilder`](crate::operator::OperatorBuilder).
+/// system can resolve identity. Built by the peer builder in
+/// `dialog-peer`, above this crate.
 #[derive(Debug, Clone)]
 pub struct Authority {
     name: String,
-    profile: Signer,
+    profile: Did,
     operator: Signer,
     account: Option<Did>,
-    /// The two signers' DIDs, derived once: rendering a key as a
-    /// `did:key` base58-encodes it, and every query identifies its
-    /// operator, while the signers never change.
-    profile_did: Did,
+    /// The operator's DID, derived once: rendering a key as a `did:key`
+    /// base58-encodes it, and every query identifies its operator, while
+    /// the signer never changes.
     operator_did: Did,
 }
 
 impl Authority {
-    /// Create an opened profile from existing signers.
+    /// An authority acting as `operator` for the replica `profile`.
     pub fn new(
         name: impl Into<String>,
-        profile: impl Into<Signer>,
+        profile: impl Into<Did>,
         operator: impl Into<Signer>,
     ) -> Self {
-        let profile: Signer = profile.into();
         let operator: Signer = operator.into();
         Self {
             name: name.into(),
-            profile_did: Principal::did(&profile),
             operator_did: Principal::did(&operator),
-            profile,
+            profile: profile.into(),
             operator,
             account: None,
         }
@@ -60,9 +64,9 @@ impl Authority {
         &self.name
     }
 
-    /// Get the profile DID.
+    /// The replica identity the chain describes.
     pub fn profile_did(&self) -> Did {
-        self.profile_did.clone()
+        self.profile.clone()
     }
 
     /// Get the operator DID.
@@ -73,11 +77,6 @@ impl Authority {
     /// Get the account DID, if configured.
     pub fn account_did(&self) -> Option<&Did> {
         self.account.as_ref()
-    }
-
-    /// Get a reference to the profile signer.
-    pub fn profile_signer(&self) -> &Signer {
-        &self.profile
     }
 
     /// Get a reference to the operator signer.

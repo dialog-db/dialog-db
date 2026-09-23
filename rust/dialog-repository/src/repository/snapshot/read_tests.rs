@@ -8,7 +8,7 @@ use anyhow::Result;
 use dialog_artifacts::history::History as _;
 use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Value};
 use dialog_effects::blob::BlobError;
-use dialog_operator::helpers::test_operator_with_profile;
+use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::query::Output;
 use dialog_query::{Concept, Query, Term, the};
 use futures_util::{StreamExt as _, stream};
@@ -144,7 +144,7 @@ where
 
 #[dialog_common::test]
 async fn it_reads_what_the_branch_reads() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
@@ -180,7 +180,7 @@ async fn it_reads_what_the_branch_reads() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_stays_pinned_while_the_branch_advances() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
@@ -222,7 +222,7 @@ async fn it_stays_pinned_while_the_branch_advances() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_has_no_snapshot_before_the_first_commit() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     assert!(branch.snapshot().is_none());
@@ -233,7 +233,7 @@ async fn it_has_no_snapshot_before_the_first_commit() -> Result<()> {
 /// warm caches) reads the same revision the same way.
 #[dialog_common::test]
 async fn it_reads_through_a_cold_handle() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let revision = branch
@@ -257,7 +257,7 @@ async fn it_reads_through_a_cold_handle() -> Result<()> {
 /// naming the missing block, exactly as an unreachable branch does.
 #[dialog_common::test]
 async fn it_fails_when_the_root_is_absent() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let mut revision = branch
@@ -287,7 +287,7 @@ async fn it_fails_when_the_root_is_absent() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_joins_a_snapshot_into_a_branch_query() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let main = repo.branch("main").open().perform(&operator).await?;
     main.transaction()
@@ -328,7 +328,7 @@ async fn it_joins_a_snapshot_into_a_branch_query() -> Result<()> {
 /// and joining a branch in adds exactly that branch's row.
 #[dialog_common::test]
 async fn it_injects_session_metadata() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
@@ -385,7 +385,7 @@ async fn it_injects_session_metadata() -> Result<()> {
 /// restores both its asserts and its tombstones there.
 #[dialog_common::test]
 async fn it_restores_an_exported_overlay_elsewhere() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
@@ -426,7 +426,7 @@ async fn it_restores_an_exported_overlay_elsewhere() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_folds_the_overlay_into_reads() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
@@ -480,7 +480,7 @@ async fn it_resolves_committed_rules() -> Result<()> {
     use dialog_query::rule::DeductiveRuleDescriptor;
     use dialog_query::{ConceptQuery, Parameters};
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -538,7 +538,7 @@ async fn it_resolves_committed_rules() -> Result<()> {
 /// signed records in its tree.
 #[dialog_common::test]
 async fn it_resolves_derived_revision_concepts() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -592,7 +592,7 @@ async fn it_resolves_derived_revision_concepts() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_logs_history() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let mut revisions = Vec::new();
@@ -639,7 +639,7 @@ async fn it_logs_history() -> Result<()> {
 /// the snapshot and the branch as they were.
 #[dialog_common::test]
 async fn it_reads_blobs_and_refuses_to_write_them() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -702,7 +702,7 @@ async fn it_reads_blobs_and_refuses_to_write_them() -> Result<()> {
 /// error path into some upstream — a snapshot has none.
 #[dialog_common::test]
 async fn it_reports_an_unreferenced_blob_as_absent() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch

@@ -9,17 +9,19 @@
 #![cfg_attr(not(test), warn(clippy::large_futures))]
 #![cfg_attr(not(test), deny(clippy::panic))]
 
-//! Operator layer for Dialog-DB.
-//!
-//! This crate provides the capability-based operator system: authority
-//! credentials, profiles, operator builders, and network dispatch that
-//! together form the operational layer above the core artifact store.
+//! Peers: the runtime capability environment for Dialog. One type, built
+//! over a key, a storage and the branch of a repository that holds the
+//! peer's own state; a worker is a peer with grants from another. See
+//! [`Peer`].
 
 pub use dialog_identity::*;
 
-mod operator;
-pub use operator::*;
+mod peer;
+pub use peer::{
+    Allowance, OpenFuture, OpenPeer, Peer, PeerBuilder, PeerError, PeerKey, PeerSpace, Runtime,
+    Unset,
+};
 
-/// Test helpers for setting up profiles, operators, and test data.
+/// Test helpers: unique names, peers over volatile storage, sample data.
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;

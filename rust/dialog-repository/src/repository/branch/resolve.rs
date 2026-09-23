@@ -250,7 +250,7 @@ mod tests {
     use crate::{PullError, RepositoryMemoryExt as _, Route, Upstream};
     use anyhow::Result;
     use dialog_artifacts::Changes;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::Statement as _;
     use dialog_varsig::did;
 
@@ -259,7 +259,7 @@ mod tests {
     /// next time this one resolves, because the registry moved.
     #[dialog_common::test]
     async fn it_resolves_again_when_the_registry_moves() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
         let dev = repo.branch("dev").open().perform(&operator).await?;
@@ -291,7 +291,7 @@ mod tests {
     /// why.
     #[dialog_common::test]
     async fn it_keeps_an_unreachable_upstream_and_says_why() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let feature = repo.branch("feature").open().perform(&operator).await?;
 

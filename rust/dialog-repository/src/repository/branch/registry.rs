@@ -339,7 +339,7 @@ mod tests {
     use dialog_capability::Subject;
     use dialog_common::Holds as _;
     use dialog_effects::authority::Identify;
-    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+    use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use futures_util::StreamExt as _;
 
     /// Opening or loading a repository leaves its registry held open, so
@@ -347,25 +347,25 @@ mod tests {
     /// Creating one does not: a new repository's registry is empty.
     #[dialog_common::test]
     async fn it_is_held_once_its_repository_is_opened() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
 
         let name = unique_name("opened");
         let created = profile
-            .repository(name.clone())
+            .space(name.clone())
             .create()
             .perform(&operator)
             .await?;
         assert!(operator.held(&super::held(&created.subject())).is_none());
-        let opened = profile.repository(name).open().perform(&operator).await?;
+        let opened = profile.space(name).open().perform(&operator).await?;
         assert!(operator.held(&super::held(&opened.subject())).is_some());
 
         let name = unique_name("loaded");
         profile
-            .repository(name.clone())
+            .space(name.clone())
             .create()
             .perform(&operator)
             .await?;
-        let loaded = profile.repository(name).load().perform(&operator).await?;
+        let loaded = profile.space(name).load().perform(&operator).await?;
         assert!(operator.held(&super::held(&loaded.subject())).is_some());
         Ok(())
     }
@@ -374,7 +374,7 @@ mod tests {
     /// ever having been recorded.
     #[dialog_common::test]
     async fn it_records_and_lists() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let identity = Identify.perform(&operator).await?;
 
@@ -415,7 +415,7 @@ mod tests {
     /// rather than through the concept that also defines it.
     #[dialog_common::test]
     async fn it_records_the_active_branch_by_name() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let identity = Identify.perform(&operator).await?;
         let replica = Replica::new(profile.did(), repo.did());

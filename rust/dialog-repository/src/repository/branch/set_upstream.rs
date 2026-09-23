@@ -117,7 +117,7 @@ mod tests {
     use crate::helpers::{connect, test_repo};
     use crate::{SetUpstreamError, Upstream};
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_remote_s3::Address;
 
     fn site() -> Address {
@@ -131,7 +131,7 @@ mod tests {
     /// A local upstream is pulled from and pushed to, by name.
     #[dialog_common::test]
     async fn it_sets_local_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
@@ -152,7 +152,7 @@ mod tests {
     /// branch there.
     #[dialog_common::test]
     async fn it_sets_remote_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let origin = connect(&repo, "origin", site(), repo.did(), &operator).await?;
         let remote_main = origin.branch("main").open().perform(&operator).await?;
@@ -172,7 +172,7 @@ mod tests {
     /// branch reopened from storage knows it without asking the registry.
     #[dialog_common::test]
     async fn it_persists_remote_upstream_across_reload() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let origin = connect(&repo, "origin", site(), repo.did(), &operator).await?;
         let remote_main = origin.branch("main").open().perform(&operator).await?;
@@ -193,7 +193,7 @@ mod tests {
     /// and pushes to every one, with none singled out.
     #[dialog_common::test]
     async fn it_tracks_every_upstream_it_is_given() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -221,7 +221,7 @@ mod tests {
     /// `pull_from` and `push_to` each record one direction only.
     #[dialog_common::test]
     async fn it_records_one_direction_at_a_time() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -244,7 +244,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_setting_upstream_to_self() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

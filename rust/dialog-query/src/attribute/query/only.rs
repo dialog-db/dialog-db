@@ -382,7 +382,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::{Value, the};
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
@@ -399,7 +399,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_entity() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -436,7 +436,7 @@ mod tests {
     /// not which branch pulled.
     #[dialog_common::test]
     async fn it_follows_one_revision_for_every_name_after_a_merge() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
         let feature = repo.branch("feature").open().perform(&operator).await?;
@@ -601,7 +601,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_attribute() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -641,7 +641,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_via_vae_path() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -691,7 +691,7 @@ mod tests {
     /// out non-winners.
     #[dialog_common::test]
     async fn it_verifies_winner_for_attribute_and_value_known() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -778,7 +778,7 @@ mod tests {
     /// The challenge path must reject the loser and accept the winner.
     #[dialog_common::test]
     async fn it_verifies_winner_for_entity_and_value_known() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -866,7 +866,7 @@ mod tests {
     /// The challenge path must reject the loser and accept the winner.
     #[dialog_common::test]
     async fn it_verifies_winner_for_value_only_known() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -966,7 +966,7 @@ mod tests {
     /// stream.
     #[dialog_common::test]
     async fn it_does_not_emit_absent_on_optional_value_mismatch() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1011,7 +1011,7 @@ mod tests {
     /// sliding window path rather than the challenge path.
     #[dialog_common::test]
     async fn it_uses_sliding_window_when_entity_bound_at_eval_time() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

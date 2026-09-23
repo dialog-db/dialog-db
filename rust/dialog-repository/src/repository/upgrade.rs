@@ -359,7 +359,7 @@ mod tests {
     use dialog_effects::memory::prelude::{CellScope, SpaceScope};
     use dialog_effects::memory::{Resolve, Retract};
     use dialog_identity::SpaceHandle;
-    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+    use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_query::{Output as _, Query, Term};
     use dialog_remote_ucan::UcanAddress;
     use dialog_varsig::did;
@@ -405,7 +405,7 @@ mod tests {
                 .collect()
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         unversion(&repo, &operator).await?;
         let held = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
@@ -602,7 +602,7 @@ mod tests {
     /// current version all the same, and records it.
     #[dialog_common::test]
     async fn it_upgrades_a_repository_with_nothing_to_carry() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         unversion(&repo, &operator).await?;
 
@@ -626,7 +626,7 @@ mod tests {
     /// does not know its layout, so it refuses rather than misreads it.
     #[dialog_common::test]
     async fn it_refuses_storage_from_a_newer_release() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let cell: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
@@ -648,7 +648,7 @@ mod tests {
     /// layout, so nothing a later upgrade could carry over exists.
     #[dialog_common::test]
     async fn it_creates_a_repository_at_the_current_version() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let version: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
@@ -678,10 +678,10 @@ mod tests {
                 .collect()
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let name = unique_name("legacy");
         let handle = || SpaceHandle {
-            profile_did: profile.did(),
+            peer: profile.did(),
             name: name.clone(),
         };
         let repo = handle().open().perform(&operator).await?;

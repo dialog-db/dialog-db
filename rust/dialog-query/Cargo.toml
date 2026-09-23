@@ -55,7 +55,7 @@ wasm-bindgen-futures = { workspace = true }
 ed25519-dalek = { workspace = true }
 tokio-test = { workspace = true }
 dialog-artifacts = { workspace = true }
-dialog-operator = { workspace = true }
+dialog-peer = { workspace = true }
 dialog-repository = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-search-tree = { workspace = true }

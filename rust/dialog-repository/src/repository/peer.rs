@@ -496,8 +496,8 @@ mod tests {
     use dialog_artifacts::Entity;
     use dialog_capability::Subject;
     use dialog_effects::storage::{Directory, Location};
-    use dialog_operator::Operator;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::Peer as LocalPeer;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::{Output as _, Query, Term};
     use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address;
@@ -590,7 +590,7 @@ mod tests {
 
     /// Which peers the registry holds, and at which addresses.
     async fn recorded(
-        operator: &Operator<VolatileSpace>,
+        operator: &LocalPeer<VolatileSpace>,
         repo: &Repository,
     ) -> anyhow::Result<(Vec<Peer>, Vec<(Entity, SiteAddress)>)> {
         let registry = Subject::from(repo.did())
@@ -630,7 +630,7 @@ mod tests {
     /// a second address is added to the same peer.
     #[dialog_common::test]
     async fn it_adds_addresses_to_a_peer_by_did_then_by_name() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let origin = did!("web:tonk.network");
         let first = SiteAddress::from(UcanAddress::new("https://tonk.network/ucan/"));
@@ -664,7 +664,7 @@ mod tests {
     /// refused and nothing is recorded.
     #[dialog_common::test]
     async fn it_refuses_an_unknown_name() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let refused = repo
@@ -684,7 +684,7 @@ mod tests {
     /// A name two peers share picks out neither.
     #[dialog_common::test]
     async fn it_refuses_an_ambiguous_name() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         for (did, endpoint) in [
             (did!("web:one.example"), "https://one.example/"),

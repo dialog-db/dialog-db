@@ -38,7 +38,7 @@ members = [
     "rust/dialog-remote-fs",
     "rust/dialog-network",
     "rust/dialog-identity",
-    "rust/dialog-operator",
+    "rust/dialog-peer",
     "rust/dialog-repository",
     "rust/dialog-soak",
     "rust/dialog-varsig",
@@ -246,8 +246,8 @@ path = "./rust/dialog-remote-fs"
 [workspace.dependencies.dialog-identity]
 path = "./rust/dialog-identity"
 
-[workspace.dependencies.dialog-operator]
-path = "./rust/dialog-operator"
+[workspace.dependencies.dialog-peer]
+path = "./rust/dialog-peer"
 
 [workspace.dependencies.dialog-repository]
 path = "./rust/dialog-repository"

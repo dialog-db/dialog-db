@@ -603,7 +603,7 @@ mod tests {
         Proposition, Query, Term, Type, Value,
     };
     use dialog_artifacts::Entity;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -612,7 +612,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_concept_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -715,7 +715,7 @@ mod tests {
     /// concept lowering emits for `maybe` fields.
     #[dialog_common::test]
     async fn it_executes_concept_with_optional_field() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -836,7 +836,7 @@ mod tests {
     /// `bio` then runs with `this` known and set-widens correctly.
     #[dialog_common::test]
     async fn it_set_widens_optional_field_sorted_before_required() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -967,7 +967,7 @@ mod tests {
             pub nickname: Option<employee::Nickname>,
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1025,7 +1025,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_entity_parameter() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1402,7 +1402,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_attribute_parameter() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1475,7 +1475,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_multiple_constant_parameters() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1718,7 +1718,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_evaluates_grouped_sum() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1793,7 +1793,7 @@ mod tests {
         /// query's row for that dept.
         #[dialog_common::test]
         async fn it_folds_the_full_group_under_caller_binding() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1896,7 +1896,7 @@ mod tests {
         /// shape.
         #[dialog_common::test]
         async fn it_pins_key_times_count_for_grouped_and_folded_variable() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1981,7 +1981,7 @@ mod tests {
         /// input binds the maximum.
         #[dialog_common::test]
         async fn it_binds_absent_for_the_all_absent_group() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2080,7 +2080,7 @@ mod tests {
         /// consumes a reducing rule's concept like any other.
         #[dialog_common::test]
         async fn it_composes_plain_rule_over_reducing_concept() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2147,7 +2147,7 @@ mod tests {
         /// employees.
         #[dialog_common::test]
         async fn it_composes_reducing_rule_over_reducing_concept() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2268,7 +2268,7 @@ mod tests {
                 people.clone(),
                 people.iter().rev().cloned().collect::<Vec<_>>(),
             ] {
-                let (operator, profile) = test_operator_with_profile().await;
+                let (operator, profile) = test_session_with_peer().await;
                 let repo = test_repo(&operator, &profile).await;
                 let branch = repo.branch("main").open().perform(&operator).await?;
                 let mut tx = branch.transaction();

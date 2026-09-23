@@ -74,7 +74,7 @@ pub struct FactRow {
 }
 
 /// Deterministically generate `count` entities with a name and a role each,
-/// seeded the same way `dialog-operator`'s `generate_data` seeds its
+/// seeded the same way `dialog-peer`'s `generate_data` seeds its
 /// entities so runs are reproducible.
 pub fn generate_rows(count: usize) -> Vec<FactRow> {
     let mut rng = ChaCha8Rng::from_seed([7u8; 32]);

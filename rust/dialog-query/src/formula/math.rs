@@ -159,7 +159,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::*;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
@@ -569,7 +569,7 @@ mod tests {
         };
 
         // Create a minimal session (formulas don't need stored data)
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -606,7 +606,7 @@ mod tests {
             is: Term::var("result"),
         };
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -635,7 +635,7 @@ mod tests {
             is: Term::Constant(Value::from(8u32)),
         };
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -666,7 +666,7 @@ mod tests {
             is: Term::Constant(Value::from(99u32)),
         };
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -697,7 +697,7 @@ mod tests {
             is: Term::var("result"),
         };
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -726,7 +726,7 @@ mod tests {
             is: Term::var("result"),
         };
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
