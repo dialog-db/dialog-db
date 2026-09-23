@@ -185,6 +185,20 @@ pub mod replica {
         /// The profile entity (its DID as Entity).
         pub Entity,
     );
+
+    /// `dialog.replica/active-branch` — the branch this replica has
+    /// switched to. Cardinality-one: switching again supersedes it.
+    ///
+    /// A branch *entity*, not a name, so it can name a branch that is
+    /// not on this replica at all -- one on another replica of the same
+    /// repository, reached by its `(replica, name)` hash.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.replica")]
+    pub struct ActiveBranch(
+        /// The active branch's entity (a [`Branch`](super::Branch)
+        /// entity).
+        pub Entity,
+    );
 }
 
 /// Attribute newtypes for the [`Revision`] / [`RevisionParent`]
@@ -423,6 +437,21 @@ impl AsRef<Entity> for Branch {
     fn as_ref(&self) -> &Entity {
         &self.this
     }
+}
+
+/// The branch a replica has switched to.
+///
+/// Attached to the [`Replica`] entity (`this == Replica.this`) -- a
+/// separate concept rather than a field on `Replica` because a replica
+/// that never switched has no active branch, and concepts require
+/// every field to be present. Recorded in the registry branch by
+/// [`registry::switch`](crate::registry::switch).
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ActiveBranch {
+    /// The replica entity (same as [`Replica::this`]).
+    pub this: Entity,
+    /// The branch entity the replica has switched to.
+    pub branch: replica::ActiveBranch,
 }
 
 /// The current revision of a branch.

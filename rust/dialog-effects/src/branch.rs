@@ -22,7 +22,9 @@
 //! Subject (repository DID)
 //!   ├── Use
 //!   │     ├── Get → Branches → List → Result<Vec<String>, BranchError>
-//!   │     └── Put → Branches → Branch { name } → Create → Result<(), BranchError>
+//!   │     └── Put → Branches
+//!   │                 ├── Branch { name } → Create → Result<(), BranchError>
+//!   │                 └── Switch { branch } → Result<(), BranchError>
 //!   └── Void
 //!         └── Discard (spelled `delete`)
 //!               └── Branches
@@ -34,7 +36,7 @@ use crate::Rejection;
 use crate::method;
 use crate::{Method, Void};
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::identity::Revision;
+use dialog_capability::identity::{Entity, Revision};
 use dialog_capability::{Attenuate, Attenuation, Constraint, Effect, Policy};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
@@ -196,6 +198,34 @@ impl Effect for Delete {
     type Output = Result<(), BranchError>;
 }
 
+/// Switch the replica to a branch: record it as the active one.
+///
+/// Takes the branch's entity rather than a name because the branch
+/// need not be on this replica. It is pointed at, not looked up, so
+/// switching to a branch that exists elsewhere, or not yet anywhere,
+/// is not refused.
+///
+/// Its command extends [`Create`]'s (`/use/put/dialog/branch/switch`),
+/// so a holder of `/use/put/dialog/branch` can switch too, while a
+/// delegation of just the switch hands over nothing else.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct Switch {
+    /// The entity of the branch to switch to.
+    pub branch: Entity,
+}
+
+impl Attenuation for Switch {
+    type Of = Branches<method::Put>;
+
+    fn attenuation() -> &'static str {
+        "branch/switch"
+    }
+}
+
+impl Effect for Switch {
+    type Output = Result<(), BranchError>;
+}
+
 pub mod prelude;
 
 /// Errors that can occur during branch operations.
@@ -297,6 +327,18 @@ mod tests {
 
         assert!(write.ability().starts_with("/use/"));
         assert!(destroy.ability().starts_with("/void/"));
+    }
+
+    /// Switching extends the create command, so a grant to write
+    /// branches covers it by prefix.
+    #[dialog_common::test]
+    fn it_builds_switch_claim_path() {
+        let claim = Subject::from(did!("key:zRepo"))
+            .writer()
+            .branches()
+            .switch("did:key:zFeature".parse::<Entity>().expect("valid entity"));
+
+        assert_eq!(claim.ability(), "/use/put/dialog/branch/switch");
     }
 
     /// The branch name scopes the capability without changing the

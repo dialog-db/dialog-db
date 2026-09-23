@@ -11,14 +11,15 @@
 //! subject.reader().branches().list()          = /use/get/dialog/branch
 //! subject.writer().branches().branch(n).create()
 //!                                          = /use/put/dialog/branch
+//! subject.writer().branches().switch(b)   = /use/put/dialog/branch/switch
 //! subject.voider().branches().branch(n).delete()
 //!                                          = /void/dialog/branch
 //! ```
 
-use dialog_capability::identity::Revision;
+use dialog_capability::identity::{Entity, Revision};
 use dialog_capability::{Capability, Constrained, Constraint, Policy};
 
-use super::{Branch, Branches, Create, Delete, List};
+use super::{Branch, Branches, Create, Delete, List, Switch};
 use crate::{Method, Void, method};
 
 /// Scope a method to the branch namespace.
@@ -66,6 +67,18 @@ pub trait ListBranchesExt {
 impl ListBranchesExt for Capability<Branches<method::Get>> {
     fn list(self) -> Capability<List> {
         self.invoke(List)
+    }
+}
+
+/// Switch the replica to a branch.
+pub trait SwitchBranchExt {
+    /// Make the branch with this entity the replica's active one.
+    fn switch(self, branch: Entity) -> Capability<Switch>;
+}
+
+impl SwitchBranchExt for Capability<Branches<method::Put>> {
+    fn switch(self, branch: Entity) -> Capability<Switch> {
+        self.invoke(Switch { branch })
     }
 }
 
