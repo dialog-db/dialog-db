@@ -294,8 +294,18 @@ where
     type Error = DialogSearchTreeError;
 
     fn try_from(buffer: Buffer) -> Result<Self, Self::Error> {
-        rkyv::access::<ArchivedNodeBody<Value>, rkyv::rancor::Error>(buffer.as_ref())
-            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+        // A buffer is immutable and every clone shares one interior, so
+        // bytes that passed the check once pass it for good. The node
+        // cache hands out the same buffer on every read; checking it
+        // again each time was most of what a warm read cost. The record
+        // is set only after a successful check, and is keyed by the
+        // archived type, so no node is ever built from bytes that were
+        // not checked as exactly this type.
+        if !buffer.is_validated::<ArchivedNodeBody<Value>>() {
+            rkyv::access::<ArchivedNodeBody<Value>, rkyv::rancor::Error>(buffer.as_ref())
+                .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+            buffer.mark_validated::<ArchivedNodeBody<Value>>();
+        }
         Ok(Self {
             buffer,
             key: PhantomData,
