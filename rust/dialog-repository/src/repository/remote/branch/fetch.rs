@@ -1,6 +1,6 @@
 //! Fetch command for remote branches.
 
-use crate::{FetchRemoteBranchError, RemoteBranch, RemoteSite, Revision};
+use crate::{ConnectedBranch, FetchRemoteBranchError, RemoteSite, Revision};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory::{Publish, Resolve};
@@ -10,12 +10,12 @@ use dialog_effects::memory::{Publish, Resolve};
 /// Resolves the remote branch revision via Fork and persists the resulting
 /// (revision, edition) pair to the local snapshot cache.
 pub struct FetchRemoteBranch<'a> {
-    branch: &'a RemoteBranch,
+    branch: &'a ConnectedBranch,
 }
 
 impl<'a> FetchRemoteBranch<'a> {
     /// Create a new fetch command.
-    pub fn new(branch: &'a RemoteBranch) -> Self {
+    pub fn new(branch: &'a ConnectedBranch) -> Self {
         Self { branch }
     }
 

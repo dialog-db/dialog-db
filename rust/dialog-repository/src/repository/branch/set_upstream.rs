@@ -30,7 +30,7 @@ impl Branch {
     /// Record `target` as a branch this one both pulls from and pushes
     /// to, the way a git upstream is tracked in both directions.
     ///
-    /// Accepts a local [`Branch`] or a [`RemoteBranch`](crate::RemoteBranch)
+    /// Accepts a local [`Branch`] or a [`ConnectedBranch`](crate::ConnectedBranch)
     /// opened at a peer. A branch may track several: a bare
     /// [`pull`](Self::pull) takes from every one and a bare
     /// [`push`](Self::push) goes to every one.

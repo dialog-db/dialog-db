@@ -1,6 +1,6 @@
 //! Publish command for remote branches.
 
-use crate::{PublishRemoteBranchError, RemoteBranch, RemoteSite, Revision};
+use crate::{ConnectedBranch, PublishRemoteBranchError, RemoteSite, Revision};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory::Publish;
@@ -10,13 +10,13 @@ use dialog_effects::memory::Publish;
 /// Publishes the revision to the remote memory via Fork and persists the
 /// new remote edition to the local snapshot cache.
 pub struct PublishRemoteBranch<'a> {
-    branch: &'a RemoteBranch,
+    branch: &'a ConnectedBranch,
     revision: Revision,
 }
 
 impl<'a> PublishRemoteBranch<'a> {
     /// Create a new publish command.
-    pub fn new(branch: &'a RemoteBranch, revision: Revision) -> Self {
+    pub fn new(branch: &'a ConnectedBranch, revision: Revision) -> Self {
         Self { branch, revision }
     }
 

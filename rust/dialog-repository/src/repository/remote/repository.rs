@@ -13,8 +13,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// A repository held at a peer: which peer, the addresses it is reached
-/// at, and the repository whose replica it holds.
+/// A peer's replica of a repository, connected to: which peer holds it,
+/// the addresses the peer is reached at, and which repository it is a
+/// replica of. The local repository is a replica too; this is one held
+/// elsewhere, reached through [`peer(..).connect()`](crate::PeerReference::connect).
 ///
 /// What was a named remote is these two things together. The peer is
 /// who holds it and where to reach them; the repository is which of the
@@ -23,9 +25,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 ///
 /// Requests go to one of the peer's addresses at a time, starting with
 /// the one that last answered. One that cannot be reached is passed over
-/// for the next (see [`Unreachable`]).
+/// for the next.
 #[derive(Debug, Clone)]
-pub struct RemoteRepository {
+pub struct ConnectedReplica {
     host: Subject,
     peer: Entity,
     name: Option<String>,
@@ -36,7 +38,7 @@ pub struct RemoteRepository {
     answered: Arc<AtomicUsize>,
 }
 
-impl RemoteRepository {
+impl ConnectedReplica {
     /// A repository `subject` held at `peer`, reached at `addresses`,
     /// with its state cached under `host`. `addresses` is not empty: a
     /// peer with nowhere to reach it is not connected to.
@@ -133,7 +135,7 @@ impl RemoteRepository {
 
     /// Whether `other` is the same repository at the same peer, however
     /// it was reached.
-    pub fn same(&self, other: &RemoteRepository) -> bool {
+    pub fn same(&self, other: &ConnectedReplica) -> bool {
         self.peer == other.peer && self.subject == other.subject
     }
 
@@ -204,7 +206,7 @@ impl Unreachable for PublishError {
     }
 }
 
-impl Principal for RemoteRepository {
+impl Principal for ConnectedReplica {
     fn did(&self) -> Did {
         self.subject.clone()
     }
@@ -215,7 +217,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::RemoteRepository;
+    use super::ConnectedReplica;
     use crate::SiteAddress;
     use dialog_artifacts::Entity;
     use dialog_capability::Subject;
@@ -234,8 +236,8 @@ mod tests {
     }
 
     /// A repository at a peer reached at `endpoints`, in that order.
-    fn remote(endpoints: &[&str]) -> RemoteRepository {
-        RemoteRepository::new(
+    fn remote(endpoints: &[&str]) -> ConnectedReplica {
+        ConnectedReplica::new(
             Subject::from(did!("key:z6MkkZfZmshVFcBYo9RS6ZyUstxYdjjStQaFaL2TSTVdsiJh")),
             Entity::new().unwrap(),
             None,

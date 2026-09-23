@@ -82,7 +82,7 @@ use dialog_varsig::Principal;
 
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
-    BlobArchive, Branch, Ephemeral, Index, NetworkedIndex, PublishError, RemoteRepository,
+    BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex, PublishError,
     RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
 };
 use dialog_effects::MethodExt as _;
@@ -531,7 +531,7 @@ pub enum Reach {
     /// Fetched content is cached locally on the way through, so the
     /// export is complete at the cost of pulling whatever is absent over
     /// the network.
-    Download(RemoteRepository),
+    Download(ConnectedReplica),
 }
 
 /// Reads a snapshot's content out of a store.
@@ -577,7 +577,7 @@ impl SnapshotExport {
     /// Fetched content is cached locally on the way through, so the export
     /// is complete at the cost of pulling whatever is absent over the
     /// network.
-    pub fn download(mut self, upstream: RemoteRepository) -> Self {
+    pub fn download(mut self, upstream: ConnectedReplica) -> Self {
         self.reach = Reach::Download(upstream);
         self
     }
