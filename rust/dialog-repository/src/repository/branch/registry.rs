@@ -13,7 +13,7 @@
 //! it goes through the same [`machinery`](super::Commit::machinery)
 //! scope, beside the delegation records that already use it.
 
-use dialog_artifacts::{Changes, Statement};
+use dialog_artifacts::{Changes, Entity, Statement};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
@@ -21,7 +21,7 @@ use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 use futures_util::stream;
 
-use crate::schema::{Branch as BranchConcept, Replica};
+use crate::schema::{ActiveBranch, Branch as BranchConcept, Replica};
 use crate::{Branch, CommitError, RemoteSite};
 
 /// The environment a registry write runs against.
@@ -111,6 +111,40 @@ async fn write<Env: RegistryEnv>(
         Written::Retracted => record.retract(&mut changes),
     }
 
+    apply(registry, changes, env).await
+}
+
+/// Switch the replica `operator` views to the branch `branch`.
+///
+/// Records which branch is active as a cardinality-one fact on the
+/// replica, so switching again supersedes the previous one. The branch
+/// is named by its entity rather than a name because it need not be on
+/// this replica: it is not looked up, only pointed at.
+pub async fn switch<Env: RegistryEnv>(
+    registry: &Branch,
+    operator: &Capability<Operator>,
+    branch: &Entity,
+    env: &Env,
+) -> Result<(), CommitError> {
+    let replica = Replica::new(operator.profile().clone(), registry.of().clone());
+    let active = ActiveBranch {
+        this: replica.this,
+        branch: branch.clone().into(),
+    };
+
+    let mut changes = Changes::new();
+    active.assert(&mut changes);
+
+    apply(registry, changes, env).await
+}
+
+/// Commit `changes` to the registry under the machinery scope, which
+/// is what lets them write the reserved `dialog.` namespace.
+async fn apply<Env: RegistryEnv>(
+    registry: &Branch,
+    changes: Changes,
+    env: &Env,
+) -> Result<(), CommitError> {
     let instructions = changes.into_instructions();
     if instructions.is_empty() {
         return Ok(());
@@ -205,6 +239,48 @@ mod tests {
             "the registry lists itself: {names:?}"
         );
 
+        Ok(())
+    }
+
+    /// The active branch is written under the name tonk reads it by,
+    /// `dialog.replica/active-branch`, on the replica's entity. The
+    /// name is the contract, so it is checked against the stored claim
+    /// rather than through the concept that also defines it.
+    #[dialog_common::test]
+    async fn it_records_the_active_branch_by_name() -> anyhow::Result<()> {
+        use crate::schema::{Branch as BranchConcept, Replica};
+        use dialog_artifacts::{ArtifactSelector, Value};
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let identity = Identify.perform(&operator).await?;
+        let replica = Replica::new(profile.did(), repo.did());
+        let feature = BranchConcept::new(&replica, "feature").this;
+
+        let registry = Subject::from(repo.did())
+            .branch(REGISTRY)
+            .open()
+            .perform(&operator)
+            .await?;
+        super::switch(&registry, &identity, &feature, &operator).await?;
+
+        let registry = Subject::from(repo.did())
+            .branch(REGISTRY)
+            .load()
+            .perform(&operator)
+            .await?;
+        let select = registry.claims().select(
+            ArtifactSelector::new()
+                .the("dialog.replica/active-branch".parse()?)
+                .of(replica.this.clone()),
+        );
+        let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
+        let rows: Vec<_> = select.execute(store).await?.collect::<Vec<_>>().await;
+
+        assert_eq!(rows.len(), 1, "one active branch recorded: {}", rows.len());
+        let artifact = rows.into_iter().next().expect("one row")?;
+        assert_eq!(artifact.to_owned()?.is, Value::Entity(feature));
         Ok(())
     }
 }
