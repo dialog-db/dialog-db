@@ -172,15 +172,19 @@ impl ConceptRules {
         }
 
         let scope = adornment.into_environment(terms);
-        // The implicit rule is planned directly: its body is raw
-        // attribute queries that have no serializable (content-addressed)
-        // identity, so it can't key the global cache. It's also a pure
-        // function of this concept's descriptor and cheap to plan. Only
-        // *installed* rules — which have concept/formula bodies and thus
-        // a `this()` — are memoized globally by `(rule, adornment)`.
-        // Reducing rules never join the disjunction: their folded
-        // rows are computed separately (see [`Self::reducing`]).
-        let plan: Disjunction = iter::once(self.implicit.plan(&scope))
+        // The implicit rule has no content-addressed identity to key the
+        // shared cache by, so its plans are kept on its concept's
+        // descriptor, which every query shares. Installed rules -- with
+        // concept/formula bodies and a `this()` -- are cached by
+        // `(rule, adornment)`. Planning is most of what a warm query over
+        // a small branch costs, so neither is planned twice. Reducing
+        // rules never join the disjunction: their folded rows are
+        // computed separately (see [`Self::reducing`]).
+        let implicit = self
+            .implicit
+            .conclusion()
+            .implicit_plan(adornment, || self.implicit.plan(&scope));
+        let plan: Disjunction = iter::once(implicit)
             .chain(
                 self.installed
                     .iter()
@@ -338,11 +342,9 @@ mod tests {
     /// does `DeductiveRule::plan` depend only on the binding *pattern*
     /// (the adornment), or also on the caller's variable *names*?
     ///
-    /// `Adornment::into_environment` binds the caller's term names into
-    /// the scope, so this is not obvious. If the two `Conjunction`s
-    /// below are equal, `(rule, adornment)` is a sound cache key. If
-    /// not, the key must also capture the name mapping (or the scope
-    /// must be normalized to slot indices first).
+    /// `Adornment::into_environment` names the concept's bound fields,
+    /// never the caller's variables, so the two `Conjunction`s below
+    /// must be equal and `(rule, adornment)` is a sound cache key.
     #[dialog_common::test]
     fn it_plans_independently_of_caller_variable_names() {
         let descriptor = person_concept();

@@ -27,6 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::iter;
+use std::sync::Arc;
 
 /// A deductive rule that has passed analysis: verified for every
 /// invariant and plannable by construction.
@@ -37,8 +38,10 @@ use std::iter;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeductiveRule {
     /// The narrowed premises, inferred types, and dependency graph
-    /// produced by analysis.
-    analysis: AnalyzedRule,
+    /// produced by analysis. Shared: a rule never changes once analyzed,
+    /// and rules are cloned per query (out of statics, caches, and rule
+    /// sets), so a clone should not copy the analysis.
+    analysis: Arc<AnalyzedRule>,
     /// The rule's content-addressed identity, computed on first use:
     /// plan-cache lookups ask for it on every query.
     identity: Memo<Option<Entity>>,
@@ -48,14 +51,14 @@ impl Compile for DeductiveRule {
 
     fn from_analysis(analysis: AnalyzedRule) -> Self {
         DeductiveRule {
-            analysis,
+            analysis: Arc::new(analysis),
             identity: Memo::default(),
         }
     }
 
     fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self {
         DeductiveRule {
-            analysis: AnalyzedRule::in_progress(conclusion, premises),
+            analysis: Arc::new(AnalyzedRule::in_progress(conclusion, premises)),
             identity: Memo::default(),
         }
     }

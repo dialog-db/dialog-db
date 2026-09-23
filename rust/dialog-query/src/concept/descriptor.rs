@@ -23,14 +23,16 @@ use crate::{
 };
 use dialog_artifacts::Update;
 
+use crate::concept::query::adornment::Adornment;
 use crate::memo::Memo;
+use crate::planner::Conjunction;
 use crate::rule::DeductiveRule;
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 use serde_ipld_dagcbor::to_vec as to_cbor_vec;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Not;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// A concept descriptor: a named set of attribute descriptors that together
 /// describe an entity type. Concepts are similar to tables in relational
@@ -76,6 +78,14 @@ pub struct ConceptDescriptor {
     /// concept needs it.
     #[serde(skip)]
     implicit: Memo<Arc<DeductiveRule>>,
+    /// The implicit rule's plan for each calling pattern, planned on
+    /// first use. Planning is most of what a warm query over a small
+    /// branch costs, and a plan is a function of the rule and the
+    /// adornment alone. Kept here rather than in a shared cache because
+    /// the rule binds this descriptor's field names, which the concept's
+    /// identity does not cover.
+    #[serde(skip)]
+    implicit_plans: Memo<RwLock<HashMap<Adornment, Conjunction>>>,
 }
 
 impl ConceptDescriptor {
@@ -254,6 +264,22 @@ impl ConceptDescriptor {
             .clone()
     }
 
+    /// The implicit rule's plan under `adornment`, computed with `plan`
+    /// on the first ask and reused by every clone of this descriptor.
+    pub(crate) fn implicit_plan(
+        &self,
+        adornment: Adornment,
+        plan: impl FnOnce() -> Conjunction,
+    ) -> Conjunction {
+        let plans = self.implicit_plans.get_or_init(Default::default);
+        if let Some(hit) = plans.read().unwrap().get(&adornment) {
+            return hit.clone();
+        }
+        let planned = plan();
+        plans.write().unwrap().insert(adornment, planned.clone());
+        planned
+    }
+
     /// Creates a query application for this concept descriptor.
     pub fn apply(&self, parameters: Parameters) -> Result<Proposition, TypeError> {
         Ok(Proposition::Concept(ConceptQuery {
@@ -306,6 +332,7 @@ fn descriptor_from_with(with: NamedAttributes) -> ConceptDescriptor {
         with,
         identity: Memo::default(),
         implicit: Memo::default(),
+        implicit_plans: Memo::default(),
     }
 }
 
