@@ -6,7 +6,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::Result;
 use dialog_artifacts::history::History as _;
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Value};
+use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Value};
 use dialog_effects::blob::BlobError;
 use dialog_operator::helpers::test_operator_with_profile;
 use dialog_query::query::Output;
@@ -460,9 +460,8 @@ async fn it_restores_an_exported_overlay_elsewhere() -> Result<()> {
         vec!["Alice".to_string()],
         "a fresh handle starts with an empty overlay"
     );
-    target
-        .overlay()
-        .import(serde_ipld_dagcbor::from_slice(&bytes)?);
+    let restored: Changes = serde_ipld_dagcbor::from_slice(&bytes)?;
+    target.overlay().assert(restored);
     assert_eq!(
         people(target.query(), &operator).await?,
         vec!["Bob".to_string()],

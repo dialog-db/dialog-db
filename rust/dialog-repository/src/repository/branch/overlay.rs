@@ -73,20 +73,11 @@ impl Overlay {
 
     /// Snapshot every session fact, asserts and retracts alike. The result
     /// serializes (see [`Changes`]), so a session can outlive the process
-    /// holding it: export, carry the bytes, and [`import`](Self::import)
-    /// them into a successor's overlay.
+    /// holding it: export, carry the bytes, and [`assert`](Self::assert) them
+    /// into a successor's overlay, which replays retractions and
+    /// replacements as well as asserts.
     pub fn export(&self) -> Changes {
         self.changes()
-    }
-
-    /// Merge previously [exported](Self::export) session facts into this
-    /// overlay, after whatever it already holds. Bumps the epoch so
-    /// subscriptions re-evaluate against the restored facts.
-    pub fn import(&self, changes: Changes) -> &Self {
-        let mut state = self.state.lock().expect("overlay lock");
-        state.changes.merge(changes);
-        state.epoch += 1;
-        self
     }
 
     /// Drop every session fact.

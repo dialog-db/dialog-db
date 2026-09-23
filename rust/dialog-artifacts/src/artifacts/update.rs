@@ -108,29 +108,6 @@ impl Changes {
         self.0.len() != before
     }
 
-    /// Apply every change in `other` after the ones already recorded, with
-    /// the same semantics as recording them here directly: a replacement
-    /// still supersedes earlier changes to its `(entity, attribute)`.
-    pub fn merge(&mut self, other: Changes) {
-        for (entity, attributes) in other.0 {
-            for (attribute, changes) in attributes {
-                for change in changes {
-                    match change {
-                        Change::Assert(value) => {
-                            self.associate(attribute.clone(), entity.clone(), value)
-                        }
-                        Change::Replace(value) => {
-                            self.associate_unique(attribute.clone(), entity.clone(), value)
-                        }
-                        Change::Retract(value) => {
-                            self.dissociate(attribute.clone(), entity.clone(), value)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Borrowing iterator over every recorded `(entity, attribute,
     /// change)` triple. Use this when you need to inspect the batch
     /// without consuming it — e.g. to extract tombstones from
