@@ -92,10 +92,7 @@ use futures_util::TryStreamExt as _;
 
 use super::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
-use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryMemoryExt as _, Revision, Upstream,
-};
+use crate::{Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, Revision};
 
 /// The demand cover of one evaluation: every index key range the
 /// evaluation's selects read, recorded at the `Select` boundary.
@@ -640,19 +637,7 @@ where
         // fallback rather than swallowed: the local archive alone may
         // still satisfy the poll, and a read that misses fails with the
         // load failure as its cause instead of a bare not-found.
-        let remote = match self.branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => {
-                let loaded = self
-                    .branch
-                    .subject()
-                    .remote(name.clone())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            _ => RemoteFallback::None,
-        };
+        let remote = self.branch.upstreams().fallback();
         let store = NetworkedIndex::new(
             env,
             ArchiveScope::new(self.branch.subject()).index(),

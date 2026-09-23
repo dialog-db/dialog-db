@@ -115,7 +115,7 @@ where
             .map(|source| {
                 let loading = source.clone();
                 let fallback: FallbackFuture<'a> =
-                    Box::pin(async move { loading.as_ref().fallback(env).await });
+                    Box::pin(async move { loading.as_ref().fallback() });
                 (source, fallback.shared())
             })
             .collect();
@@ -335,7 +335,7 @@ mod tests {
 
     use super::*;
     use crate::RepositoryExt as _;
-    use crate::helpers::Counting;
+    use crate::helpers::{Counting, connect};
     use crate::repository::source::SourceRef;
     use dialog_artifacts::{Preload, PreloadRequest, Speculation};
     use dialog_query::query::Output as _;
@@ -478,11 +478,10 @@ mod tests {
         Ok(())
     }
 
-    /// Every warm-up job needs the source's remote fallback, and loading
-    /// it is a memory read of the remote's configuration. A driver loads
-    /// it once per source and shares it with every job, instead of once
-    /// per job: with four hints in flight the query pays one extra load,
-    /// not four.
+    /// Every warm-up job needs the source's remote fallback. It is read
+    /// from the routes the branch holds, with no store read, and a driver
+    /// shares it with every job: four hints in flight add no memory reads
+    /// to the query.
     #[dialog_common::test]
     async fn it_loads_a_sources_remote_fallback_once_per_driver() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
@@ -513,7 +512,7 @@ mod tests {
             .region("us-east-1")
             .bucket("bucket")
             .build()?;
-        let origin = repo.remote("origin").create(site).perform(&env).await?;
+        let origin = connect(&repo, "origin", site, repo.did(), &env).await?;
         let remote_branch = origin.branch("main").open().perform(&env).await?;
         branch.set_upstream(remote_branch).perform(&env).await?;
         let branch = repo.branch("main").open().perform(&env).await?;
@@ -528,12 +527,11 @@ mod tests {
             )
         };
 
-        // What one load of the fallback costs, and what the query costs
-        // with nothing to warm.
+        // The fallback is the branch's own routes: reading it reads no
+        // memory. What the query costs with nothing to warm:
         let before = env.count("memory::Resolve");
-        let _ = SourceRef::Branch(&branch).fallback(&env).await;
-        let load = env.count("memory::Resolve") - before;
-        assert!(load > 0, "loading the fallback reads memory");
+        let _ = SourceRef::Branch(&branch).fallback();
+        assert_eq!(env.count("memory::Resolve"), before);
         let before = env.count("memory::Resolve");
         branch
             .query()
@@ -566,9 +564,9 @@ mod tests {
         assert_eq!(queue.pending(), 0, "the driven query executed every hint");
 
         assert_eq!(
-            warmed - bare,
-            load,
-            "four warm-ups share one fallback load: {:?}",
+            warmed,
+            bare,
+            "four warm-ups add no fallback loads: {:?}",
             env.snapshot()
         );
         Ok(())
