@@ -4,12 +4,14 @@
 //! [`BranchReference`] rooted at the remote's subject. Produced by
 //! [`RemoteRepository::branch`].
 
+use crate::schema::Branch as BranchConcept;
 use crate::{
     BranchReference, Cell, LoadRemoteBranch, OpenRemoteBranch, RemoteRepository,
     RepositoryMemoryExt, Revision,
 };
 use dialog_capability::Subject;
 use dialog_effects::memory::Edition;
+use dialog_effects::memory::prelude::SpaceScope;
 
 /// Cached snapshot of the remote branch's last known state: the remote
 /// revision paired with the remote's CAS version, so a fresh
@@ -46,16 +48,23 @@ impl RemoteBranchReference {
         self.branch.name()
     }
 
+    /// The branch as a concept: its entity, derived from the peer's
+    /// replica and the name.
+    pub fn concept(&self) -> BranchConcept {
+        self.repository.replica().branch(self.name())
+    }
+
     /// Cell holding the cached remote edition for this branch.
     ///
-    /// Rooted at the enclosing repo's subject; path
-    /// `memory/remote/{remote_name}/branch/{branch_name}/revision`.
-    /// This is the local snapshot — it lives under the enclosing
-    /// repository's subject, not the remote's.
+    /// Rooted at the enclosing repo's subject, keyed by the branch's
+    /// entity: `memory/upstream/{entity}/revision`. This is the local
+    /// snapshot -- it lives under the enclosing repository's subject,
+    /// not the remote's.
     pub fn cache(&self) -> Cell<RemoteEdition> {
-        self.repository
-            .site()
-            .cell(format!("branch/{}/revision", self.name()))
+        let entity = self.concept().this;
+        SpaceScope::new(self.repository.host().clone(), format!("upstream/{entity}"))
+            .cell("revision")
+            .into()
     }
 
     /// Cell representing the remote's own branch revision.

@@ -92,7 +92,7 @@ impl Select<'_> {
         // than swallowed: the local archive alone may still satisfy the
         // query, but a read that misses fails with the load failure as
         // its cause instead of a bare not-found.
-        let remote = self.source.fallback(env).await;
+        let remote = self.source.fallback();
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.execute(store).await
     }
@@ -170,7 +170,7 @@ impl Select<'_> {
             + ConditionalSync
             + 'static,
     {
-        let remote = self.source.fallback(env).await;
+        let remote = self.source.fallback();
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.estimate(store).await
     }
@@ -276,7 +276,7 @@ impl SelectOwned<'_> {
     {
         // The same remote fallback as `Select::perform`; see the comment
         // there.
-        let remote = self.0.source.fallback(env).await;
+        let remote = self.0.source.fallback();
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.execute(store).await
     }

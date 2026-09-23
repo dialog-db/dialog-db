@@ -45,6 +45,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::LoadRemoteBranchError;
+    use crate::helpers::connect;
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_operator::helpers::test_operator_with_profile;
@@ -63,11 +64,7 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
-        let origin = repo
-            .remote("origin")
-            .create(test_site())
-            .perform(&operator)
-            .await?;
+        let origin = connect(&repo, "origin", test_site(), repo.did(), &operator).await?;
 
         let result = origin.branch("main").load().perform(&operator).await;
         assert!(

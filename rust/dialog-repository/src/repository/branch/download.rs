@@ -27,8 +27,7 @@ use futures_util::StreamExt as _;
 
 use crate::repository::snapshot::Snapshot;
 use crate::{
-    Branch, DownloadError, Pull, PullError, RemoteSite, RepositoryMemoryExt as _, Revision,
-    Upstream,
+    Branch, DownloadError, Pull, PullError, RemoteFallback, RemoteSite, Revision, Upstream,
 };
 
 /// [`data_scope`] as the byte ranges the traversal takes: the operational
@@ -121,17 +120,20 @@ impl Download<'_> {
         let Some(revision) = self.revision.or_else(|| branch.revision()) else {
             return Ok(());
         };
-        let upstream = self.from.or_else(|| branch.upstream());
-        let Some(Upstream::Remote { remote: name, .. }) = upstream else {
-            return Ok(());
+        let fallback = match self.from {
+            Some(upstream) => upstream.fallback(),
+            None => branch.upstreams().fallback(),
         };
-        let remote = branch
-            .subject()
-            .remote(name)
-            .load()
-            .perform(env)
-            .await
-            .map_err(DownloadError::LoadRemote)?;
+        let remote = match fallback {
+            RemoteFallback::Remote(remote) => remote,
+            RemoteFallback::None => return Ok(()),
+            RemoteFallback::Unavailable { remote, reason } => {
+                return Err(DownloadError::Unreachable {
+                    upstream: remote,
+                    reason,
+                });
+            }
+        };
 
         // One walk with download reach: a read-miss falls through to the
         // remote and is cached locally on the way through, and a missing
@@ -209,6 +211,7 @@ impl<'a> PullDownload<'a> {
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
