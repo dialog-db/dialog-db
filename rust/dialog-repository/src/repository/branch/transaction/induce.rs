@@ -766,7 +766,7 @@ where
     // surfaces once. Reads go through the networked store exactly as a
     // select does: a pulled head's changed paths may reference
     // remote-only blocks.
-    let remote = source.fallback(env).await;
+    let remote = source.fallback();
     let store = crate::NetworkedIndex::new(env, branch.archive().index(), remote);
     let raw_store = store.clone();
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store));

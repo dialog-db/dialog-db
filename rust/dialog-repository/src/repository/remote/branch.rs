@@ -1,3 +1,4 @@
+use crate::schema::Branch as BranchConcept;
 use crate::{BranchReference, Cell, RemoteAddress, RemoteRepository, Revision};
 
 mod fetch;
@@ -71,6 +72,12 @@ impl RemoteBranch {
     /// The branch name.
     pub fn name(&self) -> &str {
         self.branch.name()
+    }
+
+    /// The branch as a concept: its entity, derived from the peer's
+    /// replica and the name.
+    pub fn concept(&self) -> BranchConcept {
+        self.repository.replica().branch(self.name())
     }
 
     /// The full remote address (site + subject).

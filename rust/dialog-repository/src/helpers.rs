@@ -37,6 +37,44 @@ pub async fn test_repo(
         .expect("test_repo: failed to open repository")
 }
 
+#[cfg(test)]
+use crate::registry::RegistryEnv;
+#[cfg(test)]
+use crate::{RemoteRepository, Repository, SiteAddress, peer_did};
+#[cfg(test)]
+use dialog_varsig::{Did, Principal};
+
+/// Add the peer reached at `address` under `name`, and connect to the
+/// repository `subject` there: what tests once did by creating a named
+/// remote. The peer's DID is derived from the address.
+#[cfg(test)]
+pub async fn connect<C, Env>(
+    repo: &Repository<C>,
+    name: &str,
+    address: impl Into<SiteAddress>,
+    subject: Did,
+    env: &Env,
+) -> anyhow::Result<RemoteRepository>
+where
+    C: Principal,
+    Env: RegistryEnv,
+{
+    let address = address.into();
+    let did = peer_did(&address)?;
+    repo.peer(&did)
+        .add_address(address)
+        .name(name)
+        .perform(env)
+        .await?;
+    Ok(repo
+        .peer(name)
+        .connect()
+        .repository(subject)
+        .open()
+        .perform(env)
+        .await?)
+}
+
 /// Fill `branch` with what a tonk profile's account branch carries, at a
 /// scale that makes a cold clone do real work.
 ///
@@ -159,6 +197,16 @@ pub struct Counting<P> {
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
     reads: Arc<Mutex<InFlight>>,
     forks: Arc<Mutex<InFlight>>,
+}
+
+impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {
+    fn held(&self, key: &str) -> Option<dialog_common::Held> {
+        self.inner.held(key)
+    }
+
+    fn hold(&self, key: String, handle: dialog_common::Held) {
+        self.inner.hold(key, handle)
+    }
 }
 
 /// How many reads are open now, and the most that were ever open at once.

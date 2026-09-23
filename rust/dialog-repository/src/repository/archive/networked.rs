@@ -291,6 +291,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::helpers::connect;
     use std::sync::Arc;
 
     use anyhow::Result;
@@ -358,11 +359,7 @@ mod tests {
             .region("us-east-1")
             .bucket("bucket")
             .build()?;
-        let origin = repo
-            .remote("origin")
-            .create(site)
-            .perform(&operator)
-            .await?;
+        let origin = connect(&repo, "origin", site, repo.did(), &operator).await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let env = Recording {
             inner: operator,

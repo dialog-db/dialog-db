@@ -15,14 +15,14 @@
 
 use dialog_artifacts::{Changes, Entity, Statement};
 use dialog_capability::{Capability, Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_query::{Output as _, Query, Term};
 use futures_util::stream;
 
-use crate::schema::{ActiveBranch, Branch as BranchConcept, Replica};
+use crate::schema::{ActiveBranch, Branch as BranchConcept, BranchPull, BranchPush, Replica};
 use crate::{Branch, CommitError, RemoteSite};
 
 /// The environment a registry write runs against.
@@ -38,6 +38,7 @@ pub trait RegistryEnv:
     + Provider<dialog_artifacts::Preload>
     + Provider<dialog_artifacts::Speculation>
     + Provider<Fork<RemoteSite, Resolve>>
+    + Holds
     + ConditionalSync
     + 'static
 {
@@ -55,6 +56,7 @@ impl<T> RegistryEnv for T where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static
 {
@@ -139,9 +141,23 @@ pub async fn switch<Env: RegistryEnv>(
     apply(registry, changes, env).await
 }
 
+pub(crate) fn pull(branch: &BranchConcept, upstream: &BranchConcept) -> BranchPull {
+    BranchPull {
+        this: branch.this.clone(),
+        pull: upstream.this.clone().into(),
+    }
+}
+
+pub(crate) fn push(branch: &BranchConcept, upstream: &BranchConcept) -> BranchPush {
+    BranchPush {
+        this: branch.this.clone(),
+        push: upstream.this.clone().into(),
+    }
+}
+
 /// Commit `changes` to the registry under the machinery scope, which
 /// is what lets them write the reserved `dialog.` namespace.
-async fn apply<Env: RegistryEnv>(
+pub(crate) async fn apply<Env: RegistryEnv>(
     registry: &Branch,
     changes: Changes,
     env: &Env,
@@ -194,8 +210,6 @@ pub async fn list<Env: RegistryEnv>(
     operator: &Capability<Operator>,
     env: &Env,
 ) -> Result<Vec<BranchConcept>, dialog_query::EvaluationError> {
-    use dialog_query::{Output as _, Query, Term};
-
     let replica = Replica::new(operator.profile().clone(), registry.of().clone());
 
     Box::pin(
@@ -219,10 +233,13 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::test_repo;
+    use crate::schema::{Branch as BranchConcept, Replica};
     use crate::{REGISTRY, RepositoryMemoryExt};
+    use dialog_artifacts::{ArtifactSelector, Value};
     use dialog_capability::Subject;
     use dialog_effects::authority::Identify;
     use dialog_operator::helpers::test_operator_with_profile;
+    use futures_util::StreamExt as _;
 
     /// A recorded branch is listed; the registry lists itself without
     /// ever having been recorded.
@@ -269,10 +286,6 @@ mod tests {
     /// rather than through the concept that also defines it.
     #[dialog_common::test]
     async fn it_records_the_active_branch_by_name() -> anyhow::Result<()> {
-        use crate::schema::{Branch as BranchConcept, Replica};
-        use dialog_artifacts::{ArtifactSelector, Value};
-        use futures_util::StreamExt as _;
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let identity = Identify.perform(&operator).await?;

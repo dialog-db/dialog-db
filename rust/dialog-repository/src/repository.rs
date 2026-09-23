@@ -42,11 +42,17 @@ pub use memory::*;
 mod open;
 pub use open::*;
 
+mod peer;
+pub use peer::*;
+
 mod remote;
 pub use remote::*;
 
 mod snapshot;
 pub use snapshot::*;
+
+mod upgrade;
+pub use upgrade::*;
 
 pub(crate) mod source;
 
@@ -91,13 +97,6 @@ impl<C: Principal> Repository<C> {
     /// Call `.open()` or `.load()` on the returned reference.
     pub fn branch(&self, name: impl Into<String>) -> BranchReference {
         self.subject().branch(name)
-    }
-
-    /// Get a remote reference for the given name.
-    ///
-    /// Call `.create(address)` or `.load()` on the returned reference.
-    pub fn remote(&self, name: impl Into<String>) -> RemoteReference {
-        self.subject().remote(name)
     }
 }
 
@@ -213,6 +212,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::helpers::connect;
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
@@ -364,15 +364,17 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
-        let site = repo
-            .remote("origin")
-            .create(test_site_address())
+        let site = connect(&repo, "origin", test_site_address(), repo.did(), &operator).await?;
+        assert_eq!(site.name(), "origin");
+
+        let loaded = repo
+            .peer("origin")
+            .connect()
+            .repository(repo.did())
+            .open()
             .perform(&operator)
             .await?;
-        assert_eq!(site.site().name(), "origin");
-
-        let loaded = repo.remote("origin").load().perform(&operator).await?;
-        assert_eq!(loaded.site().name(), "origin");
+        assert_eq!(loaded.name(), "origin");
         assert_eq!(loaded.address().site(), &test_site_address().into());
 
         Ok(())

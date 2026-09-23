@@ -102,39 +102,157 @@ pub enum CreateRepositoryError {
     Storage(#[from] StorageError),
 }
 
-/// Errors returned by the create remote command.
+/// Errors returned when connecting to a peer, or opening a branch there.
 #[derive(Error, Debug)]
-pub enum CreateRemoteError {
-    /// A remote with this name already exists.
-    #[error("Remote {name} already exists")]
-    AlreadyExists {
-        /// The remote name.
+pub enum ConnectError {
+    /// No peer is known by the name the peer was picked out by.
+    #[error("No peer is named {name}")]
+    NotFound {
+        /// The name looked up.
         name: String,
     },
 
-    /// Failed to resolve the remote's address cell to check for
-    /// existing record.
-    #[error("Failed to resolve remote address cell: {0}")]
+    /// More than one peer is known by the name, so it picks out none.
+    #[error("More than one peer is named {name}")]
+    Ambiguous {
+        /// The name looked up.
+        name: String,
+    },
+
+    /// The peer has no address to be reached at.
+    #[error("Peer {peer} has no address to reach it at")]
+    Unreachable {
+        /// The peer, by name or entity.
+        peer: String,
+    },
+
+    /// No branch with this entity is recorded, so it has no name to
+    /// open it by.
+    #[error("No branch {branch} is recorded")]
+    UnknownBranch {
+        /// The branch entity.
+        branch: String,
+    },
+
+    /// Local storage could not be read.
+    #[error("Failed to read local storage: {0}")]
     Resolve(#[from] ResolveError),
 
-    /// Failed to publish the new remote's address.
-    #[error("Failed to publish remote address: {0}")]
-    Publish(#[from] PublishError),
+    /// Looking the peer or branch up failed.
+    #[error("Failed to look up the peer: {0}")]
+    Query(String),
+
+    /// A recorded address could not be decoded.
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+
+    /// Opening the remote branch failed.
+    #[error(transparent)]
+    Open(#[from] OpenRemoteBranchError),
 }
 
-/// Errors returned by the load remote command.
+impl From<ConnectError> for AddAddressError {
+    fn from(error: ConnectError) -> Self {
+        match error {
+            ConnectError::NotFound { name } => Self::NotFound { name },
+            ConnectError::Ambiguous { name } => Self::Ambiguous { name },
+            ConnectError::Resolve(error) => Self::Resolve(error),
+            ConnectError::Peer(error) => Self::Peer(error),
+            error => Self::Query(error.to_string()),
+        }
+    }
+}
+
+/// Errors returned when adding an address to a peer.
 #[derive(Error, Debug)]
-pub enum LoadRemoteError {
-    /// The remote has no recorded address (never created).
-    #[error("Remote {name} not found")]
+pub enum AddAddressError {
+    /// No peer is known by the name the peer was picked out by.
+    #[error("No peer is named {name}")]
     NotFound {
-        /// The remote name.
+        /// The name looked up.
         name: String,
     },
 
-    /// Failed to resolve the remote's address cell.
-    #[error("Failed to resolve remote address cell: {0}")]
+    /// More than one peer is known by the name, so it picks out none.
+    #[error("More than one peer is named {name}")]
+    Ambiguous {
+        /// The name looked up.
+        name: String,
+    },
+
+    /// The registry branch could not be opened.
+    #[error("Failed to read local storage: {0}")]
     Resolve(#[from] ResolveError),
+
+    /// Looking the peer up by name failed.
+    #[error("Failed to look up the peer: {0}")]
+    Query(String),
+
+    /// The address could not be encoded.
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+
+    /// The facts could not be committed.
+    #[error(transparent)]
+    Commit(#[from] CommitError),
+}
+
+/// Errors returned when upgrading a repository's local storage.
+#[derive(Error, Debug)]
+pub enum UpgradeError {
+    /// The storage was upgraded by a newer release, to a layout this one
+    /// does not know. It is left alone rather than misread.
+    #[error("Storage is at version {found}, newer than the {supported} this release supports")]
+    Newer {
+        /// The version the storage records.
+        found: u32,
+        /// The newest version this release knows.
+        supported: u32,
+    },
+
+    /// Local storage -- the version cell, or the registry branch --
+    /// could not be read.
+    #[error("Failed to read local storage: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// The new version could not be recorded, possibly because another
+    /// upgrade recorded one first.
+    #[error("Failed to record the storage version: {0}")]
+    Record(#[from] PublishError),
+
+    /// The operator could not say who it acts for.
+    #[error(transparent)]
+    Authority(#[from] AuthorityError),
+
+    /// The cells stored under a space could not be listed.
+    #[error("Failed to list stored cells: {0}")]
+    List(#[from] MemoryError),
+
+    /// A remote's address could not be read from its cell.
+    #[error("Failed to load remote {name}: {source}")]
+    Remote {
+        /// The remote name.
+        name: String,
+        /// Why its address cell could not be read.
+        source: ResolveError,
+    },
+
+    /// A branch's upstream cell could not be read.
+    #[error("Failed to read the upstreams of branch {name}: {source}")]
+    Upstream {
+        /// The branch name.
+        name: String,
+        /// Why it could not be read.
+        source: ResolveError,
+    },
+
+    /// A remote's address does not name a peer.
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+
+    /// The facts could not be committed to the registry.
+    #[error(transparent)]
+    Commit(#[from] CommitError),
 }
 
 /// Errors returned by the load branch command.
@@ -163,9 +281,64 @@ pub enum SetUpstreamError {
         branch: String,
     },
 
-    /// Publishing the new upstream state failed.
-    #[error("Failed to publish upstream state: {0}")]
+    /// The operator could not say who it acts for.
+    #[error(transparent)]
+    Authority(#[from] AuthorityError),
+
+    /// The registry could not be read.
+    #[error("Failed to read local storage: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// The relations could not be committed to the registry.
+    #[error(transparent)]
+    Commit(#[from] CommitError),
+
+    /// The branch's routes could not be brought up to date.
+    #[error(transparent)]
+    Upstreams(#[from] ResolveUpstreamsError),
+}
+
+/// Errors returned when resolving where a branch's upstreams live.
+#[derive(Error, Debug)]
+pub enum ResolveUpstreamsError {
+    /// The registry or the branch's tracking cell could not be read.
+    #[error("Failed to read local storage: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// The resolved routes could not be recorded.
+    #[error("Failed to record resolved upstreams: {0}")]
     Publish(#[from] PublishError),
+
+    /// The operator could not say who it acts for.
+    #[error(transparent)]
+    Authority(#[from] AuthorityError),
+
+    /// Querying the registry failed.
+    #[error("Failed to query the registry: {0}")]
+    Query(String),
+
+    /// A recorded peer address could not be decoded.
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+}
+
+impl From<dialog_query::EvaluationError> for ResolveUpstreamsError {
+    fn from(error: dialog_query::EvaluationError) -> Self {
+        Self::Query(error.to_string())
+    }
+}
+
+impl From<FetchError> for PullError {
+    fn from(error: FetchError) -> Self {
+        match error {
+            FetchError::BranchHasNoUpstream { branch } => Self::BranchHasNoUpstream { branch },
+            FetchError::LoadBranch(error) => Self::LoadBranch(error),
+            FetchError::Unreachable { upstream, reason } => Self::Unreachable { upstream, reason },
+            FetchError::OpenRemoteBranch(error) => Self::OpenRemoteBranch(error),
+            FetchError::FetchRemoteBranch(error) => Self::FetchRemoteBranch(error),
+            FetchError::Upstreams(error) => Self::Upstreams(error),
+        }
+    }
 }
 
 /// Errors specific to a branch fetch operation.
@@ -182,9 +355,14 @@ pub enum FetchError {
     #[error("Failed to load upstream branch: {0}")]
     LoadBranch(#[from] LoadBranchError),
 
-    /// Loading the configured remote failed.
-    #[error("Failed to load remote: {0}")]
-    LoadRemote(#[from] LoadRemoteError),
+    /// An upstream's peer could not be resolved, so it cannot be reached.
+    #[error("Upstream {upstream} is unreachable: {reason}")]
+    Unreachable {
+        /// The upstream branch entity.
+        upstream: String,
+        /// Why its peer could not be resolved.
+        reason: String,
+    },
 
     /// Opening the remote branch failed.
     #[error("Failed to open remote branch: {0}")]
@@ -193,6 +371,10 @@ pub enum FetchError {
     /// Fetching from the remote failed.
     #[error("Failed to fetch from remote: {0}")]
     FetchRemoteBranch(#[from] FetchRemoteBranchError),
+
+    /// The branch's upstreams could not be resolved.
+    #[error(transparent)]
+    Upstreams(#[from] ResolveUpstreamsError),
 }
 
 /// Errors specific to a commit operation.
@@ -266,9 +448,14 @@ pub enum PullError {
     #[error("Failed to load upstream branch: {0}")]
     LoadBranch(#[from] LoadBranchError),
 
-    /// Loading the configured remote failed.
-    #[error("Failed to load remote: {0}")]
-    LoadRemote(#[from] LoadRemoteError),
+    /// An upstream's peer could not be resolved, so it cannot be reached.
+    #[error("Upstream {upstream} is unreachable: {reason}")]
+    Unreachable {
+        /// The upstream branch entity.
+        upstream: String,
+        /// Why its peer could not be resolved.
+        reason: String,
+    },
 
     /// Opening the remote branch failed.
     #[error("Failed to open remote branch: {0}")]
@@ -306,6 +493,10 @@ pub enum PullError {
     /// ([`Pull::download`](crate::Pull::download)).
     #[error("Download after pull failed: {0}")]
     Download(#[from] DownloadError),
+
+    /// The branch's upstreams could not be resolved.
+    #[error(transparent)]
+    Upstreams(#[from] ResolveUpstreamsError),
 }
 
 /// Errors specific to a push operation.
@@ -349,9 +540,14 @@ pub enum PushError {
     #[error("Failed to resolve during push: {0}")]
     Resolve(#[from] ResolveError),
 
-    /// Loading the configured remote failed.
-    #[error("Failed to load remote during push: {0}")]
-    LoadRemote(#[from] LoadRemoteError),
+    /// An upstream's peer could not be resolved, so it cannot be reached.
+    #[error("Upstream {upstream} is unreachable: {reason}")]
+    Unreachable {
+        /// The upstream branch entity.
+        upstream: String,
+        /// Why its peer could not be resolved.
+        reason: String,
+    },
 
     /// Loading a local upstream branch during push failed. Push walks
     /// local upstream entries to attribute by-reference content to the
@@ -395,6 +591,10 @@ pub enum PushError {
     /// push failed.
     #[error("Remote archive operation failed during push: {0}")]
     Archive(#[from] ArchiveError),
+
+    /// The branch's upstreams could not be resolved.
+    #[error(transparent)]
+    Upstreams(#[from] ResolveUpstreamsError),
 }
 
 /// Errors returned by cell resolve operations.
@@ -650,9 +850,14 @@ mod tests {
 /// ([`Branch::download`](crate::Branch::download)).
 #[derive(Error, Debug)]
 pub enum DownloadError {
-    /// Loading the branch's configured remote failed.
-    #[error("Failed to load remote for download: {0}")]
-    LoadRemote(#[from] LoadRemoteError),
+    /// An upstream's peer could not be resolved, so it cannot be reached.
+    #[error("Upstream {upstream} is unreachable: {reason}")]
+    Unreachable {
+        /// The upstream branch entity.
+        upstream: String,
+        /// Why its peer could not be resolved.
+        reason: String,
+    },
 
     /// The materializing walk failed.
     #[error("Download walk failed: {0}")]

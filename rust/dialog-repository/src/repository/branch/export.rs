@@ -11,9 +11,7 @@ use dialog_effects::memory::Resolve;
 use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use futures_util::TryStreamExt;
 
-use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite, RepositoryMemoryExt,
-};
+use crate::{Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite};
 
 /// Command struct for exporting all artifacts from a branch.
 pub struct Export<'a, E> {
@@ -42,19 +40,7 @@ impl<E: Exporter> Export<'_, E> {
         let branch = self.branch;
         let mut exporter = self.exporter;
 
-        let upstreams = branch.upstreams();
-        let remote = match upstreams.remote_name() {
-            Some(name) => {
-                let loaded = branch
-                    .subject()
-                    .remote(name.to_string())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            None => RemoteFallback::None,
-        };
+        let remote = branch.upstreams().fallback();
 
         let catalog = ArchiveScope::new(branch.subject()).index();
         let store = NetworkedIndex::new(env, catalog, remote);

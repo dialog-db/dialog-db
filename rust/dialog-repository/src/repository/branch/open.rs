@@ -30,8 +30,8 @@ impl OpenBranch {
         let revision = self.branch.revision();
         revision.resolve().perform(env).await?;
 
-        let upstream = self.branch.upstream();
-        upstream.resolve().perform(env).await?;
+        let tracking = self.branch.tracking();
+        tracking.resolve().perform(env).await?;
 
         let induction = self.branch.induction();
         induction.resolve().perform(env).await?;
@@ -39,7 +39,7 @@ impl OpenBranch {
         Ok(Branch {
             reference: self.branch,
             revision,
-            upstream,
+            tracking,
             induction,
             node_cache: dialog_search_tree::Cache::new(),
             spill_cache: spill_cache(),

@@ -1,6 +1,6 @@
 use dialog_capability::{Did, Subject};
 
-use crate::{Cell, LoadBranch, OpenBranch, Revision, Upstreams};
+use crate::{Cell, LoadBranch, OpenBranch, Revision, Tracking};
 use dialog_effects::memory::prelude::SpaceScope;
 
 /// A reference to a named branch within a repository's memory.
@@ -47,8 +47,15 @@ impl BranchReference {
         self.cell("revision")
     }
 
-    /// The cell holding this branch's [`Upstreams`] tracking entries.
-    pub fn upstream(&self) -> Cell<Upstreams> {
+    /// The cell recording this branch's upstreams as last resolved, and
+    /// how far it has synced with each.
+    pub fn tracking(&self) -> Cell<Tracking> {
+        self.cell("tracking")
+    }
+
+    /// The cell releases before peers kept this branch's upstreams in.
+    /// Read only by the upgrade that carries them into facts.
+    pub(crate) fn legacy_upstream(&self) -> Cell<super::upstream::legacy::Upstreams> {
         self.cell("upstream")
     }
 

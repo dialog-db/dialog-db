@@ -1,8 +1,9 @@
-//! Remote repository navigation and operations.
+//! Repositories held at peers, and their branches.
 //!
 //! ```text
-//! repo.remote("origin").load().perform(&env)  → RemoteRepository
-//!   └── .branch("main")                       → RemoteBranchReference
+//! repo.peer("origin").connect()             → PeerConnection
+//!   └── .repository(did)                    → PeerRepository
+//!         └── .branch("main").open()        → RemoteBranch
 //! ```
 
 mod address;
@@ -13,15 +14,6 @@ pub use archive::*;
 
 mod branch;
 pub use branch::*;
-
-mod create;
-pub use create::*;
-
-mod load;
-pub use load::*;
-
-mod reference;
-pub use reference::*;
 
 mod repository;
 pub use repository::*;

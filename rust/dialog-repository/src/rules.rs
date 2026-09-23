@@ -198,7 +198,90 @@ pub(crate) fn builtin(concept: &Entity) -> Vec<DeductiveRule> {
             .clone();
     }
 
+    let pull = <schema::PullUpstream as Descriptor<ConceptDescriptor>>::descriptor();
+    if *concept == pull.this() {
+        static PULL: OnceLock<DeductiveRule> = OnceLock::new();
+        return vec![
+            PULL.get_or_init(|| {
+                upstream_rule(
+                    pull.clone(),
+                    <schema::BranchPull as Descriptor<ConceptDescriptor>>::descriptor().clone(),
+                    "pull",
+                )
+            })
+            .clone(),
+        ];
+    }
+
+    let push = <schema::PushUpstream as Descriptor<ConceptDescriptor>>::descriptor();
+    if *concept == push.this() {
+        static PUSH: OnceLock<DeductiveRule> = OnceLock::new();
+        return vec![
+            PUSH.get_or_init(|| {
+                upstream_rule(
+                    push.clone(),
+                    <schema::BranchPush as Descriptor<ConceptDescriptor>>::descriptor().clone(),
+                    "push",
+                )
+            })
+            .clone(),
+        ];
+    }
+
     Vec::new()
+}
+
+/// The rule resolving a branch's pull or push relation to where the
+/// tracked branch lives:
+///
+/// ```text
+/// upstream(this, upstream, name, subject, peer) :-
+///     relation(this, upstream),
+///     branch(upstream, name, replica),
+///     replica(replica, subject, peer).
+/// ```
+///
+/// `relation` is [`schema::BranchPull`] or [`schema::BranchPush`], and
+/// `field` the name of its tracked-branch field.
+fn upstream_rule(
+    conclusion: ConceptDescriptor,
+    relation: ConceptDescriptor,
+    field: &str,
+) -> DeductiveRule {
+    fn premise(predicate: ConceptDescriptor, terms: &[(&str, &str)]) -> Premise {
+        let mut parameters = Parameters::new();
+        for (field, var) in terms {
+            parameters.insert((*field).to_string(), Term::<Any>::var(*var));
+        }
+        Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms: parameters,
+            predicate,
+        }))
+    }
+
+    DeductiveRule::new(
+        conclusion,
+        vec![
+            premise(relation, &[("this", "this"), (field, "upstream")]),
+            premise(
+                <schema::Branch as Descriptor<ConceptDescriptor>>::descriptor().clone(),
+                &[
+                    ("this", "upstream"),
+                    ("name", "name"),
+                    ("replica", "replica"),
+                ],
+            ),
+            premise(
+                <schema::Replica as Descriptor<ConceptDescriptor>>::descriptor().clone(),
+                &[
+                    ("this", "replica"),
+                    ("subject", "subject"),
+                    ("peer", "peer"),
+                ],
+            ),
+        ],
+    )
+    .expect("the upstream rule compiles")
 }
 
 /// The recursive pair concluding [`schema::RevisionAncestor`]:

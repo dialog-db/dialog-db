@@ -27,8 +27,7 @@ use std::sync::Arc;
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback, RepositoryMemoryExt as _,
-    Revision, Snapshot, Upstream,
+    Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot,
 };
 
 /// An owned line to read from: a branch or a snapshot, cheaply cloned
@@ -134,45 +133,19 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The default upstream: a branch's tracked one. A snapshot tracks
-    /// nothing, so blob reads through it are local (see
-    /// [`SnapshotExport::download`](crate::SnapshotExport::download)
-    /// for hydrating one ahead of time).
-    pub(crate) fn upstream(self) -> Option<Upstream> {
-        match self {
-            SourceRef::Branch(branch) => branch.upstream(),
-            SourceRef::Snapshot(_) => None,
-        }
-    }
-
     /// The remote block reads fall back to on a local miss: the first
-    /// remote among a branch's tracked upstreams (a branch whose default
-    /// upstream is local but which tracks a remote must still hydrate
-    /// blocks it holds by reference); none for a snapshot.
+    /// peer among a branch's upstreams, as last resolved (a branch that
+    /// tracks a peer must hydrate blocks it holds by reference); none for
+    /// a snapshot.
     ///
-    /// A remote that fails to load is carried as
+    /// An upstream whose peer could not be resolved is carried as
     /// [`RemoteFallback::Unavailable`] rather than dropped: reads the
-    /// local archive serves still succeed, and a local miss surfaces the
-    /// load failure as its cause instead of a bare not-found.
-    pub(crate) async fn fallback<Env>(self, env: &Env) -> RemoteFallback
-    where
-        Env: Provider<Resolve> + ConditionalSync + 'static,
-    {
-        let SourceRef::Branch(branch) = self else {
-            return RemoteFallback::None;
-        };
-        let upstreams = branch.upstreams();
-        match upstreams.remote_name() {
-            Some(name) => {
-                let loaded = branch
-                    .subject()
-                    .remote(name.to_string())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            None => RemoteFallback::None,
+    /// local archive serves still succeed, and a local miss surfaces why
+    /// the peer is unreachable instead of a bare not-found.
+    pub(crate) fn fallback(self) -> RemoteFallback {
+        match self {
+            SourceRef::Branch(branch) => branch.upstreams().fallback(),
+            SourceRef::Snapshot(_) => RemoteFallback::None,
         }
     }
 
@@ -280,7 +253,7 @@ impl<'a> SourceRef<'a> {
     /// hydrates the history it turns out to need instead of failing with
     /// `IncompleteHistory`. A line tracking no remote reads purely
     /// locally, so an offline replica behaves as it always did.
-    pub(crate) async fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
+    pub(crate) fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
@@ -289,7 +262,7 @@ impl<'a> SourceRef<'a> {
             + ConditionalSync
             + 'static,
     {
-        let remote = self.fallback(env).await;
+        let remote = self.fallback();
         let store = NetworkedIndex::new(env, self.archive().index(), remote);
         TreeHistory::from_root_with_cache(&self.root(), store, self.node_cache())
             .with_record_cache(self.records())
@@ -313,7 +286,7 @@ impl<'a> SourceRef<'a> {
         let Some(head) = self.revision() else {
             return Ok(Vec::new());
         };
-        log(&head.version(), &self.history(env).await, limit).await
+        log(&head.version(), &self.history(env), limit).await
     }
 }
 

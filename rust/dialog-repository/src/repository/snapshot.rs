@@ -391,7 +391,7 @@ impl Snapshot {
     /// The recorded claim lineage at this snapshot's revision. See
     /// [`Branch::history`].
     /// A snapshot tracks no upstream, so this reads purely locally.
-    pub async fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -402,7 +402,7 @@ impl Snapshot {
             + ConditionalSync
             + 'static,
     {
-        SourceRef::from(self).history(env).await
+        SourceRef::from(self).history(env)
     }
 
     /// The snapshot's committed history, newest first — at most `limit`

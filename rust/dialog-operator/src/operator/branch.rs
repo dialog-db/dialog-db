@@ -282,10 +282,10 @@ where
             Some(_) => return Err(moved()),
         }
 
-        let upstream = reference.upstream();
-        upstream.resolve().perform(self).await.map_err(failed)?;
-        if upstream.content().is_some() {
-            upstream.retract().perform(self).await.map_err(failed)?;
+        let tracking = reference.tracking();
+        tracking.resolve().perform(self).await.map_err(failed)?;
+        if tracking.content().is_some() {
+            tracking.retract().perform(self).await.map_err(failed)?;
         }
 
         let induction = reference.induction();

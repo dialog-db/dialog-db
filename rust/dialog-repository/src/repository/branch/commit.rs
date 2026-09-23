@@ -403,7 +403,7 @@ where
         // from, so the failure is carried into the fallback and surfaces
         // — with its cause — on the first read that needed it, while a
         // commit every block of which is local proceeds untouched.
-        let remote = source.fallback(env).await;
+        let remote = source.fallback();
         let mut store = NetworkedIndex::new(env, source.archive().index(), remote);
 
         // Discover who we are up front: the revision is attributed to the
@@ -845,7 +845,7 @@ mod history_tests {
             .await?;
 
         branch.refresh(&operator).await?;
-        let history = branch.history(&operator).await;
+        let history = branch.history(&operator);
 
         // Both claims are recorded, and the replacement's cause lists the
         // version of the claim it superseded.
@@ -903,7 +903,7 @@ mod history_tests {
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
-        let history = branch.history(&operator).await;
+        let history = branch.history(&operator);
         let record = history
             .revision_record(&third.version())
             .await?
@@ -1032,7 +1032,7 @@ mod history_tests {
         );
 
         branch.refresh(&operator).await?;
-        let history = branch.history(&operator).await;
+        let history = branch.history(&operator);
         let record = history
             .revision_record(&empty.version())
             .await?

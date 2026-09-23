@@ -627,7 +627,6 @@ async fn it_logs_history() -> Result<()> {
     );
     let record = snapshot
         .history(&operator)
-        .await
         .revision_record(&revisions[1].version())
         .await?
         .expect("the head's record is retrievable");
