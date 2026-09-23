@@ -430,6 +430,47 @@ async fn it_folds_the_overlay_into_reads() -> Result<()> {
     Ok(())
 }
 
+/// An exported overlay, carried as bytes into a separately opened handle,
+/// restores both its asserts and its tombstones there.
+#[dialog_common::test]
+async fn it_restores_an_exported_overlay_elsewhere() -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    branch
+        .transaction()
+        .assert(person("id:alice", "Alice"))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let source = branch.snapshot().expect("snapshot");
+    source.overlay().assert(person("id:bob", "Bob"));
+    source.overlay().retract(
+        the!("test/name")
+            .of("id:alice".parse::<Entity>()?)
+            .is("Alice".to_string()),
+    );
+
+    let bytes = serde_ipld_dagcbor::to_vec(&source.overlay().export())?;
+
+    let target = branch.snapshot().expect("snapshot");
+    assert_eq!(
+        people(target.query(), &operator).await?,
+        vec!["Alice".to_string()],
+        "a fresh handle starts with an empty overlay"
+    );
+    target
+        .overlay()
+        .import(serde_ipld_dagcbor::from_slice(&bytes)?);
+    assert_eq!(
+        people(target.query(), &operator).await?,
+        vec!["Bob".to_string()],
+        "the restored overlay asserts Bob and tombstones Alice"
+    );
+    Ok(())
+}
+
 /// A deductive rule committed on the branch derives on the snapshot,
 /// resolved through the same layered rule resolution.
 #[dialog_common::test]

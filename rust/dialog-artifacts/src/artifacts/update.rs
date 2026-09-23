@@ -10,6 +10,7 @@ use dialog_capability::Provider;
 use dialog_search_tree::Manifest;
 use futures_util::Stream;
 use futures_util::stream;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -58,7 +59,11 @@ pub trait Statement: Sized {
 }
 
 /// A batch of pending writes, organized by entity and attribute.
-#[derive(Debug, Default, Clone)]
+///
+/// Serializes as the sequence of [`Instruction`]s it replays, so a batch
+/// round-trips through any serde format without losing retractions or
+/// cardinality-one replacements.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Changes(HashMap<Entity, HashMap<Attribute, Vec<Change>>>);
 
 impl Changes {
@@ -172,6 +177,46 @@ impl Update for Changes {
             .entry(the)
             .or_default()
             .push(Change::Retract(is));
+    }
+}
+
+impl Extend<Instruction> for Changes {
+    fn extend<I: IntoIterator<Item = Instruction>>(&mut self, instructions: I) {
+        for instruction in instructions {
+            match instruction {
+                Instruction::Assert(artifact) => {
+                    self.associate(artifact.the, artifact.of, artifact.is)
+                }
+                Instruction::Replace(artifact) => {
+                    self.associate_unique(artifact.the, artifact.of, artifact.is)
+                }
+                Instruction::Retract(artifact) => {
+                    self.dissociate(artifact.the, artifact.of, artifact.is)
+                }
+            }
+        }
+    }
+}
+
+impl FromIterator<Instruction> for Changes {
+    fn from_iter<I: IntoIterator<Item = Instruction>>(instructions: I) -> Self {
+        let mut changes = Self::new();
+        changes.extend(instructions);
+        changes
+    }
+}
+
+impl Serialize for Changes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.clone().into_instructions())
+    }
+}
+
+impl<'de> Deserialize<'de> for Changes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Vec::<Instruction>::deserialize(deserializer)?
+            .into_iter()
+            .collect())
     }
 }
 
@@ -432,6 +477,31 @@ mod tests {
     }
     fn role_attr() -> Attribute {
         "test/role".parse().expect("valid attribute")
+    }
+
+    /// A batch survives dag-cbor encoding with every kind of change intact:
+    /// additive asserts, cardinality-one replacements, and retractions.
+    #[dialog_common::test]
+    fn it_round_trips_changes_through_dag_cbor() {
+        let mut changes = Changes::new();
+        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(name_attr(), alice(), Value::String("Ally".into()));
+        changes.associate_unique(role_attr(), alice(), Value::String("admin".into()));
+        changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
+
+        let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
+        let decoded: Changes = serde_ipld_dagcbor::from_slice(&bytes).expect("decode changes");
+
+        assert_eq!(decoded, changes);
+        let replaced = decoded
+            .iter()
+            .find(|(entity, attribute, _)| **entity == alice() && **attribute == role_attr())
+            .map(|(_, _, change)| change.clone());
+        assert_eq!(
+            replaced,
+            Some(Change::Replace(Value::String("admin".into()))),
+            "a replacement stays a replacement"
+        );
     }
 
     /// `sort_key` must reproduce the tree's EAV key byte order exactly,
