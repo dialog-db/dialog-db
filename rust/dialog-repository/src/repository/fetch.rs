@@ -484,10 +484,10 @@ mod tests {
     /// to the query.
     #[dialog_common::test]
     async fn it_loads_a_sources_remote_fallback_once_per_driver() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("fallback-once"))
+            .space(unique_name("fallback-once"))
             .create()
             .perform(&env)
             .await?;
@@ -512,7 +512,7 @@ mod tests {
             .region("us-east-1")
             .bucket("bucket")
             .build()?;
-        let origin = connect(&repo, "origin", site, repo.did(), &env).await?;
+        let origin = connect("origin", site, repo.did(), &env).await?;
         let remote_branch = origin.branch("main").open().perform(&env).await?;
         branch.set_upstream(remote_branch).perform(&env).await?;
         let branch = repo.branch("main").open().perform(&env).await?;

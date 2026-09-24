@@ -84,7 +84,7 @@ where
     Self: BranchEnv,
 {
     /// The registry branch for `subject`, held open by this operator.
-    async fn branch_registry(&self, subject: &dialog_varsig::Did) -> Result<Branch, BranchError> {
+    async fn registry(&self, subject: &dialog_varsig::Did) -> Result<Branch, BranchError> {
         Subject::from(subject.clone())
             .registry()
             .open()
@@ -177,7 +177,7 @@ where
         // registry, which writes under the machinery scope:
         // `dialog.branch/*` is reserved, and an application write of it
         // is refused.
-        let registry = self.branch_registry(&subject).await?;
+        let registry = self.registry(&subject).await?;
         let operator = self.build_authority(subject);
         record(&registry, &operator, name.as_str(), self)
             .await
@@ -199,7 +199,7 @@ where
         input: Capability<branch_fx::List>,
     ) -> Result<Vec<BranchRecord>, BranchError> {
         let subject = input.subject().clone();
-        let registry = self.branch_registry(&subject).await?;
+        let registry = self.registry(&subject).await?;
         let operator = self.build_authority(subject);
 
         let branches = list(&registry, &operator, self).await.map_err(failed)?;
@@ -242,7 +242,7 @@ where
 
         // The branch the replica works on is not deleted out from under
         // it: switching away comes first.
-        let registry = self.branch_registry(&subject).await?;
+        let registry = self.registry(&subject).await?;
         let operator = self.build_authority(subject.clone());
         let replica = Replica::new(operator.profile().clone(), subject.clone());
         let this = BranchConcept::new(&replica, name.as_str()).this;
@@ -319,7 +319,7 @@ where
         // Only the record changes. The branch is pointed at, never
         // looked up: it may live on another replica, where there is
         // nothing here to find.
-        let registry = self.branch_registry(&subject).await?;
+        let registry = self.registry(&subject).await?;
         let operator = self.build_authority(subject);
         switch(&registry, &operator, branch, self)
             .await

@@ -25,7 +25,7 @@ use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
 use dialog_peer::Peer;
 use dialog_peer::helpers::unique_name;
-use dialog_repository::{Branch, RemoteSite, RepositoryExt as _};
+use dialog_repository::{Branch, PeersEnv, RemoteSite, RepositoryExt as _};
 use dialog_storage::NativeTempSpace;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use futures_util::stream;
@@ -92,6 +92,7 @@ where
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
         + Provider<List>
+        + PeersEnv
         + Provider<dialog_repository::Hydrate>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>

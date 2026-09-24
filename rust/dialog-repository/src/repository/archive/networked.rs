@@ -364,7 +364,7 @@ mod tests {
             .region("us-east-1")
             .bucket("bucket")
             .build()?;
-        let origin = connect(&repo, "origin", site, repo.did(), &operator).await?;
+        let origin = connect("origin", site, repo.did(), &operator).await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let env = Recording {
             inner: operator,

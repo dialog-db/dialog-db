@@ -9,6 +9,7 @@ use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
 use dialog_effects::blob::BlobError;
 use dialog_effects::memory::{MemoryError, Version};
+use dialog_effects::peer::PeerError as ContactError;
 use dialog_effects::storage::StorageError;
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
@@ -146,14 +147,6 @@ pub enum ConnectError {
         peer: String,
     },
 
-    /// No branch with this entity is recorded, so it has no name to
-    /// open it by.
-    #[error("No branch {branch} is recorded")]
-    UnknownBranch {
-        /// The branch entity.
-        branch: String,
-    },
-
     /// Local storage could not be read.
     #[error("Failed to read local storage: {0}")]
     Resolve(#[from] ResolveError),
@@ -169,6 +162,14 @@ pub enum ConnectError {
     /// Opening the remote branch failed.
     #[error(transparent)]
     Open(#[from] OpenRemoteBranchError),
+
+    /// The host could not say who it is.
+    #[error(transparent)]
+    Authority(#[from] AuthorityError),
+
+    /// The host could not look the peer up or connect to it.
+    #[error(transparent)]
+    Contact(#[from] ContactError),
 }
 
 impl From<ConnectError> for AddAddressError {
@@ -178,6 +179,8 @@ impl From<ConnectError> for AddAddressError {
             ConnectError::Ambiguous { name } => Self::Ambiguous { name },
             ConnectError::Resolve(error) => Self::Resolve(error),
             ConnectError::Peer(error) => Self::Peer(error),
+            ConnectError::Authority(error) => Self::Authority(error),
+            ConnectError::Contact(error) => Self::Contact(error),
             error => Self::Query(error.to_string()),
         }
     }
@@ -215,6 +218,14 @@ pub enum AddAddressError {
     /// The facts could not be committed.
     #[error(transparent)]
     Commit(#[from] CommitError),
+
+    /// The host could not say who it is.
+    #[error(transparent)]
+    Authority(#[from] AuthorityError),
+
+    /// The host could not record the contact.
+    #[error(transparent)]
+    Contact(#[from] ContactError),
 }
 
 /// Errors returned when upgrading a repository's local storage.
@@ -273,6 +284,10 @@ pub enum UpgradeError {
     /// The facts could not be committed to the registry.
     #[error(transparent)]
     Commit(#[from] CommitError),
+
+    /// A remote could not be recorded as a contact.
+    #[error(transparent)]
+    Contact(#[from] AddAddressError),
 }
 
 /// Errors returned by the load branch command.
@@ -351,6 +366,10 @@ pub enum ResolveUpstreamsError {
     /// A recorded peer address could not be decoded.
     #[error(transparent)]
     Peer(#[from] crate::PeerError),
+
+    /// The host could not connect to an upstream's peer.
+    #[error(transparent)]
+    Contact(#[from] ContactError),
 }
 
 impl From<dialog_query::EvaluationError> for ResolveUpstreamsError {

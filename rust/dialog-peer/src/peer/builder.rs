@@ -465,10 +465,11 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>> {
                 network: self.network,
                 runtime: self.runtime,
                 branch: self.branch.clone(),
-                registry: OnceLock::new(),
+                state: OnceLock::new(),
                 chains: Mutex::default(),
                 grants,
                 holdings: Holdings::default(),
+                connections: Mutex::default(),
             },
         );
 
@@ -479,7 +480,7 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>> {
                 .perform(&peer)
                 .await
                 .map_err(|error| PeerError::Delegation(format!("{error}")))?;
-            peer.attach_registry(branch);
+            peer.attach_state(branch);
         }
 
         Ok(peer)

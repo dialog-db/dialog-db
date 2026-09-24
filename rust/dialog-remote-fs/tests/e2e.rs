@@ -25,7 +25,7 @@ use dialog_effects::storage::Location;
 use dialog_peer::Peer;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_remote_fs::FsAddress;
-use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
+use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, contact};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource;
@@ -77,12 +77,12 @@ async fn setup_repo_with_fs_remote(
 
     let origin = {
         let site = SiteAddress::Fs(address);
-        repo.peer(&dialog_repository::peer_did(&site)?)
+        contact(&dialog_repository::peer_did(&site)?)
             .add_address(site)
             .name("origin")
             .perform(operator)
             .await?;
-        repo.peer("origin")
+        contact("origin")
             .connect()
             .repository(repo.did())
             .open()
@@ -177,14 +177,12 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
 
     let bob_origin = {
         let site = SiteAddress::Fs(address);
-        bob_repo
-            .peer(&dialog_repository::peer_did(&site)?)
+        contact(&dialog_repository::peer_did(&site)?)
             .add_address(site)
             .name("origin")
             .perform(&operator)
             .await?;
-        bob_repo
-            .peer("origin")
+        contact("origin")
             .connect()
             .repository(alice_repo.did())
             .open()
@@ -241,14 +239,12 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
     profile.access().save(chain).perform(&operator).await?;
     let bob_origin = {
         let site = SiteAddress::Fs(address);
-        bob_repo
-            .peer(&dialog_repository::peer_did(&site)?)
+        contact(&dialog_repository::peer_did(&site)?)
             .add_address(site)
             .name("origin")
             .perform(&operator)
             .await?;
-        bob_repo
-            .peer("origin")
+        contact("origin")
             .connect()
             .repository(alice_repo.did())
             .open()

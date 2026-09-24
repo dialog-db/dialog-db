@@ -55,7 +55,7 @@ use dialog_query::{
 };
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::simulation::{self, NetworkShape};
-use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
+use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, contact};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource as _;
@@ -326,12 +326,12 @@ async fn mount_client(
         .await?;
     let origin = {
         let site = SiteAddress::Fs(address.clone());
-        repo.peer(&dialog_repository::peer_did(&site)?)
+        contact(&dialog_repository::peer_did(&site)?)
             .add_address(site)
             .name("origin")
             .perform(operator)
             .await?;
-        repo.peer("origin")
+        contact("origin")
             .connect()
             .repository(server.did())
             .open()
@@ -467,14 +467,12 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
 
     let origin = {
         let site = SiteAddress::Fs(address.clone());
-        server
-            .peer(&dialog_repository::peer_did(&site)?)
+        contact(&dialog_repository::peer_did(&site)?)
             .add_address(site)
             .name("origin")
             .perform(&operator)
             .await?;
-        server
-            .peer("origin")
+        contact("origin")
             .connect()
             .repository(server.did())
             .open()

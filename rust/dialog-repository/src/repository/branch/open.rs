@@ -53,6 +53,7 @@ impl OpenBranch {
             metadata_cache: Arc::new(Mutex::new(None)),
             layer_metadata_cache: Arc::new(Mutex::new(None)),
             overlay: Ephemeral::default(),
+            answers: Arc::default(),
         })
     }
 }

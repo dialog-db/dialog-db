@@ -259,7 +259,7 @@ impl<S: Clone> Peer<S> {
     /// duration, and still unlapsed. `None` on a miss or when the cached
     /// chain rejects this particular claim.
     fn cached(&self, key: &(Did, Did, String), claim: &Prove<Ucan>) -> Option<UcanProof> {
-        let branch = self.registry_opt()?;
+        let branch = self.state_opt()?;
         let epoch = branch.revision().map(|revision| revision.version());
         let cache = self.chains().lock();
         if cache.epoch != epoch {
@@ -364,7 +364,7 @@ impl<S: Clone> Peer<S> {
         // Captured before the walk: the facts the walk reads are at most
         // this fresh, so the record must not claim a later head.
         let epoch = self
-            .registry_opt()
+            .state_opt()
             .and_then(|branch| branch.revision())
             .map(|revision| revision.version());
 

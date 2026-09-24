@@ -37,6 +37,7 @@
 pub(crate) mod access;
 mod branch;
 mod builder;
+mod contact;
 mod fork;
 mod hydrate;
 mod open;
@@ -50,23 +51,26 @@ pub use builder::{Allowance, OpenFuture, PeerBuilder, PeerError, PeerKey, Unset}
 pub use open::OpenPeer;
 pub use runtime::Runtime;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use dialog_capability::access::AuthorizeError;
+use dialog_capability::identity::Entity;
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
 use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
 use dialog_effects::credential::Secret;
+use dialog_effects::peer::PeerConnection;
 use dialog_effects::storage::{Directory, Location};
 use dialog_effects::{archive, blob, credential, memory};
 use dialog_identity::access::Access;
 use dialog_identity::{Authority, CredentialHandle, SpaceHandle};
 use dialog_network::{HydrationScheduler, Network};
-use dialog_repository::{Branch, RemoteSite, Repository};
+use dialog_repository::{Branch, By, ContactReference, RemoteSite, Repository, contact};
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
 use dialog_storage::resource::Resource;
@@ -155,8 +159,8 @@ pub(crate) struct Grant {
 /// network its forks go through, and the branch of its home repository
 /// that holds its own state.
 ///
-/// Cheap to clone: every clone is a handle onto the same storage, runtime
-/// and registry. Build one with [`Peer::open`]; derive a worker with
+/// Cheap to clone: every clone is a handle onto the same storage, runtime,
+/// state branch and connections. Build one with [`Peer::open`]; derive a worker with
 /// [`Peer::worker`].
 #[derive(Provider, Clone)]
 pub struct Peer<S: Clone> {
@@ -212,7 +216,7 @@ pub(crate) struct Inner {
     branch: Option<String>,
     /// That branch, opened. Proofs resolve from its `dialog.ucan/*` facts
     /// and retained delegations commit into it.
-    registry: OnceLock<Branch>,
+    state: OnceLock<Branch>,
     /// Resolved-chain cache: its keys carry the principal, and its epoch
     /// is the registry head.
     chains: Mutex<ChainCache>,
@@ -226,6 +230,10 @@ pub(crate) struct Inner {
     /// held type-erased, so the peer needs to know nothing of what it
     /// holds (see [`Holds`]).
     holdings: Holdings,
+    /// The peers this one is connected to, so every sync with a peer
+    /// shares what its connection has learned. A connection is dropped
+    /// when the peer's addresses change.
+    connections: Mutex<HashMap<Entity, PeerConnection>>,
 }
 
 impl<S: Clone> fmt::Debug for Peer<S> {
@@ -321,10 +329,16 @@ impl<S: Clone> Peer<S> {
         self.inner.runtime.hydration()
     }
 
+    /// A contact of this peer, picked out by name or by its DID: the
+    /// peers it can reach, and where.
+    pub fn contact(&self, by: impl Into<By>) -> ContactReference {
+        contact(by)
+    }
+
     /// The state branch, or an error for an ephemeral peer.
-    pub fn registry(&self) -> Result<&Branch, AuthorizeError> {
+    pub fn state(&self) -> Result<&Branch, AuthorizeError> {
         self.inner
-            .registry
+            .state
             .get()
             .ok_or_else(|| AuthorizeError::Malformed {
                 detail: "the peer holds no state branch".to_string(),
@@ -332,17 +346,21 @@ impl<S: Clone> Peer<S> {
     }
 
     /// The state branch when there is one.
-    pub(crate) fn registry_opt(&self) -> Option<&Branch> {
-        self.inner.registry.get()
+    pub(crate) fn state_opt(&self) -> Option<&Branch> {
+        self.inner.state.get()
     }
 
     /// The state branch this peer serves proofs from and retains into.
     pub(crate) fn delegations(&self) -> Result<&Branch, AuthorizeError> {
-        self.registry()
+        self.state()
     }
 
     pub(crate) fn directory(&self) -> &Directory {
         &self.inner.directory
+    }
+
+    pub(crate) fn connections(&self) -> &Mutex<HashMap<Entity, PeerConnection>> {
+        &self.inner.connections
     }
 
     pub(crate) fn chains(&self) -> &Mutex<ChainCache> {
@@ -449,11 +467,11 @@ impl<S: PeerSpace> Peer<S> {
     }
 
     /// Wire the opened state branch. Called once by the builder.
-    pub(crate) fn attach_registry(&self, branch: Branch) {
+    pub(crate) fn attach_state(&self, branch: Branch) {
         self.inner
-            .registry
+            .state
             .set(branch)
-            .unwrap_or_else(|_| unreachable!("a freshly built peer has no registry yet"));
+            .unwrap_or_else(|_| unreachable!("a freshly built peer has no state branch yet"));
     }
 }
 
@@ -770,7 +788,7 @@ mod tests {
             .ephemeral()
             .allow(Subject::any())
             .await?;
-        assert!(worker.registry().is_err());
+        assert!(worker.state().is_err());
 
         // Its own subject through the grant: no branch needed.
         let own = Subject::from(peer.did())
@@ -822,10 +840,7 @@ mod tests {
             .credential(credential)
             .storage(storage)
             .await?;
-        assert!(
-            on_main.registry()?.revision().is_none(),
-            "main holds nothing"
-        );
+        assert!(on_main.state()?.revision().is_none(), "main holds nothing");
         let refused = Subject::from(on_main.did())
             .attenuate(Access)
             .invoke(Prove::<Ucan>::new(

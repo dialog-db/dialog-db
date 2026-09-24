@@ -12,7 +12,9 @@ use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use std::collections::HashSet;
 
+use crate::contact;
 use crate::helpers::connect;
+use crate::schema::DidExt as _;
 use crate::{
     Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryExt as _, Revision,
     SiteAddress, SnapshotError, peer_did,
@@ -26,6 +28,7 @@ use dialog_artifacts::{
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
+use dialog_effects::peer::prelude::*;
 use dialog_peer::OpenCredential;
 use dialog_peer::helpers::{open_peer, test_session_with_peer, unique_name};
 // Only the native-only tests below construct one.
@@ -94,7 +97,7 @@ async fn setup_repo_with_s3_remote(
         .perform(operator)
         .await?;
 
-    let origin = connect(&repo, "origin", site_address, repo.did(), operator).await?;
+    let origin = connect("origin", site_address, repo.did(), operator).await?;
 
     let branch = repo.branch("main").open().perform(operator).await?;
     let remote_branch = origin.branch("main").open().perform(operator).await?;
@@ -210,17 +213,13 @@ async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
     }
 
     let peer = peer_did(&SiteAddress::from(live.clone()))?;
-    repo.peer(&peer)
+    contact(&peer)
         .add_address(dead.clone())
         .name("origin")
         .perform(&operator)
         .await?;
-    repo.peer(&peer)
-        .add_address(live)
-        .perform(&operator)
-        .await?;
-    let origin = repo
-        .peer("origin")
+    contact(&peer).add_address(live).perform(&operator).await?;
+    let origin = contact("origin")
         .connect()
         .repository(repo.did())
         .open()
@@ -250,6 +249,17 @@ async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
         .await?;
     let pushed = branch.push().perform(&operator).await?;
     assert!(pushed.is_some(), "push should reach the live address");
+
+    // The host's connection learned which address answered, so the next
+    // sync with the peer starts there.
+    let connection = crate::host(&operator)
+        .await?
+        .reader()
+        .peers()
+        .connect(peer.this())
+        .perform(&operator)
+        .await?;
+    assert_eq!(connection.answered(), 1, "the live address answered");
 
     let fetched = branch
         .fetch()
@@ -305,7 +315,7 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator)
         .await?;
-    let origin = connect(&repo, "origin", site, repo.did(), &operator).await?;
+    let origin = connect("origin", site, repo.did(), &operator).await?;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     branch
@@ -413,7 +423,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .perform(&operator_a)
         .await?;
 
-    let origin_a = connect(&repo_a, "origin", site_a, repo_a.did(), &operator_a).await?;
+    let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
     let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
     branch_a
@@ -453,7 +463,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .perform(&operator_b)
         .await?;
 
-    let origin_b = connect(&repo_b, "origin", site_b, repo_a.did(), &operator_b).await?;
+    let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
     let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
     branch_b
@@ -518,7 +528,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .perform(&operator_a)
         .await?;
 
-    let origin_a = connect(&repo_a, "origin", site_a, repo_a.did(), &operator_a).await?;
+    let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
     let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
     branch_a
@@ -555,7 +565,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
         .await?;
-    let origin_b = connect(&repo_b, "origin", site_b, repo_a.did(), &operator_b).await?;
+    let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
     let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
     branch_b
@@ -626,7 +636,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_c)
         .await?;
-    let origin_c = connect(&repo_c, "origin", site_c, repo_a.did(), &operator_c).await?;
+    let origin_c = connect("origin", site_c, repo_a.did(), &operator_c).await?;
     let branch_c = repo_c.branch("main").open().perform(&operator_c).await?;
     let remote_branch_c = origin_c.branch("main").open().perform(&operator_c).await?;
     branch_c
@@ -694,7 +704,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_a)
         .await?;
-    let origin_a = connect(&repo_a, "origin", site_a, repo_a.did(), &operator_a).await?;
+    let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
     let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
     branch_a
@@ -747,7 +757,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
         .await?;
-    let origin_b = connect(&repo_b, "origin", site_b, repo_a.did(), &operator_b).await?;
+    let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
     let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
     branch_b
@@ -879,7 +889,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .perform(&operator_a)
         .await?;
 
-    let origin_a = connect(&repo_a, "origin", site_a, repo_a.did(), &operator_a).await?;
+    let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
     let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
     branch_a
@@ -951,7 +961,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .perform(&operator_b)
         .await?;
 
-    let origin_b = connect(&repo_b, "origin", site_b, repo_a.did(), &operator_b).await?;
+    let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
     let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
     branch_b
@@ -1027,7 +1037,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_a)
         .await?;
-    let origin_a = connect(&repo_a, "origin", site_a, repo_a.did(), &operator_a).await?;
+    let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
     let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
     branch_a
@@ -1060,7 +1070,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
         .await?;
-    let origin_b = connect(&repo_b, "origin", site_b, repo_a.did(), &operator_b).await?;
+    let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
     let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
     branch_b
@@ -1141,7 +1151,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_a)
         .await?;
-    let origin_a = connect(&repo_a, "origin", site_a, repo_a.did(), &operator_a).await?;
+    let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
     let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
     branch_a
@@ -1169,7 +1179,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
         .await?;
-    let origin_b = connect(&repo_b, "origin", site_b, repo_a.did(), &operator_b).await?;
+    let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
     let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
     branch_b
@@ -1273,14 +1283,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
         .perform(&operator)
         .await?;
 
-    let origin = connect(
-        &bob_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
@@ -1319,7 +1322,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
 /// the pull brings what it adopts.
 #[dialog_common::test]
 async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
 
     let (alice_repo, alice_branch) =
         setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
@@ -1335,18 +1338,11 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
     alice_branch.push().perform(&operator).await?;
 
     let bob_repo = profile
-        .repository(unique_name("bob"))
+        .space(unique_name("bob"))
         .open()
         .perform(&operator)
         .await?;
-    let origin = connect(
-        &bob_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
 
@@ -1407,14 +1403,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
         .open()
         .perform(&operator)
         .await?;
-    let origin = connect(
-        &bob_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob_branch
@@ -1541,14 +1530,7 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
         .open()
         .perform(&env)
         .await?;
-    let origin = connect(
-        &bob_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &env,
-    )
-    .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &env).await?;
     let bob_branch = bob_repo.branch("main").open().perform(&env).await?;
     let remote_branch = origin.branch("main").open().perform(&env).await?;
     bob_branch.set_upstream(remote_branch).perform(&env).await?;
@@ -1654,16 +1636,8 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
         .open()
         .perform(&operator)
         .await?;
-    let origin_a = connect(
-        &bridge_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin_a = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
     let origin_b = connect(
-        &bridge_repo,
         "mirror",
         s3_site_address(&b_address),
         alice_repo.did(),
@@ -1701,7 +1675,6 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
     let reader_origin = connect(
-        &reader_repo,
         "origin",
         s3_site_address(&b_address),
         alice_repo.did(),
@@ -1829,6 +1802,7 @@ delegate_provider!(
     dialog_effects::archive::Put,
     dialog_effects::archive::Import,
     dialog_effects::authority::Identify,
+    dialog_effects::peer::Connect,
     dialog_effects::authority::Attest,
     dialog_artifacts::Preload,
     dialog_artifacts::Speculation,
@@ -2055,8 +2029,7 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
         "the rigged push must abort at the blob import"
     );
 
-    let origin = repo
-        .peer("origin")
+    let origin = contact("origin")
         .connect()
         .repository(repo.did())
         .open()
@@ -2128,16 +2101,8 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
         .open()
         .perform(&operator)
         .await?;
-    let origin_a = connect(
-        &bridge_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin_a = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
     let origin_b = connect(
-        &bridge_repo,
         "mirror",
         s3_site_address(&b_address),
         alice_repo.did(),
@@ -2244,16 +2209,8 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
         .open()
         .perform(&operator)
         .await?;
-    let origin_a = connect(
-        &device_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin_a = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
     let origin_b = connect(
-        &device_repo,
         "mirror",
         s3_site_address(&b_address),
         alice_repo.did(),
@@ -2295,7 +2252,6 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
         .perform(&operator)
         .await?;
     let reader_origin = connect(
-        &reader_repo,
         "origin",
         s3_site_address(&b_address),
         alice_repo.did(),
@@ -2363,14 +2319,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
         .perform(&operator)
         .await?;
 
-    let origin = connect(
-        &bob_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
@@ -2516,7 +2465,6 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
     // Publish the account's access branch to the access service.
     let account_repo = crate::Repository::from(account_profile.credential().clone());
     let account_origin = connect(
-        &account_repo,
         "origin",
         ucan_site.clone(),
         account_repo.did(),
@@ -2576,7 +2524,6 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
 
     let device_repo = crate::Repository::from(device_profile.credential().clone());
     let device_origin = connect(
-        &device_repo,
         "account",
         ucan_site,
         account_profile.did(),
@@ -2697,7 +2644,6 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         .await?;
     let account_repo = crate::Repository::from(account_profile.credential().clone());
     let account_origin = connect(
-        &account_repo,
         "origin",
         ucan_site.clone(),
         account_repo.did(),
@@ -2754,7 +2700,6 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         .await?;
     let device_repo = crate::Repository::from(device_profile.credential().clone());
     let device_origin = connect(
-        &device_repo,
         "account",
         ucan_site,
         account_profile.did(),
@@ -2858,7 +2803,6 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
 
     let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
     let alice_origin = connect(
-        &alice_repo,
         "origin",
         ucan_site.clone(),
         alice_repo.did(),
@@ -2917,14 +2861,7 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
         .open()
         .perform(&bob_operator)
         .await?;
-    let bob_origin = connect(
-        &bob_repo,
-        "origin",
-        ucan_site,
-        alice_repo.did(),
-        &bob_operator,
-    )
-    .await?;
+    let bob_origin = connect("origin", ucan_site, alice_repo.did(), &bob_operator).await?;
     let bob_branch = bob_repo
         .branch("main")
         .open()
@@ -3023,7 +2960,6 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
     // Set up UCAN remote on Alice's repo
     let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
     let alice_origin = connect(
-        &alice_repo,
         "origin",
         ucan_site.clone(),
         alice_repo.did(),
@@ -3084,14 +3020,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
         .perform(&bob_operator)
         .await?;
 
-    let bob_origin = connect(
-        &bob_repo,
-        "origin",
-        ucan_site,
-        alice_repo.did(),
-        &bob_operator,
-    )
-    .await?;
+    let bob_origin = connect("origin", ucan_site, alice_repo.did(), &bob_operator).await?;
 
     let bob_branch = bob_repo
         .branch("main")
@@ -3186,7 +3115,6 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
 
     // Set up UCAN remote
     let origin = connect(
-        &repo,
         "origin",
         SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url)),
         repo.did(),
@@ -3266,14 +3194,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
 
-    let origin = connect(
-        &bob_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
 
@@ -3373,7 +3294,7 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> Result<()> {
         .perform(&operator)
         .await?;
 
-    let origin = connect(&repo, "origin", site_address, repo.did(), &operator).await?;
+    let origin = connect("origin", site_address, repo.did(), &operator).await?;
 
     let branch = repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
@@ -3432,14 +3353,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
         .perform(&alice_operator)
         .await?;
 
-    let alice_origin = connect(
-        &alice_repo,
-        "origin",
-        site_address,
-        alice_repo.did(),
-        &alice_operator,
-    )
-    .await?;
+    let alice_origin = connect("origin", site_address, alice_repo.did(), &alice_operator).await?;
 
     let alice_branch = alice_repo
         .branch("main")
@@ -3487,14 +3401,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
         .perform(&bob_operator)
         .await?;
 
-    let bob_origin = connect(
-        &bob_repo,
-        "origin",
-        bob_site_address,
-        alice_repo.did(),
-        &bob_operator,
-    )
-    .await?;
+    let bob_origin = connect("origin", bob_site_address, alice_repo.did(), &bob_operator).await?;
 
     let bob_branch = bob_repo
         .branch("main")
@@ -3616,14 +3523,7 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
         .await?;
-    let origin_b = connect(
-        &repo_b,
-        "origin",
-        s3_site_address(&s3),
-        repo_a.did(),
-        &operator_b,
-    )
-    .await?;
+    let origin_b = connect("origin", s3_site_address(&s3), repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
     let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
     branch_b
@@ -3650,8 +3550,7 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
     // With `download`, the same export walks the whole revision, pulling
     // what is missing through the upstream as it goes -- the blob
     // included, which travels its own channel.
-    let upstream = repo_b
-        .peer("origin")
+    let upstream = contact("origin")
         .connect()
         .repository(repo_a.did())
         .open()
@@ -3783,14 +3682,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
         .perform(&operator_b)
         .await?;
-    let origin_b = connect(
-        &repo_b,
-        "origin",
-        s3_site_address(&s3),
-        repo_a.did(),
-        &operator_b,
-    )
-    .await?;
+    let origin_b = connect("origin", s3_site_address(&s3), repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
     let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
     branch_b
@@ -3845,8 +3737,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
 
     // With `download`, the export must carry every referenced block,
     // fetching the spilled value through the upstream.
-    let upstream = repo_b
-        .peer("origin")
+    let upstream = contact("origin")
         .connect()
         .repository(repo_a.did())
         .open()
@@ -3949,7 +3840,6 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
         .await?;
     let account_repo = crate::Repository::from(account_profile.credential().clone());
     let account_origin = connect(
-        &account_repo,
         "origin",
         ucan_site.clone(),
         account_repo.did(),
@@ -4003,7 +3893,6 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
         .await?;
     let device_repo = crate::Repository::from(device_profile.credential().clone());
     let device_origin = connect(
-        &device_repo,
         "account",
         ucan_site,
         account_profile.did(),
@@ -4092,14 +3981,7 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
             .open()
             .perform(&operator)
             .await?;
-        let origin = connect(
-            &repo,
-            "origin",
-            s3_site_address(&s3),
-            alice_repo.did(),
-            &operator,
-        )
-        .await?;
+        let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let remote_branch = origin.branch("main").open().perform(&operator).await?;
         branch
@@ -4231,14 +4113,7 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
         .open()
         .perform(&operator)
         .await?;
-    let origin = connect(
-        &replica_repo,
-        "origin",
-        s3_site_address(&s3),
-        source_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin = connect("origin", s3_site_address(&s3), source_repo.did(), &operator).await?;
     let replica = replica_repo
         .branch("main")
         .open()
@@ -4326,14 +4201,7 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
         .perform(&operator)
         .await?;
     profile.access().save(chain).perform(&operator).await?;
-    let source_origin = connect(
-        &source_repo,
-        "origin",
-        site.clone(),
-        source_repo.did(),
-        &operator,
-    )
-    .await?;
+    let source_origin = connect("origin", site.clone(), source_repo.did(), &operator).await?;
     let source = source_repo.branch("main").open().perform(&operator).await?;
     let source_remote = source_origin
         .branch("main")
@@ -4368,7 +4236,7 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
         .open()
         .perform(&operator)
         .await?;
-    let origin = connect(&replica_repo, "origin", site, source_repo.did(), &operator).await?;
+    let origin = connect("origin", site, source_repo.did(), &operator).await?;
     let replica = replica_repo
         .branch("main")
         .open()
@@ -4446,14 +4314,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
         .perform(&operator)
         .await?;
     profile.access().save(chain).perform(&operator).await?;
-    let source_origin = connect(
-        &source_repo,
-        "origin",
-        site.clone(),
-        source_repo.did(),
-        &operator,
-    )
-    .await?;
+    let source_origin = connect("origin", site.clone(), source_repo.did(), &operator).await?;
     let source = source_repo.branch("main").open().perform(&operator).await?;
     let source_remote = source_origin
         .branch("main")
@@ -4514,14 +4375,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
         .open()
         .perform(&replica_operator)
         .await?;
-    let origin = connect(
-        &replica_repo,
-        "origin",
-        site,
-        source_repo.did(),
-        &replica_operator,
-    )
-    .await?;
+    let origin = connect("origin", site, source_repo.did(), &replica_operator).await?;
     let replica = replica_repo
         .branch("main")
         .open()
@@ -4717,14 +4571,7 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
         .perform(&operator)
         .await?;
     profile.access().save(chain).perform(&operator).await?;
-    let source_origin = connect(
-        &source_repo,
-        "origin",
-        site.clone(),
-        source_repo.did(),
-        &operator,
-    )
-    .await?;
+    let source_origin = connect("origin", site.clone(), source_repo.did(), &operator).await?;
     let source = source_repo.branch("main").open().perform(&operator).await?;
     let source_remote = source_origin
         .branch("main")
@@ -4794,14 +4641,7 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
         .open()
         .perform(&replica_operator)
         .await?;
-    let origin = connect(
-        &replica_repo,
-        "origin",
-        site,
-        source_repo.did(),
-        &replica_operator,
-    )
-    .await?;
+    let origin = connect("origin", site, source_repo.did(), &replica_operator).await?;
     let replica = replica_repo
         .branch("main")
         .open()
@@ -4946,14 +4786,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
 
     // The churning upstream, published under its own subject.
     let (operator_a, _profile_a, repo_a) = site(&s3, "first-contact-upstream").await?;
-    let origin_a = connect(
-        &repo_a,
-        "origin",
-        s3_site_address(&s3),
-        repo_a.did(),
-        &operator_a,
-    )
-    .await?;
+    let origin_a = connect("origin", s3_site_address(&s3), repo_a.did(), &operator_a).await?;
     let main_a = repo_a.branch("main").open().perform(&operator_a).await?;
     main_a
         .set_upstream(origin_a.branch("main").open().perform(&operator_a).await?)
@@ -5018,14 +4851,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
                     .await?;
             }
         }
-        let remote = connect(
-            &repo,
-            "upstream",
-            s3_site_address(s3),
-            upstream.did(),
-            &operator,
-        )
-        .await?;
+        let remote = connect("upstream", s3_site_address(s3), upstream.did(), &operator).await?;
         branch
             .set_upstream(remote.branch("main").open().perform(&operator).await?)
             .perform(&operator)
@@ -5172,14 +4998,7 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
         .perform(&operator)
         .await?;
     profile.access().save(chain).perform(&operator).await?;
-    let account_origin = connect(
-        &account_repo,
-        "origin",
-        site.clone(),
-        account_repo.did(),
-        &operator,
-    )
-    .await?;
+    let account_origin = connect("origin", site.clone(), account_repo.did(), &operator).await?;
     let account = account_repo
         .branch(crate::ACCESS_BRANCH)
         .open()
@@ -5251,14 +5070,8 @@ async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result
     fill_account_branch(&device, 1, &device_operator).await?;
 
     // Sign in: point the seeded branch at the account and pull.
-    let device_remote = connect(
-        &device_repo,
-        "account-access",
-        site,
-        account_repo.did(),
-        &device_operator,
-    )
-    .await?;
+    let device_remote =
+        connect("account-access", site, account_repo.did(), &device_operator).await?;
     device
         .set_upstream(
             device_remote
@@ -5363,14 +5176,7 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
         .open()
         .perform(&operator)
         .await?;
-    let origin = connect(
-        &bob_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob_branch
@@ -5418,8 +5224,7 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
 
     // And upstream still carries Alice's second revision: a refused
     // push leaves the head exactly where the other writer put it.
-    let observer = bob_repo
-        .peer("origin")
+    let observer = contact("origin")
         .connect()
         .repository(alice_repo.did())
         .open()
@@ -5472,14 +5277,7 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
         .open()
         .perform(&operator)
         .await?;
-    let origin = connect(
-        &bob_repo,
-        "origin",
-        s3_site_address(&s3),
-        alice_repo.did(),
-        &operator,
-    )
-    .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob_branch
@@ -5532,8 +5330,7 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
         "an assumed push whose upstream moved is refused by the conditional write, got: {refused:?}"
     );
 
-    let observer = bob_repo
-        .peer("origin")
+    let observer = contact("origin")
         .connect()
         .repository(alice_repo.did())
         .open()

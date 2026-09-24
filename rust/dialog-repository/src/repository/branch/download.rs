@@ -23,6 +23,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_effects::peer::Connect;
 use futures_util::StreamExt as _;
 
 use crate::repository::snapshot::Snapshot;
@@ -211,6 +212,7 @@ impl<'a> PullDownload<'a> {
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, BlobRead>>
+            + Provider<Connect>
             + dialog_common::Holds
             + ConditionalSync
             + 'static,

@@ -9,6 +9,7 @@
 //! - [`storage`]: Location-based storage operations (`Storage`, `Location`, `Mount`, `Load`, `Save`)
 //! - [`memory`]: CAS memory cells (`Memory`, `Space`, `Cell`, `Resolve`, `Publish`, `Retract`)
 //! - [`branch`]: Named lines of revisions (`Branches`, `Branch`, `List`, `Create`, `Delete`)
+//! - [`peer`]: A host's contacts and connections (`Peers`, `AddAddress`, `SetName`, `Find`, `Connect`)
 //! - [`archive`]: Content-addressed archive (`Archive`, `Catalog`, `Get`, `Put`)
 //!
 //! # Example
@@ -47,6 +48,7 @@ pub mod blob;
 pub mod branch;
 pub mod credential;
 pub mod memory;
+pub mod peer;
 pub mod rejection;
 pub mod space;
 pub mod storage;
@@ -64,6 +66,7 @@ pub mod prelude {
     pub use crate::branch::prelude::*;
     pub use crate::credential::prelude::*;
     pub use crate::memory::prelude::*;
+    pub use crate::peer::prelude::*;
 }
 
 // Re-export capability primitives for convenience

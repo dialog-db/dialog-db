@@ -14,12 +14,13 @@
 //!
 //! # Steps
 //!
-//! - **0 → 1**: remotes and upstreams move from cells into facts in the
-//!   [`REGISTRY`](crate::REGISTRY). Each remote becomes a
-//!   [`Peer`](crate::schema::Peer) at the address its cell holds; each
-//!   upstream becomes a pull and a push relation to the branch it
-//!   tracked. The cells, and `credential/key/self`, are left in place
-//!   for one version and removed by the next.
+//! - **0 → 1**: remotes and upstreams move from cells into facts. Each
+//!   remote becomes a contact of the host doing the upgrade, reached at
+//!   the address its cell holds and named as the remote was; each
+//!   upstream becomes a pull and a push relation in the
+//!   [`REGISTRY`](crate::REGISTRY) to the branch it tracked. The cells,
+//!   and `credential/key/self`, are left in place for one version and
+//!   removed by the next.
 
 use dialog_artifacts::Changes;
 use dialog_capability::{Capability, Did, Provider, Subject};
@@ -35,10 +36,11 @@ use dialog_varsig::Principal;
 
 use super::branch::upstream::legacy;
 use crate::registry::{RegistryEnv, apply, pull, push};
-use crate::schema::{Peer, PeerAddress, Replica};
+use crate::schema::{DidExt as _, Replica};
 use crate::{
-    Branch, Cell, PublishError, RemoteAddress, RemoteEdition, Repository, RepositoryMemoryExt as _,
-    Resolved, Route, SiteAddress, Tracking, UpgradeError,
+    Branch, Cell, PeersEnv, PublishError, RemoteAddress, RemoteEdition, Repository,
+    RepositoryMemoryExt as _, Resolved, Route, SiteAddress, Tracking, UpgradeError, contact,
+    peer_did,
 };
 use dialog_artifacts::Entity;
 
@@ -84,7 +86,7 @@ impl Upgrade {
     /// the first.
     pub async fn perform<Env>(self, env: &Env) -> Result<Upgraded, UpgradeError>
     where
-        Env: RegistryEnv + Provider<List>,
+        Env: RegistryEnv + PeersEnv + Provider<List>,
     {
         let cell: Cell<u32> = SpaceScope::new(self.subject.clone(), SPACE)
             .cell(CELL)
@@ -140,7 +142,7 @@ async fn carry_over<Env>(
     env: &Env,
 ) -> Result<(), UpgradeError>
 where
-    Env: RegistryEnv + Provider<List>,
+    Env: RegistryEnv + PeersEnv + Provider<List>,
 {
     let local = Replica::new(operator.profile().clone(), registry.of().clone());
     let remotes = stored(subject, "remote", "/address", env).await?;
@@ -182,7 +184,7 @@ where
                         continue;
                     };
                     let carried = carry(&mut peers, remote, address)?;
-                    let replica = carried.peer.repository(carried.subject.clone());
+                    let replica = Replica::new(carried.peer.clone(), carried.subject.clone());
                     let target = replica.branch(branch.as_str());
                     replica.assert(&mut changes);
                     target.clone().assert(&mut changes);
@@ -190,7 +192,7 @@ where
                     (
                         target.clone(),
                         Route::Remote {
-                            peer: carried.peer.this.clone(),
+                            peer: carried.peer.this(),
                             name: Some(remote.clone()),
                             addresses: vec![carried.site.clone()],
                             subject: carried.subject.clone(),
@@ -214,8 +216,11 @@ where
     }
 
     for carried in peers {
-        carried.peer.assert(&mut changes);
-        carried.address.assert(&mut changes);
+        contact(&carried.peer)
+            .add_address(carried.site)
+            .name(carried.name)
+            .perform(env)
+            .await?;
     }
 
     apply(registry, changes, env).await?;
@@ -288,8 +293,7 @@ where
 #[derive(Clone)]
 struct Carried {
     name: String,
-    peer: Peer,
-    address: PeerAddress,
+    peer: Did,
     site: SiteAddress,
     subject: Did,
 }
@@ -303,11 +307,9 @@ fn carry(
     if let Some(carried) = peers.iter().find(|carried| carried.name == name) {
         return Ok(carried.clone());
     }
-    let peer = Peer::at(name, &address.address)?;
     let carried = Carried {
         name: name.to_string(),
-        address: PeerAddress::new(&peer.this, &address.address)?,
-        peer,
+        peer: peer_did(&address.address)?,
         site: address.address,
         subject: address.subject,
     };
@@ -345,19 +347,21 @@ mod tests {
     use crate::RepositoryExt as _;
     use crate::helpers::test_repo;
     use crate::repository::branch::resolve::resolve;
-    use crate::schema::{BranchPull, BranchPush, Peer, PeerAddress, Replica};
+    use crate::schema::{BranchPull, BranchPush, DidExt as _, Replica};
     use crate::{
         Cell, REGISTRY, RemoteEdition, RepositoryMemoryExt as _, Route, SiteAddress, Target,
-        TreeReference, UpgradeError,
+        TreeReference, UpgradeError, site_address,
     };
     use dialog_artifacts::Instruction;
     use dialog_capability::Provider;
     use dialog_capability::Subject;
     use dialog_common::ConditionalSync;
     use dialog_credentials::Credential;
+    use dialog_effects::MethodExt as _;
     use dialog_effects::memory::Version;
     use dialog_effects::memory::prelude::{CellScope, SpaceScope};
     use dialog_effects::memory::{Resolve, Retract};
+    use dialog_effects::peer::prelude::*;
     use dialog_identity::SpaceHandle;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_query::{Output as _, Query, Term};
@@ -452,34 +456,28 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        // The remote is a peer named after it, identified by its origin,
-        // reached at the address its cell held.
-        let peers: Vec<Peer> = registry
-            .query()
-            .select(Query::<Peer> {
-                this: Term::var("this"),
-                name: Term::var("name"),
-            })
+        // The remote is a contact of the host, named after it,
+        // identified by its origin, reached at the address its cell held.
+        let host = crate::host(&operator).await?;
+        let named = host
+            .clone()
+            .reader()
+            .peers()
+            .find("origin")
             .perform(&operator)
-            .try_vec()
             .await?;
-        assert_eq!(peers.len(), 1, "one remote, one peer");
-        let origin = peers.into_iter().next().expect("one peer");
-        assert_eq!(origin.this.to_string(), "did:web:tonk.network");
-        assert_eq!(origin.name.0, "origin");
-
-        let addresses: Vec<PeerAddress> = registry
-            .query()
-            .select(Query::<PeerAddress> {
-                this: origin.this.clone().into(),
-                address: Term::var("address"),
-            })
+        let origin = did!("web:tonk.network");
+        assert_eq!(named, vec![origin.this()], "one remote, one contact");
+        let connection = host
+            .reader()
+            .peers()
+            .connect(origin.this())
             .perform(&operator)
-            .try_vec()
             .await?;
-        let sites = addresses
+        let sites = connection
+            .addresses()
             .iter()
-            .map(PeerAddress::site)
+            .map(site_address)
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             sites,
@@ -491,7 +489,7 @@ mod tests {
         // Each upstream is pulled from and pushed to, by entity: on the
         // peer's replica of the repository it holds, or on this one.
         let local = Replica::new(profile.did(), repo.did());
-        let remote = origin.repository(held);
+        let remote = Replica::new(origin, held);
         let tracked = async |name: &str| -> anyhow::Result<(Vec<_>, Vec<_>)> {
             let this = local.branch(name).this;
             let mut pulls: Vec<_> = registry

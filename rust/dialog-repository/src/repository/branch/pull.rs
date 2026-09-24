@@ -19,7 +19,7 @@ use futures_util::future::{Either, join_all};
 
 use super::fetch::fetch_one;
 use super::resolve::resolve;
-use crate::registry::RegistryEnv;
+use crate::ResolveEnv;
 use crate::{
     Branch, Checkpoint, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError, Revision,
     TreeReference, Upstream, UpstreamBranch,
@@ -106,7 +106,7 @@ impl<'a> Pull<'a> {
     /// ```
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
     where
-        Env: RegistryEnv,
+        Env: ResolveEnv,
     {
         if self.from.is_some() {
             return Box::pin(self.prepare(env)).await?.commit(env).await;
@@ -189,7 +189,7 @@ impl<'a> Pull<'a> {
     /// under a brief exclusive lock.
     pub async fn prepare<Env>(self, env: &Env) -> Result<PreparedPull<'a>, PullError>
     where
-        Env: RegistryEnv,
+        Env: ResolveEnv,
     {
         let branch = self.branch;
 
@@ -228,7 +228,7 @@ impl<'a> Pull<'a> {
 
 /// Phase one for one upstream: fetch it, rebase local changes onto it,
 /// and persist the merged tree's blocks, without writing any cell.
-pub(crate) async fn prepare_upstream<'a, Env: RegistryEnv>(
+pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
     branch: &'a Branch,
     upstream: Upstream,
     env: &Env,

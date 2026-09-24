@@ -38,36 +38,30 @@ pub async fn test_repo(
 }
 
 #[cfg(test)]
-use crate::registry::RegistryEnv;
+use crate::{ConnectedReplica, PeersEnv, SiteAddress, contact, peer_did};
 #[cfg(test)]
-use crate::{ConnectedReplica, Repository, SiteAddress, peer_did};
-#[cfg(test)]
-use dialog_varsig::{Did, Principal};
+use dialog_varsig::Did;
 
-/// Add the peer reached at `address` under `name`, and connect to the
-/// repository `subject` there: what tests once did by creating a named
-/// remote. The peer's DID is derived from the address.
+/// Make the peer reached at `address` a contact named `name`, and connect
+/// to its replica of the repository `subject`: what tests once did by
+/// creating a named remote. The peer's DID is derived from the address,
+/// and connecting goes by it: names are the host's, so two tests' peers
+/// may share one.
 #[cfg(test)]
-pub async fn connect<C, Env>(
-    repo: &Repository<C>,
+pub async fn connect<Env: PeersEnv>(
     name: &str,
     address: impl Into<SiteAddress>,
     subject: Did,
     env: &Env,
-) -> anyhow::Result<ConnectedReplica>
-where
-    C: Principal,
-    Env: RegistryEnv,
-{
+) -> anyhow::Result<ConnectedReplica> {
     let address = address.into();
     let did = peer_did(&address)?;
-    repo.peer(&did)
+    contact(&did)
         .add_address(address)
         .name(name)
         .perform(env)
         .await?;
-    Ok(repo
-        .peer(name)
+    Ok(contact(&did)
         .connect()
         .repository(subject)
         .open()

@@ -22,7 +22,7 @@ use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use super::resolve::resolve;
-use crate::registry::RegistryEnv;
+use crate::ResolveEnv;
 use crate::{
     Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex,
     RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
@@ -138,7 +138,7 @@ impl Push<'_> {
     /// for content reachable from no store at all.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PushError>
     where
-        Env: RegistryEnv
+        Env: ResolveEnv
             + Provider<BlobRead>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Put>>
@@ -216,7 +216,7 @@ async fn push_upstream<Env>(
     env: &Env,
 ) -> Result<Option<Revision>, PushError>
 where
-    Env: RegistryEnv
+    Env: ResolveEnv
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Put>>
@@ -619,7 +619,7 @@ where
     let host = branch.subject();
     gather(&branch.upstreams(), &mut remotes, &mut visited, &mut locals);
     gather(
-        &branch.tracked().synced_with(&host),
+        &branch.sharing(branch.tracked().synced_with(&host)),
         &mut remotes,
         &mut visited,
         &mut locals,
@@ -628,7 +628,7 @@ where
         let local = branch.subject().branch(name).load().perform(env).await?;
         gather(&local.upstreams(), &mut remotes, &mut visited, &mut locals);
         gather(
-            &local.tracked().synced_with(&host),
+            &branch.sharing(local.tracked().synced_with(&host)),
             &mut remotes,
             &mut visited,
             &mut locals,

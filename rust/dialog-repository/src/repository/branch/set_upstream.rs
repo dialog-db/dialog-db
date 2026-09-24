@@ -5,7 +5,8 @@ use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_query::Statement as _;
 
 use super::resolve::resolve;
-use crate::registry::{RegistryEnv, apply, pull, push};
+use crate::ResolveEnv;
+use crate::registry::{apply, pull, push};
 use crate::schema::Replica;
 use crate::{Branch, RepositoryMemoryExt as _, SetUpstreamError, UpstreamBranch};
 
@@ -64,7 +65,7 @@ impl Branch {
 impl SetUpstream<'_> {
     /// Record the relations in the registry, and bring this branch's
     /// routes up to date with them.
-    pub async fn perform<Env: RegistryEnv>(self, env: &Env) -> Result<(), SetUpstreamError> {
+    pub async fn perform<Env: ResolveEnv>(self, env: &Env) -> Result<(), SetUpstreamError> {
         let branch = self.branch;
         let operator = Identify.perform(env).await?;
         let local = Replica::new(operator.profile().clone(), branch.of().clone());
@@ -154,7 +155,7 @@ mod tests {
     async fn it_sets_remote_upstream() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
-        let origin = connect(&repo, "origin", site(), repo.did(), &operator).await?;
+        let origin = connect("origin", site(), repo.did(), &operator).await?;
         let remote_main = origin.branch("main").open().perform(&operator).await?;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -174,7 +175,7 @@ mod tests {
     async fn it_persists_remote_upstream_across_reload() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
-        let origin = connect(&repo, "origin", site(), repo.did(), &operator).await?;
+        let origin = connect("origin", site(), repo.did(), &operator).await?;
         let remote_main = origin.branch("main").open().perform(&operator).await?;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
