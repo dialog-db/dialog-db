@@ -48,6 +48,9 @@ pub use peer::*;
 mod remote;
 pub use remote::*;
 
+mod replica;
+pub use replica::*;
+
 mod snapshot;
 pub use snapshot::*;
 

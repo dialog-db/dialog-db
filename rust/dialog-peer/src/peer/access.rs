@@ -658,7 +658,7 @@ mod tests {
             .expect("the operator proves from the branch it retained into");
 
         let configured = profile
-            .repository()
+            .repository(profile.home())
             .branch("account/test")
             .open()
             .perform(&operator)
@@ -674,7 +674,7 @@ mod tests {
         );
 
         let default = profile
-            .repository()
+            .repository(profile.home())
             .branch(ACCESS_BRANCH)
             .open()
             .perform(&operator)
@@ -719,7 +719,7 @@ mod tests {
         // projection, a pull. This advances the head the operator's own
         // build-time handle still caches.
         let elsewhere = profile
-            .repository()
+            .repository(profile.home())
             .branch(ACCESS_BRANCH)
             .open()
             .perform(&operator)
