@@ -64,7 +64,7 @@ mod tests {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
-        let origin = connect(&repo, "origin", test_site(), repo.did(), &operator).await?;
+        let origin = connect("origin", test_site(), repo.did(), &operator).await?;
 
         let result = origin.branch("main").load().perform(&operator).await;
         assert!(

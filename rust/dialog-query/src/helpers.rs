@@ -40,7 +40,9 @@ use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
 use dialog_peer::Peer;
 use dialog_peer::helpers::{generate_data, open_peer, unique_name};
-use dialog_repository::{Branch, NetworkedIndex, RemoteSite, Repository, RepositoryExt as _};
+use dialog_repository::{
+    Branch, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
+};
 use dialog_search_tree::audit as tree_audit;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBackend};
@@ -606,6 +608,7 @@ where
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
         + Provider<List>
+        + PeersEnv
         + Provider<dialog_repository::Hydrate>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -1700,6 +1703,7 @@ mod test {
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
             + Provider<List>
+            + PeersEnv
             + Provider<dialog_repository::Hydrate>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1822,6 +1826,7 @@ mod test {
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
             + Provider<List>
+            + PeersEnv
             + Provider<dialog_repository::Hydrate>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
@@ -1953,6 +1958,7 @@ mod test {
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
             + Provider<List>
+            + PeersEnv
             + Provider<dialog_repository::Hydrate>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>

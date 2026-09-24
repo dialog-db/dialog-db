@@ -21,6 +21,8 @@ use dialog_capability::{Capability, Did, Subject};
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_query::query::Application;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 mod blob;
@@ -56,6 +58,7 @@ pub mod registry;
 pub use registry::{OpenRegistry, RegistryReference};
 
 pub(crate) mod resolve;
+pub use resolve::ResolveEnv;
 
 mod open;
 pub use open::*;
@@ -202,7 +205,16 @@ pub struct Branch {
     /// into its overlay: this branch's, the registry's self-description,
     /// and the session's. Keyed by profile, operator, and head.
     layer_metadata_cache: LayerMetadataMemo,
+    /// Which address answered last, per peer, as the host's connection to
+    /// it records it. Filled when the branch resolves its upstreams, and
+    /// shared by every clone, so a remote built from a route fails over
+    /// as the host's connection does rather than starting afresh.
+    answers: Answers,
 }
+
+/// Which address answered last, per peer: the record each of the host's
+/// connections keeps, collected as a branch connects.
+pub(crate) type Answers = Arc<Mutex<HashMap<Entity, Arc<AtomicUsize>>>>;
 
 impl Branch {
     /// The metadata a query layer over this branch alone folds in, as
@@ -274,13 +286,56 @@ impl Branch {
     /// The upstreams this branch pulls from, as last resolved: a bare
     /// [`pull`](Self::pull) takes from every one.
     pub fn pulls(&self) -> Upstreams {
-        self.tracked().pulls(&self.subject())
+        self.sharing(self.tracked().pulls(&self.subject()))
     }
 
     /// The upstreams this branch pushes to, as last resolved: a bare
     /// [`push`](Self::push) goes to every one.
     pub fn pushes(&self) -> Upstreams {
-        self.tracked().pushes(&self.subject())
+        self.sharing(self.tracked().pushes(&self.subject()))
+    }
+
+    /// `upstreams`, with each remote reaching its peer through the record
+    /// of the host's connection to it, where the branch has connected.
+    pub(crate) fn sharing(&self, upstreams: Upstreams) -> Upstreams {
+        let answers = self
+            .answers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if answers.is_empty() {
+            return upstreams;
+        }
+        upstreams
+            .iter()
+            .cloned()
+            .map(|upstream| match upstream {
+                Upstream::Remote {
+                    remote,
+                    branch,
+                    tree,
+                } => match answers.get(remote.peer()) {
+                    Some(answered) => Upstream::Remote {
+                        remote: remote.sharing(answered.clone()),
+                        branch,
+                        tree,
+                    },
+                    None => Upstream::Remote {
+                        remote,
+                        branch,
+                        tree,
+                    },
+                },
+                upstream => upstream,
+            })
+            .collect()
+    }
+
+    /// Record that the host's connection to `peer` keeps `answered`.
+    pub(crate) fn connected(&self, peer: Entity, answered: Arc<AtomicUsize>) {
+        self.answers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(peer, answered);
     }
 
     /// Where a read of content this branch holds by reference falls back

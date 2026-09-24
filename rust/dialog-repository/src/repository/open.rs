@@ -1,6 +1,6 @@
 use crate::registry::RegistryEnv;
 use crate::repository::upgrade::stamp;
-use crate::{OpenRepositoryError, Repository, RepositoryMemoryExt as _, UpgradeError};
+use crate::{OpenRepositoryError, PeersEnv, Repository, RepositoryMemoryExt as _, UpgradeError};
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
@@ -24,7 +24,11 @@ impl OpenRepository {
     /// Execute against an operator.
     pub async fn perform<Env>(self, env: &Env) -> Result<Repository, OpenRepositoryError>
     where
-        Env: Provider<space::Load> + Provider<space::Create> + Provider<List> + RegistryEnv,
+        Env: Provider<space::Load>
+            + Provider<space::Create>
+            + Provider<List>
+            + RegistryEnv
+            + PeersEnv,
     {
         let repository = match self.0.clone().load().perform(env).await {
             Ok(credential) => {

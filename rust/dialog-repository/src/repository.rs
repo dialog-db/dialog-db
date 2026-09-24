@@ -345,22 +345,23 @@ mod tests {
         Ok(())
     }
 
+    /// A contact added under a name is reached by it: the same peer, at
+    /// the address it was given.
     #[dialog_common::test]
-    async fn it_adds_and_loads_remote_via_repository() -> Result<()> {
+    async fn it_reaches_a_contact_by_its_name() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
-        let site = connect(&repo, "origin", test_site_address(), repo.did(), &operator).await?;
-        assert_eq!(site.name(), "origin");
+        let site = connect("origin", test_site_address(), repo.did(), &operator).await?;
 
-        let loaded = repo
-            .peer("origin")
+        let loaded = contact("origin")
             .connect()
             .repository(repo.did())
             .open()
             .perform(&operator)
             .await?;
         assert_eq!(loaded.name(), "origin");
+        assert_eq!(loaded.peer(), site.peer());
         assert_eq!(loaded.address().site(), &test_site_address().into());
 
         Ok(())
