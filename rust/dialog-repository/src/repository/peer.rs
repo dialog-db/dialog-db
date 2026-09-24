@@ -420,7 +420,9 @@ fn encode(segment: &str) -> String {
 }
 
 /// `did:key` of the Ed25519 key seeded by the Blake3 hash of the
-/// location's file URI.
+/// location's canonical file URI: the one [`file_uri`] derives, which
+/// names one directory however its path is spelled, not the URI a
+/// peer's records carry ([`Location::uri`]), which keeps the spelling.
 fn key(location: &Location) -> Did {
     let seed = Blake3Hash::hash(file_uri(location).as_bytes());
     let key = ed25519_dalek::SigningKey::from_bytes(seed.as_bytes());
