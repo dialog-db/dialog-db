@@ -70,7 +70,7 @@ use dialog_effects::{archive, blob, credential, memory};
 use dialog_identity::access::Access;
 use dialog_identity::{Authority, CredentialHandle, SpaceHandle};
 use dialog_network::{HydrationScheduler, Network};
-use dialog_repository::{Branch, By, ContactReference, RemoteSite, Repository, contact};
+use dialog_repository::{Branch, By, ContactReference, RemoteSite, ReplicaReference, contact};
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
 use dialog_storage::resource::Resource;
@@ -297,9 +297,19 @@ impl<S: Clone> Peer<S> {
         }
     }
 
-    /// The home repository, named by its DID.
-    pub fn repository(&self) -> Repository<Did> {
-        Repository::from(self.inner.home.clone())
+    /// A repository this peer holds, by the name of its space or by its
+    /// DID: the replica of it that belongs to the principal the peer acts
+    /// for, its home. A worker opens its parent's repositories this way.
+    ///
+    /// ```no_run
+    /// # async fn example(peer: &dialog_peer::Peer<dialog_storage::provider::storage::VolatileSpace>) -> anyhow::Result<()> {
+    /// let notes = peer.repository("notes").branch("main").open().perform(peer).await?;
+    /// # let _ = notes;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn repository(&self, by: impl Into<By>) -> ReplicaReference {
+        ReplicaReference::new(self.inner.home.clone(), by)
     }
 
     /// The storage every space this peer holds is mounted in.
@@ -497,14 +507,15 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::helpers::{open_peer, unique_name};
+    use crate::helpers::{open_peer, test_session_with_peer, unique_name};
     use crate::{ClaimExt as _, OpenCredential};
     use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_capability::access::{Access, Proof as _, Prove, Retain};
+    use dialog_capability::did;
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::storage::Location;
-    use dialog_repository::RepositoryExt as _;
+    use dialog_repository::{OpenReplicaBranchError, RepositoryAtExt as _, RepositoryExt as _};
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_ucan::{Parameters, Scope, Ucan, UcanDelegation};
     use dialog_ucan_core::command::Command as UcanCommand;
@@ -850,6 +861,70 @@ mod tests {
             .perform(&on_main)
             .await;
         assert!(refused.is_err());
+        Ok(())
+    }
+
+    /// A worker opens its parent's repository by the name of the
+    /// parent's space for it, or by the repository's DID, and gets the
+    /// parent's replica of the branch.
+    #[dialog_common::test]
+    async fn it_opens_a_parents_branch_by_repository_name_or_did() -> Result<()> {
+        let (worker, peer) = test_session_with_peer().await;
+        let name = unique_name("notes");
+        let created = peer.space(name.clone()).create().perform(&worker).await?;
+
+        let by_name = peer
+            .repository(name.as_str())
+            .branch("home")
+            .open()
+            .perform(&worker)
+            .await?;
+        assert_eq!(by_name.subject().did(), &created.did());
+        assert_eq!(by_name.name(), "home");
+
+        let by_did = peer
+            .repository(created.did())
+            .branch("home")
+            .open()
+            .perform(&worker)
+            .await?;
+        assert_eq!(by_did.subject().did(), &created.did());
+        Ok(())
+    }
+
+    /// Opening a branch of a repository that has no space by that name is
+    /// refused rather than creating one.
+    #[dialog_common::test]
+    async fn it_does_not_create_a_repository_to_open_a_branch_in() -> Result<()> {
+        let (worker, peer) = test_session_with_peer().await;
+        let opened = peer
+            .repository(unique_name("missing").as_str())
+            .branch("home")
+            .open()
+            .perform(&worker)
+            .await;
+        assert!(
+            matches!(opened, Err(OpenReplicaBranchError::Load(_))),
+            "{opened:?}"
+        );
+        Ok(())
+    }
+
+    /// Naming another peer's replica is refused rather than opened under
+    /// the replica of the peer the worker acts for.
+    #[dialog_common::test]
+    async fn it_refuses_to_open_another_peers_replica() -> Result<()> {
+        let (worker, _) = test_session_with_peer().await;
+        let opened = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK")
+            .repository("notes")
+            .branch("home")
+            .open()
+            .perform(&worker)
+            .await;
+        assert!(
+            matches!(opened, Err(OpenReplicaBranchError::Foreign { .. })),
+            "{opened:?}"
+        );
         Ok(())
     }
 }
