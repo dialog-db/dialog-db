@@ -1,8 +1,9 @@
-//! Repositories held at peers, and their branches.
+//! Replicas on connected peers, and their branches.
 //!
 //! ```text
-//! repo.peer("origin").connect()             → PeerConnection
-//!   └── .repository(did)                    → PeerRepository
+//! contact("origin").connect()               → ContactConnection
+//!   └── .repository(did)                    → PeerReplica
+//!         ├── .open()                       → ConnectedReplica
 //!         └── .branch("main").open()        → ConnectedBranch
 //! ```
 

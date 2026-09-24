@@ -1,0 +1,217 @@
+//! The peer's contacts: the `peer` effects, answered from its state
+//! branch.
+//!
+//! Which peers this one can reach, and where, is recorded in its own
+//! state beside its delegations. Connecting reads the addresses once
+//! and keeps the connection, so every sync with a peer shares what the
+//! connection learns, such as which address answered last. Adding an
+//! address drops the kept connection, and the next connect reads the
+//! addresses afresh.
+
+use dialog_capability::identity::Entity;
+use dialog_capability::{Capability, Policy as _, Provider};
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::peer::{AddAddress, Connect, Find, PeerConnection, PeerError, SetName};
+use dialog_repository::contacts;
+use dialog_repository::registry::RegistryEnv;
+use dialog_repository::{Branch, CommitError, PublishError};
+
+use super::Peer;
+
+/// How many times a write that lost a race for the state branch's head is
+/// retried before the failure surfaces, as retaining a delegation does.
+const RETRY_LIMIT: usize = 3;
+
+impl<S: Clone> Peer<S>
+where
+    Self: RegistryEnv,
+{
+    /// The state branch contacts live in, re-read so what other handles
+    /// wrote is seen.
+    async fn contacts(&self) -> Result<&Branch, PeerError> {
+        let state = self.state().map_err(|error| PeerError::Stateless {
+            reason: error.to_string(),
+        })?;
+        state
+            .refresh(self)
+            .await
+            .map_err(|error| PeerError::Storage(error.to_string()))?;
+        Ok(state)
+    }
+
+    /// Write to the state branch, re-reading its head and trying again
+    /// when another handle moved it first.
+    async fn write_contacts<F, Fut>(&self, write: F) -> Result<(), PeerError>
+    where
+        F: Fn(Branch) -> Fut,
+        Fut: Future<Output = Result<(), CommitError>>,
+    {
+        let mut attempt = 0;
+        loop {
+            let state = self.contacts().await?.clone();
+            match write(state).await {
+                Ok(()) => return Ok(()),
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+                    if attempt < RETRY_LIMIT =>
+                {
+                    attempt += 1;
+                }
+                Err(error) => return Err(PeerError::Storage(error.to_string())),
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<AddAddress> for Peer<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: RegistryEnv + ConditionalSend,
+{
+    async fn execute(&self, input: Capability<AddAddress>) -> Result<(), PeerError> {
+        let AddAddress { peer, address } = AddAddress::of(&input).clone();
+        self.write_contacts(|state| {
+            let (peer, address) = (&peer, &address);
+            async move { contacts::add_address(&state, peer, address, self).await }
+        })
+        .await?;
+        self.connections().lock().remove(&peer);
+        Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<SetName> for Peer<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: RegistryEnv + ConditionalSend,
+{
+    async fn execute(&self, input: Capability<SetName>) -> Result<(), PeerError> {
+        let SetName { peer, name } = SetName::of(&input).clone();
+        self.write_contacts(|state| {
+            let (peer, name) = (&peer, &name);
+            async move { contacts::set_name(&state, peer, name, self).await }
+        })
+        .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<Find> for Peer<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: RegistryEnv + ConditionalSend,
+{
+    async fn execute(&self, input: Capability<Find>) -> Result<Vec<Entity>, PeerError> {
+        let name = &Find::of(&input).name;
+        let state = self.contacts().await?;
+        contacts::find(state, name, self)
+            .await
+            .map_err(|error| PeerError::Storage(error.to_string()))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<Connect> for Peer<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: RegistryEnv + ConditionalSend,
+{
+    async fn execute(&self, input: Capability<Connect>) -> Result<PeerConnection, PeerError> {
+        let peer = &Connect::of(&input).peer;
+        if let Some(connection) = self.connections().lock().get(peer) {
+            return Ok(connection.clone());
+        }
+        let state = self.contacts().await?;
+        let addresses = contacts::addresses(state, peer, self)
+            .await
+            .map_err(|error| PeerError::Storage(error.to_string()))?;
+        let connection = PeerConnection::new(peer.clone(), addresses)?;
+        // Two connects racing both read the addresses; the first one kept
+        // is the one every later connect shares.
+        Ok(self
+            .connections()
+            .lock()
+            .entry(peer.clone())
+            .or_insert(connection)
+            .clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use crate::Peer;
+    use crate::helpers::test_session_with_peer;
+    use dialog_capability::Subject;
+    use dialog_capability::identity::Entity;
+    use dialog_effects::MethodExt as _;
+    use dialog_effects::peer::prelude::*;
+    use dialog_effects::peer::{PeerConnection, PeerError};
+    use dialog_remote_ucan::UcanAddress;
+    use dialog_repository::contact;
+    use dialog_storage::provider::storage::VolatileSpace;
+    use dialog_varsig::did;
+
+    fn peer() -> Entity {
+        "did:web:tonk.network".parse().expect("valid entity")
+    }
+
+    async fn connect(worker: &Peer<VolatileSpace>) -> Result<PeerConnection, PeerError> {
+        Subject::from(worker.home().clone())
+            .reader()
+            .peers()
+            .connect(peer())
+            .perform(worker)
+            .await
+    }
+
+    /// Every connect to a peer shares one connection, so what one sync
+    /// learns about which address answers, the next starts from. A new
+    /// address replaces the connection, so the next connect sees it.
+    #[dialog_common::test]
+    async fn it_keeps_a_connection_until_the_peer_is_reached_elsewhere() -> anyhow::Result<()> {
+        let (worker, _) = test_session_with_peer().await;
+        for endpoint in [
+            "https://tonk.network/ucan/",
+            "https://backup.tonk.network/ucan/",
+        ] {
+            contact(did!("web:tonk.network"))
+                .add_address(UcanAddress::new(endpoint))
+                .perform(&worker)
+                .await?;
+        }
+
+        let first = connect(&worker).await?;
+        first.answer(1);
+        let second = connect(&worker).await?;
+        assert_eq!(second.addresses().len(), 2);
+        assert_eq!(second.answered(), 1, "one connection, shared");
+
+        contact(did!("web:tonk.network"))
+            .add_address(UcanAddress::new("https://third.tonk.network/ucan/"))
+            .perform(&worker)
+            .await?;
+        let third = connect(&worker).await?;
+        assert_eq!(third.addresses().len(), 3);
+        assert_eq!(third.answered(), 0, "a fresh connection");
+        Ok(())
+    }
+
+    /// A peer with no address is not connected to.
+    #[dialog_common::test]
+    async fn it_refuses_to_connect_to_a_peer_it_cannot_reach() -> anyhow::Result<()> {
+        let (worker, _) = test_session_with_peer().await;
+        assert!(matches!(
+            connect(&worker).await,
+            Err(PeerError::Unreachable { .. })
+        ));
+        Ok(())
+    }
+}

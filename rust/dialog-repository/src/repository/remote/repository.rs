@@ -1,31 +1,33 @@
 //! A repository held at a peer.
 
 use crate::schema::{DidExt as _, Replica};
-use crate::{PublishError, RemoteAddress, ResolveError, SiteAddress};
+use crate::{PublishError, RemoteAddress, ResolveError, SiteAddress, site_address};
 use dialog_artifacts::Entity;
 use dialog_capability::{Did, Subject};
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::blob::BlobError;
 use dialog_effects::memory::MemoryError;
+use dialog_effects::peer::PeerConnection;
 use dialog_varsig::Principal;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// A peer's replica of a repository, connected to: which peer holds it,
-/// the addresses the peer is reached at, and which repository it is a
-/// replica of. The local repository is a replica too; this is one held
-/// elsewhere, reached through [`peer(..).connect()`](crate::PeerReference::connect).
+/// A replica on a connected peer: which peer holds it, the addresses
+/// the host reaches that peer at, and which repository it is a replica
+/// of. The local repository is a replica too; this is one held
+/// elsewhere, reached through
+/// [`contact(..).connect()`](crate::ContactReference::connect).
 ///
 /// What was a named remote is these two things together. The peer is
 /// who holds it and where to reach them; the repository is which of the
-/// peer's replicas this is. Their state is cached locally, under the
-/// repository this handle was reached from, keyed by entity.
+/// peer's replicas this is. Their state is cached locally, keyed by
+/// entity.
 ///
 /// Requests go to one of the peer's addresses at a time, starting with
-/// the one that last answered. One that cannot be reached is passed over
-/// for the next.
+/// the one that last answered, as the host's connection to the peer
+/// records it. One that cannot be reached is passed over for the next.
 #[derive(Debug, Clone)]
 pub struct ConnectedReplica {
     host: Subject,
@@ -57,6 +59,38 @@ impl ConnectedReplica {
             subject,
             answered: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// The replica of `subject` at the peer `connection` reaches, with
+    /// its state cached under `host`. Reaching it goes through the
+    /// connection's addresses, and shares with every other user of the
+    /// connection which of them answered last.
+    pub(crate) fn connected(
+        host: Subject,
+        connection: &PeerConnection,
+        name: Option<String>,
+        subject: Did,
+    ) -> Result<Self, crate::PeerError> {
+        let addresses = connection
+            .addresses()
+            .iter()
+            .map(site_address)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            host,
+            peer: connection.peer().clone(),
+            name,
+            addresses,
+            subject,
+            answered: connection.answers(),
+        })
+    }
+
+    /// This replica, reaching its peer through `answered`: the record of
+    /// which address answered last that the host's connection keeps.
+    pub(crate) fn sharing(mut self, answered: Arc<AtomicUsize>) -> Self {
+        self.answered = answered;
+        self
     }
 
     /// The subject DID of the repository.
