@@ -224,6 +224,32 @@ pub mod replica {
     );
 }
 
+/// Attribute newtypes for [`Space`].
+///
+/// All attributes here live under the `dialog.space` domain: the
+/// repositories a peer keeps, by name, and where each is stored.
+pub mod space {
+    use super::Attribute;
+
+    /// `dialog.space/name` — the name the peer knows the repository by.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Name(
+        /// The name.
+        pub String,
+    );
+
+    /// `dialog.space/address` — where the repository is stored, as the
+    /// URI of its storage location (`file:///path/name`,
+    /// `file:profile/name`).
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Address(
+        /// The location's URI.
+        pub String,
+    );
+}
+
 /// Attribute newtypes for [`PeerAddress`] and [`Contact`].
 ///
 /// All attributes here live under the `dialog.peer` domain: what a host
@@ -660,6 +686,21 @@ impl AsRef<Entity> for PeerAddress {
     fn as_ref(&self) -> &Entity {
         &self.this
     }
+}
+
+/// A repository a peer keeps, by the name it knows it by and where it
+/// is stored. Its entity is the repository's DID.
+///
+/// What a peer's space names resolve to: looking a repository up by name
+/// reads these before anything is looked for on disk.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Space {
+    /// The repository's entity: its DID.
+    pub this: Entity,
+    /// The name the peer knows it by.
+    pub name: space::Name,
+    /// Where it is stored.
+    pub address: space::Address,
 }
 
 /// A contact: a peer the host knows by name.

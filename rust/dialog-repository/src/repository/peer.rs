@@ -18,7 +18,7 @@ use dialog_effects::authority::{AuthorityError, Identify, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_effects::peer::prelude::*;
 use dialog_effects::peer::{self as peer_fx, PeerAddress};
-use dialog_effects::storage::{Directory, Location};
+use dialog_effects::storage::Location;
 use dialog_varsig::{Did, Principal as _};
 use thiserror::Error;
 use url::Url;
@@ -390,22 +390,9 @@ fn web_at(endpoint: &Url, path: Option<&str>) -> Result<Did, PeerError> {
 /// `did:key` of the Ed25519 key seeded by the Blake3 hash of the
 /// location's file URI.
 fn key(location: &Location) -> Did {
-    let seed = Blake3Hash::hash(file_uri(location).as_bytes());
+    let seed = Blake3Hash::hash(location.uri().as_bytes());
     let key = ed25519_dalek::SigningKey::from_bytes(seed.as_bytes());
     Ed25519Verifier::from(key).did()
-}
-
-/// The file URI naming a location: an absolute directory as a `file://`
-/// URL, and a platform directory by its role, since where it resolves
-/// differs by device.
-fn file_uri(location: &Location) -> String {
-    let Location { directory, name } = location;
-    match directory {
-        Directory::At(path) => format!("file://{}/{name}", path.trim_end_matches('/')),
-        Directory::Profile => format!("file:profile/{name}"),
-        Directory::Current => format!("file:current/{name}"),
-        Directory::Temp => format!("file:temp/{name}"),
-    }
 }
 
 #[cfg(test)]

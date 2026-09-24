@@ -39,6 +39,8 @@ pub use load::*;
 mod memory;
 pub use memory::*;
 
+pub mod spaces;
+
 mod open;
 pub use open::*;
 

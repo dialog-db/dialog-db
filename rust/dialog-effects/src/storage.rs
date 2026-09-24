@@ -98,6 +98,38 @@ impl Location {
             name: String::new(),
         }
     }
+
+    /// The location as a URI: an absolute directory as a `file://` URL,
+    /// and a platform directory by its role (`file:profile/{name}`), since
+    /// where a role resolves differs by device.
+    pub fn uri(&self) -> String {
+        let Self { directory, name } = self;
+        match directory {
+            Directory::At(path) => format!("file://{}/{name}", path.trim_end_matches('/')),
+            Directory::Profile => format!("file:profile/{name}"),
+            Directory::Current => format!("file:current/{name}"),
+            Directory::Temp => format!("file:temp/{name}"),
+        }
+    }
+
+    /// The location a URI written by [`uri`](Self::uri) names, or `None`
+    /// for one it did not write. An absolute directory's name is its last
+    /// path segment.
+    pub fn from_uri(uri: &str) -> Option<Self> {
+        if let Some(path) = uri.strip_prefix("file://") {
+            let (directory, name) = path.rsplit_once('/')?;
+            let directory = if directory.is_empty() { "/" } else { directory };
+            return Some(Self::new(Directory::At(directory.to_string()), name));
+        }
+        let (role, name) = uri.strip_prefix("file:")?.split_once('/')?;
+        let directory = match role {
+            "profile" => Directory::Profile,
+            "current" => Directory::Current,
+            "temp" => Directory::Temp,
+            _ => return None,
+        };
+        Some(Self::new(directory, name))
+    }
 }
 
 impl Attenuation for Location {
@@ -207,5 +239,33 @@ impl Storage {
         Subject::from(did!("local:storage"))
             .attenuate(Storage)
             .attenuate(Location::at(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Directory, Location};
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// Every kind of location reads back from the URI it is written as.
+    #[dialog_common::test]
+    fn it_reads_a_location_back_from_its_uri() {
+        for location in [
+            Location::new(Directory::At("/var/dialog".into()), "notes"),
+            Location::new(Directory::At("/".into()), "notes"),
+            Location::profile("notes"),
+            Location::current("notes"),
+            Location::temp("notes"),
+        ] {
+            assert_eq!(Location::from_uri(&location.uri()), Some(location));
+        }
+        assert_eq!(
+            Location::new(Directory::At("/var/dialog/".into()), "notes").uri(),
+            "file:///var/dialog/notes"
+        );
+        assert_eq!(Location::profile("notes").uri(), "file:profile/notes");
+        assert_eq!(Location::from_uri("https://example.com/notes"), None);
     }
 }
