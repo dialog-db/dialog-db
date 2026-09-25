@@ -455,6 +455,12 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         &self.inner.system
     }
 
+    /// The account this peer acts for: the principal a space created on
+    /// it delegates to. The peer's home, until an account is given.
+    pub fn account(&self) -> &Did {
+        &self.inner.home
+    }
+
     pub(crate) fn authority(&self) -> &Authority {
         &self.authority
     }
