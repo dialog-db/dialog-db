@@ -6,7 +6,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::Result;
 use dialog_artifacts::history::History as _;
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Value};
+use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Value};
 use dialog_effects::blob::BlobError;
 use dialog_operator::helpers::test_operator_with_profile;
 use dialog_query::query::Output;
@@ -377,6 +377,49 @@ async fn it_injects_session_metadata() -> Result<()> {
     assert_eq!(
         joined[0].branch.0,
         schema::Branch::new(&replica, "main").this
+    );
+    Ok(())
+}
+
+/// An exported overlay, carried as bytes into a separately opened handle,
+/// restores both its asserts and its tombstones there.
+#[dialog_common::test]
+async fn it_restores_an_exported_overlay_elsewhere() -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    branch
+        .transaction()
+        .assert(person("id:alice", "Alice"))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let source = branch.snapshot().expect("snapshot");
+    source.overlay().assert(person("id:bob", "Bob"));
+    source.overlay().retract(
+        the!("test/name")
+            .of("id:alice".parse::<Entity>()?)
+            .is("Alice".to_string()),
+    );
+
+    let bytes = serde_ipld_dagcbor::to_vec(&source.overlay().export())?;
+
+    let target = branch.snapshot().expect("snapshot");
+    assert_eq!(
+        people(target.query(), &operator).await?,
+        vec!["Alice".to_string()],
+        "a fresh handle starts with an empty overlay"
+    );
+    let restored: Changes = serde_ipld_dagcbor::from_slice(&bytes)?;
+    assert!(
+        target.overlay().apply(restored).is_some(),
+        "restoring lands as one instant"
+    );
+    assert_eq!(
+        people(target.query(), &operator).await?,
+        vec!["Bob".to_string()],
+        "the restored overlay asserts Bob and tombstones Alice"
     );
     Ok(())
 }
