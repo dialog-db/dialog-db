@@ -552,7 +552,8 @@ mod tests {
     use dialog_capability::access::{Access, Proof as _, Prove, Retain};
     use dialog_capability::did;
     use dialog_credentials::Ed25519Signer;
-    use dialog_credentials::SignerCredential;
+    use dialog_credentials::{Credential, SignerCredential};
+    use dialog_effects::credential::{self as credential_fx, prelude::*};
     use dialog_effects::storage::Location;
     use dialog_repository::{OpenReplicaBranchError, RepositoryAtExt as _, RepositoryExt as _};
     use dialog_storage::provider::storage::VolatileSpace;
@@ -1093,6 +1094,42 @@ mod tests {
             *last.0.subject(),
             UcanSubject::Any,
             "the grant scoped to another subject was used"
+        );
+        Ok(())
+    }
+
+    /// A session acts with its own key. The peer's key is not handed to
+    /// it, and neither is the key of a repository it loads: it reads and
+    /// writes the repository under its grants, never as the repository.
+    #[dialog_common::test]
+    async fn it_withholds_keys_from_a_session() -> Result<()> {
+        let peer = open_peer(
+            Storage::<VolatileSpace>::volatile(),
+            Location::temp(unique_name("keys")),
+        )
+        .await?;
+        let session = peer
+            .session(b"keys")
+            .allow(Subject::any().claim(peer.credential()))
+            .await?;
+
+        let key = Subject::from(peer.did())
+            .credential()
+            .key(credential_fx::SELF)
+            .load()
+            .perform(&session)
+            .await;
+        assert!(key.is_err(), "the session was handed the peer's key");
+
+        let name = unique_name("repo");
+        peer.space(name.clone()).open().perform(&peer).await?;
+        let repository = peer.space(name).load().perform(&session).await?;
+        assert!(
+            matches!(
+                repository.credential(),
+                Credential::Verifier(_)
+            ),
+            "the session was handed the repository's key"
         );
         Ok(())
     }
