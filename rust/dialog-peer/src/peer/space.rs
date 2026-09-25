@@ -213,8 +213,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::Peer;
     use crate::helpers::unique_name;
+    use crate::{ClaimExt as _, Peer};
     use dialog_capability::{Subject, did};
     use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
@@ -253,6 +253,40 @@ mod tests {
         let second = peer_at(&storage, &credential, "/second").await?;
         let loaded = second.space(name).load().perform(&second).await?;
         assert_eq!(loaded.did(), created.did());
+        Ok(())
+    }
+
+    /// Opening a space mounts it in storage, which is the storage's to
+    /// allow: a session its peer granted nothing over storage is refused,
+    /// while one granted everything the peer holds opens it.
+    #[dialog_common::test]
+    async fn it_opens_a_space_for_a_session_only_with_the_storages_authority() -> anyhow::Result<()>
+    {
+        let storage = Storage::volatile();
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&storage)
+            .await?;
+        let peer = peer_at(&storage, &credential, "/gate").await?;
+        let name = unique_name("notes");
+        peer.space(name.clone()).create().perform(&peer).await?;
+
+        let elsewhere = Ed25519Signer::generate().await?;
+        let scoped = peer
+            .session(b"scoped")
+            .allow(Subject::from(elsewhere.did()).claim(peer.credential()))
+            .await?;
+        let refused = peer.space(name.clone()).load().perform(&scoped).await;
+        assert!(
+            refused.is_err(),
+            "a session with no storage authority mounted a space"
+        );
+
+        let trusted = peer
+            .session(b"trusted")
+            .allow(Subject::any().claim(peer.credential()))
+            .await?;
+        let loaded = peer.space(name).load().perform(&trusted).await?;
+        assert!(!loaded.did().to_string().is_empty());
         Ok(())
     }
 
