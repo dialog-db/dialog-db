@@ -845,7 +845,7 @@ where
             .filter(|_| !has_overlay_rules(&self.changes));
         if let Some(bundle) = cache
             .as_ref()
-            .and_then(|cache| cache.bundle(&concept, &roots))
+            .and_then(|cache| cache.bundle(&input, &roots))
         {
             return Ok(self.continuing(&concept, bundle));
         }
@@ -887,7 +887,7 @@ where
             bundle
         };
         if let Some(cache) = cache {
-            cache.record_bundle(concept.clone(), roots, bundle.clone());
+            cache.record_bundle(input.clone(), roots, bundle.clone());
         }
         Ok(self.continuing(&concept, bundle))
     }

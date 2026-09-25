@@ -312,7 +312,20 @@ struct RuleCacheInner {
     /// warm query costs, and it changes only when a layer does. Only
     /// sets resolved without overlay rules are kept, since those are
     /// read fresh per query.
-    bundles: HashMap<Entity, (Vec<[u8; 32]>, ConceptRules)>,
+    ///
+    /// Kept with the descriptor it was assembled for: the set carries
+    /// that descriptor's implicit rule, which binds its field names, and
+    /// descriptors differing only in field names share an identity.
+    bundles: HashMap<Entity, Bundle>,
+}
+
+/// A rule set assembled for one descriptor, as of the roots of the
+/// layers it was resolved from.
+#[derive(Debug, Clone)]
+struct Bundle {
+    roots: Vec<[u8; 32]>,
+    descriptor: ConceptDescriptor,
+    rules: ConceptRules,
 }
 
 impl RuleCache {
@@ -339,25 +352,41 @@ impl RuleCache {
             .insert(concept, (head, entities));
     }
 
-    /// The rule set assembled for `concept` over layers at `roots`, if
-    /// one was recorded at exactly those roots.
-    pub(crate) fn bundle(&self, concept: &Entity, roots: &[[u8; 32]]) -> Option<ConceptRules> {
+    /// The rule set assembled for `descriptor` over layers at `roots`,
+    /// if one was recorded for exactly that descriptor at exactly those
+    /// roots.
+    pub(crate) fn bundle(
+        &self,
+        descriptor: &ConceptDescriptor,
+        roots: &[[u8; 32]],
+    ) -> Option<ConceptRules> {
         let inner = self.inner.read();
-        match inner.bundles.get(concept) {
-            Some((at, bundle)) if at.as_slice() == roots => Some(bundle.clone()),
+        match inner.bundles.get(&descriptor.this()) {
+            Some(bundle)
+                if bundle.roots.as_slice() == roots && bundle.descriptor == *descriptor =>
+            {
+                Some(bundle.rules.clone())
+            }
             _ => None,
         }
     }
 
-    /// Record the rule set assembled for `concept` over layers at
-    /// `roots`, replacing one recorded at other roots.
+    /// Record the rule set assembled for `descriptor` over layers at
+    /// `roots`, replacing one recorded for its concept before.
     pub(crate) fn record_bundle(
         &self,
-        concept: Entity,
+        descriptor: ConceptDescriptor,
         roots: Vec<[u8; 32]>,
-        bundle: ConceptRules,
+        rules: ConceptRules,
     ) {
-        self.inner.write().bundles.insert(concept, (roots, bundle));
+        self.inner.write().bundles.insert(
+            descriptor.this(),
+            Bundle {
+                roots,
+                descriptor,
+                rules,
+            },
+        );
     }
 
     /// A cached hydrated body by rule entity, if present.
