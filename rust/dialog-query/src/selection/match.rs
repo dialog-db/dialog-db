@@ -5,6 +5,7 @@ use crate::Claim;
 use crate::artifact::Value;
 use crate::error::EvaluationError;
 use crate::term::Term;
+use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Record;
 
@@ -192,11 +193,19 @@ impl Match {
 
     /// Cite a claim as evidence for the given term.
     pub fn cite(&mut self, term: &Term<Record>, claim: &Claim) -> Result<(), EvaluationError> {
+        self.cite_owned(term, claim.to_owned());
+        Ok(())
+    }
+
+    /// Cite a claim the caller owns, moving it in rather than copying
+    /// it: a scan builds the claim for the row it yields and has no
+    /// further use for it.
+    pub(crate) fn cite_owned(&mut self, term: &Term<Record>, claim: Claim) {
         if let Term::Variable {
             name: Some(name), ..
         } = term
         {
-            let claim = Arc::new(claim.to_owned());
+            let claim = Arc::new(claim);
             match self
                 .claims
                 .iter_mut()
@@ -206,8 +215,6 @@ impl Match {
                 None => self.claims.push((name.as_str().into(), claim)),
             }
         }
-
-        Ok(())
     }
 
     /// Merge every binding and claim from `other` into this match,
@@ -239,6 +246,14 @@ impl Match {
             }
         }
         Some(self)
+    }
+
+    /// The binding for the variable `name`, if a premise has touched
+    /// it. The borrowing counterpart of [`Self::lookup`], for callers
+    /// that hold a variable's name rather than a [`Term`] and need not
+    /// copy the value out.
+    pub fn get(&self, name: &str) -> Option<&Binding> {
+        probe(&self.bindings, name)
     }
 
     /// The `Present` value bound to `name`, if any. Used by the merge
@@ -281,51 +296,60 @@ impl Match {
         match term {
             Term::Variable {
                 name: Some(name), ..
-            } => {
-                // Contract check: a typed variable only accepts values
-                // inhabiting its kind. Scans filter mismatched facts
-                // before reaching here, so a failure at this point is
-                // a contract violation (e.g. an untyped construction
-                // path feeding a value the rule's types exclude), not
-                // a data-dependent non-match.
-                if let Some(kind) = term.kind()
-                    && !kind.admits(&value)
-                {
-                    return Err(EvaluationError::KindMismatch {
-                        variable: name.clone(),
-                        kind: kind.to_string(),
-                        value: format!("{value:?}"),
-                        value_type: format!("{:?}", value.data_type()),
-                    });
-                }
-                if let Some(existing) = probe(&self.bindings, name) {
-                    match existing {
-                        Binding::Present(existing_value) => {
-                            if *existing_value != value {
-                                Err(EvaluationError::Assignment {
-                                    reason: format!(
-                                        "Can not set {:?} to {:?} because it is already set to {:?}.",
-                                        name, value, existing_value
-                                    ),
-                                })
-                            } else {
-                                Ok(())
-                            }
-                        }
-                        Binding::Absent => Err(EvaluationError::Assignment {
-                            reason: format!(
-                                "Can not set {:?} to {:?} because it is already bound to Absent.",
-                                name, value
-                            ),
-                        }),
-                    }
-                } else {
-                    self.bindings
-                        .push((name.as_str().into(), Binding::Present(value)));
-                    Ok(())
-                }
-            }
+            } => self.bind_variable(name, term.kind(), value),
             Term::Variable { name: None, .. } | Term::Constant(_) => Ok(()),
+        }
+    }
+
+    /// [`Self::bind`] for a variable given by name and kind, so a
+    /// caller holding a typed term need not widen it to a
+    /// `Term<Any>` (a copy of its name) for every value it binds.
+    pub(crate) fn bind_variable(
+        &mut self,
+        name: &str,
+        kind: Option<Kind>,
+        value: Value,
+    ) -> Result<(), EvaluationError> {
+        // Contract check: a typed variable only accepts values
+        // inhabiting its kind. Scans filter mismatched facts
+        // before reaching here, so a failure at this point is
+        // a contract violation (e.g. an untyped construction
+        // path feeding a value the rule's types exclude), not
+        // a data-dependent non-match.
+        if let Some(kind) = kind
+            && !kind.admits(&value)
+        {
+            return Err(EvaluationError::KindMismatch {
+                variable: name.to_string(),
+                kind: kind.to_string(),
+                value: format!("{value:?}"),
+                value_type: format!("{:?}", value.data_type()),
+            });
+        }
+        if let Some(existing) = probe(&self.bindings, name) {
+            match existing {
+                Binding::Present(existing_value) => {
+                    if *existing_value != value {
+                        Err(EvaluationError::Assignment {
+                            reason: format!(
+                                "Can not set {:?} to {:?} because it is already set to {:?}.",
+                                name, value, existing_value
+                            ),
+                        })
+                    } else {
+                        Ok(())
+                    }
+                }
+                Binding::Absent => Err(EvaluationError::Assignment {
+                    reason: format!(
+                        "Can not set {:?} to {:?} because it is already bound to Absent.",
+                        name, value
+                    ),
+                }),
+            }
+        } else {
+            self.bindings.push((name.into(), Binding::Present(value)));
+            Ok(())
         }
     }
 
@@ -337,23 +361,26 @@ impl Match {
         match term {
             Term::Variable {
                 name: Some(name), ..
-            } => {
-                if let Some(existing) = probe(&self.bindings, name) {
-                    match existing {
-                        Binding::Absent => Ok(()),
-                        Binding::Present(value) => Err(EvaluationError::Assignment {
-                            reason: format!(
-                                "Can not set {:?} to Absent because it is already set to {:?}.",
-                                name, value
-                            ),
-                        }),
-                    }
-                } else {
-                    self.bindings.push((name.as_str().into(), Binding::Absent));
-                    Ok(())
-                }
-            }
+            } => self.bind_absent_variable(name),
             Term::Variable { name: None, .. } | Term::Constant(_) => Ok(()),
+        }
+    }
+
+    /// [`Self::bind_absent`] for a variable given by name.
+    pub(crate) fn bind_absent_variable(&mut self, name: &str) -> Result<(), EvaluationError> {
+        if let Some(existing) = probe(&self.bindings, name) {
+            match existing {
+                Binding::Absent => Ok(()),
+                Binding::Present(value) => Err(EvaluationError::Assignment {
+                    reason: format!(
+                        "Can not set {:?} to Absent because it is already set to {:?}.",
+                        name, value
+                    ),
+                }),
+            }
+        } else {
+            self.bindings.push((name.into(), Binding::Absent));
+            Ok(())
         }
     }
 

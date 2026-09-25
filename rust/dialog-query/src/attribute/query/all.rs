@@ -134,23 +134,37 @@ impl AttributeQueryAll {
 
     /// Merge a matched artifact into a match: store the claim and bind
     /// the/of/is/cause values to the corresponding terms.
+    ///
+    /// Takes the artifact by value: its fields move into the cited
+    /// claim, and each slot is bound by name, so a row pays for one
+    /// copy of each bound value and none of the terms' names.
     pub(crate) fn merge(
         &self,
         candidate: &mut Match,
-        artifact: &Artifact,
+        artifact: Artifact,
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(artifact);
-        candidate.cite(&self.source, &claim)?;
-        candidate.bind(&Term::<Any>::from(&self.the), Value::from(claim.the()))?;
-        candidate.bind(
-            &Term::<Any>::from(&self.of),
-            Value::Entity(claim.of().clone()),
-        )?;
-        candidate.bind(&self.is, claim.is().clone())?;
-        candidate.bind(
-            &Term::<Any>::from(&self.cause),
-            Value::Bytes(claim.cause().clone().0.into()),
-        )?;
+        if let Some(name) = self.the.name() {
+            candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;
+        }
+        if let Some(name) = self.of.name() {
+            candidate.bind_variable(
+                name,
+                self.of.binding_kind(),
+                Value::Entity(claim.of().clone()),
+            )?;
+        }
+        if let Some(name) = self.is.name() {
+            candidate.bind_variable(name, self.is.kind(), claim.is().clone())?;
+        }
+        if let Some(name) = self.cause.name() {
+            candidate.bind_variable(
+                name,
+                self.cause.binding_kind(),
+                Value::Bytes(claim.cause().clone().0.into()),
+            )?;
+        }
+        candidate.cite_owned(&self.source, claim);
         Ok(())
     }
 
@@ -163,11 +177,13 @@ impl AttributeQueryAll {
     /// to have no value", produced upstream by a
     /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery) left-join.
     pub(crate) fn absent_blocked(&self, base: &Match) -> bool {
-        let absent = |term: &Term<Any>| matches!(base.lookup(term), Ok(Binding::Absent));
-        absent(&Term::<Any>::from(&self.the))
-            || absent(&Term::<Any>::from(&self.of))
-            || absent(&self.is)
-            || absent(&Term::<Any>::from(&self.cause))
+        let absent = |name: Option<&str>| {
+            matches!(name.and_then(|name| base.get(name)), Some(Binding::Absent))
+        };
+        absent(self.the.name())
+            || absent(self.of.name())
+            || absent(self.is.name())
+            || absent(self.cause.name())
     }
 
     /// True when a fact inhabits the scan's typed slots: the value
@@ -370,7 +386,7 @@ impl AttributeQueryAll {
                         continue;
                     }
                     let mut extension = base.clone();
-                    selector.merge(&mut extension, &artifact)?;
+                    selector.merge(&mut extension, artifact)?;
                     yield extension;
                 }
             }
