@@ -1060,6 +1060,7 @@ mod tests {
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::Identify;
     use dialog_effects::memory::Resolve;
+    use dialog_operator::Operator;
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::attribute::The;
     use dialog_query::attribute::{AttributeDescriptor, Keyed, Relation};
@@ -1068,6 +1069,7 @@ mod tests {
     use dialog_query::types::{Any, Type as ValueType};
     use dialog_query::{AttributeQuery, Claim, Term, the};
     use dialog_query::{Cardinality, ConceptDescriptor, ConceptQuery, Output as _};
+    use dialog_storage::provider::storage::VolatileSpace;
     use std::collections::BTreeMap;
     use std::str::FromStr;
 
@@ -3865,7 +3867,7 @@ mod tests {
     /// the result a maintained subscription must agree with.
     async fn fresh_names(
         branch: &crate::Branch,
-        operator: &dialog_operator::Operator<dialog_storage::provider::storage::VolatileSpace>,
+        operator: &Operator<VolatileSpace>,
     ) -> anyhow::Result<Vec<(Entity, String)>> {
         use dialog_query::query::Output as _;
         let claims: Vec<Claim> = branch
@@ -4198,6 +4200,11 @@ mod tests {
         subscription.poll(&operator).await?.expect("initial");
         branch.overlay().clear();
         subscription.poll(&operator).await?;
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 1),
+            "the lifted tombstone reached the fixpoint continuation"
+        );
 
         let sorted = |rows: &[HasAncestor]| {
             let mut rows = rows.to_vec();
@@ -4213,6 +4220,186 @@ mod tests {
             sorted(subscription.results()),
             sorted(&fresh),
             "no ancestor row derives from an edge nobody can read"
+        );
+        Ok(())
+    }
+
+    /// The regression this port fixes: every overlay write used to bump
+    /// an epoch that sent every subscription on the branch into a full
+    /// recompute, even ones that never read the written facts. A
+    /// session status flipping on one entity, and per-client stamps
+    /// being written and garbage-collected, must leave subscriptions
+    /// over other facts, and head-dependent ones, untouched.
+    #[dialog_common::test]
+    async fn it_does_not_recompute_on_unrelated_overlay_writes() -> anyhow::Result<()> {
+        use crate::schema;
+        use dialog_artifacts::{Changes, Update as _};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut names = branch.subscribe(names_query());
+        let replica = schema::Replica::new(profile.did(), branch.of().clone());
+        let branch_concept = schema::Branch::new(&replica, "main");
+        let mut revision = branch.subscribe(Query::<schema::BranchRevision> {
+            this: branch_concept.this.clone().into(),
+            tree: Term::var("tree"),
+            edition: Term::var("edition"),
+            revision: Term::var("revision"),
+        });
+        names.poll(&operator).await?.expect("initial");
+        revision.poll(&operator).await?.expect("initial");
+        assert!(revision.demand().depends_on_head());
+
+        let here = Entity::new()?;
+        for status in ["pending", "settled", "pending", "settled"] {
+            let mut changes = Changes::new();
+            changes.associate_unique(
+                "sync/status".parse()?,
+                here.clone(),
+                Value::String(status.into()),
+            );
+            branch.overlay().assert(changes);
+            let site = Entity::new()?;
+            branch
+                .overlay()
+                .assert(the!("site/path").of(site.clone()).is("/".to_string()));
+            branch.overlay().retain_entities(|entity| *entity != site);
+
+            assert!(
+                names.poll(&operator).await?.is_none(),
+                "an overlay write the query never reads changes nothing"
+            );
+            assert!(
+                revision.poll(&operator).await?.is_none(),
+                "an overlay-only move leaves a head-dependent result alone"
+            );
+        }
+        assert_eq!(names.recomputes(), 1, "no recompute for unrelated writes");
+        assert_eq!(names.maintenances(), 0, "and no per-entity work either");
+        assert_eq!(revision.recomputes(), 1);
+        assert_eq!(revision.maintenances(), 0);
+
+        // The head-dependent subscription still re-fires on a commit.
+        branch
+            .transaction()
+            .assert(the!("person/name").of(Entity::new()?).is("Bob".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        revision
+            .poll(&operator)
+            .await?
+            .expect("a commit moves the head");
+        assert_eq!(revision.recomputes(), 2);
+        Ok(())
+    }
+
+    /// Every maintained step agrees with a fresh evaluation, across the
+    /// whole overlay vocabulary interleaved with commits: session
+    /// asserts, idempotent re-asserts, cardinality-one replaces,
+    /// tombstones over committed facts, a session copy of a tombstoned
+    /// fact, retracts of session facts, entity garbage collection, and
+    /// clear. None of it recomputes.
+    #[dialog_common::test]
+    async fn it_agrees_with_a_fresh_evaluation_through_overlay_churn() -> anyhow::Result<()> {
+        use dialog_artifacts::{Changes, Update as _};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let carol = Entity::new()?;
+        let dave = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        let name = |of: &Entity, is: &str| the!("person/name").of(of.clone()).is(is.to_string());
+        let rename = |of: &Entity, is: &str| {
+            let mut changes = Changes::new();
+            changes.associate_unique(
+                "person/name".parse().expect("attribute"),
+                of.clone(),
+                Value::String(is.into()),
+            );
+            changes
+        };
+
+        let mut step = 0;
+        let mut check = async |subscription: &mut super::Subscription<AttributeQuery>,
+                               label: &str|
+               -> anyhow::Result<()> {
+            step += 1;
+            subscription.poll(&operator).await?;
+            assert_eq!(
+                retained_names(subscription),
+                fresh_names(&branch, &operator).await?,
+                "step {step} ({label}): the maintained result drifted from a fresh evaluation"
+            );
+            Ok(())
+        };
+
+        branch.overlay().assert(name(&carol, "Carol"));
+        check(&mut subscription, "session assert").await?;
+        branch.overlay().assert(name(&carol, "Carol"));
+        check(&mut subscription, "idempotent re-assert").await?;
+        branch.overlay().assert(rename(&carol, "Caroline"));
+        check(&mut subscription, "session replace").await?;
+        branch.overlay().retract(name(&alice, "Alice"));
+        check(&mut subscription, "tombstone over a committed fact").await?;
+        branch.overlay().assert(name(&alice, "Alice"));
+        check(&mut subscription, "session copy of a tombstoned fact").await?;
+        branch.overlay().retract(name(&alice, "Alice"));
+        check(&mut subscription, "retract the session copy").await?;
+        branch
+            .transaction()
+            .assert(name(&dave, "Dave"))
+            .retract(name(&bob, "Bob"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.overlay().assert(name(&bob, "Robert"));
+        check(&mut subscription, "commit and session write together").await?;
+        branch.overlay().retain_entities(|entity| *entity != carol);
+        check(&mut subscription, "garbage-collect an entity").await?;
+        branch.overlay().clear();
+        check(&mut subscription, "clear").await?;
+
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "every step was maintained, none recomputed"
         );
         Ok(())
     }

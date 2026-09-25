@@ -1500,6 +1500,128 @@ mod rule_tests {
         Ok(())
     }
 
+    /// The `employee` query binding every field to a variable.
+    fn employees() -> ConceptQuery {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        ConceptQuery {
+            predicate: employee_descriptor(),
+            terms,
+        }
+    }
+
+    /// A rule asserted into the branch's session overlay resolves like
+    /// a committed one: session-held rules are a rule source of their
+    /// own, read fresh every query and never head-cached.
+    #[dialog_common::test]
+    async fn it_resolves_a_rule_held_in_the_session_overlay() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let before: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(before.is_empty(), "no rule, no employees");
+
+        branch
+            .overlay()
+            .assert(rule_with_person_attr("org/contractor-name"));
+        let after: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            after.iter().map(|c| c.entity().clone()).collect::<Vec<_>>(),
+            vec![bob],
+            "the session rule concludes Bob"
+        );
+
+        branch.overlay().clear();
+        let cleared: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(
+            cleared.is_empty(),
+            "dropping the session rule drops its conclusions"
+        );
+        Ok(())
+    }
+
+    /// A session rule arriving after a subscription evaluated must
+    /// reach it: session rule reads are recorded as rule demand, so
+    /// the rule's instant lands in the cover and the poll re-evaluates.
+    /// Without that record the instant falls outside the cover and the
+    /// poll wrongly reports nothing changed.
+    #[dialog_common::test]
+    async fn it_propagates_a_session_rule_to_a_subscription() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(employees());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty(), "no rule, no employees");
+
+        branch
+            .overlay()
+            .assert(rule_with_person_attr("org/contractor-name"));
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the session rule reaches the subscription");
+        assert_eq!(
+            delta
+                .asserted
+                .iter()
+                .map(|c| c.entity().clone())
+                .collect::<Vec<_>>(),
+            vec![bob]
+        );
+
+        branch.overlay().clear();
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("dropping the session rule reaches the subscription");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(delta.retracted.len(), 1);
+        Ok(())
+    }
+
     // ----- (4) discovery cache keys on head: a stale handle (head not
     // advanced) keeps using its cached discovery and does NOT pick up a
     // rule committed via another handle until it refreshes. This proves
