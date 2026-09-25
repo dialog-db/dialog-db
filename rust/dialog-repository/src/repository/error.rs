@@ -1,4 +1,4 @@
-use crate::TreeReference;
+use crate::{Fetched, Revision, Target, TreeReference};
 use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::identity::IdentityError;
@@ -368,6 +368,13 @@ impl From<FetchError> for PullError {
             FetchError::OpenRemoteBranch(error) => Self::OpenRemoteBranch(error),
             FetchError::FetchRemoteBranch(error) => Self::FetchRemoteBranch(error),
             FetchError::Upstreams(error) => Self::Upstreams(error),
+            FetchError::Partial { unreached, .. } => Self::Partial {
+                landed: None,
+                unreached: unreached
+                    .into_iter()
+                    .map(|(target, error)| (target, error.into()))
+                    .collect(),
+            },
         }
     }
 }
@@ -375,6 +382,16 @@ impl From<FetchError> for PullError {
 /// Errors specific to a branch fetch operation.
 #[derive(Error, Debug)]
 pub enum FetchError {
+    /// Some upstreams were fetched and some could not be: what was
+    /// fetched, and why each of the rest failed.
+    #[error("{} of the upstreams could not be fetched", unreached.len())]
+    Partial {
+        /// What the reachable upstreams were at.
+        fetched: Vec<Fetched>,
+        /// Each upstream that failed, and how.
+        unreached: Vec<(Target, FetchError)>,
+    },
+
     /// Branch has no configured upstream to fetch from.
     #[error("Branch {branch} has no upstream to fetch from")]
     BranchHasNoUpstream {
@@ -465,6 +482,16 @@ pub enum CommitError {
 /// Errors specific to a pull operation.
 #[derive(Error, Debug)]
 pub enum PullError {
+    /// Some upstreams were pulled and some could not be: the head the
+    /// reachable ones left, and why each of the rest failed.
+    #[error("{} of the upstreams could not be pulled", unreached.len())]
+    Partial {
+        /// The head the pulls that landed left, if any brought anything.
+        landed: Option<Box<Revision>>,
+        /// Each upstream that failed, and how.
+        unreached: Vec<(Target, PullError)>,
+    },
+
     /// Branch has no configured upstream to pull from.
     #[error("Branch {branch} has no upstream to pull from")]
     BranchHasNoUpstream {
@@ -537,6 +564,16 @@ pub enum PullError {
 /// Errors specific to a push operation.
 #[derive(Error, Debug)]
 pub enum PushError {
+    /// Some upstreams were pushed to and some could not be: what the
+    /// pushes that landed pushed, and why each of the rest failed.
+    #[error("{} of the upstreams could not be pushed to", unreached.len())]
+    Partial {
+        /// The revision pushed, if any push had anything to push.
+        pushed: Option<Box<Revision>>,
+        /// Each upstream that failed, and how.
+        unreached: Vec<(Target, PushError)>,
+    },
+
     /// Branch has no configured upstream to push to.
     #[error("Branch {branch} has no upstream")]
     BranchHasNoUpstream {
