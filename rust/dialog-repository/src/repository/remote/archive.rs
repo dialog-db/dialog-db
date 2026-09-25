@@ -58,18 +58,12 @@ impl RemoteGet<'_> {
     where
         Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync,
     {
-        let catalog = &self.index.catalog;
-        let hash = self.hash;
+        let remote = self.index.repository.connection(env);
         self.index
-            .repository
-            .reach(|address| async move {
-                catalog
-                    .clone()
-                    .get(hash)
-                    .fork(address.site())
-                    .perform(env)
-                    .await
-            })
+            .catalog
+            .clone()
+            .get(self.hash)
+            .perform(&remote)
             .await
     }
 }
@@ -86,18 +80,12 @@ impl RemotePut<'_> {
     where
         Env: Provider<Fork<RemoteSite, Put>> + ConditionalSync,
     {
-        let catalog = &self.index.catalog;
-        let block = &self.block;
+        let remote = self.index.repository.connection(env);
         self.index
-            .repository
-            .reach(|address| async move {
-                catalog
-                    .clone()
-                    .put(block.clone())
-                    .fork(address.site())
-                    .perform(env)
-                    .await
-            })
+            .catalog
+            .clone()
+            .put(self.block)
+            .perform(&remote)
             .await
     }
 }
