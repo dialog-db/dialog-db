@@ -10,13 +10,15 @@ use dialog_capability::Provider;
 use dialog_search_tree::Manifest;
 use futures_util::Stream;
 use futures_util::stream;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::vec::IntoIter;
 
 /// A single write operation on an `(entity, attribute)` pair.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Change {
     /// Assert a value for an entity-attribute pair (cardinality-many).
     Assert(Value),
@@ -58,7 +60,11 @@ pub trait Statement: Sized {
 }
 
 /// A batch of pending writes, organized by entity and attribute.
-#[derive(Debug, Default, Clone)]
+///
+/// Serializes as that same nesting, so a batch round-trips through any serde
+/// format without losing retractions or cardinality-one replacements.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Changes(HashMap<Entity, HashMap<Attribute, Vec<Change>>>);
 
 impl Changes {
@@ -100,6 +106,29 @@ impl Changes {
         let before = self.0.len();
         self.0.retain(|entity, _| keep(entity));
         self.0.len() != before
+    }
+
+    /// Apply every change in `other` after the ones already recorded, with
+    /// the same semantics as recording them here directly: a replacement
+    /// still supersedes earlier changes to its `(entity, attribute)`.
+    pub fn merge(&mut self, other: Changes) {
+        for (entity, attributes) in other.0 {
+            for (attribute, changes) in attributes {
+                for change in changes {
+                    match change {
+                        Change::Assert(value) => {
+                            self.associate(attribute.clone(), entity.clone(), value)
+                        }
+                        Change::Replace(value) => {
+                            self.associate_unique(attribute.clone(), entity.clone(), value)
+                        }
+                        Change::Retract(value) => {
+                            self.dissociate(attribute.clone(), entity.clone(), value)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Borrowing iterator over every recorded `(entity, attribute,
@@ -432,6 +461,32 @@ mod tests {
     }
     fn role_attr() -> Attribute {
         "test/role".parse().expect("valid attribute")
+    }
+
+    /// A batch round-trips through dag-cbor with its retractions and
+    /// cardinality-one replacements intact, so a session overlay can be
+    /// carried as bytes into another process.
+    #[dialog_common::test]
+    fn it_round_trips_changes_through_dag_cbor() {
+        let mut changes = Changes::new();
+        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(name_attr(), alice(), Value::String("Ally".into()));
+        changes.associate_unique(role_attr(), alice(), Value::String("admin".into()));
+        changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
+
+        let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
+        let decoded: Changes = serde_ipld_dagcbor::from_slice(&bytes).expect("decode changes");
+
+        assert_eq!(decoded, changes);
+        let replaced = decoded
+            .iter()
+            .find(|(entity, attribute, _)| **entity == alice() && **attribute == role_attr())
+            .map(|(_, _, change)| change.clone());
+        assert_eq!(
+            replaced,
+            Some(Change::Replace(Value::String("admin".into()))),
+            "a replacement stays a replacement"
+        );
     }
 
     /// `sort_key` must reproduce the tree's EAV key byte order exactly,
