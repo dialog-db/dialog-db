@@ -218,9 +218,11 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::ConnectedReplica;
+    use crate::PublishError;
     use crate::SiteAddress;
     use dialog_artifacts::Entity;
     use dialog_capability::Subject;
+    use dialog_effects::Rejection;
     use dialog_effects::memory::MemoryError;
     use dialog_remote_s3::Address as S3Address;
     use dialog_varsig::did;
@@ -312,5 +314,47 @@ mod tests {
         assert!(matches!(answered, Err(MemoryError::Storage(_))));
         assert_eq!(attempts, 3);
         assert_eq!(remote.address().site(), &site("https://a.example"));
+    }
+
+    /// A publish is a conditional write. One that failed on the wire may
+    /// still have landed, and sending it to another address would then
+    /// report a conflict with itself: it is not sent again.
+    #[dialog_common::test]
+    async fn it_does_not_resend_a_publish_that_may_have_landed() {
+        let remote = remote(&["https://a.example", "https://b.example"]);
+        let mut attempts = 0;
+        let answered: Result<(), PublishError> = remote
+            .reach(|_| {
+                attempts += 1;
+                async { Err(PublishError::Storage("timed out".into())) }
+            })
+            .await;
+        assert!(matches!(answered, Err(PublishError::Storage(_))));
+        assert_eq!(attempts, 1, "the publish may have landed at the first");
+    }
+
+    /// A publish that never left, because the address could not be
+    /// connected to, is sent to the next address.
+    #[dialog_common::test]
+    async fn it_sends_a_publish_that_never_left_to_the_next_address() {
+        let remote = remote(&["https://a.example", "https://b.example"]);
+        let mut attempts = 0;
+        let answered: Result<(), PublishError> = remote
+            .reach(|_| {
+                attempts += 1;
+                let first = attempts == 1;
+                async move {
+                    if first {
+                        Err(PublishError::Rejected(Rejection::Unavailable {
+                            reason: "connection refused".into(),
+                        }))
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+        assert!(answered.is_ok());
+        assert_eq!(attempts, 2);
     }
 }
