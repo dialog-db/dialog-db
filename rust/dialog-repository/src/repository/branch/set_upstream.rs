@@ -73,7 +73,13 @@ impl SetUpstream<'_> {
         let mut changes = Changes::new();
         let target = match &self.target {
             UpstreamBranch::Local(target) => {
-                if target.name() == branch.name() && target.of() == branch.of() {
+                if target.of() != branch.of() {
+                    return Err(SetUpstreamError::ForeignLocalUpstream {
+                        branch: branch.name().to_string(),
+                        target: target.name().to_string(),
+                    });
+                }
+                if target.name() == branch.name() {
                     return Err(SetUpstreamError::UpstreamIsItself {
                         branch: branch.name().to_string(),
                     });
