@@ -106,7 +106,7 @@ impl Select<'_> {
         self,
         store: S,
     ) -> Result<
-        impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's,
+        impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + use<'s, S>,
         DialogSearchTreeError,
     >
     where
