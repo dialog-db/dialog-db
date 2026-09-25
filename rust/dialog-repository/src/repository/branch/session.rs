@@ -1094,6 +1094,83 @@ mod rule_tests {
         Ok(rows.iter().map(|c| c.entity().clone()).collect())
     }
 
+    /// A concept over `org/person-name` under the field `field`.
+    fn person_under(field: &str) -> ConceptDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "with": { field: { "the": "org/person-name", "as": "Text" } }
+        }))
+        .expect("descriptor parses")
+    }
+
+    /// Names read through a concept with a single field `field`.
+    async fn names_under<Env>(
+        branch: &Branch,
+        operator: &Env,
+        field: &str,
+    ) -> anyhow::Result<Vec<String>>
+    where
+        Env: dialog_capability::Provider<Get>
+            + dialog_capability::Provider<Put>
+            + dialog_capability::Provider<Resolve>
+            + dialog_capability::Provider<Identify>
+            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<dialog_artifacts::Preload>
+            + dialog_capability::Provider<dialog_artifacts::Speculation>
+            + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert(field.into(), Term::var("value"));
+        let query = ConceptQuery {
+            predicate: person_under(field),
+            terms,
+        };
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(query)
+            .perform(operator)
+            .try_vec()
+            .await?;
+        rows.iter()
+            .map(|row| Ok(row.get::<String>(field)?))
+            .collect()
+    }
+
+    /// Two concepts over the same attributes under different field names
+    /// share an identity, since identity ignores field names. Each must
+    /// still be answered by its own implicit rule: querying one first
+    /// must not leave the other planned over the first one's fields.
+    #[dialog_common::test]
+    async fn it_answers_concepts_that_differ_only_in_field_names() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(person_under("name").this(), person_under("label").this());
+        assert_eq!(
+            names_under(&branch, &operator, "name").await?,
+            vec!["Alice"]
+        );
+        assert_eq!(
+            names_under(&branch, &operator, "label").await?,
+            vec!["Alice"]
+        );
+        Ok(())
+    }
+
     // ----- (1) committed rule resolves via the durable (tree) layer ----
 
     #[dialog_common::test]
