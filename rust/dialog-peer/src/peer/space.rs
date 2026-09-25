@@ -7,7 +7,7 @@ use dialog_capability::access::{Access, FromCapability as _, Prove, Retain};
 use dialog_capability::{Ability, Capability, Constraint, Effect, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::key::{ExtractableKey, KeyExport};
-use dialog_credentials::secret::Context;
+use dialog_credentials::secret::{Context, SealedSecret};
 use dialog_credentials::{
     Credential, Ed25519Signer, Ed25519Verifier, Extractable, Signer, SignerCredential,
 };
@@ -45,7 +45,9 @@ fn handed<M: Mode>(credential: Credential) -> Credential {
 impl<S, M: Mode> Provider<space_fx::Load> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Storage<S>: Provider<storage_fx::Load> + Provider<credential_fx::Load<Credential>>,
+    Storage<S>: Provider<storage_fx::Load>
+        + Provider<credential_fx::Load<Credential>>
+        + Provider<credential_fx::Save<Credential>>,
     Self: RegistryEnv
         + Provider<Prove<Ucan>>
         + Provider<Retain<Ucan>>
@@ -77,7 +79,7 @@ where
                     credential.did()
                 )));
             }
-            return Ok(handed::<M>(credential));
+            return self.adopted(credential).await;
         }
 
         // A repository named by its DID is the one already mounted, if it
@@ -86,7 +88,7 @@ where
         if let Ok(repository) = name.parse::<Did>()
             && let Some(credential) = self.mounted(&repository).await
         {
-            return Ok(handed::<M>(credential));
+            return self.adopted(credential).await;
         }
         if let Ok(repository) = name.parse::<Did>()
             && let Some(location) = self.located(&repository).await?
@@ -98,13 +100,13 @@ where
                     credential.did()
                 )));
             }
-            return Ok(handed::<M>(credential));
+            return self.adopted(credential).await;
         }
 
         let location = storage_fx::Location::new(self.directory().clone(), name);
         let credential = self.load_at(location.clone()).await?;
         self.record_space(&credential.did(), name, &location).await;
-        Ok(handed::<M>(credential))
+        self.adopted(credential).await
     }
 }
 
@@ -215,6 +217,65 @@ where
         load.perform(&self.storage).await
     }
 
+    /// `credential` as this peer hands a loaded space over, after
+    /// bringing a space from before keys were sealed up to date.
+    ///
+    /// Such a space still holds its signing key. Its key is sealed to the
+    /// account and the space delegates to it, and only then is the stored
+    /// key replaced by its verifier: a load that stops part-way finds the
+    /// key still there and does it again. The home is never touched, since
+    /// its key is this peer's own identity.
+    async fn adopted(&self, credential: Credential) -> Result<Credential, storage_fx::StorageError>
+    where
+        S: ConditionalSend + ConditionalSync + 'static,
+        Self: RegistryEnv + Provider<Retain<Ucan>>,
+        Storage<S>: Provider<credential_fx::Save<Credential>>,
+    {
+        let Credential::Signer(signer) = &credential else {
+            return Ok(handed::<M>(credential));
+        };
+        if credential.did() == *self.home() {
+            return Ok(handed::<M>(credential));
+        }
+        let signer = signer.signer().clone();
+        let Signer::Ed25519(ed25519) = &signer else {
+            return Err(failed("only an Ed25519 space key can be sealed"));
+        };
+        // Natively every export is the seed; in the browser a key that
+        // was stored whole was stored extractable.
+        #[allow(irrefutable_let_patterns)]
+        let KeyExport::Extractable(seed) = ed25519.export().await.map_err(failed)? else {
+            return Err(failed("the space's stored key is not extractable"));
+        };
+        let sealed = self.seal_to_account(&seed).await?;
+        self.delegate_to_account(&signer).await?;
+        self.seal_space(&credential.did(), sealed.to_bytes())
+            .await?;
+        Subject::from(credential.did())
+            .credential()
+            .key(credential_fx::SELF)
+            .save(Credential::from(signer.verifier()))
+            .perform(&self.storage)
+            .await
+            .map_err(failed)?;
+        Ok(handed::<M>(credential))
+    }
+
+    /// `seed`, sealed to the account this peer acts for.
+    async fn seal_to_account(&self, seed: &[u8]) -> Result<SealedSecret, storage_fx::StorageError> {
+        let account: Ed25519Verifier = self.account().to_string().parse().map_err(|_| {
+            failed(format!(
+                "the account {} has no key to seal the space's key to",
+                self.account()
+            ))
+        })?;
+        account
+            .secret(SPACE_KEY)
+            .conceal(seed)
+            .await
+            .map_err(failed)
+    }
+
     /// Have the space `space` is the key of delegate its whole authority
     /// to the account this peer acts for, and retain the delegation where
     /// the peer proves from.
@@ -317,17 +378,7 @@ where
         let KeyExport::Extractable(seed) = key.export().await.map_err(failed)? else {
             return Err(failed("the space's key is not extractable"));
         };
-        let account: Ed25519Verifier = self.account().to_string().parse().map_err(|_| {
-            failed(format!(
-                "the account {} has no key to seal the space's key to",
-                self.account()
-            ))
-        })?;
-        let sealed = account
-            .secret(SPACE_KEY)
-            .conceal(&seed)
-            .await
-            .map_err(failed)?;
+        let sealed = self.seal_to_account(&seed).await?;
         let signer = Signer::from(
             Ed25519Signer::import(KeyExport::Extractable(seed))
                 .await
