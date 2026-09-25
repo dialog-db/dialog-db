@@ -64,6 +64,7 @@ mod open;
 pub use open::*;
 
 mod pull;
+mod reconcile;
 pub use pull::*;
 
 mod push;

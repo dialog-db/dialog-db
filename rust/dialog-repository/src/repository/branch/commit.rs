@@ -1,3 +1,4 @@
+use super::reconcile::reconcile;
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
@@ -29,6 +30,7 @@ pub struct Commit<'a, Changes> {
     canonicalize: bool,
     scope: WriteScope,
     entries: Vec<(Key, State<Datum>)>,
+    reconcile: bool,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -40,6 +42,7 @@ impl<'a, Changes> Commit<'a, Changes> {
             canonicalize: false,
             scope: WriteScope::Application,
             entries: Vec::new(),
+            reconcile: false,
         }
     }
 
@@ -109,6 +112,23 @@ impl<'a, Changes> Commit<'a, Changes> {
     /// marking a point in history or forcing a sync point.
     pub fn allow_empty(mut self) -> Self {
         self.allow_empty = true;
+        self
+    }
+
+    /// Merge with the head instead of failing when another writer
+    /// advanced it first.
+    ///
+    /// By default a commit that loses the race for the branch's head
+    /// fails with [`VersionMismatch`](PublishError::VersionMismatch), and
+    /// the caller decides what to do. With `reconcile`, the commit's
+    /// revision is kept exactly as minted and a merge of it with the head
+    /// that won is published instead, as a pull merges two peers'
+    /// changes: both sides' facts survive, and a value both set is
+    /// elected by version when read. A commit racing another commit by
+    /// the same writer on the same branch cannot be kept (its version is
+    /// taken) and still fails.
+    pub fn reconcile(mut self) -> Self {
+        self.reconcile = true;
         self
     }
 }
@@ -189,6 +209,7 @@ where
         let head = branch.revision.checkpoint();
         let base_revision = branch.revision();
         let base_version = branch.revision.edition().map(|edition| edition.version);
+        let reconciling = self.reconcile.then(|| base_revision.clone());
 
         let minted = Mint {
             source: SourceRef::from(branch),
@@ -232,7 +253,14 @@ where
             Outcome::Minted(minted) => *minted,
         };
 
-        head.publish(revision.clone(), env).await?;
+        if let Err(lost) = head.publish(revision.clone(), env).await {
+            return match (lost, reconciling) {
+                (lost @ PublishError::VersionMismatch { .. }, Some(base)) => {
+                    reconcile(branch, base, revision, lost, env).await
+                }
+                (lost, _) => Err(lost.into()),
+            };
+        }
 
         // Seed the memos with what was just published: the next commit's
         // skip-table walk starts at this very record, and later pulls
