@@ -18,10 +18,10 @@
 
 use anyhow::Result;
 use dialog_capability::{Fork, Provider, Subject};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
-use dialog_effects::memory::{Publish, Resolve};
+use dialog_effects::memory::{List, Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_network::Network;
 use dialog_operator::helpers::unique_name;
@@ -98,8 +98,12 @@ where
         + Provider<Attest>
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
+        + Provider<List>
         + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {

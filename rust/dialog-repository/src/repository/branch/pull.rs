@@ -9,18 +9,20 @@ use dialog_artifacts::history::Context;
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_capability::{Fork, Provider};
+use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
-use futures_util::future::Either;
+use futures_util::future::{Either, join_all};
 
+use super::fetch::fetch_one;
+use super::resolve::resolve;
+use crate::registry::RegistryEnv;
 use crate::{
-    Branch, Checkpoint, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError,
-    RemoteSite, RepositoryMemoryExt, Revision, TreeReference, Upstream, UpstreamBranch,
+    Branch, Checkpoint, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError, Revision,
+    TreeReference, Upstream, UpstreamBranch,
 };
 
 /// Below this divergence mass (summed edition excess, roughly commits),
@@ -50,14 +52,14 @@ impl<'a> Pull<'a> {
         self.from.as_ref()
     }
 
-    /// Pull from the given branch instead of the default upstream.
+    /// Pull from the given branch alone, instead of every upstream.
     ///
-    /// Accepts either a `&Branch` or a `&RemoteBranch` — the same inputs as
-    /// [`Branch::set_upstream`]. If the target is already tracked, its
-    /// recorded sync base drives the merge; otherwise the merge runs from
-    /// the empty base (correct, just unable to skip anything) and a
-    /// successful pull starts tracking the target — without changing the
-    /// default upstream — so the next pull from it is incremental.
+    /// Accepts either a `&Branch` or a `&ConnectedBranch` — the same inputs as
+    /// [`Branch::set_upstream`]. The merge runs from the tree last synced
+    /// with that branch, or from the empty base if it never was (correct,
+    /// just unable to skip anything). A successful pull records how far it
+    /// got, so the next pull from it is incremental, but does not make the
+    /// target an upstream: that is [`Branch::pull_from`]'s to record.
     pub fn from(mut self, source: impl Into<UpstreamBranch>) -> Self {
         self.from = Some(Upstream::from(source.into()));
         self
@@ -65,10 +67,9 @@ impl<'a> Pull<'a> {
 }
 
 impl Branch {
-    /// Pull from the configured upstream.
+    /// Pull from every branch this one pulls from.
     ///
-    /// Targets the default upstream; chain [`Pull::from`] to pull from
-    /// another tracked (or brand-new) upstream instead.
+    /// Chain [`Pull::from`] to pull from one branch alone instead.
     pub fn pull(&self) -> Pull<'_> {
         Pull::new(self)
     }
@@ -105,19 +106,76 @@ impl<'a> Pull<'a> {
     /// ```
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<crate::Hydrate>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + ConditionalSync
-            + 'static,
+        Env: RegistryEnv,
     {
-        Box::pin(self.prepare(env)).await?.commit(env).await
+        if self.from.is_some() {
+            return Box::pin(self.prepare(env)).await?.commit(env).await;
+        }
+
+        let branch = self.branch;
+        resolve(branch, env).await?;
+        let upstreams: Vec<Upstream> = branch.pulls().iter().cloned().collect();
+        if upstreams.is_empty() {
+            return Err(PullError::BranchHasNoUpstream {
+                branch: branch.name().to_string(),
+            });
+        }
+
+        // The network half runs for every upstream at once: each fetches
+        // its head and hydrates what its merge reads. The merges then land
+        // one at a time, since each advances the same head. A merge
+        // prepared before an earlier one of this pull landed finds the head
+        // moved by it, and prepares again from this handle's head -- local
+        // work now, its blocks already fetched. A head moved by anything
+        // else still fails the pull, as a single pull racing a commit does:
+        // the caller refreshes and pulls again.
+        //
+        // An upstream that cannot be prepared -- unreachable, say -- does
+        // not keep the others from landing: the pull lands what it can and
+        // reports the rest.
+        let prepared = join_all(
+            upstreams
+                .iter()
+                .map(|upstream| Box::pin(prepare_upstream(branch, upstream.clone(), env))),
+        )
+        .await;
+        let total = upstreams.len();
+        let mut unreached = Vec::new();
+        // Like a single pull, answer the merged head, or `None` when no
+        // upstream brought anything new.
+        let mut landed = None;
+        for (upstream, prepared) in upstreams.into_iter().zip(prepared) {
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    unreached.push((upstream.target(), error));
+                    continue;
+                }
+            };
+            let committed = match prepared.commit(env).await {
+                Err(PullError::Publish(PublishError::VersionMismatch { .. }))
+                    if landed.is_some() =>
+                {
+                    let tree = branch.tracked().tree(&upstream.target());
+                    Box::pin(prepare_upstream(branch, upstream.with_tree(tree), env))
+                        .await?
+                        .commit(env)
+                        .await?
+                }
+                result => result?,
+            };
+            if committed.is_some() {
+                landed = committed;
+            }
+        }
+        match unreached.len() {
+            0 => Ok(landed),
+            failed if failed == total => Err(unreached.remove(0).1),
+            _ => Err(PullError::Partial {
+                landed: landed.map(Box::new),
+                unreached,
+            }),
+        }
     }
 
     /// Phase one: fetch the upstream, rebase local changes onto it, and persist
@@ -131,27 +189,17 @@ impl<'a> Pull<'a> {
     /// under a brief exclusive lock.
     pub async fn prepare<Env>(self, env: &Env) -> Result<PreparedPull<'a>, PullError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<crate::Hydrate>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + ConditionalSync
-            + 'static,
+        Env: RegistryEnv,
     {
         let branch = self.branch;
 
-        // Select the upstream entry to pull from: the default when no
-        // explicit source was given, otherwise the tracked entry for that
-        // target — or, for a target not tracked yet, a fresh entry whose
-        // empty sync base makes the merge run from scratch.
-        let upstreams = branch.upstreams();
+        // Pull from the given target -- the tracked entry for it, or, for
+        // one not tracked yet, a fresh entry whose empty sync base makes
+        // the merge run from scratch -- or else the first branch this
+        // one pulls from. A bare `perform` pulls from every one.
+        resolve(branch, env).await?;
         let upstream = match self.from {
-            None => upstreams.default_upstream().cloned().ok_or_else(|| {
+            None => branch.pulls().iter().next().cloned().ok_or_else(|| {
                 PullError::BranchHasNoUpstream {
                     branch: branch.name().to_string(),
                 }
@@ -164,42 +212,33 @@ impl<'a> Pull<'a> {
                         branch: branch.name().to_string(),
                     });
                 }
-                upstreams.find(&target).cloned().unwrap_or(target)
+                branch
+                    .upstreams()
+                    .find(&target)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let tree = branch.tracked().tree(&target.target());
+                        target.with_tree(tree)
+                    })
             }
         };
+        Box::pin(prepare_upstream(branch, upstream, env)).await
+    }
+}
 
+/// Phase one for one upstream: fetch it, rebase local changes onto it,
+/// and persist the merged tree's blocks, without writing any cell.
+pub(crate) async fn prepare_upstream<'a, Env: RegistryEnv>(
+    branch: &'a Branch,
+    upstream: Upstream,
+    env: &Env,
+) -> Result<PreparedPull<'a>, PullError> {
+    {
         // Resolve the upstream's current revision and, when the
-        // upstream is remote, keep a handle so the merge can fall back
-        // to the remote archive for blocks that aren't local.
-        let (upstream_revision, remote) = match &upstream {
-            Upstream::Local { branch: id, .. } => {
-                let upstream_branch = branch
-                    .subject()
-                    .branch(id.clone())
-                    .load()
-                    .perform(env)
-                    .await?;
-                (upstream_branch.revision(), None)
-            }
-            Upstream::Remote {
-                remote: name,
-                branch: branch_name,
-                ..
-            } => {
-                let remote = branch
-                    .subject()
-                    .remote(name.clone())
-                    .load()
-                    .perform(env)
-                    .await?;
-                let upstream = remote
-                    .branch(branch_name.clone())
-                    .open()
-                    .perform(env)
-                    .await?;
-                (upstream.fetch().perform(env).await?, Some(remote))
-            }
-        };
+        // upstream is at a peer, keep it so the merge can fall back to
+        // the peer's archive for blocks that aren't local.
+        let upstream_revision = fetch_one(branch, &upstream, env).await?;
+        let remote = upstream.fallback();
 
         // Upstream has never received a revision yet — nothing to
         // merge in, so the pull is a no-op.
@@ -281,7 +320,7 @@ impl<'a> Pull<'a> {
                         context.clone()
                     }
                     None => {
-                        let history = branch.history(env).await;
+                        let history = branch.history(env);
                         contexts.context_of(&revision.version(), &history).await?
                     }
                 },
@@ -1101,36 +1140,27 @@ impl PreparedPull<'_> {
         // to another upstream, a set_upstream. On a version mismatch we
         // re-read the cell: if our entry is untouched (the concurrent
         // write was about a different entry), fold our advance into the
-        // current state and publish once more; if our own entry moved, a
+        // current state and publish again, until it lands; if our own entry moved, a
         // concurrent sync of this same upstream already established a
         // consistent (head, base) pair — clobbering it back would regress
         // the base — so we yield and return the head as it now stands.
-        let marker = branch.upstream.checkpoint();
-        let mut upstreams = branch.upstreams();
-        upstreams.upsert(sync.clone());
-        let publish = marker.publish(upstreams, env).await;
-
-        if let Err(PublishError::VersionMismatch { .. }) = publish {
-            branch.upstream.resolve().perform(env).await?;
-            let marker = branch.upstream.checkpoint();
-            let mut upstreams = branch.upstreams();
-            let ours_untouched = match upstreams.find(&sync) {
-                None => true,
-                Some(entry) => *entry.tree() == base,
-            };
+        let target = sync.target();
+        let marker = branch.tracking().checkpoint();
+        let mut tracking = branch.tracked();
+        tracking.record(&sync);
+        let mut publish = marker.publish(tracking, env).await;
+        while let Err(PublishError::VersionMismatch { .. }) = publish {
+            branch.tracking().resolve().perform(env).await?;
+            let marker = branch.tracking().checkpoint();
+            let mut tracking = branch.tracked();
+            let ours_untouched = tracking.get(&target).is_none_or(|tree| *tree == base);
             if !ours_untouched {
                 return Ok(branch.revision());
             }
-            upstreams.upsert(sync);
-            match marker.publish(upstreams, env).await {
-                // The cell is contended; give up on the marker advance —
-                // the merge itself landed, the next pull is just heavier.
-                Err(PublishError::VersionMismatch { .. }) => return Ok(branch.revision()),
-                other => other?,
-            }
-        } else {
-            publish?;
+            tracking.record(&sync);
+            publish = marker.publish(tracking, env).await;
         }
+        publish?;
 
         Ok(Some(new_revision))
     }
@@ -1251,13 +1281,22 @@ mod tests {
             .await;
         assert_eq!(emails.len(), 1, "dev's data arrived via the explicit pull");
 
-        // Dev is now tracked (with its own sync base), main stays default.
-        let upstreams = feature.upstreams();
-        assert_eq!(upstreams.iter().count(), 2);
+        // A one-off pull records how far it synced with dev, so the next
+        // pull from it is incremental, without making dev an upstream:
+        // main is still the only branch a bare pull takes from.
+        let upstreams = feature.pulls();
+        assert_eq!(upstreams.iter().count(), 1);
         assert!(matches!(
-            upstreams.default_upstream(),
+            upstreams.iter().next(),
             Some(Upstream::Local { branch, .. }) if branch == "main"
         ));
+        assert!(
+            feature
+                .tracked()
+                .get(&crate::Target::Local("dev".into()))
+                .is_some(),
+            "the pull recorded its sync base with dev"
+        );
 
         // Dev hasn't moved since, so re-pulling it is a no-op.
         let again = feature.pull().from(&dev).perform(&operator).await?;
@@ -1498,6 +1537,136 @@ mod tests {
             .await?;
         assert!(pulled.is_none(), "a no-op pull commits to None");
 
+        Ok(())
+    }
+
+    /// A bare pull takes from every branch the branch pulls from: the
+    /// merges land one after another, each onto what the last left, and
+    /// the pull answers the head they built.
+    /// A local upstream is named within its own repository, so a branch
+    /// of another repository on this device cannot be tracked as one:
+    /// it would silently track this repository's branch of that name.
+    #[dialog_common::test]
+    async fn it_refuses_to_track_a_branch_of_another_local_repository() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let ours = test_repo(&operator, &profile).await;
+        let theirs = test_repo(&operator, &profile).await;
+
+        let source = theirs.branch("dev").open().perform(&operator).await?;
+        let main = ours.branch("main").open().perform(&operator).await?;
+        let tracked = main.set_upstream(&source).perform(&operator).await;
+
+        assert!(
+            matches!(
+                tracked,
+                Err(crate::SetUpstreamError::ForeignLocalUpstream { .. })
+            ),
+            "{tracked:?}"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_pulls_from_every_upstream() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let mut sources = Vec::new();
+        for (name, value) in [("main", "Main data"), ("dev", "Dev data")] {
+            let source = repo.branch(name).open().perform(&operator).await?;
+            source
+                .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                    the: "user/name".parse()?,
+                    of: format!("user:{name}").parse()?,
+                    is: Value::String(value.to_string()),
+                    cause: None,
+                })]))
+                .perform(&operator)
+                .await?;
+            sources.push(source);
+        }
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        for source in &sources {
+            feature.pull_from(source).perform(&operator).await?;
+        }
+        let pulled = feature.pull().perform(&operator).await?;
+        assert_eq!(
+            pulled,
+            feature.revision(),
+            "the pull answers the head it built"
+        );
+
+        let names: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(names.len(), 2, "both upstreams' data arrived: {names:?}");
+
+        let again = feature.pull().perform(&operator).await?;
+        assert!(again.is_none(), "nothing new from either upstream");
+        Ok(())
+    }
+
+    /// An upstream that cannot be reached does not keep the others from
+    /// being pulled: what the reachable ones bring lands, and the pull
+    /// reports the one it could not reach.
+    #[dialog_common::test]
+    async fn it_pulls_what_it_can_reach_when_an_upstream_is_not() -> Result<()> {
+        use crate::PullError;
+        use crate::RepositoryMemoryExt as _;
+        use crate::registry::{apply, pull};
+        use crate::schema::Replica;
+        use dialog_artifacts::Changes;
+        use dialog_query::Statement as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:main".parse()?,
+            is: Value::String("Main data".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.pull_from(&main).perform(&operator).await?;
+
+        // Also pulls from a branch at a peer nothing says how to reach.
+        let nowhere = Replica::new(
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".parse()?,
+            repo.did(),
+        );
+        let target = nowhere.branch("main");
+        let this = Replica::new(profile.did(), repo.did()).branch("feature");
+        let mut changes = Changes::new();
+        nowhere.assert(&mut changes);
+        target.clone().assert(&mut changes);
+        pull(&this, &target).assert(&mut changes);
+        let registry = repo.subject().registry().open().perform(&operator).await?;
+        apply(&registry, changes, &operator).await?;
+
+        let pulled = feature.pull().perform(&operator).await;
+        assert_eq!(
+            feature.revision().map(|revision| revision.tree),
+            main.revision().map(|revision| revision.tree),
+            "the reachable upstream's commit landed: {pulled:?}"
+        );
+        assert!(
+            matches!(pulled, Err(PullError::Partial { ref unreached, .. }) if unreached.len() == 1),
+            "the unreachable upstream is reported: {pulled:?}"
+        );
         Ok(())
     }
 }
@@ -1951,7 +2120,7 @@ mod history_tests {
             .await?
             .expect("pull merges");
 
-        let history = feature.history(&operator).await;
+        let history = feature.history(&operator);
 
         // Main's concurrent claim was adopted into feature's history.
         assert_eq!(
@@ -2043,7 +2212,7 @@ mod history_tests {
             .perform(&operator)
             .await?;
         feature.refresh(&operator).await?;
-        let history = feature.history(&operator).await;
+        let history = feature.history(&operator);
         for version in [after_merge.version(), next.version()] {
             let skips = history
                 .revision_record(&version)
@@ -2341,7 +2510,7 @@ mod history_tests {
         );
 
         // ... and the recorded lineage proves they are concurrent.
-        let history = feature.history(&operator).await;
+        let history = feature.history(&operator);
         let ours_claims = history
             .claims_at(&ours.version(), &"post:1".parse()?, &"post/title".parse()?)
             .await?;
@@ -2828,7 +2997,7 @@ mod history_tests {
                     .cached(&head.version())
                     .await
                     .expect("the memo is primed");
-                let history = branch.history(operator).await;
+                let history = branch.history(operator);
                 let walked = context_of(&head.version(), &history).await?;
                 anyhow::Ok((memo, walked))
             }
@@ -2892,7 +3061,7 @@ mod history_tests {
             .context
             .clone()
             .expect("a freshly minted head publishes its context");
-        let history = main.history(&operator).await;
+        let history = main.history(&operator);
         let walked = context_of(&head.version(), &history).await?;
         assert_eq!(
             published, walked,
@@ -4007,10 +4176,9 @@ mod history_tests {
         assert!(merged.is_some(), "the racing pull still lands");
 
         // Both tracking advances survive: the pull's sync base for main and
-        // the push's tracking entry for backup.
+        // the push's for backup.
         let fresh = repo.branch("feature").open().perform(&operator).await?;
-        let upstreams = fresh.upstreams();
-        assert_eq!(upstreams.iter().count(), 2);
+        let tracked = fresh.tracked();
         let main_head = repo
             .branch("main")
             .load()
@@ -4018,18 +4186,16 @@ mod history_tests {
             .await?
             .revision()
             .expect("main has a revision");
-        assert!(
-            upstreams.iter().any(|entry| matches!(
-                entry,
-                crate::Upstream::Local { branch, tree } if branch == "main" && *tree == main_head.tree
-            )),
+        assert_eq!(
+            tracked.get(&crate::Target::Local("main".into())),
+            Some(&main_head.tree),
             "the pull's sync-base advance survives the race"
         );
         assert!(
-            upstreams.iter().any(
-                |entry| matches!(entry, crate::Upstream::Local { branch, .. } if branch == "backup")
-            ),
-            "the racing push's tracking entry survives the pull"
+            tracked
+                .get(&crate::Target::Local("backup".into()))
+                .is_some(),
+            "the racing push's sync base survives the pull"
         );
 
         Ok(())

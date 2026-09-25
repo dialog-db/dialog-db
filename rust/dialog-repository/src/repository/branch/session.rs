@@ -466,7 +466,7 @@ where
 {
     Box::pin(async_stream::try_stream! {
         let select = crate::Select::from_source(source.as_ref(), input);
-        let remote = source.as_ref().fallback(env).await;
+        let remote = source.as_ref().fallback();
         // Concurrent reads of one digest share fetch-and-hydrate through
         // the env's own `Hydrate` flight (see `crate::Hydrate`), with
         // every other evaluation in the process.
@@ -579,7 +579,7 @@ where
         let mut total: Option<u64> = None;
         for source in &self.sources {
             let select = crate::Select::from_source(source.as_ref(), input.clone());
-            let remote = source.as_ref().fallback(self.env).await;
+            let remote = source.as_ref().fallback();
             let store = NetworkedIndex::new(self.env, select.catalog(), remote);
             if let Some(estimate) = select.estimate(store).await? {
                 total = Some(total.unwrap_or(0).saturating_add(estimate));
@@ -635,7 +635,7 @@ where
     async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
         for source in &self.sources {
             let source = source.as_ref();
-            let remote = source.fallback(self.env).await;
+            let remote = source.fallback();
             let store = NetworkedIndex::new(self.env, source.archive().index(), remote);
             let hash = NodeHash::from(input);
             let cache = source.node_cache();

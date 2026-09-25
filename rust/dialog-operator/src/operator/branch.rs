@@ -83,10 +83,10 @@ where
     S: Clone,
     Self: BranchEnv,
 {
-    /// Open the registry branch for `subject`.
+    /// The registry branch for `subject`, held open by this operator.
     async fn registry(&self, subject: &dialog_varsig::Did) -> Result<Branch, BranchError> {
         Subject::from(subject.clone())
-            .branch(REGISTRY)
+            .registry()
             .open()
             .perform(self)
             .await
@@ -282,10 +282,10 @@ where
             Some(_) => return Err(moved()),
         }
 
-        let upstream = reference.upstream();
-        upstream.resolve().perform(self).await.map_err(failed)?;
-        if upstream.content().is_some() {
-            upstream.retract().perform(self).await.map_err(failed)?;
+        let tracking = reference.tracking();
+        tracking.resolve().perform(self).await.map_err(failed)?;
+        if tracking.content().is_some() {
+            tracking.retract().perform(self).await.map_err(failed)?;
         }
 
         let induction = reference.induction();
@@ -853,6 +853,39 @@ mod tests {
         assert!(
             created.is_err(),
             "a revision whose tree is elsewhere was pointed at"
+        );
+        Ok(())
+    }
+
+    /// Deleting a branch deletes what it pulls from and pushes to: a
+    /// branch created again under the same name starts with none.
+    #[dialog_common::test]
+    async fn it_forgets_where_a_deleted_branch_pulled_from() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        commit(&operator, &did, "main").await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        let head = commit(&operator, &did, "feature").await?;
+        Subject::from(did.clone())
+            .voider()
+            .branches()
+            .branch("feature")
+            .delete(head)
+            .perform(&operator)
+            .await?;
+
+        let again = repo.branch("feature").open().perform(&operator).await?;
+        let pulled = again.pull().perform(&operator).await;
+        assert!(
+            matches!(
+                pulled,
+                Err(dialog_repository::PullError::BranchHasNoUpstream { .. })
+            ),
+            "{pulled:?}"
         );
         Ok(())
     }

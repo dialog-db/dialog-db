@@ -324,12 +324,20 @@ async fn mount_client(
         .open()
         .perform(operator)
         .await?;
-    let origin = repo
-        .remote("origin")
-        .create(SiteAddress::Fs(address.clone()))
-        .subject(server.did())
-        .perform(operator)
-        .await?;
+    let origin = {
+        let site = SiteAddress::Fs(address.clone());
+        repo.peer(&dialog_repository::peer_did(&site)?)
+            .add_address(site)
+            .name("origin")
+            .perform(operator)
+            .await?;
+        repo.peer("origin")
+            .connect()
+            .repository(server.did())
+            .open()
+            .perform(operator)
+            .await?
+    };
     let branch = repo.branch("main").open().perform(operator).await?;
     let remote_branch = origin.branch("main").open().perform(operator).await?;
     branch.set_upstream(remote_branch).perform(operator).await?;
@@ -457,11 +465,22 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     );
     let address = seed_vault(&server, &location).await?;
 
-    let origin = server
-        .remote("origin")
-        .create(SiteAddress::Fs(address.clone()))
-        .perform(&operator)
-        .await?;
+    let origin = {
+        let site = SiteAddress::Fs(address.clone());
+        server
+            .peer(&dialog_repository::peer_did(&site)?)
+            .add_address(site)
+            .name("origin")
+            .perform(&operator)
+            .await?;
+        server
+            .peer("origin")
+            .connect()
+            .repository(server.did())
+            .open()
+            .perform(&operator)
+            .await?
+    };
     let branch = server.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     branch

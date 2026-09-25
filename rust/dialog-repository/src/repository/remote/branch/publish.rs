@@ -1,6 +1,6 @@
 //! Publish command for remote branches.
 
-use crate::{PublishRemoteBranchError, RemoteBranch, RemoteSite, Revision};
+use crate::{ConnectedBranch, PublishRemoteBranchError, RemoteSite, Revision};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory::Publish;
@@ -10,13 +10,13 @@ use dialog_effects::memory::Publish;
 /// Publishes the revision to the remote memory via Fork and persists the
 /// new remote edition to the local snapshot cache.
 pub struct PublishRemoteBranch<'a> {
-    branch: &'a RemoteBranch,
+    branch: &'a ConnectedBranch,
     revision: Revision,
 }
 
 impl<'a> PublishRemoteBranch<'a> {
     /// Create a new publish command.
-    pub fn new(branch: &'a RemoteBranch, revision: Revision) -> Self {
+    pub fn new(branch: &'a ConnectedBranch, revision: Revision) -> Self {
         Self { branch, revision }
     }
 
@@ -25,16 +25,20 @@ impl<'a> PublishRemoteBranch<'a> {
     where
         Env: Provider<Fork<RemoteSite, Publish>> + Provider<Publish> + ConditionalSync,
     {
-        let address = self.branch.address();
-
         // Publish to the upstream via fork. The in-memory upstream cell
         // picks up the new CAS edition internally; we then snapshot it
         // below.
+        let upstream = self.branch.upstream();
+        let revision = &self.revision;
         self.branch
-            .upstream()
-            .publish(self.revision)
-            .fork(address.site())
-            .perform(env)
+            .repository()
+            .reach(|address| async move {
+                upstream
+                    .publish(revision.clone())
+                    .fork(address.site())
+                    .perform(env)
+                    .await
+            })
             .await?;
 
         // Persist the upstream edition so that a future open/load can

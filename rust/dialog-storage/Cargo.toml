@@ -84,6 +84,7 @@ web-sys = { workspace = true, features = [
   "FileSystemGetDirectoryOptions",
   "FileSystemGetFileOptions",
   "FileSystemHandle",
+  "FileSystemHandleKind",
   "FileSystemReadWriteOptions",
   "FileSystemRemoveOptions",
   "FileSystemSyncAccessHandle",

@@ -1,6 +1,6 @@
 //! Remote archive operations -- upload blocks to remote storage.
 
-use crate::{RemoteRepository, RemoteSite, UploadError};
+use crate::{ConnectedReplica, RemoteSite, UploadError};
 use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::{Buffer, ConditionalSync};
@@ -12,7 +12,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 
 /// Remote archive scoped to a remote repository.
 pub struct RemoteArchive<'a> {
-    repository: &'a RemoteRepository,
+    repository: &'a ConnectedReplica,
 }
 
 impl<'a> RemoteArchive<'a> {
@@ -30,7 +30,7 @@ impl<'a> RemoteArchive<'a> {
 
 /// Remote archive index for tree node uploads.
 pub struct RemoteArchiveIndex<'a> {
-    repository: &'a RemoteRepository,
+    repository: &'a ConnectedReplica,
     catalog: CatalogScope,
 }
 
@@ -58,13 +58,18 @@ impl RemoteGet<'_> {
     where
         Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync,
     {
-        let address = self.index.repository.address();
+        let catalog = &self.index.catalog;
+        let hash = self.hash;
         self.index
-            .catalog
-            .clone()
-            .get(self.hash)
-            .fork(address.site())
-            .perform(env)
+            .repository
+            .reach(|address| async move {
+                catalog
+                    .clone()
+                    .get(hash)
+                    .fork(address.site())
+                    .perform(env)
+                    .await
+            })
             .await
     }
 }
@@ -81,13 +86,18 @@ impl RemotePut<'_> {
     where
         Env: Provider<Fork<RemoteSite, Put>> + ConditionalSync,
     {
-        let address = self.index.repository.address();
+        let catalog = &self.index.catalog;
+        let block = &self.block;
         self.index
-            .catalog
-            .clone()
-            .put(self.block)
-            .fork(address.site())
-            .perform(env)
+            .repository
+            .reach(|address| async move {
+                catalog
+                    .clone()
+                    .put(block.clone())
+                    .fork(address.site())
+                    .perform(env)
+                    .await
+            })
             .await
     }
 }
@@ -140,7 +150,7 @@ where
     }
 }
 
-impl RemoteRepository {
+impl ConnectedReplica {
     /// Get the remote archive for this repository.
     pub fn archive(&self) -> RemoteArchive<'_> {
         RemoteArchive { repository: self }
