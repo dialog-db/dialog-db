@@ -9,7 +9,7 @@
 //! addresses afresh.
 
 use dialog_capability::identity::Entity;
-use dialog_capability::{Capability, Policy as _, Provider};
+use dialog_capability::{Capability, Did, Policy as _, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::peer::{AddAddress, Connect, Find, PeerConnection, PeerError, SetName};
 use dialog_repository::contacts;
@@ -62,6 +62,21 @@ where
     }
 }
 
+impl<S: Clone, M: Mode> Peer<S, M> {
+    /// Refuse contacts asked of any subject but this peer's own: they are
+    /// kept in its state, which holds no other subject's.
+    fn own_contacts(&self, subject: &Did) -> Result<(), PeerError> {
+        if subject == self.home() {
+            Ok(())
+        } else {
+            Err(PeerError::Foreign {
+                subject: subject.to_string(),
+                home: self.home().to_string(),
+            })
+        }
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<AddAddress> for Peer<S, M>
@@ -70,6 +85,7 @@ where
     Self: RegistryEnv + ConditionalSend,
 {
     async fn execute(&self, input: Capability<AddAddress>) -> Result<(), PeerError> {
+        self.own_contacts(input.subject())?;
         let AddAddress { peer, address } = AddAddress::of(&input).clone();
         self.write_contacts(|state| {
             let (peer, address) = (&peer, &address);
@@ -89,6 +105,7 @@ where
     Self: RegistryEnv + ConditionalSend,
 {
     async fn execute(&self, input: Capability<SetName>) -> Result<(), PeerError> {
+        self.own_contacts(input.subject())?;
         let SetName { peer, name } = SetName::of(&input).clone();
         self.write_contacts(|state| {
             let (peer, name) = (&peer, &name);
@@ -106,6 +123,7 @@ where
     Self: RegistryEnv + ConditionalSend,
 {
     async fn execute(&self, input: Capability<Find>) -> Result<Vec<Entity>, PeerError> {
+        self.own_contacts(input.subject())?;
         let name = &Find::of(&input).name;
         let state = self.contacts().await?;
         contacts::find(state, name, self)
@@ -122,6 +140,7 @@ where
     Self: RegistryEnv + ConditionalSend,
 {
     async fn execute(&self, input: Capability<Connect>) -> Result<PeerConnection, PeerError> {
+        self.own_contacts(input.subject())?;
         let peer = &Connect::of(&input).peer;
         if let Some(connection) = self.connections().lock().get(peer) {
             return Ok(connection.clone());
