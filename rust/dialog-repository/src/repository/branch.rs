@@ -1,6 +1,6 @@
 use super::memory::Cell;
 use crate::rules::SharedRuleCache;
-use crate::{ResolveError, Revision};
+use crate::{Ephemeral, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory;
@@ -54,9 +54,6 @@ mod metadata;
 
 mod open;
 pub use open::*;
-
-mod overlay;
-pub use overlay::*;
 
 mod pull;
 pub use pull::*;
@@ -142,11 +139,11 @@ pub struct Branch {
     /// every query's durable rule resolution, so the `dialog.rule/*` scan is
     /// paid once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
-    /// Transient session overlay: ephemeral facts folded into every
-    /// read of this branch, never committed. Shared across clones
-    /// like the caches; mutations bump an epoch subscriptions gate
-    /// on. See [`Overlay`].
-    overlay: Overlay,
+    /// The branch's ephemeral line: session facts folded into every
+    /// read of this branch, never committed. Shared across clones like
+    /// the caches; every change mints an instant subscriptions
+    /// maintain from. See [`Ephemeral`].
+    overlay: Ephemeral,
     /// Shared plan cache for the deductive rules resolved on this branch,
     /// keyed by content-addressed `(rule, adornment)`. Handed to each
     /// per-query `ConceptRules` assembly so a re-assembled rule set reuses
@@ -205,6 +202,13 @@ impl Branch {
     /// Returns the branch name.
     pub fn name(&self) -> &str {
         self.reference.name()
+    }
+
+    /// The branch's ephemeral line: assert or retract session facts
+    /// that every read of this branch observes but no commit
+    /// persists. See [`Ephemeral`].
+    pub fn overlay(&self) -> &Ephemeral {
+        &self.overlay
     }
 
     /// Returns the current revision of this branch, or `None` if the branch
