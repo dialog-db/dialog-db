@@ -132,7 +132,9 @@ pub async fn record<Env: RegistryEnv>(
     write(registry, operator, name, env, Written::Asserted).await
 }
 
-/// Forget `name`, so it stops being listed.
+/// Forget `name`, so it stops being listed, along with every branch it
+/// pulls from and pushes to: a branch created again under the name is a
+/// new branch, and starts with none.
 ///
 /// The caller retracts the branch's cells first: this half is what a
 /// listing reads, so retracting it last means a failure part-way leaves
@@ -167,10 +169,52 @@ async fn write<Env: RegistryEnv>(
     let mut changes = Changes::new();
     match written {
         Written::Asserted => record.assert(&mut changes),
-        Written::Retracted => record.retract(&mut changes),
+        Written::Retracted => {
+            let (pulls, pushes) = relations(registry, &record, env).await?;
+            for pull in pulls {
+                pull.retract(&mut changes);
+            }
+            for push in pushes {
+                push.retract(&mut changes);
+            }
+            record.retract(&mut changes);
+        }
     }
 
     apply(registry, changes, env).await
+}
+
+/// Every pull and push relation recorded from `branch`.
+async fn relations<Env: RegistryEnv>(
+    registry: &Branch,
+    branch: &BranchConcept,
+    env: &Env,
+) -> Result<(Vec<BranchPull>, Vec<BranchPush>), CommitError> {
+    let pulls = Box::pin(
+        registry
+            .query()
+            .select(Query::<BranchPull> {
+                this: branch.this.clone().into(),
+                pull: Term::var("pull"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await
+    .map_err(|error| CommitError::Registry(error.to_string()))?;
+    let pushes = Box::pin(
+        registry
+            .query()
+            .select(Query::<BranchPush> {
+                this: branch.this.clone().into(),
+                push: Term::var("push"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await
+    .map_err(|error| CommitError::Registry(error.to_string()))?;
+    Ok((pulls, pushes))
 }
 
 /// Switch the replica `operator` views to the branch `branch`.
