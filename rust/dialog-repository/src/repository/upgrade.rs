@@ -6,9 +6,10 @@
 //! it before it knows anything else about the layout. Storage without
 //! the cell is at version 0, the layout from before versioning.
 //!
-//! Upgrading is explicit. [`Repository::upgrade`] runs every step from
-//! the recorded version up to [`VERSION`] and records the new version
-//! last. A step asserts the same facts however often it runs, so an
+//! Opening or loading a repository upgrades it, and creating one records
+//! the current version, so storage is never read in an older layout.
+//! [`Repository::upgrade`] runs every step from the recorded version up
+//! to [`VERSION`] and records the new version last. A step asserts the same facts however often it runs, so an
 //! upgrade interrupted before it records its version simply runs again.
 //!
 //! # Steps
@@ -22,12 +23,13 @@
 
 use dialog_artifacts::Changes;
 use dialog_capability::{Capability, Did, Provider, Subject};
+use dialog_common::ConditionalSync;
 use dialog_effects::MethodExt as _;
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
-use dialog_effects::memory::List;
 use dialog_effects::memory::prelude::{
     ListSpaceExt as _, MemoryExt as _, SpaceExt as _, SpaceScope,
 };
+use dialog_effects::memory::{List, Publish};
 use dialog_query::Statement as _;
 use dialog_varsig::Principal;
 
@@ -35,8 +37,8 @@ use super::branch::upstream::legacy;
 use crate::registry::{RegistryEnv, apply, pull, push};
 use crate::schema::{Peer, PeerAddress, Replica};
 use crate::{
-    Branch, Cell, RemoteAddress, RemoteEdition, Repository, RepositoryMemoryExt as _, Resolved,
-    Route, SiteAddress, Tracking, UpgradeError,
+    Branch, Cell, PublishError, RemoteAddress, RemoteEdition, Repository, RepositoryMemoryExt as _,
+    Resolved, Route, SiteAddress, Tracking, UpgradeError,
 };
 use dialog_artifacts::Entity;
 
@@ -110,6 +112,16 @@ impl Upgrade {
         cell.publish(VERSION).perform(env).await?;
         Ok(Upgraded { from, to: VERSION })
     }
+}
+
+/// Record that storage this release just created is at [`VERSION`], so
+/// no upgrade ever runs over it.
+pub(crate) async fn stamp<Env>(subject: &Subject, env: &Env) -> Result<(), PublishError>
+where
+    Env: Provider<Publish> + ConditionalSync,
+{
+    let cell: Cell<u32> = SpaceScope::new(subject.clone(), SPACE).cell(CELL).into();
+    cell.publish(VERSION).perform(env).await
 }
 
 /// Step 0 → 1: carry remotes and upstreams out of their cells into
@@ -329,6 +341,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::{CELL, SPACE, Upgraded, VERSION};
+    use crate::Repository;
     use crate::RepositoryExt as _;
     use crate::helpers::test_repo;
     use crate::repository::branch::resolve::resolve;
@@ -338,15 +351,33 @@ mod tests {
         TreeReference, UpgradeError,
     };
     use dialog_artifacts::Instruction;
+    use dialog_capability::Provider;
     use dialog_capability::Subject;
+    use dialog_common::ConditionalSync;
+    use dialog_credentials::Credential;
     use dialog_effects::memory::Version;
     use dialog_effects::memory::prelude::{CellScope, SpaceScope};
+    use dialog_effects::memory::{Resolve, Retract};
     use dialog_identity::SpaceHandle;
     use dialog_operator::helpers::{test_operator_with_profile, unique_name};
     use dialog_query::{Output as _, Query, Term};
     use dialog_remote_ucan::UcanAddress;
     use dialog_varsig::did;
     use futures_util::stream;
+
+    /// Take out the version `repo` recorded when it was created, leaving
+    /// its storage as it was before versioning.
+    async fn unversion<Env>(repo: &Repository<Credential>, env: &Env) -> anyhow::Result<()>
+    where
+        Env: Provider<Resolve> + Provider<Retract> + ConditionalSync,
+    {
+        let version: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
+            .cell(CELL)
+            .into();
+        version.resolve().perform(env).await?;
+        version.retract().perform(env).await?;
+        Ok(())
+    }
 
     /// Storage from before versioning is at version 0, and upgrading it
     /// carries the remotes and upstreams stored in cells over into facts.
@@ -376,6 +407,7 @@ mod tests {
 
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        unversion(&repo, &operator).await?;
         let held = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
 
         for (space, cell, content) in [
@@ -572,6 +604,7 @@ mod tests {
     async fn it_upgrades_a_repository_with_nothing_to_carry() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
+        unversion(&repo, &operator).await?;
 
         assert_eq!(
             repo.upgrade().perform(&operator).await?,
@@ -599,6 +632,7 @@ mod tests {
         let cell: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
             .cell(CELL)
             .into();
+        cell.resolve().perform(&operator).await?;
         cell.publish(VERSION + 1).perform(&operator).await?;
 
         let refused = repo.upgrade().perform(&operator).await;
