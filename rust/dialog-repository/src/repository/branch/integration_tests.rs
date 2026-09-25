@@ -1356,6 +1356,63 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
+/// A one-off pull from a remote branch that is not an upstream leaves
+/// what it pulled readable: reads cannot fall back to that remote, so
+/// the pull brings what it adopts.
+#[dialog_common::test]
+async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+
+    let bob_repo = profile
+        .repository(unique_name("bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = connect(
+        &bob_repo,
+        "origin",
+        s3_site_address(&s3),
+        alice_repo.did(),
+        &operator,
+    )
+    .await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+
+    let pulled = bob_branch
+        .pull()
+        .from(remote_branch)
+        .perform(&operator)
+        .await?;
+    assert!(pulled.is_some(), "the pull found Alice's data");
+
+    let results: Vec<_> = bob_branch
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(results.len(), 1, "Bob reads Alice's artifact");
+    Ok(())
+}
+
 /// A retraction must survive a concurrent three-way pull.
 ///
 /// The resurrection scenario observed in the wild: Alice and Bob share

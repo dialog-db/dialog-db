@@ -1530,6 +1530,38 @@ mod tests {
     /// A bare pull takes from every branch the branch pulls from: the
     /// merges land one after another, each onto what the last left, and
     /// the pull answers the head they built.
+    /// An upstream in another repository on this device is that
+    /// repository's branch, not this one's branch of the same name:
+    /// pulling from it brings its commits.
+    #[dialog_common::test]
+    async fn it_pulls_from_a_branch_in_another_local_repository() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let ours = test_repo(&operator, &profile).await;
+        let theirs = test_repo(&operator, &profile).await;
+
+        let source = theirs.branch("main").open().perform(&operator).await?;
+        source
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:theirs".parse()?,
+                is: Value::String("Theirs".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let main = ours.branch("main").open().perform(&operator).await?;
+        main.set_upstream(&source).perform(&operator).await?;
+        let pulled = main.pull().perform(&operator).await?;
+
+        assert_eq!(
+            pulled.map(|revision| revision.tree),
+            source.revision().map(|revision| revision.tree),
+            "the pull adopted the other repository's head"
+        );
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_pulls_from_every_upstream() -> Result<()> {
         use dialog_artifacts::ArtifactSelector;

@@ -857,6 +857,39 @@ mod tests {
         Ok(())
     }
 
+    /// Deleting a branch deletes what it pulls from and pushes to: a
+    /// branch created again under the same name starts with none.
+    #[dialog_common::test]
+    async fn it_forgets_where_a_deleted_branch_pulled_from() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        commit(&operator, &did, "main").await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        let head = commit(&operator, &did, "feature").await?;
+        Subject::from(did.clone())
+            .voider()
+            .branches()
+            .branch("feature")
+            .delete(head)
+            .perform(&operator)
+            .await?;
+
+        let again = repo.branch("feature").open().perform(&operator).await?;
+        let pulled = again.pull().perform(&operator).await;
+        assert!(
+            matches!(
+                pulled,
+                Err(dialog_repository::PullError::BranchHasNoUpstream { .. })
+            ),
+            "{pulled:?}"
+        );
+        Ok(())
+    }
+
     /// The registry holds every other branch's record, so it refuses to
     /// be created or deleted through the same capability.
     #[dialog_common::test]
