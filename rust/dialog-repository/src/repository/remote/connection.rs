@@ -81,3 +81,67 @@ where
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use dialog_artifacts::Entity;
+    use dialog_capability::{Fork, Provider, Subject};
+    use dialog_effects::memory::prelude::CellScope;
+    use dialog_effects::memory::{MemoryError, Publish, Version};
+    use dialog_remote_s3::Address as S3Address;
+    use dialog_varsig::did;
+
+    use crate::{ConnectedReplica, RemoteSite, SiteAddress};
+
+    /// An environment whose every publish at a peer fails on the wire,
+    /// counting how many were sent.
+    #[derive(Default)]
+    struct Timeouts {
+        sent: AtomicUsize,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<Fork<RemoteSite, Publish>> for Timeouts {
+        async fn execute(&self, _input: Fork<RemoteSite, Publish>) -> Result<Version, MemoryError> {
+            self.sent.fetch_add(1, Ordering::Relaxed);
+            Err(MemoryError::Storage("timed out".into()))
+        }
+    }
+
+    fn site(endpoint: &str) -> SiteAddress {
+        S3Address::builder(endpoint)
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()
+            .unwrap()
+            .into()
+    }
+
+    /// A publish is a conditional write: one that failed on the wire may
+    /// have landed, so a connection does not send it to another address.
+    #[dialog_common::test]
+    async fn it_does_not_resend_a_publish_that_may_have_landed() {
+        let subject = did!("key:z6MkkZfZmshVFcBYo9RS6ZyUstxYdjjStQaFaL2TSTVdsiJh");
+        let replica = ConnectedReplica::new(
+            Subject::from(subject.clone()),
+            Entity::new().unwrap(),
+            None,
+            vec![site("https://a.example"), site("https://b.example")],
+            subject.clone(),
+        );
+        let env = Timeouts::default();
+
+        let published = CellScope::new(Subject::from(subject), "branch/main", "revision")
+            .publish(vec![1], None)
+            .perform(&replica.connection(&env))
+            .await;
+        assert!(matches!(published, Err(MemoryError::Storage(_))));
+        assert_eq!(env.sent.load(Ordering::Relaxed), 1);
+    }
+}
