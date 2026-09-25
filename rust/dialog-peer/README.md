@@ -11,9 +11,13 @@ repository its key names. A handle's mode records which key it acts with:
   and opening sessions.
 - `Peer<S, Session>`, made by `peer.session(context)` or by giving the
   builder an `operator`, is the same peer acting with a separate key,
-  within what the peer granted it. It keeps no copy of the peer's key, and
-  every session commits under its own origin, so sessions of one peer
-  never collide.
+  within what the peer granted it. It is never handed a key: not the
+  peer's, and not that of a repository it loads. Every session commits
+  under its own origin, so sessions of one peer never collide.
+
+What a session does at other peers is proven from its grants. Its reads
+and writes of the storage it shares with its peer are not yet: a session
+is a separate signer, not yet a sandbox.
 
 See `notes/peer-and-session.md`.
 

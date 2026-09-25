@@ -95,7 +95,7 @@ impl PeerKey {
 /// A scope some issuer grants the peer at open.
 ///
 /// Made from a capability (claimed by the builder's default issuer, the
-/// parent of a [worker](Peer::worker)), from a [`Claim`] that names its
+/// peer of a [session](Peer::session)), from a [`Claim`] that names its
 /// issuer and carries its window, or from a pre-minted
 /// [`UcanCertificate`] whose audience is the peer's key.
 #[derive(Clone)]
