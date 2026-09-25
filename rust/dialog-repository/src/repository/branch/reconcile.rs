@@ -223,7 +223,7 @@ mod tests {
 
     use crate::helpers::test_repo;
     use crate::registry::RegistryEnv;
-    use crate::{Branch, CommitError, PublishError};
+    use crate::{Branch, CommitError, PublishError, PullError};
     use anyhow::Result;
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_peer::helpers::test_session_with_peer;
@@ -338,6 +338,60 @@ mod tests {
                 Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
             ),
             "{raced:?}"
+        );
+        Ok(())
+    }
+
+    /// A session pulling a branch in the background while it commits to
+    /// the same branch writes under one origin both times. The two take
+    /// turns rather than minting the same edition twice, so both land.
+    #[dialog_common::test]
+    async fn it_lands_a_commit_and_a_pull_of_one_session_together() -> Result<()> {
+        let (session, peer) = test_session_with_peer().await;
+        let repo = test_repo(&session, &peer).await;
+        let main = repo.branch("main").open().perform(&session).await?;
+        main.commit(stream::iter(vec![name("user:a", "Alice")?]))
+            .perform(&session)
+            .await?;
+
+        let syncing = repo.branch("feature").open().perform(&session).await?;
+        syncing.pull_from(&main).perform(&session).await?;
+        syncing.pull().perform(&session).await?;
+        let writing = repo.branch("feature").open().perform(&session).await?;
+
+        main.commit(stream::iter(vec![name("user:b", "Bob")?]))
+            .perform(&session)
+            .await?;
+        let (pulled, committed) = futures_util::join!(
+            syncing.pull().perform(&session),
+            writing
+                .commit(stream::iter(vec![name("user:c", "Carol")?]))
+                .reconcile()
+                .perform(&session),
+        );
+        committed?;
+        // A pull whose head moved under it is refused, as it always is, and
+        // pulled again from the head it missed.
+        if let Err(error) = pulled {
+            assert!(
+                matches!(
+                    error,
+                    PullError::Publish(PublishError::VersionMismatch { .. })
+                ),
+                "{error:?}"
+            );
+            syncing.refresh(&session).await?;
+            syncing.pull().perform(&session).await?;
+        }
+
+        let fresh = repo.branch("feature").open().perform(&session).await?;
+        assert_eq!(
+            names(&fresh, &session).await?,
+            vec![
+                Value::String("Alice".into()),
+                Value::String("Bob".into()),
+                Value::String("Carol".into())
+            ]
         );
         Ok(())
     }
