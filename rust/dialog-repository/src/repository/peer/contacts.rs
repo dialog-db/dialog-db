@@ -3,8 +3,10 @@
 //! The host's environment provides the `peer` effects over these: it
 //! decides where its state lives, and these say what is recorded there.
 //! Contacts are written under the machinery scope, since `dialog.peer/*`
-//! is reserved: only the host writes its own state, so what is recorded
-//! was authorized when it was written.
+//! is reserved, and the environment refuses the effects for any subject
+//! but its own. They are not signed invocations, and a local effect is
+//! not yet proven against its caller's grants: what is recorded is what
+//! code holding the environment wrote.
 
 use dialog_artifacts::{Changes, Entity};
 use dialog_effects::peer::PeerAddress;
