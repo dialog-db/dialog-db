@@ -214,4 +214,27 @@ mod tests {
         ));
         Ok(())
     }
+
+    /// A remote peer is connected to by its DID, and a branch of its
+    /// replica is opened through the connection.
+    #[dialog_common::test]
+    async fn it_connects_to_a_peer_and_opens_a_branch_there() -> anyhow::Result<()> {
+        let (worker, _) = test_session_with_peer().await;
+        contact(did!("web:tonk.network"))
+            .add_address(UcanAddress::new("https://tonk.network/ucan/"))
+            .perform(&worker)
+            .await?;
+
+        let subject = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        let branch = Peer::connect(did!("web:tonk.network"))
+            .repository(subject.clone())
+            .branch("main")
+            .open()
+            .perform(&worker)
+            .await?;
+        assert_eq!(branch.name(), "main");
+        assert_eq!(branch.repository().did(), subject);
+        assert_eq!(branch.repository().peer(), &peer());
+        Ok(())
+    }
 }

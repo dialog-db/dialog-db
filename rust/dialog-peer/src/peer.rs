@@ -73,7 +73,9 @@ use dialog_effects::{archive, blob, credential, memory};
 use dialog_identity::access::Access;
 use dialog_identity::{Authority, CredentialHandle, SpaceHandle};
 use dialog_network::{HydrationScheduler, Network};
-use dialog_repository::{Branch, By, ContactReference, RemoteSite, ReplicaReference, contact};
+use dialog_repository::{
+    Branch, By, ContactConnection, ContactReference, RemoteSite, ReplicaReference, contact,
+};
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
 use dialog_storage::resource::Resource;
@@ -267,6 +269,18 @@ impl Peer<Unset> {
         PeerBuilder::<Unset, Unset, Local>::new(credential.did())
             .issuer(credential.clone())
             .credential(credential)
+    }
+
+    /// Connect to the peer `peer` picks out, by its DID or by the name
+    /// this peer knows it by, to reach the replicas it holds.
+    ///
+    /// Performed against a peer, the connection is found through that
+    /// peer's contacts: `Peer::connect(did).repository(subject)
+    /// .branch("main").open().perform(&peer)` opens a branch of the
+    /// remote peer's replica, whose fetches and publishes reach the remote
+    /// peer at whichever of its addresses answers.
+    pub fn connect(peer: impl Into<By>) -> ContactConnection {
+        contact(peer).connect()
     }
 
     /// Start building a session of the peer `peer`, when its key is not
