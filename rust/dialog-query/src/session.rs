@@ -1172,17 +1172,18 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
+        let operands = person.sorted_operands();
         let free = Match::new();
-        let adornment_free = Adornment::derive(&terms, &free);
-        let env_free = adornment_free.into_environment(&terms);
+        let adornment_free = Adornment::derive(&operands, &terms, &free);
+        let env_free = adornment_free.into_environment(&operands);
         let free_plan = rules.plan(&terms, &free);
 
         let mut bound = Match::new();
         bound
             .bind(&Term::var("e"), Value::from(Entity::new().unwrap()))
             .unwrap();
-        let adornment_bound = Adornment::derive(&terms, &bound);
-        let env_bound = adornment_bound.into_environment(&terms);
+        let adornment_bound = Adornment::derive(&operands, &terms, &bound);
+        let env_bound = adornment_bound.into_environment(&operands);
         let bound_plan = rules.plan(&terms, &bound);
 
         // The entity-bound scope names the concept's `this` field, which
