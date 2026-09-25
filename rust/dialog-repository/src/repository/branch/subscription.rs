@@ -833,7 +833,7 @@ where
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
                 let query_env: QueryEnv<'a, Env> =
-                    QueryEnv::new(vec![Source::Branch(self.branch.clone())], overlay, env)
+                    QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
                         .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
@@ -951,7 +951,7 @@ where
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let mut query_env: QueryEnv<'a, Env> =
-                QueryEnv::new(vec![Source::Branch(self.branch.clone())], overlay, env)
+                QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
                     .with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
@@ -966,14 +966,9 @@ where
             // does (see `crate::repository::fetch`).
             let queue = Provider::<Speculation>::execute(env, ()).await;
             let results = Box::pin(query.clone().perform(&query_env));
-            Driven::new(
-                results,
-                vec![Source::Branch(self.branch.clone())],
-                env,
-                queue,
-            )
-            .try_vec()
-            .await
+            Driven::new(results, vec![Source::from(self.branch.clone())], env, queue)
+                .try_vec()
+                .await
         })
     }
 
@@ -1015,7 +1010,7 @@ where
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let query_env: QueryEnv<'a, Env> =
-                QueryEnv::new(vec![Source::Branch(self.branch.clone())], overlay, env)
+                QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
                     .with_demand(self.demand.clone())
                     .with_fixpoint(
                         concept.this(),
@@ -1025,14 +1020,9 @@ where
             // continuation's reads warm through the ambient queue.
             let queue = Provider::<Speculation>::execute(env, ()).await;
             let results = Box::pin(self.query.clone().perform(&query_env));
-            Driven::new(
-                results,
-                vec![Source::Branch(self.branch.clone())],
-                env,
-                queue,
-            )
-            .try_vec()
-            .await
+            Driven::new(results, vec![Source::from(self.branch.clone())], env, queue)
+                .try_vec()
+                .await
         })
     }
 }
