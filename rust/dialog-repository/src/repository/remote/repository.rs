@@ -138,11 +138,25 @@ impl ConnectedReplica {
     /// the next address reaches the same peer, which would say the same.
     /// Only an address that could not be reached is passed over. When
     /// none can be, the last one's error is returned.
-    pub(crate) async fn reach<T, E, F, Fut>(&self, mut request: F) -> Result<T, E>
+    pub(crate) async fn reach<T, E, F, Fut>(&self, request: F) -> Result<T, E>
     where
         F: FnMut(RemoteAddress) -> Fut,
         Fut: Future<Output = Result<T, E>>,
         E: Unreachable,
+    {
+        self.reach_unless(E::unreachable, request).await
+    }
+
+    /// [`reach`](Self::reach), passing a failure on to the next address
+    /// only when `elsewhere` says the request may be sent there.
+    pub(crate) async fn reach_unless<T, E, F, Fut>(
+        &self,
+        elsewhere: impl Fn(&E) -> bool,
+        mut request: F,
+    ) -> Result<T, E>
+    where
+        F: FnMut(RemoteAddress) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
     {
         let count = self.addresses.len();
         let first = self.answered.load(Ordering::Relaxed) % count;
@@ -150,10 +164,10 @@ impl ConnectedReplica {
         loop {
             let result = request(self.at(index)).await;
             match &result {
-                Err(error) if error.unreachable() && (index + 1) % count != first => {
+                Err(error) if elsewhere(error) && (index + 1) % count != first => {
                     index = (index + 1) % count;
                 }
-                Err(error) if error.unreachable() => return result,
+                Err(error) if elsewhere(error) => return result,
                 _ => {
                     self.answered.store(index, Ordering::Relaxed);
                     return result;
