@@ -144,7 +144,7 @@ impl<'a> SourceRef<'a> {
     /// the peer is unreachable instead of a bare not-found.
     pub(crate) fn fallback(self) -> RemoteFallback {
         match self {
-            SourceRef::Branch(branch) => branch.upstreams().fallback(),
+            SourceRef::Branch(branch) => branch.fallback(),
             SourceRef::Snapshot(_) => RemoteFallback::None,
         }
     }
