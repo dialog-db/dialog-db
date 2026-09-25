@@ -457,10 +457,30 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
         let mut grants = Vec::with_capacity(self.allowed.len());
         for allowance in self.allowed {
             let grant = match allowance.kind {
-                AllowanceKind::Certificate(certificate) => Grant {
-                    issuer: certificate.0.issuer().clone(),
-                    certificate,
-                },
+                AllowanceKind::Certificate(certificate) => {
+                    // A certificate is this peer's authority only when it
+                    // was issued to this peer's key and still holds.
+                    if *certificate.0.audience() != audience {
+                        return Err(PeerError::Certificate(format!(
+                            "the certificate from {} is issued to {}, not to {audience}",
+                            certificate.0.issuer(),
+                            certificate.0.audience()
+                        )));
+                    }
+                    if let Some(expiration) = certificate.0.expiration()
+                        && expiration <= Timestamp::now()
+                    {
+                        return Err(PeerError::Certificate(format!(
+                            "the certificate from {} expired at {}",
+                            certificate.0.issuer(),
+                            expiration.to_unix()
+                        )));
+                    }
+                    Grant {
+                        issuer: certificate.0.issuer().clone(),
+                        certificate,
+                    }
+                }
                 AllowanceKind::Scope {
                     scope,
                     issuer,
@@ -575,4 +595,8 @@ pub enum PeerError {
     /// Minting a grant or opening the state branch failed.
     #[error("Delegation error: {0}")]
     Delegation(String),
+
+    /// A certificate given as a grant is not this peer's authority.
+    #[error("Certificate error: {0}")]
+    Certificate(String),
 }
