@@ -1608,4 +1608,42 @@ mod tests {
         }
         Ok(())
     }
+
+    /// Pushing to many upstreams at once, every push records how far it
+    /// got, however contended the record is: a push whose record was
+    /// dropped would find its target moved past the recorded base next
+    /// time, and be refused as not a fast-forward for good.
+    #[dialog_common::test]
+    async fn it_records_every_push_of_a_concurrent_push() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        let names = ["one", "two", "three", "four", "five"];
+        for name in names {
+            let target = repo.branch(name).open().perform(&operator).await?;
+            feature.push_to(&target).perform(&operator).await?;
+        }
+        for value in ["Alice", "Bob"] {
+            feature
+                .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                    the: "user/name".parse()?,
+                    of: format!("user:{value}").parse()?,
+                    is: Value::String(value.into()),
+                    cause: None,
+                })]))
+                .perform(&operator)
+                .await?;
+            feature.push().perform(&operator).await?;
+            let head = feature.revision().expect("committed");
+            for name in names {
+                assert_eq!(
+                    feature.tracked().get(&crate::Target::Local(name.into())),
+                    Some(&head.tree),
+                    "the push of {value} to {name} recorded how far it got"
+                );
+            }
+        }
+        Ok(())
+    }
 }
