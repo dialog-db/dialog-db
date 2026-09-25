@@ -45,7 +45,8 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, AttributeKey, Changes, DialogArtifactsError,
-    Entity, EntityKey, Instruction, Key, Select, SortKey, Statement, ValueKey, default_sort_key,
+    Entity, EntityKey, Instruction, Key, Select, SortKey, Statement, Update, ValueKey,
+    default_sort_key,
 };
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash;
@@ -302,6 +303,28 @@ impl Ephemeral {
         state.mint(delta)
     }
 
+    /// Everything this line holds, as one batch: each tombstone as the
+    /// retraction that hides its fact beneath, then each held fact as an
+    /// assertion. The batch serializes (see [`Changes`]), so a session can
+    /// outlive the process holding it: export, carry the bytes, and
+    /// [`apply`](Self::apply) them to a successor's line, which reproduces
+    /// both the facts and the tombstones as one instant.
+    pub fn export(&self) -> Changes {
+        let state = self.state.read();
+        let mut changes = Changes::new();
+        for fact in state.shadowed.values() {
+            changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
+        }
+        // Every fact sits under three keys; export each once.
+        let mut exported = HashSet::new();
+        for fact in state.facts.values() {
+            if exported.insert((fact.of.clone(), fact.the.clone(), fact.is.to_bytes())) {
+                changes.associate(fact.the.clone(), fact.of.clone(), fact.is.clone());
+            }
+        }
+        changes
+    }
+
     /// Drop every fact and tombstone recorded for entities that fail
     /// `keep`, outright rather than by tombstoning. The
     /// garbage-collection primitive for per-client facts keyed by
@@ -435,7 +458,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_artifacts::{Update as _, Value};
+    use dialog_artifacts::Value;
     use dialog_query::the;
 
     fn fact(of: &str, the_: &str, is: &str) -> Artifact {
@@ -515,6 +538,44 @@ mod tests {
             vec![Value::String("C".into())]
         );
         assert_eq!(line.revision().sequence, 3);
+    }
+
+    #[dialog_common::test]
+    fn it_exports_held_facts_and_tombstones_for_another_line() {
+        let source = Ephemeral::new();
+        source.assert(
+            the!("person/name")
+                .of("id:a".parse().unwrap())
+                .is("A".to_string()),
+        );
+        source.assert(
+            the!("person/name")
+                .of("id:a".parse().unwrap())
+                .is("Ann".to_string()),
+        );
+        source.retract(
+            the!("person/name")
+                .of("id:b".parse().unwrap())
+                .is("B".to_string()),
+        );
+
+        let exported = source.export();
+        let target = Ephemeral::new();
+        let restored = target.apply(exported).expect("a restore mints");
+        assert_eq!(
+            restored.sequence, 1,
+            "the whole session lands as one instant"
+        );
+        assert_eq!(target.len(), source.len(), "each held fact once");
+        assert_eq!(
+            values(&target, "id:a", "person/name"),
+            values(&source, "id:a", "person/name")
+        );
+        assert_eq!(
+            *target.tombstones(),
+            *source.tombstones(),
+            "the tombstone hiding id:b travels too"
+        );
     }
 
     #[dialog_common::test]
