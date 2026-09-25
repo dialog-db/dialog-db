@@ -217,6 +217,8 @@ mod tests {
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_credentials::Extractable;
+    use dialog_credentials::key::ExtractableKey;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::StreamExt;
@@ -265,7 +267,9 @@ mod tests {
 
         // Generate the keypair first, derive the space name from the
         // last 8 chars of its did:key, then create with that same signer.
-        let signer = Ed25519Signer::generate().await.unwrap();
+        let signer = <Ed25519Signer<Extractable> as ExtractableKey>::generate()
+            .await
+            .unwrap();
         let did = signer.did().to_string();
         let name = did[did.len() - 8..].to_string();
 

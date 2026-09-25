@@ -239,6 +239,15 @@ pub mod space {
         pub String,
     );
 
+    /// `dialog.space/key` — the repository's signing key, sealed to the
+    /// account it delegates to. Only that account opens it.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Key(
+        /// The sealed key.
+        pub Vec<u8>,
+    );
+
     /// `dialog.space/address` — where the repository is stored, as the
     /// URI of its storage location (`file:///path/name`,
     /// `file:profile/name`).
@@ -701,6 +710,15 @@ pub struct Space {
     pub name: space::Name,
     /// Where it is stored.
     pub address: space::Address,
+}
+
+/// A repository's signing key, sealed to the account it delegates to.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SpaceKey {
+    /// The repository's entity: its DID.
+    pub this: Entity,
+    /// The sealed key.
+    pub key: space::Key,
 }
 
 /// A contact: a peer the host knows by name.
