@@ -17,7 +17,7 @@
 use dialog_capability::identity::Entity;
 use dialog_capability::{Capability, Constraint};
 
-use super::{AddAddress, Connect, Find, PeerAddress, Peers, SetName};
+use super::{AddAddress, Connect, Find, PeerAddress, Peers, RemoveAddress, RemoveName, SetName};
 use crate::{Method, method};
 
 /// Scope a method to the host's peers.
@@ -44,6 +44,10 @@ pub trait WritePeersExt {
     fn add_address(self, peer: Entity, address: PeerAddress) -> Capability<AddAddress>;
     /// Give `peer` the name it is known by.
     fn set_name(self, peer: Entity, name: impl Into<String>) -> Capability<SetName>;
+    /// Record that `peer` is no longer reached at `address`.
+    fn remove_address(self, peer: Entity, address: PeerAddress) -> Capability<RemoveAddress>;
+    /// Take back the name `peer` is known by.
+    fn remove_name(self, peer: Entity) -> Capability<RemoveName>;
 }
 
 impl WritePeersExt for Capability<Peers<method::Put>> {
@@ -56,6 +60,14 @@ impl WritePeersExt for Capability<Peers<method::Put>> {
             peer,
             name: name.into(),
         })
+    }
+
+    fn remove_address(self, peer: Entity, address: PeerAddress) -> Capability<RemoveAddress> {
+        self.invoke(RemoveAddress { peer, address })
+    }
+
+    fn remove_name(self, peer: Entity) -> Capability<RemoveName> {
+        self.invoke(RemoveName { peer })
     }
 }
 
