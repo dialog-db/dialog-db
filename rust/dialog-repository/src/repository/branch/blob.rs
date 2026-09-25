@@ -692,7 +692,7 @@ mod tests {
     async fn it_writes_a_blob_and_reads_it_back_by_entity() -> Result<()> {
         let storage = Storage::volatile();
         let profile = open_peer(storage.clone(), Location::profile(unique_name("blob"))).await?;
-        let operator = profile.worker(b"test").allow(Subject::any()).await?;
+        let operator = profile.session(b"test").allow(Subject::any()).await?;
         let repo = profile
             .space(unique_name("repo"))
             .open()
@@ -749,7 +749,7 @@ mod tests {
             Location::profile(unique_name("blob-retract")),
         )
         .await?;
-        let operator = profile.worker(b"test").allow(Subject::any()).await?;
+        let operator = profile.session(b"test").allow(Subject::any()).await?;
         let repo = profile
             .space(unique_name("repo"))
             .open()
@@ -819,7 +819,7 @@ mod tests {
             Location::profile(unique_name("blob-reject")),
         )
         .await?;
-        let operator = profile.worker(b"test").allow(Subject::any()).await?;
+        let operator = profile.session(b"test").allow(Subject::any()).await?;
         let repo = profile
             .space(unique_name("repo"))
             .open()

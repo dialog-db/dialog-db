@@ -410,10 +410,12 @@ mod tests {
         UcanDelegation::new(DelegationChain::new(delegation))
     }
 
-    async fn open_branch(name: &str) -> Result<(crate::Branch, Peer<VolatileSpace>)> {
+    async fn open_branch(
+        name: &str,
+    ) -> Result<(crate::Branch, Peer<VolatileSpace, dialog_peer::Session>)> {
         let storage = Storage::volatile();
         let profile = open_peer(storage.clone(), Location::profile(unique_name(name))).await?;
-        let operator = profile.worker(b"test").allow(Subject::any()).await?;
+        let operator = profile.session(b"test").allow(Subject::any()).await?;
         let repo = profile
             .space(unique_name("repo"))
             .open()

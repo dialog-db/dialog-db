@@ -4,7 +4,7 @@
 //! delegates execution to the network layer. The site's own fork
 //! wrapper fetches identity from the env via `authority::Identify`.
 
-use super::Peer;
+use super::{Mode, Peer};
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Effect, Fork, ForkInvocation, Provider, Site, SiteFork};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -27,7 +27,7 @@ impl<T, E: From<AuthorizeError>> FromAuthError for Result<T, E> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<A, At, Fx> Provider<Fork<At, Fx>> for Peer<A>
+impl<A, At, Fx, M: Mode> Provider<Fork<At, Fx>> for Peer<A, M>
 where
     // The peer's storage provider type
     A: Clone + ConditionalSend + ConditionalSync + 'static,

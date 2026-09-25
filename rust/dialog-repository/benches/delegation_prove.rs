@@ -20,8 +20,8 @@ use dialog_capability::access::Access as AccessAttenuation;
 use dialog_capability::access::{CertificateStore, Prove, TimeRange};
 use dialog_credentials::Ed25519Signer;
 use dialog_effects::storage::{Directory, Location};
-use dialog_peer::Peer;
 use dialog_peer::helpers::open_peer;
+use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, RepositoryExt as _};
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::provider::{FileSystem, Volatile};
@@ -54,13 +54,13 @@ fn scope(subject: &Did) -> Scope {
     }
 }
 
-async fn open_branch(name: &str) -> (Branch, Peer<VolatileSpace>) {
+async fn open_branch(name: &str) -> (Branch, Peer<VolatileSpace, Session>) {
     let storage = Storage::volatile();
     let profile = open_peer(storage.clone(), Location::profile(name.to_string()))
         .await
         .unwrap();
     let operator = profile
-        .worker(b"bench")
+        .session(b"bench")
         .allow(Subject::any())
         .await
         .unwrap();
@@ -81,7 +81,7 @@ async fn operator_with_retained(
     space: &Ed25519Signer,
     holder: &Ed25519Signer,
     n: usize,
-) -> Peer<VolatileSpace> {
+) -> Peer<VolatileSpace, Session> {
     use dialog_capability::access::Retain;
     let storage = Storage::volatile();
     let profile = open_peer(
@@ -91,7 +91,7 @@ async fn operator_with_retained(
     .await
     .unwrap();
     let operator = profile
-        .worker(b"bench")
+        .session(b"bench")
         .allow(Subject::any())
         .await
         .unwrap();
@@ -112,7 +112,7 @@ struct Backends {
     fs: FileSystem,
     volatile: Volatile,
     branch: Branch,
-    operator: Peer<VolatileSpace>,
+    operator: Peer<VolatileSpace, Session>,
 }
 
 async fn populate(name: &str, chains: Vec<UcanDelegation>) -> Backends {

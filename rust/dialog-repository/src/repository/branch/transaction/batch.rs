@@ -572,7 +572,10 @@ mod tests {
         })
     }
 
-    async fn bodies(branch: &Branch, operator: &Peer<VolatileSpace>) -> Result<Vec<String>> {
+    async fn bodies(
+        branch: &Branch,
+        operator: &Peer<VolatileSpace, dialog_peer::Session>,
+    ) -> Result<Vec<String>> {
         let mut bodies: Vec<String> = branch
             .query()
             .select(Query::<Note> {

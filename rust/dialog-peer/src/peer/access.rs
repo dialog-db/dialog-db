@@ -32,7 +32,7 @@
 //! does not want proving to pay download latency materializes the branch
 //! up front with `Branch::download`.
 
-use super::{Grant, Peer};
+use super::{Grant, Local, Mode, Peer};
 use dialog_capability::access::{
     Access, Authorize, AuthorizeError, Certificate as _, Export, Proof as _, Protocol, Prove,
     Retain, Scope as _, TimeRange,
@@ -121,19 +121,19 @@ impl<T> LocalEnv for T where
 /// would otherwise open. Before the reach is installed (during build)
 /// and offline, the forks degrade to reporting content unavailable, and
 /// the walk skips what it cannot read.
-struct AccessEnv<S: Clone> {
-    operator: Peer<S>,
+struct AccessEnv<S: Clone, M: Mode = Local> {
+    operator: Peer<S, M>,
 }
 
 macro_rules! delegate_local {
     ($($effect:ty),+ $(,)?) => {$(
         #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-        impl<S> Provider<$effect> for AccessEnv<S>
+        impl<S, M: Mode> Provider<$effect> for AccessEnv<S, M>
         where
             S: Clone + ConditionalSend + ConditionalSync + 'static,
             <$effect as Command>::Input: ConditionalSend,
-            Peer<S>: Provider<$effect> + ConditionalSync,
+            Peer<S, M>: Provider<$effect> + ConditionalSync,
         {
             async fn execute(
                 &self,
@@ -151,7 +151,7 @@ delegate_local!(
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Fork<RemoteSite, Get>> for AccessEnv<S>
+impl<S, M: Mode> Provider<Fork<RemoteSite, Get>> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: ConditionalSync,
@@ -178,7 +178,7 @@ where
 // fetch, so its work is not interchangeable with an ordinary read's.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<dialog_repository::Hydrate> for AccessEnv<S>
+impl<S, M: Mode> Provider<dialog_repository::Hydrate> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
@@ -193,7 +193,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Fork<RemoteSite, Resolve>> for AccessEnv<S>
+impl<S, M: Mode> Provider<Fork<RemoteSite, Resolve>> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: ConditionalSync,
@@ -211,7 +211,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Fork<RemoteSite, BlobRead>> for AccessEnv<S>
+impl<S, M: Mode> Provider<Fork<RemoteSite, BlobRead>> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: ConditionalSync,
@@ -229,7 +229,7 @@ where
     }
 }
 
-impl<S: Clone> Peer<S> {
+impl<S: Clone, M: Mode> Peer<S, M> {
     /// The number of chains currently cached (for tests).
     #[cfg(test)]
     pub(crate) fn cached_chains(&self) -> usize {
@@ -446,7 +446,7 @@ impl<S: Clone> Peer<S> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Prove<Ucan>> for Peer<S>
+impl<S, M: Mode> Provider<Prove<Ucan>> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: LocalEnv + ConditionalSend,
@@ -461,7 +461,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Retain<Ucan>> for Peer<S>
+impl<S, M: Mode> Provider<Retain<Ucan>> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: LocalEnv + ConditionalSend,
@@ -518,7 +518,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S, P> Provider<Export<P>> for Peer<S>
+impl<S, P, M: Mode> Provider<Export<P>> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     P: Protocol,
@@ -538,7 +538,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Authorize<Ucan>> for Peer<S>
+impl<S, M: Mode> Provider<Authorize<Ucan>> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: LocalEnv + ConditionalSend,
@@ -567,7 +567,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::Peer;
+    use crate::{Mode, Peer, Session};
     use dialog_effects::storage::Location;
 
     use crate::helpers::{open_peer, unique_name};
@@ -586,12 +586,12 @@ mod tests {
         unique_name(prefix)
     }
 
-    async fn operator(name: &str) -> (Peer<VolatileSpace>, Peer<VolatileSpace>) {
+    async fn operator(name: &str) -> (Peer<VolatileSpace, Session>, Peer<VolatileSpace>) {
         let storage = Storage::volatile();
         let profile = open_peer(storage.clone(), Location::profile(unique(name)))
             .await
             .unwrap();
-        let operator = profile.worker(b"test").await.unwrap();
+        let operator = profile.session(b"test").await.unwrap();
         (operator, profile)
     }
 
@@ -604,7 +604,7 @@ mod tests {
     }
 
     async fn retain_grant(
-        operator: &Peer<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         space: &Ed25519Signer,
         holder: &Ed25519Signer,
         expiration: Option<Timestamp>,
@@ -646,7 +646,7 @@ mod tests {
         let storage = Storage::volatile();
         let profile =
             open_peer(storage.clone(), Location::profile(unique("access-branch"))).await?;
-        let operator = profile.worker(b"test").branch("account/test").await?;
+        let operator = profile.session(b"test").branch("account/test").await?;
 
         let space = Ed25519Signer::generate().await?;
         let holder = Ed25519Signer::generate().await?;
@@ -985,7 +985,11 @@ mod tests {
             let profile = open_peer(storage.clone(), Location::profile(unique("no-residue")))
                 .await
                 .unwrap();
-            let operator = profile.worker(b"test").allow(Subject::any()).await.unwrap();
+            let operator = profile
+                .session(b"test")
+                .allow(Subject::any())
+                .await
+                .unwrap();
             (operator, profile)
         };
 
@@ -1037,7 +1041,11 @@ mod tests {
             let profile = open_peer(storage.clone(), Location::profile(unique("compose")))
                 .await
                 .unwrap();
-            let operator = profile.worker(b"test").allow(Subject::any()).await.unwrap();
+            let operator = profile
+                .session(b"test")
+                .allow(Subject::any())
+                .await
+                .unwrap();
             (operator, profile)
         };
         let space = Ed25519Signer::generate().await?;
@@ -1065,7 +1073,7 @@ mod tests {
         assert_eq!(proof.proofs().len(), 2);
         Ok(())
     }
-    async fn retained_count(operator: &Peer<VolatileSpace>) -> Result<usize> {
+    async fn retained_count(operator: &Peer<VolatileSpace, impl Mode>) -> Result<usize> {
         use futures_util::TryStreamExt as _;
         let rows: Vec<_> = operator
             .delegations()?
@@ -1086,7 +1094,7 @@ mod tests {
             Location::profile(unique("bounded-session")),
         )
         .await?;
-        let setup = profile.worker(b"setup").await?;
+        let setup = profile.session(b"setup").await?;
         let space = Ed25519Signer::generate().await?;
         let now = now_s();
         let upstream_end = now + 7200;
@@ -1112,7 +1120,7 @@ mod tests {
             .await?;
         for session_end in [now + 3600, now + 10800, now - 60] {
             let operator = profile
-                .worker(session_end.to_le_bytes())
+                .session(session_end.to_le_bytes())
                 .allow(
                     profile
                         .access()
@@ -1170,7 +1178,7 @@ mod tests {
         .await?;
         let now = now_s();
         let operator = profile
-            .worker(b"test")
+            .session(b"test")
             .allow(
                 profile
                     .access()

@@ -1,34 +1,34 @@
-//! Peer — the runtime capability environment: one acting key over a
-//! storage, a network, and the branch of a repository that holds the
-//! peer's own state.
+//! Peer — the runtime capability environment: a peer's replicas over a
+//! storage and a network, acted on with one key.
 //!
-//! A root peer acts with the key its home repository is named by and
-//! proves from that repository's branch. A worker is a peer built over a
-//! derived (or supplied) key with grants from another peer, sharing that
-//! peer's storage and, usually, its home. Either is the environment every
-//! `perform` takes; there is no second type. The difference between them
-//! is what they hold, not what they are: grants, and whether a state
-//! branch is attached. See `notes/peer-and-session.md`.
+//! Every handle represents a peer: the owner of the replicas it opens and
+//! commits to, with its own state in a branch of the repository its key
+//! names. What differs is the key a handle acts with, which its mode
+//! records ([`Local`] or [`Session`]):
+//!
+//! - [`Peer::new`] builds a [`Local`] handle acting with the peer's own
+//!   key. It can do anything the peer can, including granting and opening
+//!   sessions.
+//! - [`Peer::session`], or [`operator`](PeerBuilder::operator) on the
+//!   builder, builds a [`Session`]: the same peer, acting with a separate
+//!   key within what the peer granted it. It keeps no copy of the peer's
+//!   key, so it cannot sign as the peer. Every session commits under its
+//!   own origin, so sessions of one peer never collide.
+//!
+//! Either is the environment every `perform` takes. See
+//! `notes/peer-and-session.md`.
 //!
 //! ```no_run
 //! # use dialog_capability::Subject;
-//! # use dialog_effects::storage::Location;
-//! # use dialog_identity::{ClaimExt as _, OpenCredential};
+//! # use dialog_identity::OpenCredential;
 //! # use dialog_peer::Peer;
 //! # use dialog_storage::provider::storage::{Storage, VolatileSpace};
-//! # use dialog_varsig::Principal as _;
 //! # async fn example() -> anyhow::Result<()> {
 //! let storage = Storage::<VolatileSpace>::volatile();
 //! let credential = OpenCredential::open("alice").perform(&storage).await?;
-//! let alice = Peer::open(credential.did())
-//!     .credential(credential)
-//!     .storage(storage)
-//!     .await?;
+//! let alice = Peer::new(credential).storage(storage).await?;
 //!
-//! let job = alice
-//!     .worker(b"refactor")
-//!     .allow(Subject::any().claim(alice.credential()))
-//!     .await?;
+//! let job = alice.session(b"refactor").allow(Subject::any()).await?;
 //! # let _ = job;
 //! # Ok(())
 //! # }
@@ -40,6 +40,7 @@ mod builder;
 mod contact;
 mod fork;
 mod hydrate;
+mod mode;
 mod open;
 mod preload;
 mod runtime;
@@ -48,12 +49,14 @@ mod space;
 mod test;
 
 pub use builder::{Allowance, OpenFuture, PeerBuilder, PeerError, PeerKey, Unset};
+pub use mode::{Local, Mode, Session};
 pub use open::OpenPeer;
 pub use runtime::Runtime;
 
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
@@ -163,7 +166,7 @@ pub(crate) struct Grant {
 /// state branch and connections. Build one with [`Peer::open`]; derive a worker with
 /// [`Peer::worker`].
 #[derive(Provider, Clone)]
-pub struct Peer<S: Clone> {
+pub struct Peer<S: Clone, M: Mode = Local> {
     #[provide(Identify, Attest)]
     /// Provider for authority effects (identity and attestation).
     authority: Authority,
@@ -195,6 +198,9 @@ pub struct Peer<S: Clone> {
     /// closures — the proof that authorizes a fetch must resolve from
     /// what is already local, or the recursion would never bottom out.
     reach: Arc<OnceLock<WalkReach>>,
+
+    /// Which key the handle acts with: the peer's own, or a session's.
+    mode: PhantomData<M>,
 }
 
 pub(crate) struct Inner {
@@ -236,7 +242,7 @@ pub(crate) struct Inner {
     connections: Mutex<HashMap<Entity, PeerConnection>>,
 }
 
-impl<S: Clone> fmt::Debug for Peer<S> {
+impl<S: Clone, M: Mode> fmt::Debug for Peer<S, M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Peer")
             .field("did", &self.did())
@@ -248,16 +254,30 @@ impl<S: Clone> fmt::Debug for Peer<S> {
 }
 
 impl Peer<Unset> {
-    /// Start building a peer whose own state lives in the repository
-    /// `home`: the peer's own DID for a root peer, the parent's for a
-    /// worker. The builder takes the key, the storage, and what else the
-    /// peer needs; awaiting it opens the peer.
-    pub fn open(home: impl Into<Did>) -> PeerBuilder {
-        PeerBuilder::new(home.into())
+    /// Start building the peer `credential` is the key of, acting with
+    /// that key. Its home is the repository the key names. Give it an
+    /// [`operator`](PeerBuilder::operator) or a
+    /// [`session`](PeerBuilder::session) to act with a separate key
+    /// instead.
+    // The builder is how a peer is made: `Peer::new(credential)` names
+    // what is being built, and awaiting the builder opens it.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(credential: impl Into<SignerCredential>) -> PeerBuilder<PeerKey> {
+        let credential = credential.into();
+        PeerBuilder::<Unset, Unset, Local>::new(credential.did())
+            .issuer(credential.clone())
+            .credential(credential)
+    }
+
+    /// Start building a session of the peer `peer`, when its key is not
+    /// at hand: an [`operator`](PeerBuilder::operator) key acting under
+    /// grants the peer issued, given as pre-minted certificates.
+    pub fn session_of(peer: impl Into<Did>) -> PeerBuilder<Unset, Unset, Session> {
+        PeerBuilder::new(peer.into())
     }
 }
 
-impl<S: Clone> Peer<S> {
+impl<S: Clone, M: Mode> Peer<S, M> {
     /// The peer's DID: the key it acts with.
     pub fn did(&self) -> Did {
         self.inner.credential.did()
@@ -394,16 +414,19 @@ impl<S: Clone> Peer<S> {
     pub fn build_authority(&self, subject: Did) -> Capability<AuthOperator> {
         self.authority.build_authority(subject)
     }
+}
 
-    /// Start a worker of this peer: a peer over a key derived from this
-    /// one and `context`, sharing this peer's home, storage, network,
-    /// runtime and state branch, with the grants the builder is given.
+impl<S: Clone> Peer<S, Local> {
+    /// Start a session of this peer: the same peer, acting with a key
+    /// derived from this one and `context`, sharing this peer's storage,
+    /// network, runtime and state branch, within the grants the builder
+    /// is given.
     ///
     /// Derivation is deterministic per `(peer, context)`, so a grant
-    /// issued to the worker's DID is reusable across runs; random bytes
+    /// issued to the session's key is reusable across runs; random bytes
     /// make a disposable key. Grants given as bare capabilities are
     /// claimed by this peer.
-    pub fn worker(&self, context: impl AsRef<[u8]>) -> PeerBuilder<PeerKey, Storage<S>> {
+    pub fn session(&self, context: impl AsRef<[u8]>) -> PeerBuilder<PeerKey, Storage<S>, Session> {
         PeerBuilder::from_peer(
             self,
             PeerKey::Derived {
@@ -414,7 +437,7 @@ impl<S: Clone> Peer<S> {
     }
 }
 
-impl<S: PeerSpace> Peer<S> {
+impl<S: PeerSpace, M: Mode> Peer<S, M> {
     /// Assemble a peer with its authority and grants, and install the
     /// walk's remote reach.
     ///
@@ -434,6 +457,7 @@ impl<S: PeerSpace> Peer<S> {
             storage,
             inner: Arc::new(inner),
             reach: Arc::new(OnceLock::new()),
+            mode: PhantomData,
         };
 
         let anchor = Peer {
@@ -485,7 +509,7 @@ impl<S: PeerSpace> Peer<S> {
     }
 }
 
-impl<S: Clone> Holds for Peer<S> {
+impl<S: Clone, M: Mode> Holds for Peer<S, M> {
     fn held(&self, key: &str) -> Option<Held> {
         self.inner.holdings.held(key)
     }
@@ -495,7 +519,7 @@ impl<S: Clone> Holds for Peer<S> {
     }
 }
 
-impl<S: Clone> Principal for Peer<S> {
+impl<S: Clone, M: Mode> Principal for Peer<S, M> {
     fn did(&self) -> Did {
         self.inner.credential.did()
     }
@@ -581,8 +605,7 @@ mod tests {
             .await?;
         assert_eq!(created.did(), loaded.did());
 
-        let peer = Peer::open(loaded.did())
-            .credential(loaded)
+        let peer = Peer::new(loaded)
             .storage(storage.clone())
             .at(location.clone())
             .await?;
@@ -602,8 +625,8 @@ mod tests {
             .await?;
         let other = Ed25519Signer::generate().await?;
 
-        let result = Peer::open(other.did())
-            .credential(credential)
+        let result = Peer::session_of(other.did())
+            .operator(credential)
             .storage(storage)
             .at(location)
             .await;
@@ -621,9 +644,9 @@ mod tests {
         )
         .await?;
 
-        let a = peer.worker(b"a").await?;
-        let again = peer.worker(b"a").await?;
-        let b = peer.worker(b"b").await?;
+        let a = peer.session(b"a").await?;
+        let again = peer.session(b"a").await?;
+        let b = peer.session(b"b").await?;
 
         assert_eq!(a.did(), again.did());
         assert_ne!(a.did(), b.did());
@@ -645,8 +668,8 @@ mod tests {
             .perform(&storage)
             .await?;
 
-        let worker = Peer::open(credential.did())
-            .credential(credential.derive(b"worker").await?)
+        let worker = Peer::session_of(credential.did())
+            .operator(credential.derive(b"worker").await?)
             .storage(storage)
             .allow(Subject::any().claim(&credential))
             .await?;
@@ -677,8 +700,8 @@ mod tests {
         .await?;
         let agent = Ed25519Signer::generate().await?;
 
-        let worker = Peer::open(peer.home().clone())
-            .credential(agent.clone())
+        let worker = Peer::session_of(peer.home().clone())
+            .operator(agent.clone())
             .storage(peer.storage().clone())
             .allow(Subject::any().claim(peer.credential()))
             .await?;
@@ -705,20 +728,20 @@ mod tests {
         .await?;
 
         let unbounded = peer
-            .worker(b"unbounded")
+            .session(b"unbounded")
             .grant(Subject::any().claim(peer.credential()))
             .await;
         assert!(matches!(unbounded, Err(PeerError::Unbounded(_))));
 
         let expiration = Timestamp::new(SystemTime::now() + Duration::from_secs(3600))?;
         let bounded = peer
-            .worker(b"bounded")
+            .session(b"bounded")
             .grant(Subject::any().claim(peer.credential()).expires(expiration))
             .await;
         assert!(bounded.is_ok());
 
-        let unclaimed = Peer::open(peer.home().clone())
-            .credential(peer.credential().derive(b"unclaimed").await?)
+        let unclaimed = Peer::session_of(peer.home().clone())
+            .operator(peer.credential().derive(b"unclaimed").await?)
             .storage(peer.storage().clone())
             .allow(Subject::any())
             .await;
@@ -766,10 +789,10 @@ mod tests {
         .await?;
         let space = Ed25519Signer::generate().await?;
 
-        let first = peer.worker(b"first").allow(Subject::any()).await?;
+        let first = peer.session(b"first").allow(Subject::any()).await?;
         retain(&first, &peer.did(), &space).await;
 
-        let second = peer.worker(b"second").allow(Subject::any()).await?;
+        let second = peer.session(b"second").allow(Subject::any()).await?;
         let proof = Subject::from(peer.did())
             .attenuate(Access)
             .invoke(Prove::<Ucan>::new(
@@ -795,7 +818,7 @@ mod tests {
         retain(&peer, &peer.did(), &space).await;
 
         let worker = peer
-            .worker(b"ephemeral")
+            .session(b"ephemeral")
             .ephemeral()
             .allow(Subject::any())
             .await?;
@@ -832,8 +855,7 @@ mod tests {
             .at(location.directory.clone())
             .perform(&storage)
             .await?;
-        let peer = Peer::open(credential.did())
-            .credential(credential.clone())
+        let peer = Peer::new(credential.clone())
             .storage(storage.clone())
             .branch("account/test")
             .await?;
@@ -847,10 +869,7 @@ mod tests {
             .await?;
         assert_eq!(proof.proofs().len(), 1);
 
-        let on_main = Peer::open(credential.did())
-            .credential(credential)
-            .storage(storage)
-            .await?;
+        let on_main = Peer::new(credential).storage(storage).await?;
         assert!(on_main.state()?.revision().is_none(), "main holds nothing");
         let refused = Subject::from(on_main.did())
             .attenuate(Access)
@@ -925,6 +944,38 @@ mod tests {
             matches!(opened, Err(OpenReplicaBranchError::Foreign { .. })),
             "{opened:?}"
         );
+        Ok(())
+    }
+
+    /// A peer built from its credential acts with that key; a session of
+    /// it acts with a key derived for its context, while representing the
+    /// same peer. Deriving the session from the builder or from an open
+    /// peer gives the same key.
+    #[dialog_common::test]
+    async fn it_builds_a_peer_and_its_sessions() -> Result<()> {
+        let storage = Storage::<VolatileSpace>::volatile();
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&storage)
+            .await?;
+
+        let alice = Peer::new(credential.clone())
+            .storage(storage.clone())
+            .await?;
+        assert_eq!(alice.did(), credential.did());
+        assert_eq!(*alice.home(), credential.did());
+
+        let session: Peer<VolatileSpace, Session> =
+            alice.session(b"worker").allow(Subject::any()).await?;
+        assert_ne!(session.did(), credential.did());
+        assert_eq!(*session.home(), credential.did());
+
+        let built: Peer<VolatileSpace, Session> = Peer::new(credential.clone())
+            .session(b"worker")
+            .storage(storage)
+            .allow(Subject::any())
+            .await?;
+        assert_eq!(built.did(), session.did());
+        assert_eq!(*built.home(), credential.did());
         Ok(())
     }
 }

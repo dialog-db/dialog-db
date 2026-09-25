@@ -14,7 +14,7 @@
 //! leaves one that lists but points at nothing. Repeating the same
 //! operation finishes either.
 
-use super::Peer;
+use super::{Mode, Peer};
 use core::fmt::Display;
 use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
@@ -78,7 +78,7 @@ fn failed(error: impl Display) -> BranchError {
     BranchError::Memory(MemoryError::Storage(error.to_string()))
 }
 
-impl<S> Peer<S>
+impl<S, M: Mode> Peer<S, M>
 where
     S: Clone,
     Self: BranchEnv,
@@ -96,7 +96,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<branch_fx::Create> for Peer<S>
+impl<S, M: Mode> Provider<branch_fx::Create> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: BranchEnv + ConditionalSend,
@@ -189,7 +189,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<branch_fx::List> for Peer<S>
+impl<S, M: Mode> Provider<branch_fx::List> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: BranchEnv + ConditionalSend,
@@ -209,7 +209,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<branch_fx::Delete> for Peer<S>
+impl<S, M: Mode> Provider<branch_fx::Delete> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: BranchEnv + ConditionalSend,
@@ -307,7 +307,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<branch_fx::Switch> for Peer<S>
+impl<S, M: Mode> Provider<branch_fx::Switch> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: BranchEnv + ConditionalSend,
@@ -335,8 +335,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::Peer;
     use crate::helpers::{test_repo, test_session_with_peer};
+    use crate::{Mode, Peer};
     use dialog_artifacts::{Artifact, Entity, Instruction, Value};
     use dialog_capability::identity::TreeReference;
     use dialog_capability::{Did, Subject};
@@ -352,7 +352,7 @@ mod tests {
 
     /// Mint a real head on `name` by committing nothing to it.
     async fn commit(
-        operator: &Peer<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         subject: &Did,
         name: &str,
     ) -> anyhow::Result<Revision> {
@@ -370,7 +370,7 @@ mod tests {
 
     /// Where `name` points, as seen by opening it.
     async fn head(
-        operator: &Peer<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         subject: &Did,
         name: &str,
     ) -> anyhow::Result<Option<Revision>> {
@@ -383,7 +383,10 @@ mod tests {
     }
 
     /// The branch the replica has switched to, if any.
-    async fn active(operator: &Peer<VolatileSpace>, subject: &Did) -> anyhow::Result<Vec<Entity>> {
+    async fn active(
+        operator: &Peer<VolatileSpace, impl Mode>,
+        subject: &Did,
+    ) -> anyhow::Result<Vec<Entity>> {
         let identity = Identify.perform(operator).await?;
         let replica = Replica::new(identity.profile().clone(), subject.clone());
         let registry = Subject::from(subject.clone())
@@ -405,7 +408,7 @@ mod tests {
 
     /// The entity of the branch `name` on the replica `operator` views.
     async fn entity(
-        operator: &Peer<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         subject: &Did,
         name: &str,
     ) -> anyhow::Result<Entity> {
@@ -414,7 +417,10 @@ mod tests {
         Ok(BranchConcept::new(&replica, name).this)
     }
 
-    async fn listed(operator: &Peer<VolatileSpace>, subject: &Did) -> anyhow::Result<Vec<String>> {
+    async fn listed(
+        operator: &Peer<VolatileSpace, impl Mode>,
+        subject: &Did,
+    ) -> anyhow::Result<Vec<String>> {
         Ok(Subject::from(subject.clone())
             .reader()
             .branches()

@@ -19,8 +19,8 @@ use parking_lot::Mutex;
 /// Create a test repository (this crate's types) using the given operator
 /// as the effect environment.
 #[cfg(test)]
-pub async fn test_repo(
-    session: &dialog_peer::Peer<VolatileSpaceForTests>,
+pub async fn test_repo<M: dialog_peer::Mode>(
+    session: &dialog_peer::Peer<VolatileSpaceForTests, M>,
     peer: &dialog_peer::Peer<VolatileSpaceForTests>,
 ) -> crate::Repository<dialog_credentials::Credential> {
     use crate::RepositoryExt as _;

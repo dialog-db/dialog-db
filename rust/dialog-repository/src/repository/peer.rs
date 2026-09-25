@@ -505,7 +505,7 @@ mod tests {
 
     /// The names and addresses `branch` records for peers.
     async fn recorded(
-        operator: &LocalPeer<VolatileSpace>,
+        operator: &LocalPeer<VolatileSpace, impl dialog_peer::Mode>,
         branch: &Branch,
     ) -> anyhow::Result<(Vec<schema::Contact>, Vec<(Entity, SiteAddress)>)> {
         let names: Vec<schema::Contact> = branch
@@ -536,14 +536,17 @@ mod tests {
     }
 
     /// The contacts the host `operator` acts for knows by `name`.
-    async fn found(operator: &LocalPeer<VolatileSpace>, name: &str) -> anyhow::Result<Vec<Entity>> {
+    async fn found(
+        operator: &LocalPeer<VolatileSpace, impl dialog_peer::Mode>,
+        name: &str,
+    ) -> anyhow::Result<Vec<Entity>> {
         let host = super::host(operator).await?;
         Ok(host.reader().peers().find(name).perform(operator).await?)
     }
 
     /// Where the host `operator` acts for reaches `peer`, in order.
     async fn reached(
-        operator: &LocalPeer<VolatileSpace>,
+        operator: &LocalPeer<VolatileSpace, impl dialog_peer::Mode>,
         peer: &Entity,
     ) -> anyhow::Result<Vec<SiteAddress>> {
         let host = super::host(operator).await?;

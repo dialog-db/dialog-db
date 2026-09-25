@@ -10,7 +10,6 @@ use dialog_effects::storage::{Directory, Location};
 use dialog_identity::OpenCredential;
 use dialog_network::Network;
 use dialog_storage::provider::storage::Storage;
-use dialog_varsig::Principal as _;
 
 use super::{Peer, PeerError, PeerSpace, Runtime};
 
@@ -101,8 +100,7 @@ impl OpenPeer {
             .await
             .map_err(|error| PeerError::Open(error.to_string()))?;
 
-        let mut builder = Peer::open(credential.did())
-            .credential(credential)
+        let mut builder = Peer::new(credential)
             .storage(storage.clone())
             .network(self.network)
             .runtime(self.runtime)

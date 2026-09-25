@@ -313,7 +313,7 @@ async fn seed_vault(repo: &Repository<SignerCredential>, location: &Location) ->
 /// Open a repository for `profile`, wire `origin` at `address` for the
 /// server's subject, and track its `main` branch.
 async fn mount_client(
-    operator: &Peer<VolatileSpace>,
+    operator: &Peer<VolatileSpace, dialog_peer::Session>,
     profile: &Peer<VolatileSpace>,
     server: &Repository<SignerCredential>,
     address: &FsAddress,
@@ -348,7 +348,7 @@ async fn mount_client(
 /// — a phase must observe real data, not a lazily erred stream.
 async fn select_count(
     branch: &Branch,
-    operator: &Peer<VolatileSpace>,
+    operator: &Peer<VolatileSpace, dialog_peer::Session>,
     selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
 ) -> Result<usize> {
     let rows = branch

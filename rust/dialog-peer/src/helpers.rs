@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::{OpenPeer, Peer, PeerError, PeerSpace};
+use crate::{Mode, OpenPeer, Peer, PeerError, PeerSpace, Session};
 use anyhow::Result;
 use base58::ToBase58;
 use dialog_artifacts::{Artifact, Attribute, Entity, Value};
@@ -55,16 +55,16 @@ pub async fn test_peer() -> Peer<VolatileSpace> {
         .expect("test_peer: failed to open peer")
 }
 
-/// A worker with a powerline grant on a fresh volatile peer.
-pub async fn test_session() -> Peer<VolatileSpace> {
+/// A session with a powerline grant on a fresh volatile peer.
+pub async fn test_session() -> Peer<VolatileSpace, Session> {
     test_session_with_peer().await.0
 }
 
-/// A worker with a powerline grant, and the peer it was built from.
-pub async fn test_session_with_peer() -> (Peer<VolatileSpace>, Peer<VolatileSpace>) {
+/// A session with a powerline grant, and the peer it is a session of.
+pub async fn test_session_with_peer() -> (Peer<VolatileSpace, Session>, Peer<VolatileSpace>) {
     let peer = test_peer().await;
     let worker = peer
-        .worker(b"test")
+        .session(b"test")
         .allow(Subject::any())
         .await
         .expect("test_session: failed to build worker");
@@ -72,8 +72,8 @@ pub async fn test_session_with_peer() -> (Peer<VolatileSpace>, Peer<VolatileSpac
 }
 
 /// Create a test repository under `peer`, through `session`.
-pub async fn test_repo(
-    session: &Peer<VolatileSpace>,
+pub async fn test_repo<M: Mode>(
+    session: &Peer<VolatileSpace, M>,
     peer: &Peer<VolatileSpace>,
 ) -> dialog_repository::Repository<dialog_credentials::Credential> {
     use dialog_repository::RepositoryExt as _;

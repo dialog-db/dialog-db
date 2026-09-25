@@ -453,7 +453,7 @@ mod tests {
     /// must agree.
     struct Harness {
         branch: crate::Branch,
-        operator: Peer<VolatileSpace>,
+        operator: Peer<VolatileSpace, dialog_peer::Session>,
         legacy: Volatile,
     }
 
@@ -461,7 +461,7 @@ mod tests {
         async fn new(name: &str) -> Result<Self> {
             let storage = Storage::volatile();
             let profile = open_peer(storage.clone(), Location::profile(unique_name(name))).await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
             let repo = profile
                 .space(unique_name("repo"))
                 .open()
