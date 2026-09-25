@@ -1,7 +1,30 @@
 # Peers and sessions
 
 Status: design, agreed in discussion; steps 2, 7 and 8 of the order below
-are implemented (the `dialog-peer` crate, one `Peer` type). Supersedes the
+are implemented (the `dialog-peer` crate, one `Peer` type).
+
+**Current surface, which supersedes the names used further down.** The
+note was written while a derived peer was called a *worker* and built with
+`Peer::open(home).credential(..)`. That landed as:
+
+- `Peer::new(credential)` builds the peer acting with its own key, a
+  `Peer<S, Local>`.
+- `peer.session(context)` builds a *session* of it, a `Peer<S, Session>`:
+  the same peer acting with a key derived for `context`, under what the
+  peer grants it. `Peer::session_of(did).operator(key)` builds one when
+  only the peer's DID is at hand, from pre-minted certificates; they must
+  be issued to the session's key and not have expired.
+- A session is never handed a key: the peer's key is withheld from it,
+  a repository it loads comes without its signing key, and the peer's raw
+  storage is not reachable through it. What it may do elsewhere is proven
+  from its grants, the grant covering the claim's subject.
+- A session is not yet confined to its grants for local reads and writes:
+  it shares the peer's storage, and local effects are served without a
+  proof. Authorizing them is planned separately.
+
+Everywhere below, read *worker* as *session*, `Peer::open(home)` as
+`Peer::new` or `Peer::session_of`, and `peer.worker(ctx)` as
+`peer.session(ctx)`. Supersedes the
 profile / operator split described in `repository.md` and
 `space-and-storage.md`, which this note treats as the "today" column. The
 migration guide at the end is what a dependent (tonk) follows.
@@ -71,8 +94,7 @@ Implemented today (`dialog-peer`):
 // The credential is opened apart from the peer; here from the storage.
 let credential = OpenCredential::open("alice").perform(&storage).await?;
 
-let alice = Peer::open(credential.did())      // home: the repository holding own state
-    .credential(credential)                   // the acting key; Into<SignerCredential>
+let alice = Peer::new(credential)             // the acting key, whose repository holds own state
     .storage(storage)                         // Storage<S>; volatile for tests
     .at(Location::profile("alice"))           // optional; mounts the home space if not yet
     .network(net)                             // optional, Network::default()
@@ -81,8 +103,8 @@ let alice = Peer::open(credential.did())      // home: the repository holding ow
     .branch("main")                           // optional; the state branch, default main
     .await?;
 
-let job = Peer::open(credential.did())        // a worker: no handle on the parent needed
-    .credential(credential.derive(b"refactor").await?) // deterministic per (credential, context)
+let job = Peer::session_of(credential.did())  // a session: no handle on the peer needed
+    .operator(credential.derive(b"refactor").await?)   // deterministic per (credential, context)
     .storage(storage)
     .allow(Subject::any().claim(&credential))          // unbounded, minted at open, deliberate
     .grant(cap.claim(&credential).expires(t))          // bounded: the claim carries the window
@@ -90,7 +112,7 @@ let job = Peer::open(credential.did())        // a worker: no handle on the pare
     .ephemeral()                                       // optional: no state branch, memory only
     .await?;
 
-let job = alice.worker(b"refactor")           // the same, pre-filled from alice
+let job = alice.session(b"refactor")          // the same, pre-filled from alice
     .allow(Subject::any())                    // bare capabilities are claimed by alice
     .await?;
 
@@ -98,11 +120,11 @@ alice.space("notes").open().perform(&job).await?;   // named space under the hom
 branch.revision().resolve().perform(&alice).await?; // the root is the unconstrained env
 ```
 
-The key is resolved at open: `credential(..)` takes a credential or bare
-signer, and a [`PeerKey::Derived`] (what `worker` builds) derives it then.
+The key is resolved at open: `operator(..)` takes a credential or bare
+signer, and a [`PeerKey::Derived`] (what `session` builds) derives it then.
 `grant` refuses a claim without an expiration; `allow` is the unbounded
 form under its own name. A bare capability needs an issuer to claim it,
-which `worker` supplies and `issuer(..)` sets otherwise.
+which `session` supplies and `issuer(..)` sets otherwise.
 
 Planned (steps 4, 5, 9 and 10 below):
 
@@ -267,8 +289,8 @@ by type.
 
 | today | becomes |
 | --- | --- |
-| `Profile::open(name).at(dir)` | `OpenCredential::open(name).at(dir).perform(&storage)`, then `Peer::open(did).credential(c).storage(storage)` |
-| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.worker(ctx).allow(..)`, or `Peer::open(home).credential(c.derive(ctx).await?)..` |
+| `Profile::open(name).at(dir)` | `OpenCredential::open(name).at(dir).perform(&storage)`, then `Peer::new(c).storage(storage)` |
+| `profile.derive(ctx).allow(..).network(n).build(storage)` | `peer.session(ctx).allow(..)`, or `Peer::session_of(home).operator(c.derive(ctx).await?)..` |
 | `Operator<S>` | `Peer<S>`; the crate is `dialog-peer` |
 | `Authority { profile, operator, account }` | `(home, key)`; account is a link in the proof chain |
 | `OperatorBuilder::access_branch(name)` (#526) | `PeerBuilder::branch(name)`; `.using(BranchReference)` adds layers later |
@@ -413,24 +435,23 @@ let credential = OpenCredential::open(name)         // the credential, apart fro
     .at(Directory::Profile)
     .perform(&storage)
     .await?;
-let peer = Peer::open(credential.did())             // home: the repository the key names
-    .credential(credential)
+let peer = Peer::new(credential)                    // home: the repository the key names
     .storage(storage)
     .base(Directory::At(root))                      // was OperatorBuilder::base
     .network(Network::default())                    // was OperatorBuilder::network
     .branch("main")                                 // was OperatorBuilder::access_branch
     .await?;
-let worker = peer
-    .worker(b"app")                                 // was profile.derive(b"app")
+let session = peer
+    .session(b"app")                                // was profile.derive(b"app")
     .allow(Subject::any())                          // claimed by peer
     .await?;
 ```
 
-`OpenCredential` mounts the credential's space; `Peer::open(..)` opens the
+`OpenCredential` mounts the credential's space; `Peer::new(..)` opens the
 state branch. `OpenCredential::load` fails when the credential is absent,
-`create` when it is present. A worker needs no handle on its parent:
-`Peer::open(home).credential(credential.derive(ctx).await?).storage(storage)
-.allow(Subject::any().claim(&credential))` is `peer.worker(ctx).allow(..)`
+`create` when it is present. A session needs no handle on its peer:
+`Peer::session_of(home).operator(credential.derive(ctx).await?).storage(storage)
+.allow(Subject::any().claim(&credential))` is `peer.session(ctx).allow(..)`
 spelled out.
 
 | before | after |
@@ -438,25 +459,25 @@ spelled out.
 | `Operator<S>`, `Session<S>` | `Peer<S>` |
 | `OperatorError` | `PeerError` |
 | `.allow_until(cap, t)` | `.grant(peer.access().claim(cap).expires(t))` |
-| `.allow(cap)` on a session builder | `.allow(cap)` on `peer.worker(ctx)`, or `.allow(cap.claim(&credential))` |
-| a session over a supplied signer | `Peer::open(home).credential(signer)..allow(cap.claim(&parent))` |
-| `operator.did()` | `worker.did()` |
-| `operator.profile_did()`, `session.peer().did()` | `worker.home().clone()` |
-| `operator.hydration()` | `worker.hydration()`, shared through `Runtime` |
+| `.allow(cap)` on a session builder | `.allow(cap)` on `peer.session(ctx)`, or `.allow(cap.claim(&credential))` |
+| a session over a supplied signer | `Peer::session_of(home).operator(signer)..allow(cap.claim(&parent))` |
+| `operator.did()` | `session.did()` |
+| `operator.profile_did()`, `session.peer().did()` | `session.home().clone()` |
+| `operator.hydration()` | `session.hydration()`, shared through `Runtime` |
 | `profile.did()` | `peer.did()` |
 | `profile.signer()` | `peer.credential()` |
 | `profile.access()` | `peer.access()` |
 | `profile.repository(name)` | `peer.space(name)` |
 | `profile.save(chain)` / `profile.access().save(chain)` | `peer.access().save(chain)` (goes away in step 4; use `branch.delegations().retain(chain)`) |
 | `profile.credential().site(id)` | `peer.secrets().site(id)` (goes away in step 6) |
-| `Profile::open(name).at(dir).perform(&storage)` | `OpenCredential::open(name).at(dir).perform(&storage)`, then `Peer::open(c.did()).credential(c).storage(storage)`; `load` and `create` likewise |
-| `Peer::new().storage(s).attach(credential)` | `Peer::open(credential.did()).credential(credential).storage(s)` |
+| `Profile::open(name).at(dir).perform(&storage)` | `OpenCredential::open(name).at(dir).perform(&storage)`, then `Peer::new(c).storage(storage)`; `load` and `create` likewise |
+| `Peer::new().storage(s).attach(credential)` | `Peer::new(credential).storage(s)` |
 | `Reactor::new(profile)` and other holders of a `Profile` | hold the `Peer`, or the `SignerCredential` from `peer.credential()` when only signing is needed |
 | `Repository::from(&profile)` | `peer.repository()` (the home, by DID) or `Repository::from(peer.credential().clone())` |
 | `Storage::default()` per call site | one `Storage` per process; every peer over it shares it |
 | `dialog_operator::helpers::test_operator()` | `dialog_peer::helpers::test_session()` |
-| `dialog_operator::helpers::test_operator_with_profile()` | `dialog_peer::helpers::test_session_with_peer()`, returns `(worker, peer)` |
-| `test_repo(&operator, &profile)` | `test_repo(&worker, &peer)` |
+| `dialog_operator::helpers::test_operator_with_profile()` | `dialog_peer::helpers::test_session_with_peer()`, returns `(session, peer)` |
+| `test_repo(&operator, &profile)` | `test_repo(&session, &peer)` |
 
 Things the fold makes possible that the old shape did not:
 
