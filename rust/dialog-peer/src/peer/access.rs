@@ -317,13 +317,21 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         cache.chains.insert(key, proof.proofs().to_vec());
     }
 
-    /// The grant covering `claim`, if the peer holds one.
-    fn session_grant(&self, claim: &Prove<Ucan>) -> Option<&Grant> {
-        self.grants().iter().find(|grant| {
-            grant
-                .certificate
-                .verify(&claim.access)
-                .is_ok_and(|range| range.covers(&claim.duration))
+    /// The grants covering `claim`: its subject, its command and policy,
+    /// and its duration.
+    fn session_grants<'a>(&'a self, claim: &'a Prove<Ucan>) -> impl Iterator<Item = &'a Grant> {
+        self.grants().iter().filter(|grant| {
+            let subject = match grant.certificate.0.subject() {
+                UcanSubject::Any => true,
+                UcanSubject::Specific(did) => {
+                    claim.access.subject == UcanSubject::Specific(did.clone())
+                }
+            };
+            subject
+                && grant
+                    .certificate
+                    .verify(&claim.access)
+                    .is_ok_and(|range| range.covers(&claim.duration))
         })
     }
 
@@ -393,13 +401,32 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         Self: LocalEnv,
         S: ConditionalSend + ConditionalSync + 'static,
     {
-        let Some(grant) = self.session_grant(claim) else {
-            return self.walk(claim.principal.clone(), claim).await;
-        };
+        // Every grant covering the claim is tried in turn: one whose
+        // issuer cannot prove the claim does not hide one that can.
+        let mut refused = None;
+        for grant in self.session_grants(claim).cloned().collect::<Vec<_>>() {
+            match self.prove_by(grant, claim).await {
+                Ok(proof) => return Ok(proof),
+                Err(error) => refused = Some(error),
+            }
+        }
+        match refused {
+            Some(error) => Err(error),
+            None => self.walk(claim.principal.clone(), claim).await,
+        }
+    }
+
+    /// The proof of `claim` through `grant`: the grant's issuer's
+    /// authority, then the grant.
+    async fn prove_by(&self, grant: Grant, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
         let Grant {
             issuer,
             certificate: grant,
-        } = grant.clone();
+        } = grant;
 
         let mut proof = self.walk(issuer, claim).await?;
         let range = grant.verify(&claim.access)?;
