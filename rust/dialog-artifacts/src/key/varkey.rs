@@ -141,16 +141,7 @@ impl KeyParts {
     /// `Vec` here would leave the value tail without a terminator and corrupt
     /// the parse of the fields that follow in the VAE ordering.
     pub fn min(tag: u8) -> Self {
-        let mut value = Vec::new();
-        encode_bytes(&[], &mut value);
-        Self {
-            tag,
-            entity: Vec::new(),
-            attribute: Vec::new(),
-            value_type: ValueDataType::min(),
-            value: ValuePayload::Inline(value),
-            version: None,
-        }
+        Self::bound(tag, false, None, None, None)
     }
 
     /// The maximum components for an ordering.
@@ -169,21 +160,56 @@ impl KeyParts {
     // Revisit once selector ranges can express an exclusive (prefix-successor)
     // upper bound instead of `RangeInclusive<Key>`.
     pub fn max(tag: u8) -> Self {
+        Self::bound(tag, true, None, None, None)
+    }
+
+    /// One end of an ordering's range: the given fields as they are, every
+    /// other field at its [`min`](Self::min) (`upper == false`) or
+    /// [`max`](Self::max) (`upper == true`).
+    ///
+    /// The same parts as taking `min`/`max` and replacing the given fields,
+    /// without first building the defaults they replace (the maximum's
+    /// fillers are 256 bytes a field, and a selector's range builds two
+    /// bounds per scan).
+    pub fn bound(
+        tag: u8,
+        upper: bool,
+        entity: Option<Vec<u8>>,
+        attribute: Option<Vec<u8>>,
+        value: Option<(ValueDataType, ValuePayload)>,
+    ) -> Self {
+        let filler = || {
+            if upper {
+                vec![MAX_FILLER_BYTE; MAX_FILLER]
+            } else {
+                Vec::new()
+            }
+        };
+        let (value_type, value) = value.unwrap_or_else(|| {
+            let mut payload = Vec::new();
+            if upper {
+                // A parseable payload dominating every real value of the
+                // maximum type: `MAX_FILLER_BYTE` exceeds every UTF-8 byte,
+                // and real symbol names are UTF-8. (Like the entity/attribute
+                // fillers this is a bounded synthetic maximum; `set_value_*`
+                // replaces it with a real payload, this is only the unset
+                // bound.)
+                encode_bytes(&[MAX_FILLER_BYTE; MAX_FILLER], &mut payload);
+                (ValueDataType::max(), ValuePayload::Inline(payload))
+            } else {
+                // The minimum value type is a terminated-string type, whose
+                // minimum value is the empty byte string: a lone terminator,
+                // so the key round-trips (see `min`).
+                encode_bytes(&[], &mut payload);
+                (ValueDataType::min(), ValuePayload::Inline(payload))
+            }
+        });
         Self {
             tag,
-            entity: vec![MAX_FILLER_BYTE; MAX_FILLER],
-            attribute: vec![MAX_FILLER_BYTE; MAX_FILLER],
-            value_type: ValueDataType::max(),
-            // A parseable payload dominating every real value of the maximum
-            // type: `MAX_FILLER_BYTE` exceeds every UTF-8 byte, and real
-            // symbol names are UTF-8. (Like the entity/attribute fillers this
-            // is a bounded synthetic maximum; `set_value_*` replaces it with a
-            // real payload, this is only the unset bound.)
-            value: ValuePayload::Inline({
-                let mut payload = Vec::new();
-                encode_bytes(&[MAX_FILLER_BYTE; MAX_FILLER], &mut payload);
-                payload
-            }),
+            entity: entity.unwrap_or_else(filler),
+            attribute: attribute.unwrap_or_else(filler),
+            value_type,
+            value,
             version: None,
         }
     }
@@ -324,7 +350,17 @@ fn write_value_slot(parts: &KeyParts, out: &mut Vec<u8>) {
 /// the ordering's interior components (attribute, entity in VAE) sub-sorting
 /// normally within a shared-prefix cluster; the hash only tie-breaks.
 pub fn build_key(parts: &KeyParts) -> Vec<u8> {
-    let mut out = Vec::new();
+    // Every field plus its terminator, the type byte and the widest tail:
+    // exact unless a field carries zero bytes (each escapes to two).
+    let mut out = Vec::with_capacity(
+        1 + VERSION_LENGTH
+            + parts.entity.len()
+            + parts.attribute.len()
+            + 2
+            + 1
+            + parts.value.slot_bytes().len()
+            + SPILL_TAIL_LENGTH,
+    );
     out.push(parts.tag);
     match parts.tag {
         ENTITY_KEY_TAG => {
