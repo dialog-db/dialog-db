@@ -27,7 +27,7 @@ use crate::{
     Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex,
     RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
-use futures_util::future::try_join_all;
+use futures_util::future::join_all;
 
 /// Command struct for pushing local changes to an upstream branch.
 ///
@@ -161,13 +161,33 @@ impl Push<'_> {
                     branch: branch.name().to_string(),
                 });
             }
-            let pushed = try_join_all(
-                upstreams
-                    .into_iter()
-                    .map(|upstream| Box::pin(push_upstream(branch, upstream, confirm, env))),
-            )
-            .await?;
-            return Ok(pushed.into_iter().flatten().next());
+            // One upstream that cannot be pushed to does not keep the push
+            // from the others: it lands where it can and reports the rest.
+            let total = upstreams.len();
+            let results = join_all(upstreams.into_iter().map(|upstream| async move {
+                let target = upstream.target();
+                (
+                    target,
+                    Box::pin(push_upstream(branch, upstream, confirm, env)).await,
+                )
+            }))
+            .await;
+            let mut pushed = None;
+            let mut unreached = Vec::new();
+            for (target, result) in results {
+                match result {
+                    Ok(revision) => pushed = pushed.or(revision),
+                    Err(error) => unreached.push((target, error)),
+                }
+            }
+            return match unreached.len() {
+                0 => Ok(pushed),
+                failed if failed == total => Err(unreached.remove(0).1),
+                _ => Err(PushError::Partial {
+                    pushed: pushed.map(Box::new),
+                    unreached,
+                }),
+            };
         };
         if let Upstream::Local { branch: name, .. } = &target
             && name == branch.name()
@@ -510,25 +530,27 @@ where
         let mut tracking = branch.tracked();
         let advanced = upstream_state.clone().with_tree(revision.tree.clone());
         tracking.record(&advanced);
-        let publish = marker.publish(tracking, env).await;
-        if let Err(PublishError::VersionMismatch { .. }) = publish {
+        // The record is written until it lands. A mismatch means another
+        // write to the cell came first: each is some sync recording its
+        // own upstream, so there are only ever as many as syncs in flight,
+        // and folding ours into the current state again eventually lands.
+        // Giving up would leave this upstream's base behind its head, and
+        // every later push there would be refused as not a fast-forward.
+        // Only a concurrent sync of this same upstream ends the loop early:
+        // it already recorded a consistent pair, which ours must not undo.
+        let mut publish = marker.publish(tracking, env).await;
+        while let Err(PublishError::VersionMismatch { .. }) = publish {
             branch.tracking().resolve().perform(env).await?;
             let marker = branch.tracking().checkpoint();
             let mut tracking = branch.tracked();
             let ours_untouched = tracking.get(&target).is_none_or(|tree| *tree == base);
-            if ours_untouched {
-                tracking.record(&advanced);
-                match marker.publish(tracking, env).await {
-                    // The cell is contended; give up on the marker
-                    // advance — the push itself landed, the next sync
-                    // is just heavier.
-                    Err(PublishError::VersionMismatch { .. }) => {}
-                    other => other?,
-                }
+            if !ours_untouched {
+                return Ok(Some(revision));
             }
-        } else {
-            publish?;
+            tracking.record(&advanced);
+            publish = marker.publish(tracking, env).await;
         }
+        publish?;
 
         Ok(Some(revision))
     }
