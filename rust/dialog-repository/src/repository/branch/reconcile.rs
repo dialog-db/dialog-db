@@ -30,10 +30,7 @@ use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 
-use crate::{
-    Branch, CommitError, Index, NetworkedIndex, PublishError, RemoteFallback, Revision,
-    TreeReference,
-};
+use crate::{Branch, CommitError, Index, NetworkedIndex, PublishError, Revision, TreeReference};
 
 /// How many times reconciling tries to publish its merge before giving
 /// up: the merge itself can lose to yet another writer.
@@ -125,7 +122,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let mut store = NetworkedIndex::new(env, branch.archive().index(), RemoteFallback::None);
+    let mut store = NetworkedIndex::new(env, branch.archive().index(), branch.fallback());
     let tree = |reference: &TreeReference| {
         Index::from_hash_with_cache(NodeHash::from(*reference.hash()), branch.node_cache())
     };
