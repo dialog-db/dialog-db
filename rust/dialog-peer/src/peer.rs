@@ -208,6 +208,13 @@ pub struct Peer<S: Clone, M: Mode = Local> {
 pub(crate) struct Inner {
     /// The key this peer acts with.
     credential: SignerCredential,
+    /// The system owning the storage: mounting a space in it takes a
+    /// proof of the system's authority.
+    system: Did,
+    /// Certificates addressed to a principal above this peer in its
+    /// chain: a session holds its peer's storage grant, which its own
+    /// grant from the peer extends.
+    held: Vec<Grant>,
     /// The repository holding this peer's own state, and the replica
     /// identity every entity it writes derives from. The peer's own DID
     /// for a peer acting as itself; the peer's for its session.
@@ -436,6 +443,16 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     /// The grants this peer holds: the in-memory delegations to its key.
     pub(crate) fn grants(&self) -> &[Grant] {
         &self.inner.grants
+    }
+
+    /// Certificates held for principals above this peer in its chain.
+    pub(crate) fn inner_held(&self) -> &[Grant] {
+        &self.inner.held
+    }
+
+    /// The system owning this peer's storage.
+    pub(crate) fn system(&self) -> &Did {
+        &self.inner.system
     }
 
     pub(crate) fn authority(&self) -> &Authority {

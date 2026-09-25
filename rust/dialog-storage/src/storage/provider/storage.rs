@@ -7,13 +7,13 @@ mod router;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dialog_capability::access::{AuthorizeError, Export, Forget, Protocol, Prove, Retain};
 use dialog_capability::{Capability, Did, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_credentials::Credential;
+use dialog_credentials::{Credential, Ed25519Signer, Ed25519SignerError, SignerCredential};
 use dialog_effects::credential::Secret;
 use dialog_effects::{archive, blob, credential, memory, storage};
 
@@ -52,6 +52,11 @@ pub struct Storage<S: Clone> {
         credential::Retract<Secret>
     )]
     router: Router<S>,
+
+    /// The principal whose authority mounting a space in this storage
+    /// takes: a peer opens a space only if it can prove the system's
+    /// grant. Generated on first use unless given, and shared by clones.
+    system: Arc<Mutex<Option<SignerCredential>>>,
 }
 
 /// Cloning yields a second handle onto the *same* spaces, not a second
@@ -68,6 +73,7 @@ impl<S: Clone> Clone for Storage<S> {
         Self {
             loader: self.loader.clone(),
             router: self.router.clone(),
+            system: Arc::clone(&self.system),
         }
     }
 }
@@ -145,7 +151,41 @@ impl<S: Clone> Storage<S> {
         Self {
             loader: Loader::new(Arc::clone(&spaces)),
             router: Router::new(spaces),
+            system: Arc::default(),
         }
+    }
+
+    /// This storage, owned by `system` rather than by a key generated
+    /// on first use.
+    pub fn owned_by(self, system: SignerCredential) -> Self {
+        *self
+            .system
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(system);
+        self
+    }
+
+    /// The system this storage belongs to: the principal a peer proves
+    /// its authority to mount spaces from. Whoever holds the storage
+    /// holds its system, and grants from it.
+    pub async fn system(&self) -> Result<SignerCredential, Ed25519SignerError> {
+        if let Some(system) = self.held_system() {
+            return Ok(system);
+        }
+        let generated = SignerCredential::from(Ed25519Signer::generate().await?);
+        let mut held = self
+            .system
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        // Two first asks may race to generate; the first stored stands.
+        Ok(held.get_or_insert(generated).clone())
+    }
+
+    fn held_system(&self) -> Option<SignerCredential> {
+        self.system
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     /// Check if a DID is mounted.
