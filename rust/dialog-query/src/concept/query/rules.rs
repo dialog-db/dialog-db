@@ -226,6 +226,30 @@ mod tests {
         .unwrap()
     }
 
+    fn aged_person_concept() -> ConceptDescriptor {
+        ConceptDescriptor::try_from([
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "person age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "person name",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+        ])
+        .unwrap()
+    }
+
     fn alt_rule(descriptor: &ConceptDescriptor) -> DeductiveRule {
         // Distinct rule body so install does not dedup against the implicit.
         DeductiveRule::new(
@@ -386,6 +410,44 @@ mod tests {
         assert_ne!(
             adorn_a, adorn_bound,
             "binding a slot must change the adornment"
+        );
+    }
+
+    /// A plan is chosen by which of the concept's fields are bound, so two
+    /// calls binding different fields must not share one. Numbering the
+    /// fields by the call's own terms made `{name, this}` with `this`
+    /// bound and `{age, name, this}` with `name` bound the same pattern,
+    /// and the second call ran the plan made for the first.
+    #[dialog_common::test]
+    fn it_plans_calls_binding_different_fields_apart() {
+        let descriptor = aged_person_concept();
+        let rules = ConceptRules::new(&descriptor);
+
+        let mut by_entity = Parameters::new();
+        by_entity.insert("this".into(), Term::var("e"));
+        by_entity.insert("name".into(), Term::var("n"));
+        let mut entity_bound = Match::new();
+        entity_bound
+            .bind(
+                &Term::var("e"),
+                Value::from("person:alice".parse::<crate::Entity>().unwrap()),
+            )
+            .unwrap();
+
+        let mut by_name = Parameters::new();
+        by_name.insert("this".into(), Term::var("e"));
+        by_name.insert("name".into(), Term::var("n"));
+        by_name.insert("age".into(), Term::var("a"));
+        let mut name_bound = Match::new();
+        name_bound
+            .bind(&Term::var("n"), Value::from("Alice".to_string()))
+            .unwrap();
+
+        let entity_plan = rules.plan(&by_entity, &entity_bound);
+        let name_plan = rules.plan(&by_name, &name_bound);
+        assert!(
+            !Arc::ptr_eq(&entity_plan, &name_plan),
+            "a call binding `name` must not reuse the plan for one binding `this`"
         );
     }
 }
