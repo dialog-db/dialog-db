@@ -549,17 +549,6 @@ where
             ["use", "put", "archive", "block"]   => dialog_effects::archive::Put,
             ["use", "get", "archive", "blob"]    => dialog_effects::blob::Read,
             ["use", "put", "archive", "blob"]    => dialog_effects::blob::Import,
-            // The spellings before the `use` prefix. Clients minted
-            // against an earlier release still invoke these; their chains
-            // are `/`, which covers both. Dropped once no such client is
-            // deployed.
-            ["memory", "resolve"]  => dialog_effects::memory::Resolve,
-            ["memory", "publish"]  => dialog_effects::memory::Publish,
-            ["memory", "retract"]  => dialog_effects::memory::Retract,
-            ["archive", "get"]     => dialog_effects::archive::Get,
-            ["archive", "put"]     => dialog_effects::archive::Put,
-            ["archive", "blob", "read"]   => dialog_effects::blob::Read,
-            ["archive", "blob", "import"] => dialog_effects::blob::Import,
         })
     }
 }
@@ -638,7 +627,12 @@ mod tests {
         let attacker_signer = Ed25519Signer::import(&[7u8; 32]).await.unwrap();
         let attacker_did = attacker_signer.did();
 
-        let command = vec!["memory".to_string(), "resolve".to_string()];
+        let command = vec![
+            "use".to_string(),
+            "get".to_string(),
+            "memory".to_string(),
+            "cell".to_string(),
+        ];
 
         // Forge: iss = subject, aud = attacker, sub = subject, signed by
         // the attacker (who cannot sign as the subject).
@@ -729,7 +723,12 @@ mod tests {
         let container = build_test_container(
             &subject_signer,
             &operator_signer,
-            vec!["memory".to_string(), "resolve".to_string()],
+            vec![
+                "use".to_string(),
+                "get".to_string(),
+                "memory".to_string(),
+                "cell".to_string(),
+            ],
             args,
         )
         .await;
@@ -762,7 +761,12 @@ mod tests {
         let container = build_test_container(
             &subject_signer,
             &operator_signer,
-            vec!["archive".to_string(), "get".to_string()],
+            vec![
+                "use".to_string(),
+                "get".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ],
             args,
         )
         .await;
@@ -801,7 +805,12 @@ mod tests {
         let container = build_test_container(
             &subject_signer,
             &operator_signer,
-            vec!["archive".to_string(), "put".to_string()],
+            vec![
+                "use".to_string(),
+                "put".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ],
             args,
         )
         .await;
@@ -837,7 +846,7 @@ mod tests {
         let payload = build_test_container(
             &operator,
             &operator,
-            vec!["archive".into(), "get".into()],
+            vec!["use".into(), "get".into(), "archive".into(), "block".into()],
             args,
         )
         .await;
@@ -903,7 +912,12 @@ mod tests {
         // Build self-invocation (issuer == subject, no delegation)
         let container = build_self_invocation_container(
             &signer,
-            vec!["archive".to_string(), "get".to_string()],
+            vec![
+                "use".to_string(),
+                "get".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ],
             args,
         )
         .await;
@@ -944,7 +958,12 @@ mod tests {
 
         let container = build_self_invocation_container(
             &signer,
-            vec!["archive".to_string(), "put".to_string()],
+            vec![
+                "use".to_string(),
+                "put".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ],
             args,
         )
         .await;
@@ -982,7 +1001,12 @@ mod tests {
 
         let container = build_self_invocation_container(
             &signer,
-            vec!["memory".to_string(), "resolve".to_string()],
+            vec![
+                "use".to_string(),
+                "get".to_string(),
+                "memory".to_string(),
+                "cell".to_string(),
+            ],
             args,
         )
         .await;
@@ -1040,7 +1064,7 @@ mod tests {
             .issuer(subject.clone())
             .audience(&operator.did())
             .subject(DelegatedSubject::Specific(subject.did()))
-            .command(vec!["archive".to_string()])
+            .command(vec!["use".to_string()])
             .try_build()
             .await
             .expect("delegation");
@@ -1057,7 +1081,12 @@ mod tests {
             .issuer(operator.clone())
             .audience(&subject.did())
             .subject(&subject.did())
-            .command(vec!["archive".to_string(), "get".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "get".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ])
             .arguments(args)
             .proofs(vec![cid])
             .try_build()
@@ -1105,7 +1134,7 @@ mod tests {
 
     /// Asking beyond what a delegation grants is named as escalation.
     ///
-    /// The grant covers `archive`, the invocation asks for `blob/put`.
+    /// The grant covers `/use/get`, the invocation asks to put a blob.
     /// That is a decision about authority, and it must be tellable from
     /// unreadable input: the fix is a wider delegation, not a re-encoded
     /// request.
@@ -1118,7 +1147,7 @@ mod tests {
             .issuer(subject.clone())
             .audience(&operator.did())
             .subject(DelegatedSubject::Specific(subject.did()))
-            .command(vec!["archive".to_string()])
+            .command(vec!["use".to_string(), "get".to_string()])
             .try_build()
             .await
             .expect("delegation");
@@ -1134,7 +1163,12 @@ mod tests {
             .issuer(operator.clone())
             .audience(&subject.did())
             .subject(&subject.did())
-            .command(vec!["blob".to_string(), "put".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "put".to_string(),
+                "archive".to_string(),
+                "blob".to_string(),
+            ])
             .arguments(args)
             .proofs(vec![cid])
             .try_build()
@@ -1169,7 +1203,7 @@ mod tests {
                     "the refusal must name what was asked for, got: {claimed}"
                 );
                 assert!(
-                    authorized.contains("archive"),
+                    authorized.contains("use/get"),
                     "and what was actually granted, got: {authorized}"
                 );
             }
@@ -1194,7 +1228,7 @@ mod tests {
             .issuer(subject.clone())
             .audience(&stranger.did())
             .subject(DelegatedSubject::Specific(subject.did()))
-            .command(vec!["archive".to_string()])
+            .command(vec!["use".to_string()])
             .try_build()
             .await
             .expect("delegation");
@@ -1211,7 +1245,12 @@ mod tests {
             .issuer(operator.clone())
             .audience(&subject.did())
             .subject(&subject.did())
-            .command(vec!["archive".to_string(), "get".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "get".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ])
             .arguments(args)
             .proofs(vec![cid])
             .try_build()
@@ -1272,7 +1311,7 @@ mod tests {
             .issuer(subject.clone())
             .audience(&operator.did())
             .subject(DelegatedSubject::Specific(subject.did()))
-            .command(vec!["archive".to_string()])
+            .command(vec!["use".to_string()])
             .expiration(expired_at)
             .try_build()
             .await
@@ -1290,7 +1329,12 @@ mod tests {
             .issuer(operator.clone())
             .audience(&subject.did())
             .subject(&subject.did())
-            .command(vec!["archive".to_string(), "get".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "get".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ])
             .arguments(args)
             .proofs(vec![cid])
             .try_build()
@@ -1366,7 +1410,12 @@ mod tests {
 
         let container = build_self_invocation_container(
             &signer,
-            vec!["archive".to_string(), "get".to_string()],
+            vec![
+                "use".to_string(),
+                "get".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ],
             args,
         )
         .await;

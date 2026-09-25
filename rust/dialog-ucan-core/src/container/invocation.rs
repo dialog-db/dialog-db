@@ -1187,14 +1187,10 @@ pub(crate) mod tests {
         let subject_did = subject_signer.did();
         let operator_signer = generate_signer().await;
 
-        let delegation = create_delegation(
-            &subject_signer,
-            &operator_signer,
-            &subject_signer,
-            &["archive"],
-        )
-        .await
-        .expect("Failed to create delegation");
+        let delegation =
+            create_delegation(&subject_signer, &operator_signer, &subject_signer, &["use"])
+                .await
+                .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
@@ -1202,7 +1198,12 @@ pub(crate) mod tests {
             .issuer(operator_signer.clone())
             .audience(&subject_did)
             .subject(&subject_did)
-            .command(vec!["archive".to_string(), "put".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "put".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ])
             .proofs(vec![delegation_cid])
             .try_build()
             .await
@@ -1213,12 +1214,12 @@ pub(crate) mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        assert_eq!(chain.command().to_string(), "/archive/put");
+        assert_eq!(chain.command().to_string(), "/use/put/archive/block");
 
         let bytes = chain.to_bytes().expect("Failed to serialize");
         let restored = InvocationChain::try_from(bytes.as_slice()).expect("Failed to deserialize");
 
-        assert_eq!(restored.command().to_string(), "/archive/put");
+        assert_eq!(restored.command().to_string(), "/use/put/archive/block");
         assert_eq!(restored.subject(), &subject_did);
     }
 
@@ -1229,14 +1230,10 @@ pub(crate) mod tests {
         let subject_did = subject_signer.did();
         let operator_signer = generate_signer().await;
 
-        let delegation = create_delegation(
-            &subject_signer,
-            &operator_signer,
-            &subject_signer,
-            &["archive"],
-        )
-        .await
-        .expect("Failed to create delegation");
+        let delegation =
+            create_delegation(&subject_signer, &operator_signer, &subject_signer, &["use"])
+                .await
+                .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
@@ -1244,7 +1241,12 @@ pub(crate) mod tests {
             .issuer(operator_signer.clone())
             .audience(&subject_did)
             .subject(&subject_did)
-            .command(vec!["archive".to_string(), "put".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "put".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ])
             .proofs(vec![delegation_cid])
             .try_build()
             .await
@@ -1260,7 +1262,7 @@ pub(crate) mod tests {
         let restored: InvocationChain<AnySignature> =
             serde_ipld_dagcbor::from_slice(&cbor_bytes).expect("Failed to deserialize");
 
-        assert_eq!(restored.command().to_string(), "/archive/put");
+        assert_eq!(restored.command().to_string(), "/use/put/archive/block");
         assert_eq!(restored.subject(), &subject_did);
     }
 
@@ -1271,14 +1273,10 @@ pub(crate) mod tests {
         let subject_did = subject_signer.did();
         let operator_signer = generate_signer().await;
 
-        let delegation = create_delegation(
-            &subject_signer,
-            &operator_signer,
-            &subject_signer,
-            &["archive"],
-        )
-        .await
-        .expect("Failed to create delegation");
+        let delegation =
+            create_delegation(&subject_signer, &operator_signer, &subject_signer, &["use"])
+                .await
+                .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
@@ -1286,7 +1284,12 @@ pub(crate) mod tests {
             .issuer(operator_signer.clone())
             .audience(&subject_did)
             .subject(&subject_did)
-            .command(vec!["archive".to_string(), "put".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "put".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ])
             .proofs(vec![delegation_cid])
             .try_build()
             .await
@@ -1313,14 +1316,10 @@ pub(crate) mod tests {
         let subject_did = subject_signer.did();
         let operator_signer = generate_signer().await;
 
-        let delegation = create_delegation(
-            &subject_signer,
-            &operator_signer,
-            &subject_signer,
-            &["archive"],
-        )
-        .await
-        .expect("Failed to create delegation");
+        let delegation =
+            create_delegation(&subject_signer, &operator_signer, &subject_signer, &["use"])
+                .await
+                .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
@@ -1328,7 +1327,12 @@ pub(crate) mod tests {
             .issuer(operator_signer.clone())
             .audience(&subject_did)
             .subject(&subject_did)
-            .command(vec!["archive".to_string(), "put".to_string()])
+            .command(vec![
+                "use".to_string(),
+                "put".to_string(),
+                "archive".to_string(),
+                "block".to_string(),
+            ])
             .proofs(vec![delegation_cid])
             .try_build()
             .await
