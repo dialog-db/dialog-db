@@ -1367,6 +1367,73 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
+/// A commit that loses the race on a branch whose tree was adopted from
+/// a peer reconciles by reading what it holds by reference from that
+/// peer, as the commit itself did.
+#[dialog_common::test]
+async fn it_reconciles_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+
+    let bob_repo = profile
+        .space(unique_name("bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
+    let first = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    first.set_upstream(remote_branch).perform(&operator).await?;
+    first.pull().perform(&operator).await?;
+
+    // Two writers on the adopted tree: the session and its peer.
+    let second = bob_repo.branch("main").open().perform(&profile).await?;
+    first
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:bob".parse()?,
+            is: Value::String("Bob".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    second
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:carol".parse()?,
+            is: Value::String("Carol".into()),
+            cause: None,
+        })]))
+        .reconcile()
+        .perform(&profile)
+        .await?;
+
+    let results: Vec<_> = second
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&profile)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(results.len(), 3, "Alice, Bob and Carol all survive");
+    Ok(())
+}
+
 /// A retraction must survive a concurrent three-way pull.
 ///
 /// The resurrection scenario observed in the wild: Alice and Bob share
