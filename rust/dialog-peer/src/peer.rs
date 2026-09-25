@@ -66,7 +66,7 @@ use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
 use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
-use dialog_effects::credential::Secret;
+use dialog_effects::credential::{CredentialError, Secret};
 use dialog_effects::peer::PeerConnection;
 use dialog_effects::storage::{Directory, Location};
 use dialog_effects::{archive, blob, credential, memory};
@@ -165,8 +165,9 @@ pub(crate) struct Grant {
 /// that holds its own state.
 ///
 /// Cheap to clone: every clone is a handle onto the same storage, runtime,
-/// state branch and connections. Build one with [`Peer::open`]; derive a worker with
-/// [`Peer::worker`].
+/// state branch and connections. Build one with [`Peer::new`]; open a
+/// session of it with [`Peer::session`], or of a peer known only by its
+/// DID with [`Peer::session_of`].
 #[derive(Provider, Clone)]
 pub struct Peer<S: Clone, M: Mode = Local> {
     #[provide(Identify, Attest)]
@@ -180,7 +181,6 @@ pub struct Peer<S: Clone, M: Mode = Local> {
         blob::Read,
         blob::Write,
         blob::Import,
-        credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,
         credential::Save<Secret>,
@@ -210,7 +210,7 @@ pub(crate) struct Inner {
     credential: SignerCredential,
     /// The repository holding this peer's own state, and the replica
     /// identity every entity it writes derives from. The peer's own DID
-    /// for a root peer; the parent's for a worker.
+    /// for a peer acting as itself; the peer's for its session.
     home: Did,
     /// Base directory for resolving space names, until the registry
     /// resolves them by fact.
@@ -291,6 +291,29 @@ impl Peer<Unset> {
     }
 }
 
+/// A key is handed only to a handle that holds keys: the peer acting as
+/// itself. A session is refused, whichever key it asks for.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<credential::Load<Credential>> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<credential::Load<Credential>> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<credential::Load<Credential>>,
+    ) -> Result<Credential, CredentialError> {
+        if !M::HOLDS_KEYS {
+            return Err(CredentialError::Withheld(format!(
+                "the key of {} is not handed to a session",
+                input.subject()
+            )));
+        }
+        input.perform(&self.storage).await
+    }
+}
+
 impl<S: Clone, M: Mode> Peer<S, M> {
     /// The peer's DID: the key it acts with.
     pub fn did(&self) -> Did {
@@ -333,7 +356,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
 
     /// A repository this peer holds, by the name of its space or by its
     /// DID: the replica of it that belongs to the principal the peer acts
-    /// for, its home. A worker opens its parent's repositories this way.
+    /// for, its home. A session opens its peer's repositories this way.
     ///
     /// ```no_run
     /// # async fn example(peer: &dialog_peer::Peer<dialog_storage::provider::storage::VolatileSpace>) -> anyhow::Result<()> {
@@ -344,11 +367,6 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     /// ```
     pub fn repository(&self, by: impl Into<By>) -> ReplicaReference {
         ReplicaReference::new(self.inner.home.clone(), by)
-    }
-
-    /// The storage every space this peer holds is mounted in.
-    pub fn storage(&self) -> &Storage<S> {
-        &self.storage
     }
 
     /// The network dispatch fork invocations go through.
@@ -431,6 +449,12 @@ impl<S: Clone, M: Mode> Peer<S, M> {
 }
 
 impl<S: Clone> Peer<S, Local> {
+    /// The storage every space this peer holds is mounted in, keys and
+    /// all: only the peer acting as itself is handed it.
+    pub fn storage(&self) -> &Storage<S> {
+        &self.storage
+    }
+
     /// Start a session of this peer: the same peer, acting with a key
     /// derived from this one and `context`, sharing this peer's storage,
     /// network, runtime and state branch, within the grants the builder
@@ -1125,10 +1149,7 @@ mod tests {
         peer.space(name.clone()).open().perform(&peer).await?;
         let repository = peer.space(name).load().perform(&session).await?;
         assert!(
-            matches!(
-                repository.credential(),
-                Credential::Verifier(_)
-            ),
+            matches!(repository.credential(), Credential::Verifier(_)),
             "the session was handed the repository's key"
         );
         Ok(())
