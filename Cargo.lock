@@ -1687,7 +1687,6 @@ dependencies = [
  "percent-encoding",
  "pidlock",
  "rand 0.8.5",
- "rexie",
  "s3s",
  "serde",
  "serde_ipld_dagcbor",
@@ -2556,20 +2555,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 dependencies = [
  "rayon",
-]
-
-[[package]]
-name = "idb"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3afe8830d5802f769dc0be20a87f9f116798c896650cb6266eb5c19a3c109eed"
-dependencies = [
- "js-sys",
- "num-traits",
- "thiserror 1.0.69",
- "tokio",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
@@ -3716,17 +3701,6 @@ dependencies = [
  "wasm-streams 0.4.2",
  "web-sys",
  "webpki-roots 1.0.2",
-]
-
-[[package]]
-name = "rexie"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "887466cfa8a12c08ee4b174998135cea8ff0fd84858627cd793e56535a045bc9"
-dependencies = [
- "idb",
- "thiserror 1.0.69",
- "wasm-bindgen",
 ]
 
 [[package]]

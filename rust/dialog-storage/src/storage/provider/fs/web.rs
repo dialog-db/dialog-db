@@ -265,17 +265,15 @@ async fn opfs_category(category: &str, name: &str) -> Result<MountedDirectory, F
 /// [isSameEntry]: https://developer.mozilla.org/en-US/docs/Web/API/FileSystemHandle/isSameEntry
 mod registry {
     use super::{FileSystemDirectoryHandle, FileSystemError, js_io_error, random_uuid};
+    use crate::storage::idb::{Database, TransactionMode};
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
 
     const DB: &str = "dialog-fs-directories";
     const STORE: &str = "directories";
 
-    async fn open_db() -> Result<rexie::Rexie, FileSystemError> {
-        rexie::Rexie::builder(DB)
-            .version(1)
-            .add_object_store(rexie::ObjectStore::new(STORE).auto_increment(false))
-            .build()
+    async fn open_db() -> Result<Database, FileSystemError> {
+        Database::open(DB, Some(1), &[STORE])
             .await
             .map_err(|e| FileSystemError::Io(format!("opening directory registry: {e}")))
     }
@@ -297,19 +295,16 @@ mod registry {
     ) -> Result<Option<FileSystemDirectoryHandle>, FileSystemError> {
         let db = open_db().await?;
         let tx = db
-            .transaction(&[STORE], rexie::TransactionMode::ReadOnly)
+            .transaction(&[STORE], TransactionMode::ReadOnly)
             .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
         let value = store
             .get(JsValue::from_str(id))
             .await
             .map_err(|e| FileSystemError::Io(format!("reading registry entry: {e}")))?;
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("closing registry transaction: {e}")))?;
 
@@ -333,13 +328,11 @@ mod registry {
 
         // Scan existing entries for a handle pointing at the same directory.
         let tx = db
-            .transaction(&[STORE], rexie::TransactionMode::ReadOnly)
+            .transaction(&[STORE], TransactionMode::ReadOnly)
             .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
         let keys = store
             .get_all_keys(None, None)
             .await
@@ -348,8 +341,7 @@ mod registry {
             .get_all(None, None)
             .await
             .map_err(|e| FileSystemError::Io(format!("listing registry entries: {e}")))?;
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("closing registry transaction: {e}")))?;
 
@@ -367,19 +359,16 @@ mod registry {
         // New directory: mint an id and store the handle under it.
         let id = random_uuid()?;
         let tx = db
-            .transaction(&[STORE], rexie::TransactionMode::ReadWrite)
+            .transaction(&[STORE], TransactionMode::ReadWrite)
             .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
         store
             .put(handle.as_ref(), Some(&JsValue::from_str(&id)))
             .await
             .map_err(|e| FileSystemError::Io(format!("storing registry entry: {e}")))?;
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("committing registry entry: {e}")))?;
         Ok(id)
@@ -389,19 +378,16 @@ mod registry {
     pub(super) async fn unmount(id: &str) -> Result<(), FileSystemError> {
         let db = open_db().await?;
         let tx = db
-            .transaction(&[STORE], rexie::TransactionMode::ReadWrite)
+            .transaction(&[STORE], TransactionMode::ReadWrite)
             .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
         store
             .delete(JsValue::from_str(id))
             .await
             .map_err(|e| FileSystemError::Io(format!("deleting registry entry: {e}")))?;
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("committing registry deletion: {e}")))?;
         Ok(())

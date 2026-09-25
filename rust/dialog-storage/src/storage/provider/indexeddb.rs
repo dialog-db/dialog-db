@@ -55,9 +55,9 @@ mod certificate;
 mod credential;
 mod memory;
 
+use crate::storage::idb::{Database, ObjectStore, Transaction, TransactionMode};
 use futures_util::lock::Mutex;
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array, global};
-use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -77,7 +77,7 @@ struct Connection {
     stores: HashSet<String>,
     /// Shared via `Rc` so a transaction can outlive the brief connection
     /// state borrow used to start it.
-    db: Rc<Rexie>,
+    db: Rc<Database>,
 }
 
 /// Connection state shared by every provider for one database.
@@ -92,14 +92,11 @@ struct SharedConnection {
 
 impl Connection {
     async fn open(name: &str) -> Result<Self, IndexedDbError> {
-        let db = RexieBuilder::new(name)
-            .build()
+        let db = Database::open(name, None, &[])
             .await
-            .map_err(|e| IndexedDbError::Database(format!("{:?}", e)))?;
-
-        let version = db
-            .version()
             .map_err(|e| IndexedDbError::Database(e.to_string()))?;
+
+        let version = db.version();
         let stores = db.store_names().into_iter().collect();
 
         Ok(Self {
@@ -110,7 +107,7 @@ impl Connection {
     }
 
     /// Returns a clone of the database handle.
-    fn db(&self) -> Rc<Rexie> {
+    fn db(&self) -> Rc<Database> {
         self.db.clone()
     }
 }
@@ -118,7 +115,7 @@ impl Connection {
 /// A handle to a named object store.
 ///
 /// It keeps an [`IndexedDb`] clone rather than a snapshot of the current
-/// `Rexie` handle. A version change may close that handle between `store()`
+/// [`Database`] handle. A version change may close that handle between `store()`
 /// and the first request; resolving the transaction through the provider lets
 /// it refresh the pooled connection before retrying.
 struct StoreSession {
@@ -129,35 +126,34 @@ struct StoreSession {
 impl StoreSession {
     async fn query<F, Fut, Output, E>(&self, select: F) -> Result<Output, E>
     where
-        F: FnOnce(rexie::Store) -> Fut,
+        F: FnOnce(ObjectStore) -> Fut,
         Fut: std::future::Future<Output = Result<Output, E>>,
         E: From<IndexedDbError>,
     {
-        let (object_store, _armed) = self
+        let (object_store, _transaction) = self
             .provider
             .begin_transaction(&self.store_name, TransactionMode::ReadOnly)
             .await?;
 
-        // A read is complete once its request resolves. Keeping the armed
-        // terminal handlers alive until then (and briefly after drop) closes
-        // the callback race without making a successful read wait on a
-        // terminal event that some browsers may never deliver.
+        // A read is complete once its request resolves, so it does not
+        // wait on the transaction's terminal event; dropping the
+        // transaction afterwards clears its handlers.
         select(object_store).await
     }
 
     async fn transact<F, Fut, Output, E>(&self, mutate: F) -> Result<Output, E>
     where
-        F: FnOnce(rexie::Store) -> Fut,
+        F: FnOnce(ObjectStore) -> Fut,
         Fut: std::future::Future<Output = Result<Output, E>>,
         E: From<IndexedDbError>,
     {
-        let (object_store, armed) = self
+        let (object_store, transaction) = self
             .provider
             .begin_transaction(&self.store_name, TransactionMode::ReadWrite)
             .await?;
         let result = mutate(object_store).await?;
 
-        armed
+        transaction
             .settle()
             .await
             .map_err(|e| IndexedDbError::Transaction(e.to_string()))?;
@@ -224,19 +220,13 @@ impl IndexedDb {
         };
         new_stores.insert(name.to_string());
 
-        let mut builder = RexieBuilder::new(&self.name).version(version + 1);
-        for store in &new_stores {
-            builder = builder.add_object_store(ObjectStore::new(store).auto_increment(false));
-        }
-        let db = builder
-            .build()
+        let stores: Vec<&str> = new_stores.iter().map(String::as_str).collect();
+        let db = Database::open(&self.name, Some(version + 1), &stores)
             .await
-            .map_err(|error| IndexedDbError::Database(format!("{error:?}")))?;
+            .map_err(|error| IndexedDbError::Database(error.to_string()))?;
 
         let mut conn = self.connection.current.borrow_mut();
-        conn.version = db
-            .version()
-            .map_err(|error| IndexedDbError::Database(error.to_string()))?;
+        conn.version = db.version();
         conn.stores = db.store_names().into_iter().collect();
         conn.db = Rc::new(db);
         Ok(())
@@ -246,7 +236,7 @@ impl IndexedDb {
         &self,
         store_name: &str,
         mode: TransactionMode,
-    ) -> Result<(rexie::Store, crate::storage::settle::Armed), IndexedDbError> {
+    ) -> Result<(ObjectStore, Transaction), IndexedDbError> {
         let db = self.connection.current.borrow().db();
         let tx = db
             .transaction(&[store_name], mode)
@@ -254,8 +244,7 @@ impl IndexedDb {
         let store = tx
             .store(store_name)
             .map_err(|error| IndexedDbError::Store(error.to_string()))?;
-        let armed = crate::storage::settle::arm(tx);
-        Ok((store, armed))
+        Ok((store, tx))
     }
 
     /// Start a transaction against the current pooled connection.
@@ -267,7 +256,7 @@ impl IndexedDb {
         &self,
         store_name: &str,
         mode: TransactionMode,
-    ) -> Result<(rexie::Store, crate::storage::settle::Armed), IndexedDbError> {
+    ) -> Result<(ObjectStore, Transaction), IndexedDbError> {
         let _schema = self.connection.schema.lock().await;
         match self.current_transaction(store_name, mode) {
             Ok(transaction) => Ok(transaction),
@@ -537,12 +526,13 @@ mod tests {
             let current = db.connection.current.borrow();
             (current.version, current.stores.clone())
         };
-        let mut builder = RexieBuilder::new(&db.name).version(version + 1);
-        for store_name in stores.into_iter().chain(["external".to_string()]) {
-            builder = builder.add_object_store(ObjectStore::new(&store_name).auto_increment(false));
-        }
-        let external = builder.build().await.expect("external upgrade succeeds");
-        external.close();
+        let mut names: Vec<String> = stores.into_iter().collect();
+        names.push("external".to_string());
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let external = Database::open(&db.name, Some(version + 1), &names)
+            .await
+            .expect("external upgrade succeeds");
+        drop(external);
 
         let store = db.store("memory").await?;
         let result: Option<JsValue> = store
