@@ -6,8 +6,13 @@
 //! - [`Local`]: the peer's own key. It can do anything the peer can,
 //!   including signing delegations and opening sessions.
 //! - [`Session`]: a separate operator key, acting on the peer's replicas
-//!   within what the peer granted it. It cannot sign as the peer, so it
-//!   can neither delegate the peer's authority nor open further sessions.
+//!   within what the peer granted it. It is never handed the peer's key,
+//!   nor a repository's, so it cannot sign as either: it can neither
+//!   delegate the peer's authority nor open further sessions.
+//!
+//! A session sharing the peer's storage is not yet confined to its
+//! grants for local reads and writes; only its requests to other peers
+//! are proven from them.
 
 use dialog_common::{ConditionalSend, ConditionalSync};
 
@@ -24,10 +29,19 @@ pub struct Session;
 pub trait Mode:
     sealed::Sealed + Clone + Copy + ConditionalSend + ConditionalSync + 'static
 {
+    /// Whether a handle in this mode is handed the keys of the peer and
+    /// of the repositories it holds. A session acts with its own key, so
+    /// it is not: it can use what it was granted, never become its
+    /// grantor.
+    const HOLDS_KEYS: bool;
 }
 
-impl Mode for Local {}
-impl Mode for Session {}
+impl Mode for Local {
+    const HOLDS_KEYS: bool = true;
+}
+impl Mode for Session {
+    const HOLDS_KEYS: bool = false;
+}
 
 mod sealed {
     pub trait Sealed {}

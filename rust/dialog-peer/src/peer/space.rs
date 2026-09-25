@@ -12,6 +12,15 @@ use dialog_repository::spaces;
 use dialog_storage::provider::storage::Storage;
 use dialog_varsig::{Did, Principal as _};
 
+/// The credential of a loaded space as a handle in mode `M` is given it:
+/// whole to one that holds keys, and without its signing key otherwise.
+fn handed<M: Mode>(credential: Credential) -> Credential {
+    match credential.signer() {
+        Some(signer) if !M::HOLDS_KEYS => Credential::from(signer.verifier()),
+        _ => credential,
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<space_fx::Load> for Peer<S, M>
@@ -45,7 +54,7 @@ where
                     credential.did()
                 )));
             }
-            return Ok(credential);
+            return Ok(handed::<M>(credential));
         }
 
         // A repository named by its DID is the one already mounted, if it
@@ -54,7 +63,7 @@ where
         if let Ok(repository) = name.parse::<Did>()
             && let Some(credential) = self.mounted(&repository).await
         {
-            return Ok(credential);
+            return Ok(handed::<M>(credential));
         }
         if let Ok(repository) = name.parse::<Did>()
             && let Some(location) = self.located(&repository).await?
@@ -66,13 +75,13 @@ where
                     credential.did()
                 )));
             }
-            return Ok(credential);
+            return Ok(handed::<M>(credential));
         }
 
         let location = storage_fx::Location::new(self.directory().clone(), name);
         let credential = self.load_at(location.clone()).await?;
         self.record_space(&credential.did(), name, &location).await;
-        Ok(credential)
+        Ok(handed::<M>(credential))
     }
 }
 
