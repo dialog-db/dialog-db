@@ -109,7 +109,9 @@ impl<'a> Pull<'a> {
         Env: ResolveEnv,
     {
         if self.from.is_some() {
-            return Box::pin(self.prepare(env)).await?.commit(env).await;
+            let upstream = self.upstream(env).await?;
+            let prepared = Box::pin(prepare_upstream(self.branch, upstream.clone(), env)).await?;
+            return land(self.branch, upstream, prepared, false, env).await;
         }
 
         let branch = self.branch;
@@ -125,10 +127,7 @@ impl<'a> Pull<'a> {
         // its head and hydrates what its merge reads. The merges then land
         // one at a time, since each advances the same head. A merge
         // prepared before an earlier one of this pull landed finds the head
-        // moved by it, and prepares again from this handle's head -- local
-        // work now, its blocks already fetched. A head moved by anything
-        // else still fails the pull, as a single pull racing a commit does:
-        // the caller refreshes and pulls again.
+        // moved by it, and prepares again (see `land`).
         //
         // An upstream that cannot be prepared -- unreachable, say -- does
         // not keep the others from landing: the pull lands what it can and
@@ -152,18 +151,7 @@ impl<'a> Pull<'a> {
                     continue;
                 }
             };
-            let committed = match prepared.commit(env).await {
-                Err(PullError::Publish(PublishError::VersionMismatch { .. }))
-                    if landed.is_some() =>
-                {
-                    let tree = branch.tracked().tree(&upstream.target());
-                    Box::pin(prepare_upstream(branch, upstream.with_tree(tree), env))
-                        .await?
-                        .commit(env)
-                        .await?
-                }
-                result => result?,
-            };
+            let committed = land(branch, upstream, prepared, landed.is_some(), env).await?;
             if committed.is_some() {
                 landed = committed;
             }
@@ -192,37 +180,74 @@ impl<'a> Pull<'a> {
         Env: ResolveEnv,
     {
         let branch = self.branch;
+        let upstream = self.upstream(env).await?;
+        Box::pin(prepare_upstream(branch, upstream, env)).await
+    }
+
+    /// The upstream this pull takes from: the one given, or else the
+    /// first the branch pulls from.
+    async fn upstream<Env>(&self, env: &Env) -> Result<Upstream, PullError>
+    where
+        Env: ResolveEnv,
+    {
+        let branch = self.branch;
 
         // Pull from the given target -- the tracked entry for it, or, for
         // one not tracked yet, a fresh entry whose empty sync base makes
         // the merge run from scratch -- or else the first branch this
         // one pulls from. A bare `perform` pulls from every one.
         resolve(branch, env).await?;
-        let upstream = match self.from {
+        let upstream = match &self.from {
             None => branch.pulls().iter().next().cloned().ok_or_else(|| {
                 PullError::BranchHasNoUpstream {
                     branch: branch.name().to_string(),
                 }
             })?,
             Some(target) => {
-                if let Upstream::Local { branch: name, .. } = &target
+                if let Upstream::Local { branch: name, .. } = target
                     && name == branch.name()
                 {
                     return Err(PullError::UpstreamIsItself {
                         branch: branch.name().to_string(),
                     });
                 }
-                branch
-                    .upstreams()
-                    .find(&target)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let tree = branch.tracked().tree(&target.target());
-                        target.with_tree(tree)
-                    })
+                branch.upstreams().find(target).cloned().unwrap_or_else(|| {
+                    let tree = branch.tracked().tree(&target.target());
+                    target.clone().with_tree(tree)
+                })
             }
         };
-        Box::pin(prepare_upstream(branch, upstream, env)).await
+        Ok(upstream)
+    }
+}
+
+/// Land `prepared`, the pull of `upstream`, holding the branch's write
+/// lock: a commit or another pull of this writer moves the head only
+/// before or after, never between the head read and the publish.
+///
+/// When `moved` -- an earlier pull of the same call landed since this
+/// one was prepared -- the head it finds moved is its own doing, so it is
+/// prepared again from it: local work, its blocks already fetched. A head
+/// moved by anything else fails the pull, as a pull racing a commit
+/// always has: the caller refreshes and pulls again.
+async fn land<'a, Env: ResolveEnv>(
+    branch: &'a Branch,
+    upstream: Upstream,
+    prepared: PreparedPull<'a>,
+    moved: bool,
+    env: &Env,
+) -> Result<Option<Revision>, PullError> {
+    let lock = branch.write_lock();
+    let _landing = lock.lock().await;
+    match prepared.commit(env).await {
+        Err(PullError::Publish(PublishError::VersionMismatch { .. })) if moved => {
+            let tree = branch.tracked().tree(&upstream.target());
+            Box::pin(prepare_upstream(branch, upstream.with_tree(tree), env))
+                .await?
+                .commit(env)
+                .await
+        }
+        result => result,
     }
 }
 

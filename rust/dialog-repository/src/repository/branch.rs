@@ -21,9 +21,10 @@ use dialog_capability::{Capability, Did, Subject};
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_query::query::Application;
+use futures_util::lock::Mutex as AsyncMutex;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 mod blob;
 pub use blob::*;
@@ -337,6 +338,28 @@ impl Branch {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(peer, answered);
+    }
+
+    /// The lock a writer holds while it moves this branch's head. Every
+    /// handle of the branch in this process shares it, so a commit and a
+    /// pull by one writer take turns instead of minting the same edition
+    /// twice. Origins are unique per process, so no lock is needed beyond
+    /// it.
+    pub(crate) fn write_lock(&self) -> Arc<AsyncMutex<()>> {
+        static LOCKS: OnceLock<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>> = OnceLock::new();
+        let key = format!("{}:{}", self.subject(), self.name());
+        let mut locks = LOCKS
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        // Drop the entries of branches no handle holds a lock for any more.
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
     }
 
     /// Where a read of content this branch holds by reference falls back

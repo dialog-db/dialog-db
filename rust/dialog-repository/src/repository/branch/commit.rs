@@ -2,7 +2,7 @@ use super::reconcile::reconcile;
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
-    Revision, Snapshot, TreeReference, origin_of,
+    RepositoryMemoryExt as _, Revision, Snapshot, TreeReference, origin_of,
 };
 use dialog_artifacts::history::{
     Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
@@ -201,6 +201,29 @@ where
             + ConditionalSync
             + 'static,
     {
+        // One writer moves the head at a time within an environment: its
+        // commits and its pulls of this branch take turns, since both mint
+        // under its origin and would otherwise take the same edition.
+        let lock = branch.write_lock();
+        let _writing = lock.lock().await;
+
+        // A reconciling commit builds on a head its own writer moved since
+        // this handle read it, a pull of its own say: that is not a
+        // concurrent change to merge with, and minting on the older head
+        // would take the edition the newer one holds. A head another writer
+        // moved stays a race, merged as the commit asked.
+        if self.reconcile {
+            let stored = branch.subject().branch(branch.name()).revision();
+            stored.resolve().perform(env).await?;
+            let issuer = Identify.perform(env).await?.did();
+            if let Some(newer) = stored.content()
+                && Some(&newer) != branch.revision().as_ref()
+                && newer.issuer == issuer
+            {
+                branch.revision.resolve().perform(env).await?;
+            }
+        }
+
         // Checkpoint the head: capture the version we build this commit on top
         // of, so the publish below CAS's against it. A concurrent commit or
         // pull that advances the head while we apply changes then makes this
