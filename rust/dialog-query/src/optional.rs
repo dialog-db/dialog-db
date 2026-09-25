@@ -134,7 +134,9 @@ impl OptionalAttributeQuery {
         let selector = self;
         try_stream! {
             for await candidate in selection {
-                let base = candidate?;
+                let mut base = candidate?;
+                // Every row this one extends into shares its bindings.
+                base.share();
 
                 // Structural invariant: the schema hard-requires the
                 // entity, so the planner only schedules this step once

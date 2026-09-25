@@ -144,6 +144,7 @@ impl AttributeQueryAll {
         artifact: Artifact,
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(artifact);
+        candidate.reserve(4);
         if let Some(name) = self.the.name() {
             candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;
         }
@@ -354,7 +355,9 @@ impl AttributeQueryAll {
         // that wrapped or boxed it (several KiB per scan step, per row).
         Box::pin(try_stream! {
             for await candidate in selection {
-                let base = candidate?;
+                let mut base = candidate?;
+                // Every row this one extends into shares its bindings.
+                base.share();
 
                 // An Absent-bound parameter matches nothing at the
                 // scalar layer: filter the row without scanning.

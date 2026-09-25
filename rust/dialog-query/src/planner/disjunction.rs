@@ -46,7 +46,7 @@ impl Disjunction {
     /// Returns `Pin<Box<...>>` because Disjunction is recursive — Or holds a
     /// `Box<Disjunction>` whose evaluate calls back into this method. Boxing
     /// keeps each alternative at pointer size on the stack.
-    pub fn evaluate<'a, Env, M: Selection + 'static>(
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         selection: M,
         env: &'a Env,
@@ -72,7 +72,7 @@ impl FromIterator<Conjunction> for Disjunction {
 
 impl Disjunction {
     /// Disjunction the input stream and merge two alternative evaluations.
-    fn merge<'a, Env, M: Selection + 'static>(
+    fn merge<'a, Env, M: Selection + 'a>(
         left: Disjunction,
         right: Conjunction,
         selection: M,

@@ -21,12 +21,11 @@ pub trait SendStream<T>:
 }
 impl<S, T> SendStream<T> for S where
     S: TryStream<Ok = T, Error = EvaluationError, Item = Result<T, EvaluationError>>
-        + 'static
         + ConditionalSend
 {
 }
 
-type PinnedSendStream<T> = Pin<Box<dyn SendStream<T>>>;
+type PinnedSendStream<'a, T> = Pin<Box<dyn SendStream<T> + 'a>>;
 
 /// Split a stream into two independent streams that each receive a clone of
 /// every item.
@@ -44,10 +43,10 @@ type PinnedSendStream<T> = Pin<Box<dyn SendStream<T>>>;
 /// when the other pulls an item for it, and a half dropped early wakes the
 /// survivor, which then drives the input alone. An input error reaches both
 /// halves and ends them.
-pub fn fork_stream<S, T>(input: S) -> (PinnedSendStream<T>, PinnedSendStream<T>)
+pub fn fork_stream<'a, S, T>(input: S) -> (PinnedSendStream<'a, T>, PinnedSendStream<'a, T>)
 where
-    S: SendStream<T> + ConditionalSend + 'static,
-    T: Clone + ConditionalSend + 'static,
+    S: SendStream<T> + ConditionalSend + 'a,
+    T: Clone + ConditionalSend + 'a,
 {
     let fanout = Arc::new(Mutex::new(Fanout {
         input: Some(Box::pin(input)),
@@ -64,9 +63,9 @@ where
 }
 
 /// The state two halves of a [`fork_stream`] share.
-struct Fanout<T> {
+struct Fanout<'a, T> {
     /// The input, until it ends or fails.
-    input: Option<PinnedSendStream<T>>,
+    input: Option<PinnedSendStream<'a, T>>,
     /// Items pulled by one half and not yet taken by the other.
     queues: [VecDeque<Result<T, EvaluationError>>; 2],
     /// Whether each half is still held.
@@ -76,12 +75,12 @@ struct Fanout<T> {
 }
 
 /// One half of a [`fork_stream`].
-struct Half<T> {
-    fanout: Arc<Mutex<Fanout<T>>>,
+struct Half<'a, T> {
+    fanout: Arc<Mutex<Fanout<'a, T>>>,
     side: usize,
 }
 
-impl<T: Clone> Stream for Half<T> {
+impl<T: Clone> Stream for Half<'_, T> {
     type Item = Result<T, EvaluationError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -128,7 +127,7 @@ impl<T: Clone> Stream for Half<T> {
     }
 }
 
-impl<T> Drop for Half<T> {
+impl<T> Drop for Half<'_, T> {
     fn drop(&mut self) {
         let mut fanout = self
             .fanout

@@ -670,7 +670,9 @@ impl ResolverQuery {
         let resolver = self;
         try_stream! {
             for await candidate in selection {
-                let base = candidate?;
+                let mut base = candidate?;
+                // Every row this one extends into shares its bindings.
+                base.share();
                 let Some(reference) = resolver.node_reference(&base) else {
                     continue;
                 };
