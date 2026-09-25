@@ -1,10 +1,16 @@
 //! Space capability providers for [`Peer`].
 
+use core::fmt::Display;
+
 use super::{Mode, Peer};
 use dialog_capability::access::{Access, FromCapability as _, Prove, Retain};
 use dialog_capability::{Ability, Capability, Constraint, Effect, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_credentials::{Credential, Signer};
+use dialog_credentials::key::{ExtractableKey, KeyExport};
+use dialog_credentials::secret::Context;
+use dialog_credentials::{
+    Credential, Ed25519Signer, Ed25519Verifier, Extractable, Signer, SignerCredential,
+};
 use dialog_effects::credential::{self as credential_fx, prelude::*};
 use dialog_effects::space as space_fx;
 use dialog_effects::storage::{self as storage_fx, LocationExt as _};
@@ -15,6 +21,15 @@ use dialog_ucan::{Scope, Ucan, UcanDelegation};
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use dialog_ucan_core::{DelegationBuilder, DelegationChain};
 use dialog_varsig::{Did, Principal as _};
+
+/// The context a space's key is sealed in, so a sealed key opens only as
+/// one.
+const SPACE_KEY: Context = Context::new("dialog.space/key");
+
+/// A failure creating a space, as a storage error.
+fn failed(error: impl Display) -> storage_fx::StorageError {
+    storage_fx::StorageError::Storage(error.to_string())
+}
 
 /// The credential of a loaded space as a handle in mode `M` is given it:
 /// whole to one that holds keys, and without its signing key otherwise.
@@ -150,6 +165,22 @@ where
             let _ = spaces::record(state, repository, name, location, self).await;
         }
     }
+
+    /// Keep the sealed key of the repository `repository` in this peer's
+    /// state. A peer that keeps no state has nowhere to, and the space's
+    /// key would live only in its creator's memory: refused.
+    async fn seal_space(
+        &self,
+        repository: &Did,
+        sealed: Vec<u8>,
+    ) -> Result<(), storage_fx::StorageError> {
+        let state = self.state_opt().ok_or_else(|| {
+            failed("a peer keeping no state has nowhere to keep a space's sealed key")
+        })?;
+        spaces::seal(state, repository, sealed, self)
+            .await
+            .map_err(failed)
+    }
 }
 
 impl<S: Clone, M: Mode> Peer<S, M>
@@ -270,12 +301,38 @@ where
         }
 
         let name = &space_fx::Space::of(&input).name;
-        let credential = space_fx::Create::of(&input).credential.clone();
-        let Some(signer) = credential.signer().cloned() else {
-            return Err(storage_fx::StorageError::Storage(
-                "a space is created from its signing key, not a verifier".into(),
-            ));
+        let key = match &space_fx::Create::of(&input).key {
+            Some(key) => key.0.clone(),
+            None => <Ed25519Signer<Extractable> as ExtractableKey>::generate()
+                .await
+                .map_err(failed)?,
         };
+
+        // The space's key is sealed to the account it delegates to, and
+        // kept only as that: the account can reach it, to name co-owners
+        // or rotate, and nothing else can.
+        // Only the browser has a second, opaque kind of export; natively
+        // every export is the seed.
+        #[allow(irrefutable_let_patterns)]
+        let KeyExport::Extractable(seed) = key.export().await.map_err(failed)? else {
+            return Err(failed("the space's key is not extractable"));
+        };
+        let account: Ed25519Verifier = self.account().to_string().parse().map_err(|_| {
+            failed(format!(
+                "the account {} has no key to seal the space's key to",
+                self.account()
+            ))
+        })?;
+        let sealed = account
+            .secret(SPACE_KEY)
+            .conceal(&seed)
+            .await
+            .map_err(failed)?;
+        let signer = Signer::from(
+            Ed25519Signer::import(KeyExport::Extractable(seed))
+                .await
+                .map_err(failed)?,
+        );
         let location = storage_fx::Location::new(self.directory().clone(), name);
 
         // The space keeps its identity, not its key: whoever holds the
@@ -290,8 +347,9 @@ where
         // Its authority goes to the account it is created for, where the
         // peer acting for that account proves it from.
         self.delegate_to_account(&signer).await?;
+        self.seal_space(&created.did(), sealed.to_bytes()).await?;
         self.record_space(&created.did(), name, &location).await;
-        Ok(credential)
+        Ok(Credential::Signer(SignerCredential::from(signer)))
     }
 }
 
@@ -304,7 +362,9 @@ mod tests {
     use crate::{ClaimExt as _, Peer};
     use dialog_capability::access::{Access, Prove};
     use dialog_capability::{Subject, did};
-    use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
+    use dialog_credentials::key::KeyExport;
+    use dialog_credentials::secret::{Context, SealedSecret};
+    use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential};
     use dialog_effects::credential::{self as credential_fx, prelude::*};
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
     use dialog_identity::OpenCredential;
@@ -436,6 +496,36 @@ mod tests {
             .invoke(Prove::<Ucan>::new(peer.did(), scope))
             .perform(&peer)
             .await?;
+        Ok(())
+    }
+
+    /// A space's key is kept only sealed to its account, and the account
+    /// opens it: the key it reveals is the one the space is named by.
+    #[dialog_common::test]
+    async fn it_seals_a_created_spaces_key_to_its_account() -> anyhow::Result<()> {
+        let storage = Storage::volatile();
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&storage)
+            .await?;
+        let peer = peer_at(&storage, &credential, "/sealed").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+
+        let sealed = spaces::sealed(peer.state()?, &created.did(), &peer)
+            .await?
+            .expect("the space's key is kept sealed");
+        let Signer::Ed25519(account) = credential.signer() else {
+            panic!("the account is an Ed25519 key");
+        };
+        let seed = account
+            .secret(Context::new("dialog.space/key"))
+            .reveal(&SealedSecret::from_bytes(&sealed)?)
+            .await?;
+        let key = Ed25519Signer::import(KeyExport::Extractable(seed)).await?;
+        assert_eq!(key.did(), created.did());
         Ok(())
     }
 

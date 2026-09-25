@@ -2,8 +2,7 @@ use crate::registry::RegistryEnv;
 use crate::repository::upgrade::stamp;
 use crate::{OpenRepositoryError, PeersEnv, Repository, RepositoryMemoryExt as _, UpgradeError};
 use dialog_capability::{Capability, Provider};
-use dialog_credentials::Ed25519Signer;
-use dialog_credentials::credential::{Credential, SignerCredential};
+
 use dialog_effects::memory::List;
 use dialog_effects::space::{self, SpaceExt};
 
@@ -37,9 +36,7 @@ impl OpenRepository {
                 repository
             }
             Err(_) => {
-                let signer = Ed25519Signer::generate().await?;
-                let credential = Credential::Signer(SignerCredential::from(signer));
-                let repository = Repository::from(self.0.create(credential).perform(env).await?);
+                let repository = Repository::from(self.0.create().perform(env).await?);
                 stamp(&repository.subject(), env)
                     .await
                     .map_err(UpgradeError::from)?;
