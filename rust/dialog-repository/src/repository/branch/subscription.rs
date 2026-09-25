@@ -904,8 +904,15 @@ where
                     .collect();
                 // ...re-derive + insert: goal-directed re-evaluation,
                 // recording into the existing cover (the standing
-                // demand only ever grows between recomputes).
-                let after = self.evaluate(env, &self.demand.clone(), &scoped).await?;
+                // demand only ever grows between recomputes), each
+                // row put back in the open query's shape so it reads
+                // exactly like a recomputed one.
+                let after = self
+                    .evaluate(env, &self.demand.clone(), &scoped)
+                    .await?
+                    .into_iter()
+                    .map(|row| self.query.adopt(row))
+                    .collect::<Result<Vec<_>, _>>()?;
                 for row in &after {
                     if !before.contains(row) {
                         asserted.push(row.clone());
@@ -4400,6 +4407,108 @@ mod tests {
             subscription.recomputes(),
             1,
             "every step was maintained, none recomputed"
+        );
+        Ok(())
+    }
+
+    /// A concept query over `person/name` with `this` and `name` both
+    /// left as variables: the shape a UI subscribes with.
+    fn people_query() -> ConceptQuery {
+        serde_json::from_value(serde_json::json!({
+            "assert": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "name": {"?": {"name": "name"}}
+            }
+        }))
+        .expect("the people query parses")
+    }
+
+    /// Every variable a row's match binds for the query's operands,
+    /// sorted: what a consumer reading `source()` sees. A row whose
+    /// match lacks a binding the query names shows it as `None`.
+    fn bindings(rows: &[dialog_query::ConceptConclusion]) -> Vec<Vec<(String, Option<Value>)>> {
+        let mut rows: Vec<Vec<(String, Option<Value>)>> = rows
+            .iter()
+            .map(|row| {
+                ["this", "name"]
+                    .into_iter()
+                    .map(|variable| {
+                        let value = match row.source().lookup(&Term::<Any>::var(variable)) {
+                            Ok(dialog_query::Binding::Present(value)) => Some(value),
+                            _ => None,
+                        };
+                        (variable.to_string(), value)
+                    })
+                    .collect()
+            })
+            .collect();
+        rows.sort_by_key(|row| format!("{row:?}"));
+        rows
+    }
+
+    /// A row re-derived for one entity must have the shape a full
+    /// evaluation gives it, not just compare equal to it. Maintenance
+    /// narrows the query by pinning `this` to the entity, and a row
+    /// realized through that narrowed query has no `this` binding in
+    /// its match; consumers reading `source()` then see maintained and
+    /// recomputed rows disagree.
+    #[dialog_common::test]
+    async fn it_maintains_rows_in_the_shape_a_recompute_gives_them() -> anyhow::Result<()> {
+        use dialog_query::query::Output as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(people_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("covered write");
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 1),
+            "the new row came from per-entity maintenance"
+        );
+
+        let fresh: Vec<dialog_query::ConceptConclusion> = branch
+            .select(people_query())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            bindings(&delta.asserted),
+            vec![vec![
+                ("this".to_string(), Some(Value::Entity(bob))),
+                ("name".to_string(), Some(Value::String("Bob".into()))),
+            ]],
+            "the maintained row binds every variable the query names"
+        );
+        assert_eq!(
+            bindings(subscription.results()),
+            bindings(&fresh),
+            "maintained rows read exactly like recomputed ones"
         );
         Ok(())
     }

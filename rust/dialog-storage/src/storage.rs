@@ -5,7 +5,7 @@ mod backend;
 pub use backend::*;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub(crate) mod settle;
+pub(crate) mod idb;
 
 /// Capability-based storage providers.
 pub mod provider;
