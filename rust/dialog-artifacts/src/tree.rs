@@ -1305,21 +1305,19 @@ pub fn selector_range(
     // construction: `set_*` parses the built bound back into exactly these
     // parts and mutates the same field.
     let exact_bound = |tag: u8, upper: bool| {
-        let mut parts = if upper {
-            varkey::KeyParts::max(tag)
-        } else {
-            varkey::KeyParts::min(tag)
-        };
-        if let Some(entity) = selector.entity() {
-            parts.entity = EntityKeyPart::from(entity).raw().to_vec();
-        }
-        if let Some(attribute) = selector.attribute() {
-            parts.attribute = AttributeKeyPart::from(attribute).raw().to_vec();
-        }
-        if let Some(value) = selector.value() {
-            parts.value_type = value.data_type();
-            parts.value = build_value_payload(value, manifest);
-        }
+        let parts = varkey::KeyParts::bound(
+            tag,
+            upper,
+            selector
+                .entity()
+                .map(|entity| EntityKeyPart::from(entity).raw().to_vec()),
+            selector
+                .attribute()
+                .map(|attribute| AttributeKeyPart::from(attribute).raw().to_vec()),
+            selector
+                .value()
+                .map(|value| (value.data_type(), build_value_payload(value, manifest))),
+        );
         Key::from(varkey::build_key(&parts))
     };
     if selector.entity().is_some()
