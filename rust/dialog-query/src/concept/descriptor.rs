@@ -670,6 +670,25 @@ impl Application for ConceptQuery {
         Some(&self.predicate)
     }
 
+    /// A restriction pins `this` to a constant, so the rows it realizes
+    /// carry the restricted terms and a match with no binding for this
+    /// query's `this` variable. Put both back: the row then reads, term
+    /// by term and binding by binding, like the one this query realizes
+    /// for the same facts.
+    fn adopt(&self, conclusion: ConceptConclusion) -> Result<ConceptConclusion, EvaluationError> {
+        let ConceptConclusion {
+            this, mut source, ..
+        } = conclusion;
+        if let Some(term @ Term::Variable { name: Some(_), .. }) = self.terms.get("this") {
+            source.bind(term, Value::Entity(this.clone()))?;
+        }
+        Ok(ConceptConclusion {
+            this,
+            terms: self.terms.clone(),
+            source,
+        })
+    }
+
     fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {
         let this_param =
             self.terms
