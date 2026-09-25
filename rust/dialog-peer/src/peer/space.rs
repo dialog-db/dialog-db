@@ -1,7 +1,8 @@
 //! Space capability providers for [`Peer`].
 
 use super::{Mode, Peer};
-use dialog_capability::{Capability, Policy, Provider, Subject, did};
+use dialog_capability::access::{Access, FromCapability as _, Prove};
+use dialog_capability::{Ability, Capability, Constraint, Effect, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
 use dialog_effects::credential::{self as credential_fx, prelude::*};
@@ -10,6 +11,7 @@ use dialog_effects::storage::{self as storage_fx, LocationExt as _};
 use dialog_repository::registry::RegistryEnv;
 use dialog_repository::spaces;
 use dialog_storage::provider::storage::Storage;
+use dialog_ucan::{Scope, Ucan};
 use dialog_varsig::{Did, Principal as _};
 
 /// The credential of a loaded space as a handle in mode `M` is given it:
@@ -27,7 +29,7 @@ impl<S, M: Mode> Provider<space_fx::Load> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Storage<S>: Provider<storage_fx::Load> + Provider<credential_fx::Load<Credential>>,
-    Self: RegistryEnv + ConditionalSend + ConditionalSync,
+    Self: RegistryEnv + Provider<Prove<Ucan>> + ConditionalSend + ConditionalSync,
 {
     /// A space name resolves to the repository the peer recorded under
     /// it, loaded from where it was recorded. A name the peer has no
@@ -164,13 +166,45 @@ where
     async fn load_at(
         &self,
         location: storage_fx::Location,
-    ) -> Result<Credential, storage_fx::StorageError> {
-        Subject::from(did!("local:storage"))
+    ) -> Result<Credential, storage_fx::StorageError>
+    where
+        Self: Provider<Prove<Ucan>>,
+    {
+        let load = Subject::from(self.system().clone())
             .attenuate(storage_fx::Storage)
             .attenuate(location)
-            .load()
-            .perform(&self.storage)
+            .load();
+        self.may_mount(&load).await?;
+        load.perform(&self.storage).await
+    }
+
+    /// Refuse `mount` unless this peer can prove the storage's system
+    /// granted it: directly, for the peer acting as itself, or through
+    /// the peer it is a session of.
+    pub(crate) async fn may_mount<Fx>(
+        &self,
+        mount: &Capability<Fx>,
+    ) -> Result<(), storage_fx::StorageError>
+    where
+        Self: Provider<Prove<Ucan>>,
+        Fx: Effect + Clone,
+        Fx::Of: Constraint,
+        Capability<Fx>: Ability,
+    {
+        Subject::from(self.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(
+                self.did(),
+                Scope::from_capability(mount),
+            ))
+            .perform(self)
             .await
+            .map(|_| ())
+            .map_err(|error| {
+                storage_fx::StorageError::Storage(format!(
+                    "mounting a space is not authorized: {error}"
+                ))
+            })
     }
 }
 
@@ -179,8 +213,10 @@ where
 impl<S, M: Mode> Provider<space_fx::Create> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Storage<S>: Provider<storage_fx::Create>,
-    Self: RegistryEnv + ConditionalSend + ConditionalSync,
+    Storage<S>: Provider<storage_fx::Create>
+        + Provider<storage_fx::Load>
+        + Provider<credential_fx::Load<Credential>>,
+    Self: RegistryEnv + Provider<Prove<Ucan>> + ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
@@ -197,12 +233,12 @@ where
         let name = &space_fx::Space::of(&input).name;
         let credential = space_fx::Create::of(&input).credential.clone();
         let location = storage_fx::Location::new(self.directory().clone(), name);
-        let created = Subject::from(did!("local:storage"))
+        let create = Subject::from(self.system().clone())
             .attenuate(storage_fx::Storage)
             .attenuate(location.clone())
-            .create(credential)
-            .perform(&self.storage)
-            .await?;
+            .create(credential);
+        self.may_mount(&create).await?;
+        let created = create.perform(&self.storage).await?;
         self.record_space(&created.did(), name, &location).await;
         Ok(created)
     }
