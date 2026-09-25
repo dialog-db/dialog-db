@@ -1,6 +1,6 @@
 //! Space capability providers for [`Peer`].
 
-use super::Peer;
+use super::{Mode, Peer};
 use dialog_capability::{Capability, Policy, Provider, Subject, did};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
@@ -13,7 +13,7 @@ use dialog_varsig::{Did, Principal as _};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<space_fx::Load> for Peer<S>
+impl<S, M: Mode> Provider<space_fx::Load> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Storage<S>: Provider<storage_fx::Load>,
@@ -54,7 +54,7 @@ where
     }
 }
 
-impl<S> Peer<S>
+impl<S, M: Mode> Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: RegistryEnv,
@@ -98,7 +98,7 @@ where
     }
 }
 
-impl<S: Clone> Peer<S>
+impl<S: Clone, M: Mode> Peer<S, M>
 where
     Storage<S>: Provider<storage_fx::Load>,
 {
@@ -118,7 +118,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<space_fx::Create> for Peer<S>
+impl<S, M: Mode> Provider<space_fx::Create> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Storage<S>: Provider<storage_fx::Create>,
@@ -172,8 +172,7 @@ mod tests {
         credential: &SignerCredential,
         base: &str,
     ) -> anyhow::Result<Peer<VolatileSpace>> {
-        Ok(Peer::open(credential.did())
-            .credential(credential.clone())
+        Ok(Peer::new(credential.clone())
             .storage(storage.clone())
             .base(Directory::At(base.into()))
             .await?)

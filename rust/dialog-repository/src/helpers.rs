@@ -19,7 +19,10 @@ use parking_lot::Mutex;
 /// Create a test repository (this crate's types) under `peer`, through
 /// `session` as the effect environment.
 #[cfg(test)]
-pub async fn test_repo<S: PeerSpace>(session: &Peer<S>, peer: &Peer<S>) -> Repository<Credential> {
+pub async fn test_repo<S: PeerSpace, M: Mode>(
+    session: &Peer<S, M>,
+    peer: &Peer<S>,
+) -> Repository<Credential> {
     use crate::RepositoryExt as _;
     use dialog_identity::SpaceHandle;
     use dialog_peer::helpers::unique_name;
@@ -44,7 +47,7 @@ pub type FlakySpace = Space<Volatile, Flaky, Volatile, Volatile, Volatile>;
 /// reaches the [`Flaky`] memory of a repository, by its DID, to plan
 /// them.
 #[cfg(test)]
-pub async fn flaky_session_with_peer() -> (Peer<FlakySpace>, Peer<FlakySpace>) {
+pub async fn flaky_session_with_peer() -> (Peer<FlakySpace, Session>, Peer<FlakySpace>) {
     use dialog_capability::Subject;
     use dialog_effects::storage::Location;
     use dialog_peer::helpers::{open_peer, unique_name};
@@ -55,10 +58,10 @@ pub async fn flaky_session_with_peer() -> (Peer<FlakySpace>, Peer<FlakySpace>) {
     .await
     .expect("flaky_session_with_peer: failed to open peer");
     let session = peer
-        .worker(b"test")
+        .session(b"test")
         .allow(Subject::any())
         .await
-        .expect("flaky_session_with_peer: failed to build worker");
+        .expect("flaky_session_with_peer: failed to build session");
     (session, peer)
 }
 
@@ -67,7 +70,7 @@ use crate::{ConnectedReplica, PeersEnv, SiteAddress, contact, peer_did};
 #[cfg(test)]
 use dialog_credentials::Credential;
 #[cfg(test)]
-use dialog_peer::{Peer, PeerSpace};
+use dialog_peer::{Mode, Peer, PeerSpace, Session};
 #[cfg(test)]
 use dialog_storage::Flaky;
 #[cfg(test)]
