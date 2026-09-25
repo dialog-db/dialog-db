@@ -384,7 +384,7 @@ where
     pub fn stream<R, Backend>(
         self,
         range: R,
-        accessor: Accessor<Backend>,
+        accessor: Accessor<Key, Value, Backend>,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
@@ -411,7 +411,7 @@ where
     pub fn stream_handles<R, Backend>(
         self,
         range: R,
-        accessor: Accessor<Backend>,
+        accessor: Accessor<Key, Value, Backend>,
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
@@ -427,7 +427,7 @@ where
     fn stream_scan<R, Backend, Out>(
         self,
         range: R,
-        accessor: Accessor<Backend>,
+        accessor: Accessor<Key, Value, Backend>,
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
@@ -701,7 +701,7 @@ where
     pub async fn search<Backend>(
         &self,
         key: &Key,
-        accessor: Accessor<Backend>,
+        accessor: Accessor<Key, Value, Backend>,
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
@@ -830,7 +830,7 @@ async fn prefetch_right_neighbor<Key, Value, Backend>(
     key: &Key,
     leaf: &PersistentNode<Key, Value>,
     path: &[TreeLayer<Key, Value>],
-    accessor: Accessor<Backend>,
+    accessor: Accessor<Key, Value, Backend>,
 ) -> Result<Option<RightNeighbor<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,

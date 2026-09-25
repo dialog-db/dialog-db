@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use dialog_common::{Blake3Hash, ConditionalSend};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use rkyv::{
@@ -7,46 +9,68 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Key, PersistentNode, Value,
+    Buffer, ContentAddressedStorage, DialogSearchTreeError, Key, NodeCache, PersistentNode, Value,
 };
 
 /// Accessor for retrieving durable nodes from cache and content-addressed
 /// storage.
 ///
 /// The accessor checks for nodes in the following order:
-/// 1. Cache - recently accessed nodes
-/// 2. Storage - persistent content-addressed storage backend
+/// 1. Cache - recently accessed nodes, already checked
+/// 2. Storage - persistent content-addressed storage backend, whose bytes
+///    are checked once as they become a node and enter the cache
 ///
 /// Unflushed nodes are never read here: in-flight edits live in a
 /// [`TransientTree`](crate::TransientTree)'s spine, and a
 /// [`PersistentTree`](crate::PersistentTree) reads only what has been flushed to
 /// storage. The accumulating delta is purely a persist-time output and is not
 /// consulted on the read path.
-#[derive(Clone)]
-pub struct Accessor<Backend>
+pub struct Accessor<Key, Value, Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
-    cache: Cache<Blake3Hash, Buffer>,
+    cache: NodeCache<Key, Value>,
     storage: ContentAddressedStorage<Backend>,
+    types: PhantomData<fn() -> (Key, Value)>,
 }
 
-impl<Backend> Accessor<Backend>
+impl<Key, Value, Backend> Clone for Accessor<Key, Value, Backend>
 where
+    Key: self::Key,
+    Value: self::Value,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            cache: self.cache.clone(),
+            storage: self.storage.clone(),
+            types: PhantomData,
+        }
+    }
+}
+
+impl<Key, Value, Backend> Accessor<Key, Value, Backend>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSend,
 {
     /// Creates a new accessor over the given cache and storage backend.
-    pub fn new(
-        cache: Cache<Blake3Hash, Buffer>,
-        storage: ContentAddressedStorage<Backend>,
-    ) -> Self {
-        Self { cache, storage }
+    pub fn new(cache: NodeCache<Key, Value>, storage: ContentAddressedStorage<Backend>) -> Self {
+        Self {
+            cache,
+            storage,
+            types: PhantomData,
+        }
     }
 
-    /// Loads the node at `hash` into the cache, without decoding it or
-    /// reporting what happened, and resolves to the hash it loaded so that a
-    /// queue of these can tell which one finished.
+    /// Loads the node at `hash` into the cache, without reporting what
+    /// happened, and resolves to the hash it loaded so that a queue of these
+    /// can tell which one finished.
     ///
     /// This is a read nobody is waiting on: it makes the node local so that a
     /// later [`get_node`](Self::get_node) is served from the cache. It
@@ -69,47 +93,28 @@ where
     /// node is in neither. The read is this caller's own: it never waits on
     /// a read of the same node that someone else has in flight, since only
     /// that someone could drive it.
-    pub async fn get_node<Key, Value>(
+    pub async fn get_node(
         &self,
         hash: &Blake3Hash,
-    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
-    where
-        Key: self::Key,
-        Value: self::Value,
-        Value::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        >,
-    {
-        let buffer = self
-            .cache
+    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
+        self.cache
             .get_or_fetch(hash, async |key| self.retrieve(key).await)
-            .await?;
-        Self::decode(hash, buffer)
-    }
-
-    async fn retrieve(&self, key: &Blake3Hash) -> Result<Option<Buffer>, DialogStorageError> {
-        self.storage
-            .retrieve(key)
-            .await
-            .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
-    }
-
-    fn decode<Key, Value>(
-        hash: &Blake3Hash,
-        buffer: Option<Buffer>,
-    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
-    where
-        Key: self::Key,
-        Value: self::Value,
-        Value::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        >,
-    {
-        buffer
+            .await?
             .ok_or_else(|| {
                 DialogSearchTreeError::Node(format!("Block not found in storage: {}", hash))
             })
-            .and_then(PersistentNode::try_from)
+    }
+
+    /// The node stored under `key`, checked as it is read.
+    async fn retrieve(
+        &self,
+        key: &Blake3Hash,
+    ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
+        self.storage
+            .retrieve(key)
+            .await?
+            .map(|bytes| PersistentNode::try_from(Buffer::from(bytes)))
+            .transpose()
     }
 }
 
@@ -121,7 +126,7 @@ mod tests {
     use futures_util::future::join_all;
 
     use crate::{
-        Accessor, Cache, ContentAddressedStorage, Delta, PersistentNode, PersistentTree,
+        Accessor, Buffer, Cache, ContentAddressedStorage, Delta, PersistentNode, PersistentTree,
         helpers::ObservingBackend,
     };
 
@@ -167,6 +172,26 @@ mod tests {
             let _: PersistentNode<[u8; 4], Vec<u8>> = read?;
         }
         assert_eq!(backend.read_log().len(), 8, "later reads hit the cache");
+
+        Ok(())
+    }
+
+    /// Bytes that do not check as a node are never cached: every read of
+    /// them goes back to storage and fails again, and none is served a node.
+    #[dialog_common::test]
+    async fn it_does_not_cache_bytes_that_fail_the_check() -> Result<()> {
+        let backend = ObservingBackend::new();
+        let mut storage = ContentAddressedStorage::new(backend.clone());
+        let garbage = Buffer::from(vec![0xFF; 7]);
+        let hash = garbage.blake3_hash().clone();
+        storage.store(garbage.as_ref().to_vec(), &hash).await?;
+
+        let accessor = Accessor::<[u8; 4], Vec<u8>, _>::new(Cache::new(), storage);
+        backend.reset();
+
+        assert!(accessor.get_node(&hash).await.is_err());
+        assert!(accessor.get_node(&hash).await.is_err());
+        assert_eq!(backend.read_log(), vec![hash.clone(); 2]);
 
         Ok(())
     }
