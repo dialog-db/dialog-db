@@ -11,6 +11,10 @@ use std::fmt;
 
 use dialog_capability::{Capability, Constraint, Effect, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::Rejection;
+use dialog_effects::archive::{self, ArchiveError};
+use dialog_effects::blob::{self, BlobError};
+use dialog_effects::memory::{self, MemoryError};
 
 use super::repository::Unreachable;
 use crate::{ConnectedReplica, RemoteSite};
@@ -70,15 +74,64 @@ where
     Capability<E>: Clone + ConditionalSend + ConditionalSync,
     Env: Provider<Fork<RemoteSite, E>> + ConditionalSync,
     T: ConditionalSend,
-    Error: Unreachable + ConditionalSend,
+    E: Resend<Error>,
+    Error: ConditionalSend,
 {
     async fn execute(&self, input: Capability<E>) -> Result<T, Error> {
         self.replica
-            .reach(|address| {
+            .reach_unless(E::resend, |address| {
                 let input = input.clone();
                 async move { input.fork(address.site()).perform(self.env).await }
             })
             .await
+    }
+}
+
+/// Whether an effect that failed at one of a peer's addresses may be sent
+/// to the next.
+///
+/// A read, or a write of content-addressed bytes, may be sent anywhere it
+/// could not be carried out: repeating it changes nothing. A conditional
+/// write may be sent on only if it never left, since one that failed on
+/// the wire may have landed, and would then conflict with itself.
+pub trait Resend<Error> {
+    /// Whether `error` leaves the effect free to be sent elsewhere.
+    fn resend(error: &Error) -> bool;
+}
+
+impl Resend<ArchiveError> for archive::Get {
+    fn resend(error: &ArchiveError) -> bool {
+        error.unreachable()
+    }
+}
+
+impl Resend<ArchiveError> for archive::Put {
+    fn resend(error: &ArchiveError) -> bool {
+        error.unreachable()
+    }
+}
+
+impl Resend<BlobError> for blob::Read {
+    fn resend(error: &BlobError) -> bool {
+        error.unreachable()
+    }
+}
+
+impl Resend<MemoryError> for memory::Resolve {
+    fn resend(error: &MemoryError) -> bool {
+        error.unreachable()
+    }
+}
+
+impl Resend<MemoryError> for memory::Publish {
+    fn resend(error: &MemoryError) -> bool {
+        matches!(error, MemoryError::Rejected(Rejection::Unavailable { .. }))
+    }
+}
+
+impl Resend<MemoryError> for memory::Retract {
+    fn resend(error: &MemoryError) -> bool {
+        matches!(error, MemoryError::Rejected(Rejection::Unavailable { .. }))
     }
 }
 
