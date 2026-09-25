@@ -31,15 +31,17 @@ use crate::{
     Revision, Snapshot, Upstream,
 };
 
-/// An owned line to read from: a branch or a snapshot, cheaply cloned
-/// (both share their caches by handle). Query environments hold these
-/// so the only lifetime they carry is the capability environment's.
+/// An owned line to read from: a branch or a snapshot. Query
+/// environments hold these so the only lifetime they carry is the
+/// capability environment's. The line sits behind an [`Arc`]: a query
+/// hands one to every scan it runs, and cloning the line itself copies
+/// its identifiers and cell handles each time.
 #[derive(Debug, Clone)]
 pub(crate) enum Source {
     /// A named line whose head lives in a memory cell.
-    Branch(Branch),
+    Branch(Arc<Branch>),
     /// A detached line whose head is held by value.
-    Snapshot(Snapshot),
+    Snapshot(Arc<Snapshot>),
 }
 
 impl Source {
@@ -54,13 +56,13 @@ impl Source {
 
 impl From<Branch> for Source {
     fn from(branch: Branch) -> Self {
-        Source::Branch(branch)
+        Source::Branch(Arc::new(branch))
     }
 }
 
 impl From<Snapshot> for Source {
     fn from(snapshot: Snapshot) -> Self {
-        Source::Snapshot(snapshot)
+        Source::Snapshot(Arc::new(snapshot))
     }
 }
 
@@ -96,8 +98,8 @@ impl<'a> SourceRef<'a> {
     /// An owned handle to the same line.
     pub(crate) fn to_source(self) -> Source {
         match self {
-            SourceRef::Branch(branch) => Source::Branch(branch.clone()),
-            SourceRef::Snapshot(snapshot) => Source::Snapshot(snapshot.clone()),
+            SourceRef::Branch(branch) => Source::Branch(Arc::new(branch.clone())),
+            SourceRef::Snapshot(snapshot) => Source::Snapshot(Arc::new(snapshot.clone())),
         }
     }
 

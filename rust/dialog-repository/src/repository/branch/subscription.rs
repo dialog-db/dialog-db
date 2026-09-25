@@ -746,7 +746,7 @@ where
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
                 let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                    vec![Source::Branch(self.branch.clone())],
+                    vec![Source::from(self.branch.clone())],
                     overlay,
                     Arc::new(tombstones),
                     env,
@@ -862,7 +862,7 @@ where
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let mut query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![Source::Branch(self.branch.clone())],
+                vec![Source::from(self.branch.clone())],
                 overlay,
                 Arc::new(tombstones),
                 env,
@@ -881,14 +881,9 @@ where
             // does (see `crate::repository::fetch`).
             let queue = Provider::<Speculation>::execute(env, ()).await;
             let results = Box::pin(query.clone().perform(&query_env));
-            Driven::new(
-                results,
-                vec![Source::Branch(self.branch.clone())],
-                env,
-                queue,
-            )
-            .try_vec()
-            .await
+            Driven::new(results, vec![Source::from(self.branch.clone())], env, queue)
+                .try_vec()
+                .await
         })
     }
 
@@ -931,7 +926,7 @@ where
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![Source::Branch(self.branch.clone())],
+                vec![Source::from(self.branch.clone())],
                 overlay,
                 Arc::new(tombstones),
                 env,
@@ -945,14 +940,9 @@ where
             // continuation's reads warm through the ambient queue.
             let queue = Provider::<Speculation>::execute(env, ()).await;
             let results = Box::pin(self.query.clone().perform(&query_env));
-            Driven::new(
-                results,
-                vec![Source::Branch(self.branch.clone())],
-                env,
-                queue,
-            )
-            .try_vec()
-            .await
+            Driven::new(results, vec![Source::from(self.branch.clone())], env, queue)
+                .try_vec()
+                .await
         })
     }
 }
