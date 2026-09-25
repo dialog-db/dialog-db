@@ -14,7 +14,7 @@ mod tests {
             .await
             .unwrap();
 
-        let operator = profile.worker(b"test").await.unwrap();
+        let operator = profile.session(b"test").await.unwrap();
 
         assert!(!operator.did().to_string().is_empty());
     }
@@ -25,13 +25,13 @@ mod tests {
         let profile1 = open_peer(storage1.clone(), Location::profile(unique_name("ctx1")))
             .await
             .unwrap();
-        let op1 = profile1.worker(b"context-a").await.unwrap();
+        let op1 = profile1.session(b"context-a").await.unwrap();
 
         let storage2 = Storage::volatile();
         let profile2 = open_peer(storage2.clone(), Location::profile(unique_name("ctx2")))
             .await
             .unwrap();
-        let op2 = profile2.worker(b"context-b").await.unwrap();
+        let op2 = profile2.session(b"context-b").await.unwrap();
 
         assert_ne!(op1.did(), op2.did());
     }
@@ -50,7 +50,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let operator = profile.worker(b"alice").await.unwrap();
+            let operator = profile.session(b"alice").await.unwrap();
 
             let result = profile
                 .access()
@@ -79,7 +79,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let operator = profile.worker(b"alice").await.unwrap();
+            let operator = profile.session(b"alice").await.unwrap();
 
             let result = profile
                 .access()
@@ -104,7 +104,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .worker(b"alice")
+                .session(b"alice")
                 .allow(Subject::any().reader().archive().catalog("index"))
                 .await
                 .unwrap();
@@ -137,7 +137,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .worker(b"alice")
+                .session(b"alice")
                 .allow(Subject::any().reader().archive().catalog("index"))
                 .await
                 .unwrap();
@@ -167,7 +167,7 @@ mod tests {
 
             use dialog_effects::storage as fx_storage;
             let operator = profile
-                .worker(b"admin")
+                .session(b"admin")
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -194,7 +194,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let operator = profile.worker(b"alice").await.unwrap();
+            let operator = profile.session(b"alice").await.unwrap();
 
             let result = profile
                 .access()
@@ -220,7 +220,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .worker(b"alice")
+                .session(b"alice")
                 .allow(Subject::any().reader().archive().catalog("index"))
                 .await
                 .unwrap();
@@ -247,7 +247,7 @@ mod tests {
 
     mod time_bound_tests {
         use super::*;
-        use crate::Peer;
+        use crate::{Peer, Session};
         use dialog_capability::Subject;
         use dialog_capability::access::{Authorization as _, Proof as _};
         use dialog_effects::MethodExt as _;
@@ -262,7 +262,7 @@ mod tests {
         /// Build an operator WITHOUT a powerline delegation.
         /// Only explicitly delegated capabilities will be available.
         async fn build_restricted_operator_with_profile()
-        -> (Peer<VolatileSpace>, Peer<VolatileSpace>) {
+        -> (Peer<VolatileSpace, Session>, Peer<VolatileSpace>) {
             let storage = Storage::volatile();
             let profile = open_peer(
                 storage.clone(),
@@ -270,7 +270,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let operator = profile.worker(b"test").await.unwrap();
+            let operator = profile.session(b"test").await.unwrap();
             (operator, profile)
         }
 
@@ -711,7 +711,11 @@ mod tests {
             )
             .await
             .unwrap();
-            let operator = profile.worker(b"test").allow(Subject::any()).await.unwrap();
+            let operator = profile
+                .session(b"test")
+                .allow(Subject::any())
+                .await
+                .unwrap();
 
             let address = address_from(&s3);
 
@@ -740,7 +744,11 @@ mod tests {
             let profile = open_peer(storage.clone(), Location::profile(unique_name("s3-get")))
                 .await
                 .unwrap();
-            let operator = profile.worker(b"test").allow(Subject::any()).await.unwrap();
+            let operator = profile
+                .session(b"test")
+                .allow(Subject::any())
+                .await
+                .unwrap();
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -778,7 +786,11 @@ mod tests {
             )
             .await
             .unwrap();
-            let operator = profile.worker(b"test").allow(Subject::any()).await.unwrap();
+            let operator = profile
+                .session(b"test")
+                .allow(Subject::any())
+                .await
+                .unwrap();
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -828,7 +840,7 @@ mod tests {
                 Location::profile(unique_name("s3-mem-pub")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -876,7 +888,7 @@ mod tests {
                 Location::profile(unique_name("s3-mem-upd")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -933,7 +945,7 @@ mod tests {
                 Location::profile(unique_name("s3-mem-cas")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -1000,7 +1012,7 @@ mod tests {
                 Location::profile(unique_name("s3-mem-ret")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -1075,7 +1087,7 @@ mod tests {
                 Location::profile(unique_name("ucan-get-miss")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = ucan_address(&s3);
 
@@ -1100,7 +1112,7 @@ mod tests {
                 Location::profile(unique_name("ucan-put-get")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = ucan_address(&s3);
             let content = b"hello from ucan".to_vec();
@@ -1138,7 +1150,7 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-miss")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = ucan_address(&s3);
 
@@ -1164,7 +1176,7 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-pub")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = ucan_address(&s3);
             let subject = operator.home().clone();
@@ -1204,7 +1216,7 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-upd")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = ucan_address(&s3);
             let subject = operator.home().clone();
@@ -1253,7 +1265,7 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-cas")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = ucan_address(&s3);
             let subject = operator.home().clone();
@@ -1315,7 +1327,7 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-ret")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = ucan_address(&s3);
             let subject = operator.home().clone();
@@ -1365,7 +1377,7 @@ mod tests {
             .await?;
             // Only delegate archive access, not memory
             let operator = profile
-                .worker(b"test")
+                .session(b"test")
                 // Reading and writing are separate powers now that the
                 // verb is a level of the hierarchy, so a delegation that
                 // covers both says so twice.
@@ -1431,7 +1443,7 @@ mod tests {
                 Location::profile(unique_name("ucan-direct")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = ucan_address(&s3);
             let content = b"one request, proved and performed".to_vec();
@@ -1474,7 +1486,7 @@ mod tests {
                 Location::profile(unique_name("ucan-permits")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
 
             let address = SiteAddress::Ucan(
                 UcanAddress::new(&s3.access_service_url).with_exchange(Exchange::Permit),
@@ -1527,7 +1539,7 @@ mod tests {
                 Location::profile(unique_name("blob-route")),
             )
             .await?;
-            let operator = profile.worker(b"test").allow(Subject::any()).await?;
+            let operator = profile.session(b"test").allow(Subject::any()).await?;
             let subject = Subject::from(profile.did());
 
             let payload = b"hello blob routing".to_vec();
@@ -1613,7 +1625,11 @@ mod tests {
             .await
             .unwrap();
 
-            let operator = profile.worker(b"test").allow(Subject::any()).await.unwrap();
+            let operator = profile
+                .session(b"test")
+                .allow(Subject::any())
+                .await
+                .unwrap();
 
             // Use a wrong DID as subject
             let wrong_did = did!("key:z6MkWrongDid");
@@ -1636,7 +1652,11 @@ mod tests {
             .await
             .unwrap();
 
-            let operator = profile.worker(b"test").allow(Subject::any()).await.unwrap();
+            let operator = profile
+                .session(b"test")
+                .allow(Subject::any())
+                .await
+                .unwrap();
 
             // Use the correct profile DID as subject
             let result: Result<_, _> = Subject::from(operator.home().clone())

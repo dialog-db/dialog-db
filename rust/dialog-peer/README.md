@@ -2,71 +2,70 @@
 
 Peers: the runtime capability environment for Dialog.
 
-A **Peer** is one acting key over a storage, a network, and the branch of a
-repository that holds the peer's own state, its **home**. A root peer acts
-with the key its home is named by and proves from that repository's branch.
-A **worker** is a peer built over a derived (or supplied) key with grants
-from another peer, sharing that peer's storage and, usually, its home. Both
-are the one `Peer` type; the difference is what they hold, not what they
-are. See `notes/peer-and-session.md`.
+A **Peer** represents the owner of the replicas it opens and commits to,
+over a storage and a network, with its own state in a branch of the
+repository its key names. A handle's mode records which key it acts with:
+
+- `Peer<S, Local>`, made by `Peer::new(credential)`, acts with the peer's
+  own key. It can do anything the peer can, including granting authority
+  and opening sessions.
+- `Peer<S, Session>`, made by `peer.session(context)` or by giving the
+  builder an `operator`, is the same peer acting with a separate key,
+  within what the peer granted it. It keeps no copy of the peer's key, and
+  every session commits under its own origin, so sessions of one peer
+  never collide.
+
+See `notes/peer-and-session.md`.
 
 ## Usage
 
 ```rust,no_run
 # use dialog_capability::Subject;
-# use dialog_effects::storage::Location;
-# use dialog_identity::{ClaimExt as _, OpenCredential};
+# use dialog_identity::OpenCredential;
 # use dialog_peer::Peer;
 # use dialog_repository::RepositoryExt as _;
 # use dialog_storage::provider::storage::{Storage, VolatileSpace};
-# use dialog_varsig::Principal as _;
 # async fn example() -> anyhow::Result<()> {
 // The credential is opened apart from the peer; here from the storage.
 let storage = Storage::<VolatileSpace>::volatile();
 let credential = OpenCredential::open("alice").perform(&storage).await?;
 
-// The peer: its home is the repository the credential names.
-let alice = Peer::open(credential.did())
-    .credential(credential)
-    .storage(storage)
-    .branch("main")
-    .await?;
+// The peer, acting with its own key.
+let alice = Peer::new(credential).storage(storage).await?;
 
-// A worker: a derived key, allowed what the peer claims for it.
-let job = alice
-    .worker(b"my-app")
-    .allow(Subject::any().claim(alice.credential()))
-    .await?;
+// A session: a derived key, allowed what the peer grants it.
+let job = alice.session(b"my-app").allow(Subject::any()).await?;
 
-// Open a repository the peer holds, through the worker.
+// Open a repository the peer holds, through the session.
 let contacts = alice.space("contacts").open().perform(&job).await?;
 # let _ = contacts;
 # Ok(())
 # }
 ```
 
-A worker needs no handle on its parent, only its credential and storage:
+A session needs no open handle on its peer, only the peer's credential and
+the storage:
 
 ```rust,no_run
 # use dialog_capability::Subject;
-# use dialog_identity::ClaimExt as _;
 # use dialog_peer::Peer;
-# use dialog_varsig::Principal as _;
 # async fn example(
 #     credential: dialog_credentials::SignerCredential,
 #     storage: dialog_storage::provider::storage::Storage<dialog_storage::provider::storage::VolatileSpace>,
 # ) -> anyhow::Result<()> {
-let worker = Peer::open(credential.did())
-    .credential(credential.derive(b"worker").await?)
+let session = Peer::new(credential)
+    .session(b"worker")
     .storage(storage)
     .ephemeral()
-    .allow(Subject::any().claim(&credential))
+    .allow(Subject::any())
     .await?;
-# let _ = worker;
+# let _ = session;
 # Ok(())
 # }
 ```
 
 `grant` takes a claim with an expiration; `allow` is the deliberate
-unbounded form. `ephemeral` drops the state branch, so the worker proves
-from its grants alone and retains nothing.
+unbounded form. `ephemeral` drops the state branch, so the session proves
+from its grants alone and retains nothing. `Peer::session_of(peer)` builds
+a session when only the peer's DID is known, from an `operator` key and
+certificates the peer issued.

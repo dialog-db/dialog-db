@@ -54,7 +54,7 @@ async fn seed_vault(repo: &Repository<SignerCredential>) -> Result<(Location, Fs
 /// vault as the repo's space, and add it as the `origin` remote with an
 /// upstream-tracking `main` branch.
 async fn setup_repo_with_fs_remote(
-    operator: &Peer<VolatileSpace>,
+    operator: &Peer<VolatileSpace, dialog_peer::Session>,
     profile: &Peer<VolatileSpace>,
     name: &str,
 ) -> Result<(Repository<SignerCredential>, Location, Branch)> {

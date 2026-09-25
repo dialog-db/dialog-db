@@ -16,13 +16,13 @@ use dialog_repository::contacts;
 use dialog_repository::registry::RegistryEnv;
 use dialog_repository::{Branch, CommitError, PublishError};
 
-use super::Peer;
+use super::{Mode, Peer};
 
 /// How many times a write that lost a race for the state branch's head is
 /// retried before the failure surfaces, as retaining a delegation does.
 const RETRY_LIMIT: usize = 3;
 
-impl<S: Clone> Peer<S>
+impl<S: Clone, M: Mode> Peer<S, M>
 where
     Self: RegistryEnv,
 {
@@ -64,7 +64,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<AddAddress> for Peer<S>
+impl<S, M: Mode> Provider<AddAddress> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: RegistryEnv + ConditionalSend,
@@ -83,7 +83,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<SetName> for Peer<S>
+impl<S, M: Mode> Provider<SetName> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: RegistryEnv + ConditionalSend,
@@ -100,7 +100,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Find> for Peer<S>
+impl<S, M: Mode> Provider<Find> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: RegistryEnv + ConditionalSend,
@@ -116,7 +116,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Connect> for Peer<S>
+impl<S, M: Mode> Provider<Connect> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: RegistryEnv + ConditionalSend,
@@ -147,8 +147,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::Peer;
     use crate::helpers::test_session_with_peer;
+    use crate::{Mode, Peer};
     use dialog_capability::Subject;
     use dialog_capability::identity::Entity;
     use dialog_effects::MethodExt as _;
@@ -163,7 +163,7 @@ mod tests {
         "did:web:tonk.network".parse().expect("valid entity")
     }
 
-    async fn connect(worker: &Peer<VolatileSpace>) -> Result<PeerConnection, PeerError> {
+    async fn connect(worker: &Peer<VolatileSpace, impl Mode>) -> Result<PeerConnection, PeerError> {
         Subject::from(worker.home().clone())
             .reader()
             .peers()

@@ -28,7 +28,7 @@ pub(crate) mod test {
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_storage::{Blake3Hash, StorageBackend};
 
-    type Operator = DialogOperator<VolatileSpace>;
+    type Operator = DialogOperator<VolatileSpace, dialog_peer::Session>;
 
     /// Test environment that implements both `Provider<Select<'a>>` and
     /// `Provider<SelectRules>`, bridging a Branch + Operator with a RuleRegistry.

@@ -2070,7 +2070,7 @@ mod resolver_tests {
     /// carries it).
     async fn committed_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Peer<VolatileSpace>,
+        operator: &Peer<VolatileSpace, dialog_peer::Session>,
     ) -> anyhow::Result<(Branch, String)> {
         let branch = repo.branch("main").open().perform(operator).await?;
         let mut tx = branch.transaction();
@@ -2166,7 +2166,7 @@ mod resolver_tests {
     /// span/descent surface runs against a real multi-level tree.
     async fn committed_wide_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Peer<VolatileSpace>,
+        operator: &Peer<VolatileSpace, dialog_peer::Session>,
         count: usize,
     ) -> anyhow::Result<(Branch, String)> {
         let branch = repo.branch("main").open().perform(operator).await?;

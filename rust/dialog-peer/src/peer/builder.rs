@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::future::{Future, IntoFuture};
+use std::marker::PhantomData;
 use std::pin::Pin;
 
 use dialog_capability::{Ability, Capability, Constraint, Subject, did};
@@ -20,7 +21,7 @@ use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 
-use super::{Grant, Inner, Peer, PeerSpace, Runtime};
+use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
 
 /// A builder slot before it is filled.
 #[derive(Debug, Clone, Copy, Default)]
@@ -200,12 +201,15 @@ impl From<UcanCertificate> for Allowance {
     }
 }
 
-/// Builder for a [`Peer`]. Created by [`Peer::open`] or [`Peer::worker`].
+/// Builder for a [`Peer`]. Created by [`Peer::new`], [`Peer::session_of`]
+/// or [`Peer::session_of`](Peer::session).
 ///
 /// `K` is the key slot and `St` the storage slot, [`Unset`] until
 /// [`credential`](Self::credential) and [`storage`](Self::storage) fill
-/// them; only a builder with both can be awaited.
-pub struct PeerBuilder<K = Unset, St = Unset> {
+/// them; only a builder with both can be awaited. `M` is the mode of the
+/// peer it builds: [`Local`] acting with the peer's own key, or
+/// [`Session`] acting with a separate operator key.
+pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     home: Did,
     key: K,
     storage: St,
@@ -216,9 +220,10 @@ pub struct PeerBuilder<K = Unset, St = Unset> {
     branch: Option<String>,
     issuer: Option<SignerCredential>,
     allowed: Vec<Allowance>,
+    mode: PhantomData<M>,
 }
 
-impl PeerBuilder {
+impl<M> PeerBuilder<Unset, Unset, M> {
     pub(crate) fn new(home: Did) -> Self {
         Self {
             home,
@@ -231,15 +236,16 @@ impl PeerBuilder {
             branch: Some(ACCESS_BRANCH.to_string()),
             issuer: None,
             allowed: Vec::new(),
+            mode: PhantomData,
         }
     }
 }
 
-impl<S: Clone> PeerBuilder<PeerKey, Storage<S>> {
-    /// A builder pre-filled from `peer`: its home, storage, network,
-    /// runtime, base directory and state branch, with `peer` as the
-    /// issuer of bare-capability grants.
-    pub(crate) fn from_peer(peer: &Peer<S>, key: PeerKey) -> Self {
+impl<S: Clone> PeerBuilder<PeerKey, Storage<S>, Session> {
+    /// A session builder pre-filled from `peer`: its home, storage,
+    /// network, runtime, base directory and state branch, with `peer` as
+    /// the issuer of bare-capability grants.
+    pub(crate) fn from_peer(peer: &Peer<S, Local>, key: PeerKey) -> Self {
         Self {
             home: peer.home().clone(),
             key,
@@ -251,11 +257,12 @@ impl<S: Clone> PeerBuilder<PeerKey, Storage<S>> {
             branch: peer.branch().map(str::to_string),
             issuer: Some(peer.credential().clone()),
             allowed: Vec::new(),
+            mode: PhantomData,
         }
     }
 }
 
-impl<K, St> PeerBuilder<K, St> {
+impl<K, St, M> PeerBuilder<K, St, M> {
     /// Where the home repository's space lives. Mounted at open when it
     /// is not already, and checked to be the space `home` names.
     ///
@@ -328,10 +335,51 @@ impl<K, St> PeerBuilder<K, St> {
     }
 }
 
-impl<St> PeerBuilder<Unset, St> {
+impl<St> PeerBuilder<PeerKey, St, Local> {
+    /// Act with `operator` instead of the peer's own key: a session of
+    /// the peer. Grants given as bare capabilities are claimed by the
+    /// peer, and the peer's key is not kept by what this builds.
+    pub fn operator(self, operator: impl Into<PeerKey>) -> PeerBuilder<PeerKey, St, Session> {
+        PeerBuilder {
+            home: self.home,
+            key: operator.into(),
+            storage: self.storage,
+            location: self.location,
+            directory: self.directory,
+            network: self.network,
+            runtime: self.runtime,
+            branch: self.branch,
+            issuer: self.issuer,
+            allowed: self.allowed,
+            mode: PhantomData,
+        }
+    }
+
+    /// Act with a key derived from the peer's for `context`: a session of
+    /// the peer, as [`operator`](Self::operator) with a derived key.
+    pub fn session(self, context: impl AsRef<[u8]>) -> PeerBuilder<PeerKey, St, Session> {
+        let from = match &self.key {
+            PeerKey::Supplied(credential) => credential.clone(),
+            PeerKey::Derived { from, .. } => from.clone(),
+        };
+        self.operator(PeerKey::Derived {
+            from,
+            context: context.as_ref().to_vec(),
+        })
+    }
+}
+
+impl<St> PeerBuilder<Unset, St, Session> {
+    /// The key the session acts with.
+    pub fn operator(self, operator: impl Into<PeerKey>) -> PeerBuilder<PeerKey, St, Session> {
+        self.credential(operator)
+    }
+}
+
+impl<St, M> PeerBuilder<Unset, St, M> {
     /// The key this peer acts with: a credential, a bare signer, or a
     /// [`PeerKey`] to derive at open.
-    pub fn credential<K: Into<PeerKey>>(self, key: K) -> PeerBuilder<PeerKey, St> {
+    pub fn credential<K: Into<PeerKey>>(self, key: K) -> PeerBuilder<PeerKey, St, M> {
         PeerBuilder {
             home: self.home,
             key: key.into(),
@@ -343,13 +391,14 @@ impl<St> PeerBuilder<Unset, St> {
             branch: self.branch,
             issuer: self.issuer,
             allowed: self.allowed,
+            mode: PhantomData,
         }
     }
 }
 
-impl<K> PeerBuilder<K, Unset> {
+impl<K, M> PeerBuilder<K, Unset, M> {
     /// The storage the peer's spaces are mounted in. Fixes the space type.
-    pub fn storage<S: Clone>(self, storage: Storage<S>) -> PeerBuilder<K, Storage<S>> {
+    pub fn storage<S: Clone>(self, storage: Storage<S>) -> PeerBuilder<K, Storage<S>, M> {
         PeerBuilder {
             home: self.home,
             key: self.key,
@@ -361,11 +410,12 @@ impl<K> PeerBuilder<K, Unset> {
             branch: self.branch,
             issuer: self.issuer,
             allowed: self.allowed,
+            mode: PhantomData,
         }
     }
 }
 
-impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>> {
+impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
     /// Open the peer: resolve its key, mount its home space when told
     /// where, mint its grants, and open its state branch.
     ///
@@ -374,7 +424,7 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>> {
     /// authority on every open, and persisting it would only accumulate
     /// (one immortal certificate per session was exactly the field
     /// pathology).
-    pub async fn build(self) -> Result<Peer<S>, PeerError> {
+    pub async fn build(self) -> Result<Peer<S, M>, PeerError> {
         let credential = self.key.resolve().await?;
 
         if let Some(location) = &self.location {
@@ -489,14 +539,15 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>> {
 
 /// The future an awaited builder runs.
 #[cfg(not(target_arch = "wasm32"))]
-pub type OpenFuture<S> = Pin<Box<dyn Future<Output = Result<Peer<S>, PeerError>> + Send>>;
+pub type OpenFuture<S, M = Local> =
+    Pin<Box<dyn Future<Output = Result<Peer<S, M>, PeerError>> + Send>>;
 /// The future an awaited builder runs (single-threaded wasm form).
 #[cfg(target_arch = "wasm32")]
-pub type OpenFuture<S> = Pin<Box<dyn Future<Output = Result<Peer<S>, PeerError>>>>;
+pub type OpenFuture<S, M = Local> = Pin<Box<dyn Future<Output = Result<Peer<S, M>, PeerError>>>>;
 
-impl<S: PeerSpace> IntoFuture for PeerBuilder<PeerKey, Storage<S>> {
-    type Output = Result<Peer<S>, PeerError>;
-    type IntoFuture = OpenFuture<S>;
+impl<S: PeerSpace, M: Mode> IntoFuture for PeerBuilder<PeerKey, Storage<S>, M> {
+    type Output = Result<Peer<S, M>, PeerError>;
+    type IntoFuture = OpenFuture<S, M>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.build())

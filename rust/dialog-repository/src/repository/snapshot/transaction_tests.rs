@@ -137,7 +137,7 @@ fn fact(of: &str, is: &str) -> Artifact {
 
 /// A branch with one committed fact and a snapshot of it.
 async fn staged() -> Result<(
-    dialog_peer::Peer<VolatileSpace>,
+    dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
     dialog_peer::Peer<VolatileSpace>,
     Repository,
     Branch,

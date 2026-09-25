@@ -30,11 +30,11 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_repository::{Hydrate, HydrationRequest, RemoteSite, hydrate};
 
-use super::Peer;
+use super::{Mode, Peer};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Hydrate> for Peer<S>
+impl<S, M: Mode> Provider<Hydrate> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: Provider<Get>
