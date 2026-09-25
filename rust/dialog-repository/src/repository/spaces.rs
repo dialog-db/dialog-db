@@ -85,3 +85,32 @@ fn subject(entity: &Entity) -> Result<Did, SpaceError> {
         .parse()
         .map_err(|_| SpaceError::Encoding(format!("{entity} is not a repository DID")))
 }
+
+/// Where `state` records the repository `subject` is stored, under each
+/// name it is known by.
+pub async fn locate<Env: RegistryEnv>(
+    state: &Branch,
+    subject: &Did,
+    env: &Env,
+) -> Result<Vec<(String, Location)>, SpaceError> {
+    let rows: Vec<Space> = Box::pin(
+        state
+            .query()
+            .select(Query::<Space> {
+                this: subject.this().into(),
+                name: Term::var("name"),
+                address: Term::var("address"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let location = Location::from_uri(&row.address.0).ok_or_else(|| {
+                SpaceError::Encoding(format!("{} is not a storage location", row.address.0))
+            })?;
+            Ok((row.name.0, location))
+        })
+        .collect()
+}
