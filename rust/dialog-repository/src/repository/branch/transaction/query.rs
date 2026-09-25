@@ -11,7 +11,7 @@
 //! engine through `Provider<Select> for Changes` — no in-memory tree
 //! materialization. Asserts/Replaces surface as positive facts unioned
 //! with the branch's stream; Retracts lift into tombstones (via
-//! [`tombstones_from`]) that filter matching branch facts via
+//! [`tombstones_from`](crate::layer::tombstones_from)) that filter matching branch facts via
 //! [`filter_tombstones`] before the merge, so a `tx.retract(x)` shadows
 //! `x` in the underlying branch view without modifying the branch's
 //! persistent tree.
@@ -56,10 +56,8 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
-use std::sync::Arc;
 
 use crate::RemoteSite;
-use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
 use crate::repository::source::SourceRef;
@@ -150,7 +148,6 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             let overlay = QueryLayer::from(source)
                 .with(changes)
                 .overlay(&operator);
-            let tombstones = tombstones_from(&overlay);
 
             // A transaction query is just a single-line `QueryEnv`.
             // Constructing the *same* env type the branch-session path
@@ -158,7 +155,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
             let sources = vec![source.to_source()];
-            let query_env = QueryEnv::new(sources.clone(), overlay, Arc::new(tombstones), env);
+            let query_env = QueryEnv::new(sources.clone(), overlay, env);
             let results = Box::pin(query.perform(&query_env));
             // Mid-transaction queries drive the ambient preload queue
             // like any other evaluation (see `crate::repository::fetch`).

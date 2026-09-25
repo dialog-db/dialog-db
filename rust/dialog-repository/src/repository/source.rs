@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{
-    Branch, EMPTY_TREE_HASH, NetworkedIndex, Overlay, RemoteFallback, RepositoryArchiveExt as _,
+    Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback, RepositoryArchiveExt as _,
     RepositoryMemoryExt as _, Revision, Snapshot, Upstream,
 };
 
@@ -233,7 +233,7 @@ impl<'a> SourceRef<'a> {
     }
 
     /// The transient session overlay every read of this line folds in.
-    pub(crate) fn overlay(self) -> &'a Overlay {
+    pub(crate) fn overlay(self) -> &'a Ephemeral {
         match self {
             SourceRef::Branch(branch) => branch.overlay(),
             SourceRef::Snapshot(snapshot) => snapshot.overlay(),
