@@ -205,6 +205,37 @@ pub(crate) trait Unreachable {
     fn unreachable(&self) -> bool;
 }
 
+/// A failure of one step of a request to a peer, tagged with where the
+/// step ran. A request that also reads or writes here -- a transfer
+/// streaming a blob between the peer and the local archive -- fails over
+/// only on the peer's failures: one of the local steps would fail at
+/// every address alike.
+#[derive(Debug)]
+pub(crate) enum Step<E> {
+    /// A step carried out at the peer.
+    Remote(E),
+    /// A step carried out here.
+    Local(E),
+}
+
+impl<E> Step<E> {
+    /// The failure, wherever it happened.
+    pub(crate) fn into_inner(self) -> E {
+        match self {
+            Step::Remote(error) | Step::Local(error) => error,
+        }
+    }
+}
+
+impl<E: Unreachable> Unreachable for Step<E> {
+    fn unreachable(&self) -> bool {
+        match self {
+            Step::Remote(error) => error.unreachable(),
+            Step::Local(_) => false,
+        }
+    }
+}
+
 impl Unreachable for ArchiveError {
     fn unreachable(&self) -> bool {
         matches!(
@@ -263,7 +294,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::ConnectedReplica;
+    use super::{ConnectedReplica, Step};
     use crate::PublishError;
     use crate::SiteAddress;
     use dialog_artifacts::Entity;
@@ -402,5 +433,31 @@ mod tests {
             .await;
         assert!(answered.is_ok());
         assert_eq!(attempts, 2);
+    }
+
+    /// A step of the request that ran here failed: the next address would
+    /// fail it the same way, so it is not tried.
+    #[dialog_common::test]
+    async fn it_does_not_fail_over_on_a_local_step() {
+        let remote = remote(&["https://a.example", "https://b.example"]);
+        let mut attempts = 0;
+        let answered: Result<(), Step<MemoryError>> = remote
+            .reach(|_| {
+                attempts += 1;
+                async { Err(Step::Local(unreachable())) }
+            })
+            .await;
+        assert!(matches!(answered, Err(Step::Local(_))));
+        assert_eq!(attempts, 1);
+
+        let mut attempts = 0;
+        let answered: Result<(), Step<MemoryError>> = remote
+            .reach(|_| {
+                attempts += 1;
+                async { Err(Step::Remote(unreachable())) }
+            })
+            .await;
+        assert!(matches!(answered, Err(Step::Remote(_))));
+        assert_eq!(attempts, 2, "a step at the peer still fails over");
     }
 }

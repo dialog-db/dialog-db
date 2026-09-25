@@ -23,6 +23,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use super::resolve::resolve;
 use crate::ResolveEnv;
+use crate::repository::remote::Step;
 use crate::{
     Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex,
     RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
@@ -944,10 +945,14 @@ where
         .reach(|address| {
             let digest = digest.clone();
             let opened = opened.take();
+            // Only the target's side fails over: reading the source here
+            // would fail the same for every address.
             async move {
                 let mut source = match opened {
                     Some(source) => source,
-                    None => blob_source(&digest, branch, sources, env).await?,
+                    None => blob_source(&digest, branch, sources, env)
+                        .await
+                        .map_err(Step::Local)?,
                 };
                 let mut sink = address
                     .subject
@@ -958,15 +963,17 @@ where
                     .import(digest, size)
                     .fork(address.site())
                     .perform(env)
-                    .await?;
-                while let Some(chunk) = source.next().await? {
-                    sink.write_all(&chunk).await?;
+                    .await
+                    .map_err(Step::Remote)?;
+                while let Some(chunk) = source.next().await.map_err(Step::Local)? {
+                    sink.write_all(&chunk).await.map_err(Step::Remote)?;
                 }
-                sink.finish().await?;
-                Ok::<_, BlobError>(())
+                sink.finish().await.map_err(Step::Remote)?;
+                Ok::<_, Step<BlobError>>(())
             }
         })
-        .await?;
+        .await
+        .map_err(Step::into_inner)?;
     Ok(())
 }
 
