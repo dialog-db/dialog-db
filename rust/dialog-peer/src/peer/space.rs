@@ -251,12 +251,17 @@ mod tests {
 
     use crate::helpers::unique_name;
     use crate::{ClaimExt as _, Peer};
+    use dialog_capability::access::{Access, Prove};
     use dialog_capability::{Subject, did};
     use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
+    use dialog_effects::credential::{self as credential_fx, prelude::*};
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
     use dialog_identity::OpenCredential;
     use dialog_repository::{RepositoryExt as _, spaces};
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
+    use dialog_ucan::{Parameters, Scope, Ucan};
+    use dialog_ucan_core::command::Command as UcanCommand;
+    use dialog_ucan_core::subject::Subject as UcanSubject;
     use dialog_varsig::Principal as _;
 
     /// A peer over `storage` acting as `credential`, looking for names it
@@ -323,6 +328,63 @@ mod tests {
             .await?;
         let loaded = peer.space(name).load().perform(&trusted).await?;
         assert!(!loaded.did().to_string().is_empty());
+        Ok(())
+    }
+
+    /// A space keeps no signing key: whoever holds the storage finds the
+    /// space's identity there, but nothing to sign as it with.
+    #[dialog_common::test]
+    async fn it_keeps_no_signing_key_in_a_created_space() -> anyhow::Result<()> {
+        let storage = Storage::volatile();
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&storage)
+            .await?;
+        let peer = peer_at(&storage, &credential, "/keys").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+
+        let stored = Subject::from(created.did())
+            .credential()
+            .key(credential_fx::SELF)
+            .load()
+            .perform(&storage)
+            .await?;
+        assert!(
+            matches!(stored, Credential::Verifier(_)),
+            "the space holds its signing key"
+        );
+        Ok(())
+    }
+
+    /// A space delegates to the account it is created for, so the peer
+    /// acting for that account proves its authority over the space with
+    /// no delegation minted by hand.
+    #[dialog_common::test]
+    async fn it_proves_authority_over_a_space_it_created() -> anyhow::Result<()> {
+        let storage = Storage::volatile();
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&storage)
+            .await?;
+        let peer = peer_at(&storage, &credential, "/authority").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+
+        let scope = Scope {
+            subject: UcanSubject::Specific(created.did()),
+            command: UcanCommand(vec!["archive".to_string()]),
+            parameters: Parameters::default(),
+        };
+        Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(peer.did(), scope))
+            .perform(&peer)
+            .await?;
         Ok(())
     }
 
