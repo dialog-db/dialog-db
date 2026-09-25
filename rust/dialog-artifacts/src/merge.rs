@@ -43,6 +43,7 @@
 
 use core::ops::RangeInclusive;
 use std::collections::BTreeSet;
+use std::fmt::Display;
 use std::iter::repeat_n;
 use std::str::FromStr;
 use std::str::from_utf8;
@@ -157,9 +158,7 @@ pub fn data_scope() -> [RangeInclusive<Key>; 2] {
 /// embed the value hash, so the covered claims live at different keys
 /// than the record's. The whole slot must be scanned.
 pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTreeError> {
-    let decode = |e: crate::DialogArtifactsError| {
-        DialogSearchTreeError::Node(format!("history record: {e}"))
-    };
+    let decode = |e: &dyn Display| DialogSearchTreeError::Node(format!("history record: {e}"));
     // The record's entity and attribute live in its key, not its payload.
     let parts = parse_key(key.as_ref())
         .ok_or_else(|| DialogSearchTreeError::Node("history key did not parse".to_string()))?;
@@ -167,12 +166,12 @@ pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTree
         from_utf8(&parts.entity)
             .map_err(|e| DialogSearchTreeError::Node(format!("entity is not UTF-8: {e}")))?,
     )
-    .map_err(decode)?;
+    .map_err(|e| decode(&e))?;
     let the = Attribute::from_str(
         from_utf8(&parts.attribute)
             .map_err(|e| DialogSearchTreeError::Node(format!("attribute is not UTF-8: {e}")))?,
     )
-    .map_err(decode)?;
+    .map_err(|e| decode(&e))?;
     let start = <EntityKey<Key> as KeyViewConstruct>::min()
         .set_entity(EntityKeyPart::from(&of))
         .set_attribute(AttributeKeyPart::from(&the))

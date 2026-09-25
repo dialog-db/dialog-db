@@ -1,3 +1,4 @@
+use dialog_artifacts::history::RevisionRecord;
 use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
@@ -587,7 +588,8 @@ impl<'a> Pull<'a> {
                     branch_entity.clone(),
                     authority.did(),
                 );
-                let mut record = revision.record(
+                let mut record = RevisionRecord::create(
+                    &revision,
                     authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
@@ -757,7 +759,8 @@ impl<'a> Pull<'a> {
                     branch_entity.clone(),
                     authority.did(),
                 );
-                let mut record = revision.record(
+                let mut record = RevisionRecord::create(
+                    &revision,
                     authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
@@ -929,7 +932,8 @@ impl<'a> Pull<'a> {
                 // parent (see `dialog_artifacts::history::skip`). Sign the
                 // record before it enters the tree, and the head once the
                 // merged root is final — same order as `Commit`.
-                let mut record = revision.record(
+                let mut record = RevisionRecord::create(
+                    &revision,
                     authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),

@@ -54,8 +54,6 @@ mod artifacts;
 pub use artifacts::*;
 
 pub mod history;
-mod revision;
-pub use revision::*;
 
 mod reference;
 pub use reference::*;
@@ -98,8 +96,9 @@ pub mod merge;
 pub mod position;
 pub mod tree;
 
-mod uri;
-pub use uri::*;
+pub use dialog_capability::identity::{
+    EMPTY_TREE_HASH, ENTITY_LENGTH, Entity, IdentityError, Revision, TreeReference, Uri,
+};
 
 /// Test helpers for generating deterministic test data.
 #[cfg(any(test, feature = "helpers"))]

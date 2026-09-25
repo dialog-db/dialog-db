@@ -437,14 +437,6 @@ impl From<Attribute> for JsValue {
     }
 }
 
-impl From<Entity> for JsValue {
-    fn from(value: Entity) -> Self {
-        // TODO: Change this to pass a string when the query
-        // engine supports URI entities
-        JsValue::from(value.to_string().as_bytes().to_owned())
-    }
-}
-
 impl From<Cause> for JsValue {
     fn from(value: Cause) -> Self {
         let result = Uint8Array::new_with_length(HASH_SIZE as u32);
@@ -497,17 +489,6 @@ impl TryFrom<JsValue> for Attribute {
 //         Ok(Entity::from_str(&entity)?)
 //     }
 // }
-
-impl TryFrom<JsValue> for Entity {
-    type Error = JsError;
-
-    fn try_from(entity: JsValue) -> Result<Self, Self::Error> {
-        let bytes = entity.dyn_into::<Uint8Array>().map_err(js_value_to_error)?;
-        let string = String::from_utf8(bytes.to_vec())
-            .map_err(|error| DialogArtifactsError::InvalidEntity(format!("{error}")))?;
-        Ok(Entity::from_str(&string)?)
-    }
-}
 
 impl TryFrom<JsValue> for Value {
     type Error = JsError;

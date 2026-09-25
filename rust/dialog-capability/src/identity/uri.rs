@@ -13,7 +13,8 @@ use url::Url;
 use base58::ToBase58;
 use ed25519_dalek::SigningKey;
 
-use crate::{DialogArtifactsError, ENTITY_LENGTH, make_reference, mutable_slice};
+use super::{ENTITY_LENGTH, IdentityError};
+use dialog_common::Blake3Hash;
 
 /// A [`Uri`] is a helper type that helps validate and reliably convert between
 /// plain string URIs (which typically represent an [`Entity`]) and their other
@@ -28,7 +29,7 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, make_reference, mutable_slice};
 /// canonical (parse + equality with the parse's own rendering) and adopts the
 /// stored string without re-rendering it. A stored string that fails that
 /// check is a corrupt or foreign-written entry; it is rejected as
-/// [`CorruptEntry`](DialogArtifactsError::CorruptEntry) so readers can ignore
+/// [`CorruptEntry`](IdentityError::CorruptEntry) so readers can ignore
 /// the row. Either way a [`Uri`] holds a valid canonical URI by construction.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
@@ -55,7 +56,7 @@ impl<'de> Deserialize<'de> for Uri {
 impl Uri {
     /// Generate a globally unique URI. The raw format will be an ed25519 DID
     /// Key.
-    pub fn unique() -> Result<Self, DialogArtifactsError> {
+    pub fn unique() -> Result<Self, IdentityError> {
         const PREFIX: &str = "z6Mk";
 
         let key = [
@@ -71,7 +72,7 @@ impl Uri {
 
         format!("did:key:{key}")
             .parse()
-            .map_err(|error| DialogArtifactsError::InvalidEntity(format!("{error}")))
+            .map_err(|error| IdentityError::InvalidEntity(format!("{error}")))
     }
 
     /// Builds a [`Uri`] from a string read back out of the index, validating
@@ -84,11 +85,11 @@ impl Uri {
     /// passes and the stored string is adopted as-is — no re-render, no second
     /// allocation. A string that fails either check did not come from this
     /// writer: the entry is corrupt or foreign, and the error is
-    /// [`CorruptEntry`](DialogArtifactsError::CorruptEntry) so scan paths can
+    /// [`CorruptEntry`](IdentityError::CorruptEntry) so scan paths can
     /// ignore the row rather than fail the query. An [`Entity`](crate::Entity)
     /// therefore holds a valid canonical URI by construction on every path,
     /// stored reads included.
-    pub(crate) fn from_stored(s: &str) -> Result<Self, DialogArtifactsError> {
+    pub fn from_stored(s: &str) -> Result<Self, IdentityError> {
         // The cheap proof first: for the common entity shapes (did:key,
         // user:, blob: — opaque-path non-special URIs) canonicality is
         // PROVEN by a single byte scan, ~free per row. Everything else
@@ -97,13 +98,13 @@ impl Uri {
             return Ok(Self(s.into()));
         }
         let url: Url = s.parse().map_err(|error| {
-            DialogArtifactsError::CorruptEntry(format!("stored entity is not a URI: {error}"))
+            IdentityError::CorruptEntry(format!("stored entity is not a URI: {error}"))
         })?;
         // Canonicality subsumes the whitespace/control guard in `from_str`:
         // `url::Url::parse` strips those characters, so a string containing
         // them can never equal its own parse's rendering.
         if url.as_str() != s {
-            return Err(DialogArtifactsError::CorruptEntry(format!(
+            return Err(IdentityError::CorruptEntry(format!(
                 "stored entity is not a canonical URI rendering: {s:?}"
             )));
         }
@@ -121,24 +122,24 @@ impl Uri {
     /// The layout is 64 bytes wide. The first 32 bytes contain the first 32 bytes
     /// of the UTF-8-encoded URI string; the last 32 bytes are the hash of any
     /// remaining bytes in the URI string (or else all zeroes).
-    pub fn key_bytes(&self) -> Result<[u8; ENTITY_LENGTH], DialogArtifactsError> {
+    pub fn key_bytes(&self) -> Result<[u8; ENTITY_LENGTH], IdentityError> {
         let format = |bytes: &[u8]| {
             let mut key_bytes = [0u8; 64];
 
             if let Some((l, r)) = bytes.split_at_checked(32) {
-                let rest = make_reference(r);
+                let rest = *Blake3Hash::hash(r).as_bytes();
 
-                mutable_slice!(key_bytes, 0, 32).write_all(l)?;
-                mutable_slice!(key_bytes, 32, 32).write_all(rest.as_ref())?;
+                key_bytes[0..32].as_mut().write_all(l)?;
+                key_bytes[32..64].as_mut().write_all(rest.as_ref())?;
             } else {
-                mutable_slice!(key_bytes, 0, 32).write_all(bytes)?;
+                key_bytes[0..32].as_mut().write_all(bytes)?;
             }
 
             Ok(key_bytes) as Result<[u8; 64], io::Error>
         };
 
         format(self.0.as_bytes()).map_err(|error| {
-            DialogArtifactsError::InvalidEntity(format!("Could not format as key bytes: {error}"))
+            IdentityError::InvalidEntity(format!("Could not format as key bytes: {error}"))
         })
     }
 }
@@ -241,7 +242,7 @@ impl Deref for Uri {
 }
 
 impl FromStr for Uri {
-    type Err = DialogArtifactsError;
+    type Err = IdentityError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Reject strings that only *look* URI-ish because they carry
@@ -259,7 +260,7 @@ impl FromStr for Uri {
         // `url` legitimately normalizes some real URLs, e.g. adding a
         // trailing slash to `https://host`, and those are valid entities.)
         if s.chars().any(|c| c.is_ascii_whitespace() || c.is_control()) {
-            return Err(DialogArtifactsError::InvalidUri(format!(
+            return Err(IdentityError::InvalidUri(format!(
                 "URI must not contain whitespace or control characters: {s:?}"
             )));
         }
@@ -287,13 +288,13 @@ impl FromStr for Uri {
         // check exact: our own writes always pass it.
         let url: Url = s
             .parse()
-            .map_err(|error| DialogArtifactsError::InvalidUri(format!("{error}")))?;
+            .map_err(|error| IdentityError::InvalidUri(format!("{error}")))?;
         Ok(Uri(String::from(url).into()))
     }
 }
 
 impl TryFrom<String> for Uri {
-    type Error = DialogArtifactsError;
+    type Error = IdentityError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         value.parse()
@@ -302,11 +303,8 @@ impl TryFrom<String> for Uri {
 
 #[cfg(test)]
 mod tests {
-    use crate::Entity;
-    use anyhow::Result;
-
+    use super::super::{Entity, IdentityError};
     use super::Uri;
-    use crate::DialogArtifactsError;
 
     /// The canonicality prover accepts exactly the opaque non-special
     /// shapes it documents, and refuses everything whose WHATWG handling
@@ -394,12 +392,12 @@ mod tests {
         assert!(Uri::from_stored("did:key:z6MkExample").is_ok());
         assert!(matches!(
             Uri::from_stored("not a uri"),
-            Err(DialogArtifactsError::CorruptEntry(_))
+            Err(IdentityError::CorruptEntry(_))
         ));
         // Parses as a URL, but is not the parser's own rendering of itself.
         assert!(matches!(
             Uri::from_stored("HTTPS://Google.com"),
-            Err(DialogArtifactsError::CorruptEntry(_))
+            Err(IdentityError::CorruptEntry(_))
         ));
 
         // Whatever `from_str` normalizes and stores, `from_stored` admits:
@@ -411,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn it_can_convert_to_key_bytes() -> Result<()> {
+    fn it_can_convert_to_key_bytes() -> Result<(), IdentityError> {
         let entity: Entity = "https://google.com".parse()?;
 
         println!("\n{entity}");
