@@ -1622,6 +1622,53 @@ mod rule_tests {
         Ok(())
     }
 
+    /// A subscription over a rule-derived concept stays quiet when the
+    /// overlay changes facts it never reads: the session stamp lands
+    /// outside both its fact cover and its rule-discovery cover, so the
+    /// poll neither recomputes nor maintains.
+    #[dialog_common::test]
+    async fn it_ignores_unrelated_overlay_writes_under_a_rule_backed_subscription()
+    -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(employee_from_person())
+            .assert(
+                the!("org/person-name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(employees());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted.len(),
+            1,
+            "the committed rule derives Alice"
+        );
+
+        for path in ["/", "/hub", "/space"] {
+            let site = Entity::new()?;
+            branch
+                .overlay()
+                .assert(the!("xyz.tonk.site/path").of(site).is(path.to_string()));
+            assert!(
+                subscription.poll(&operator).await?.is_none(),
+                "an unrelated session stamp changes nothing"
+            );
+        }
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 0);
+        Ok(())
+    }
+
     // ----- (4) discovery cache keys on head: a stale handle (head not
     // advanced) keeps using its cached discovery and does NOT pick up a
     // rule committed via another handle until it refreshes. This proves
