@@ -86,6 +86,10 @@ pub struct ConceptDescriptor {
     /// identity does not cover.
     #[serde(skip)]
     implicit_plans: Memo<RwLock<HashMap<Adornment, Conjunction>>>,
+    /// Every operand of the concept in sorted order, which numbers the
+    /// bits of an [`Adornment`]. Asked for on every planned call.
+    #[serde(skip)]
+    sorted_operands: Memo<Arc<[String]>>,
 }
 
 impl ConceptDescriptor {
@@ -172,6 +176,18 @@ impl ConceptDescriptor {
                 vec![name.to_string(), Relation::key_operand(name)]
             }
         }
+    }
+
+    /// Every [operand](Self::operands) in sorted order: the numbering an
+    /// [`Adornment`] of a call of this concept is taken over.
+    pub fn sorted_operands(&self) -> Arc<[String]> {
+        self.sorted_operands
+            .get_or_init(|| {
+                let mut operands: Vec<String> = self.operands().collect();
+                operands.sort();
+                operands.into()
+            })
+            .clone()
     }
 
     /// The keyed-collection fields of this concept.
@@ -333,6 +349,7 @@ fn descriptor_from_with(with: NamedAttributes) -> ConceptDescriptor {
         identity: Memo::default(),
         implicit: Memo::default(),
         implicit_plans: Memo::default(),
+        sorted_operands: Memo::default(),
     }
 }
 

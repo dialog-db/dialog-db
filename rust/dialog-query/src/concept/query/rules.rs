@@ -165,13 +165,14 @@ impl ConceptRules {
     /// adornment, so a repeated identical call on the *same*
     /// `ConceptRules` skips even the (cheap) re-assembly.
     pub fn plan(&self, terms: &Parameters, matched: &Match) -> Arc<Disjunction> {
-        let adornment = Adornment::derive(terms, matched);
+        let operands = self.implicit.conclusion().sorted_operands();
+        let adornment = Adornment::derive(&operands, terms, matched);
 
         if let Some(plan) = self.plans.read().unwrap().get(&adornment) {
             return plan.clone();
         }
 
-        let scope = adornment.into_environment(terms);
+        let scope = adornment.into_environment(&operands);
         // The implicit rule has no content-addressed identity to key the
         // shared cache by, so its plans are kept on its concept's
         // descriptor, which every query shares. Installed rules -- with
@@ -385,13 +386,14 @@ mod tests {
         terms_b.insert("this".into(), Term::var("e2"));
         terms_b.insert("name".into(), Term::var("n2"));
 
+        let operands = descriptor.sorted_operands();
         let matched = Match::new();
-        let adorn_a = Adornment::derive(&terms_a, &matched);
-        let adorn_b = Adornment::derive(&terms_b, &matched);
+        let adorn_a = Adornment::derive(&operands, &terms_a, &matched);
+        let adorn_b = Adornment::derive(&operands, &terms_b, &matched);
         assert_eq!(adorn_a, adorn_b, "same binding pattern ⇒ same adornment");
 
-        let plan_a = rule.plan(&adorn_a.into_environment(&terms_a));
-        let plan_b = rule.plan(&adorn_b.into_environment(&terms_b));
+        let plan_a = rule.plan(&adorn_a.into_environment(&operands));
+        let plan_b = rule.plan(&adorn_b.into_environment(&operands));
 
         assert_eq!(
             plan_a, plan_b,
@@ -406,7 +408,7 @@ mod tests {
         bound
             .bind(&Term::var("n1"), Value::from("x".to_string()))
             .unwrap();
-        let adorn_bound = Adornment::derive(&terms_a, &bound);
+        let adorn_bound = Adornment::derive(&operands, &terms_a, &bound);
         assert_ne!(
             adorn_a, adorn_bound,
             "binding a slot must change the adornment"
