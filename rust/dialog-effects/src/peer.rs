@@ -122,6 +122,52 @@ impl Effect for SetName {
     type Output = Result<(), PeerError>;
 }
 
+/// Record that `peer` is no longer reached at `address`: a failover
+/// passes over an address it knows, so one that stopped serving the peer
+/// is taken back.
+///
+/// Removing an address the peer does not have converges.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct RemoveAddress {
+    /// The peer, by its entity: its DID.
+    pub peer: Entity,
+    /// The address to stop reaching it at.
+    pub address: PeerAddress,
+}
+
+impl Attenuation for RemoveAddress {
+    type Of = Peers<method::Put>;
+
+    fn attenuation() -> &'static str {
+        "peer/remove-address"
+    }
+}
+
+impl Effect for RemoveAddress {
+    type Output = Result<(), PeerError>;
+}
+
+/// Take back the name the host knows `peer` by, freeing it for another.
+///
+/// Removing the name of a peer that has none converges.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct RemoveName {
+    /// The peer, by its entity: its DID.
+    pub peer: Entity,
+}
+
+impl Attenuation for RemoveName {
+    type Of = Peers<method::Put>;
+
+    fn attenuation() -> &'static str {
+        "peer/remove-name"
+    }
+}
+
+impl Effect for RemoveName {
+    type Output = Result<(), PeerError>;
+}
+
 /// The peers known by `name`. More than one means the name is
 /// ambiguous; none means no contact has it.
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]

@@ -30,6 +30,47 @@ pub async fn add_address<Env: RegistryEnv>(
     apply(state, changes, env).await
 }
 
+/// Record in `state` that `peer` is no longer reached at `address`.
+pub async fn remove_address<Env: RegistryEnv>(
+    state: &Branch,
+    peer: &Entity,
+    address: &PeerAddress,
+    env: &Env,
+) -> Result<(), CommitError> {
+    let mut changes = Changes::new();
+    schema::PeerAddress {
+        this: peer.clone(),
+        address: peer::Address(address.0.clone()),
+    }
+    .retract(&mut changes);
+    apply(state, changes, env).await
+}
+
+/// Take back from `state` the name `peer` is known by, if it has one.
+pub async fn remove_name<Env: RegistryEnv>(
+    state: &Branch,
+    peer: &Entity,
+    env: &Env,
+) -> Result<(), CommitError> {
+    let named: Vec<schema::Contact> = Box::pin(
+        state
+            .query()
+            .select(Query::<schema::Contact> {
+                this: peer.clone().into(),
+                name: Term::var("name"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await
+    .map_err(|error| CommitError::Registry(error.to_string()))?;
+    let mut changes = Changes::new();
+    for contact in named {
+        contact.retract(&mut changes);
+    }
+    apply(state, changes, env).await
+}
+
 /// Record in `state` that `peer` is known by `name`, replacing any name
 /// it had.
 pub async fn set_name<Env: RegistryEnv>(

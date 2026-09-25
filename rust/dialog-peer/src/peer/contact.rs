@@ -11,7 +11,9 @@
 use dialog_capability::identity::Entity;
 use dialog_capability::{Capability, Did, Policy as _, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_effects::peer::{AddAddress, Connect, Find, PeerConnection, PeerError, SetName};
+use dialog_effects::peer::{
+    AddAddress, Connect, Find, PeerConnection, PeerError, RemoveAddress, RemoveName, SetName,
+};
 use dialog_repository::contacts;
 use dialog_repository::registry::RegistryEnv;
 use dialog_repository::{Branch, CommitError, PublishError};
@@ -110,6 +112,46 @@ where
         self.write_contacts(|state| {
             let (peer, name) = (&peer, &name);
             async move { contacts::set_name(&state, peer, name, self).await }
+        })
+        .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<RemoveAddress> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: RegistryEnv + ConditionalSend,
+{
+    async fn execute(&self, input: Capability<RemoveAddress>) -> Result<(), PeerError> {
+        self.own_contacts(input.subject())?;
+        let RemoveAddress { peer, address } = RemoveAddress::of(&input).clone();
+        self.write_contacts(|state| {
+            let (peer, address) = (&peer, &address);
+            async move { contacts::remove_address(&state, peer, address, self).await }
+        })
+        .await?;
+        // A connection holds the addresses it was made with: the next
+        // connect reads them again, without this one.
+        self.connections().lock().remove(&peer);
+        Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<RemoveName> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: RegistryEnv + ConditionalSend,
+{
+    async fn execute(&self, input: Capability<RemoveName>) -> Result<(), PeerError> {
+        self.own_contacts(input.subject())?;
+        let RemoveName { peer } = RemoveName::of(&input).clone();
+        self.write_contacts(|state| {
+            let peer = &peer;
+            async move { contacts::remove_name(&state, peer, self).await }
         })
         .await
     }
@@ -244,6 +286,62 @@ mod tests {
             matches!(connect(&worker).await, Err(PeerError::Unreachable { .. })),
             "nothing was recorded among the peer's own contacts"
         );
+        Ok(())
+    }
+
+    /// An address taken back is no longer tried: the next connection is
+    /// made with the addresses that remain.
+    #[dialog_common::test]
+    async fn it_stops_reaching_a_peer_at_a_removed_address() -> anyhow::Result<()> {
+        let (worker, _) = test_session_with_peer().await;
+        for endpoint in [
+            "https://tonk.network/ucan/",
+            "https://backup.tonk.network/ucan/",
+        ] {
+            contact(did!("web:tonk.network"))
+                .add_address(UcanAddress::new(endpoint))
+                .perform(&worker)
+                .await?;
+        }
+        assert_eq!(connect(&worker).await?.addresses().len(), 2);
+
+        let stale = dialog_repository::peer_address(
+            &UcanAddress::new("https://backup.tonk.network/ucan/").into(),
+        )?;
+        Subject::from(worker.home().clone())
+            .writer()
+            .peers()
+            .remove_address(peer(), stale)
+            .perform(&worker)
+            .await?;
+
+        assert_eq!(connect(&worker).await?.addresses().len(), 1);
+        Ok(())
+    }
+
+    /// A name taken back picks out no peer, and is free to give another.
+    #[dialog_common::test]
+    async fn it_frees_a_removed_name() -> anyhow::Result<()> {
+        let (worker, _) = test_session_with_peer().await;
+        contact(did!("web:tonk.network"))
+            .add_address(UcanAddress::new("https://tonk.network/ucan/"))
+            .name("tonk")
+            .perform(&worker)
+            .await?;
+        let peers = Subject::from(worker.home().clone()).reader().peers();
+        assert_eq!(
+            peers.clone().find("tonk").perform(&worker).await?,
+            vec![peer()]
+        );
+
+        Subject::from(worker.home().clone())
+            .writer()
+            .peers()
+            .remove_name(peer())
+            .perform(&worker)
+            .await?;
+
+        assert!(peers.find("tonk").perform(&worker).await?.is_empty());
         Ok(())
     }
 
