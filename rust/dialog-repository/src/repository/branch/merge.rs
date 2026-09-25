@@ -1,8 +1,8 @@
-//! Reconciling a commit that lost the race for its branch's head.
+//! Merging a commit that lost the race for its branch's head.
 //!
 //! A commit builds on the head it read (the base) and publishes against
 //! it. When another writer advanced the head first, the commit's revision
-//! is already durable, just not the head. Reconciling keeps that revision
+//! is already durable, just not the head. Merging keeps that revision
 //! exactly as minted, editions and records included, and publishes a
 //! merge of it with the head that won: the same merge a pull performs
 //! between peers, with the roles fixed by the race. The base is known
@@ -32,13 +32,13 @@ use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 
 use crate::{Branch, CommitError, Index, NetworkedIndex, PublishError, Revision, TreeReference};
 
-/// How many times reconciling tries to publish its merge before giving
+/// How many times merging tries to publish its merge before giving
 /// up: the merge itself can lose to yet another writer.
 const RETRY_LIMIT: usize = 3;
 
 /// Publish a merge of `mine`, a revision minted on `base` whose publish
 /// lost, with whatever head `branch` holds now.
-pub(crate) async fn reconcile<Env>(
+pub(crate) async fn merge_with_winner<Env>(
     branch: &Branch,
     base: Option<Revision>,
     mine: Revision,
@@ -78,7 +78,7 @@ where
         }
 
         let (merged, merged_context) =
-            merge(branch, base.as_ref(), &mine, &theirs, context, env).await?;
+            merged(branch, base.as_ref(), &mine, &theirs, context, env).await?;
         match head.publish(merged.clone(), env).await {
             Ok(()) => {
                 branch.contexts().insert(merged.version(), merged_context);
@@ -103,7 +103,7 @@ async fn context_of(branch: &Branch, head: &Revision) -> Option<Context> {
 /// Mint a revision whose tree is `theirs` with what `mine` changed since
 /// `base` integrated onto it, and whose parents are both, with its
 /// context.
-async fn merge<Env>(
+async fn merged<Env>(
     branch: &Branch,
     base: Option<&Revision>,
     mine: &Revision,
@@ -257,7 +257,7 @@ mod tests {
         Ok(values)
     }
 
-    /// A commit that loses the race to another writer, asked to reconcile,
+    /// A commit that loses the race to another writer, asked to merge,
     /// is kept as it was minted and merged with the head that won: both
     /// writes survive and the head's parents are both revisions.
     #[dialog_common::test]
@@ -273,7 +273,7 @@ mod tests {
             .await?;
         let merged = second
             .commit(stream::iter(vec![name("user:b", "Bob")?]))
-            .reconcile()
+            .merge()
             .perform(&peer)
             .await?;
 
@@ -288,9 +288,9 @@ mod tests {
         Ok(())
     }
 
-    /// Without `reconcile`, the same race is refused as before.
+    /// Without `merge`, the same race is refused as before.
     #[dialog_common::test]
-    async fn it_refuses_a_lost_race_unless_asked_to_reconcile() -> Result<()> {
+    async fn it_refuses_a_lost_race_unless_asked_to_merge() -> Result<()> {
         let (worker, peer) = test_session_with_peer().await;
         let repo = test_repo(&worker, &peer).await;
         let first = repo.branch("main").open().perform(&worker).await?;
@@ -315,9 +315,9 @@ mod tests {
     }
 
     /// A writer racing itself mints the edition the winner already holds,
-    /// so its revision cannot be kept and reconciling refuses.
+    /// so its revision cannot be kept and merging refuses.
     #[dialog_common::test]
-    async fn it_refuses_to_reconcile_a_writer_racing_itself() -> Result<()> {
+    async fn it_refuses_to_merge_a_writer_racing_itself() -> Result<()> {
         let (worker, peer) = test_session_with_peer().await;
         let repo = test_repo(&worker, &peer).await;
         let first = repo.branch("main").open().perform(&worker).await?;
@@ -329,7 +329,7 @@ mod tests {
             .await?;
         let raced = second
             .commit(stream::iter(vec![name("user:b", "Bob")?]))
-            .reconcile()
+            .merge()
             .perform(&worker)
             .await;
         assert!(
@@ -366,7 +366,7 @@ mod tests {
             syncing.pull().perform(&session),
             writing
                 .commit(stream::iter(vec![name("user:c", "Carol")?]))
-                .reconcile()
+                .merge()
                 .perform(&session),
         );
         committed?;

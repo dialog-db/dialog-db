@@ -1368,10 +1368,10 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
 }
 
 /// A commit that loses the race on a branch whose tree was adopted from
-/// a peer reconciles by reading what it holds by reference from that
+/// a peer merges by reading what it holds by reference from that
 /// peer, as the commit itself did.
 #[dialog_common::test]
-async fn it_reconciles_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> {
+async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
 
     let (alice_repo, alice_branch) =
@@ -1416,7 +1416,7 @@ async fn it_reconciles_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<
             is: Value::String("Carol".into()),
             cause: None,
         })]))
-        .reconcile()
+        .merge()
         .perform(&profile)
         .await?;
 

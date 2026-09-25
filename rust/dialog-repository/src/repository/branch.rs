@@ -64,8 +64,8 @@ pub use resolve::ResolveEnv;
 mod open;
 pub use open::*;
 
+mod merge;
 mod pull;
-mod reconcile;
 pub use pull::*;
 
 mod push;

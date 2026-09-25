@@ -1,4 +1,4 @@
-use super::reconcile::reconcile;
+use super::merge::merge_with_winner;
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
@@ -30,7 +30,7 @@ pub struct Commit<'a, Changes> {
     canonicalize: bool,
     scope: WriteScope,
     entries: Vec<(Key, State<Datum>)>,
-    reconcile: bool,
+    merge: bool,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -42,7 +42,7 @@ impl<'a, Changes> Commit<'a, Changes> {
             canonicalize: false,
             scope: WriteScope::Application,
             entries: Vec::new(),
-            reconcile: false,
+            merge: false,
         }
     }
 
@@ -115,20 +115,24 @@ impl<'a, Changes> Commit<'a, Changes> {
         self
     }
 
-    /// Merge with the head instead of failing when another writer
-    /// advanced it first.
+    /// Merge with the head that won instead of failing when another
+    /// writer advanced it first.
     ///
     /// By default a commit that loses the race for the branch's head
     /// fails with [`VersionMismatch`](PublishError::VersionMismatch), and
-    /// the caller decides what to do. With `reconcile`, the commit's
-    /// revision is kept exactly as minted and a merge of it with the head
-    /// that won is published instead, as a pull merges two peers'
-    /// changes: both sides' facts survive, and a value both set is
-    /// elected by version when read. A commit racing another commit by
-    /// the same writer on the same branch cannot be kept (its version is
-    /// taken) and still fails.
-    pub fn reconcile(mut self) -> Self {
-        self.reconcile = true;
+    /// the caller decides what to do. With `merge`, the commit's revision
+    /// is kept exactly as minted and a merge of it with the head that won
+    /// is published instead, as a pull merges two peers' changes: both
+    /// sides' facts survive, and a value both set is elected by version
+    /// when read.
+    ///
+    /// A head moved by this commit's own writer -- a pull it ran in the
+    /// background, say -- is not a concurrent change: the commit is built
+    /// on it rather than merged with it. A handle that raced its own
+    /// writer some other way still fails, since the version it minted is
+    /// taken.
+    pub fn merge(mut self) -> Self {
+        self.merge = true;
         self
     }
 }
@@ -207,12 +211,12 @@ where
         let lock = branch.write_lock();
         let _writing = lock.lock().await;
 
-        // A reconciling commit builds on a head its own writer moved since
+        // A merging commit builds on a head its own writer moved since
         // this handle read it, a pull of its own say: that is not a
         // concurrent change to merge with, and minting on the older head
         // would take the edition the newer one holds. A head another writer
         // moved stays a race, merged as the commit asked.
-        if self.reconcile {
+        if self.merge {
             let stored = branch.subject().branch(branch.name()).revision();
             stored.resolve().perform(env).await?;
             let issuer = Identify.perform(env).await?.did();
@@ -232,7 +236,7 @@ where
         let head = branch.revision.checkpoint();
         let base_revision = branch.revision();
         let base_version = branch.revision.edition().map(|edition| edition.version);
-        let reconciling = self.reconcile.then(|| base_revision.clone());
+        let merging = self.merge.then(|| base_revision.clone());
 
         let minted = Mint {
             source: SourceRef::from(branch),
@@ -277,9 +281,9 @@ where
         };
 
         if let Err(lost) = head.publish(revision.clone(), env).await {
-            return match (lost, reconciling) {
+            return match (lost, merging) {
                 (lost @ PublishError::VersionMismatch { .. }, Some(base)) => {
-                    reconcile(branch, base, revision, lost, env).await
+                    merge_with_winner(branch, base, revision, lost, env).await
                 }
                 (lost, _) => Err(lost.into()),
             };
