@@ -11,16 +11,16 @@
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
 };
-use dialog_artifacts::tree::{SpillCache, spill_cache};
+use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
+use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::query::PlanCache;
-use dialog_search_tree::{Buffer, Cache};
+use dialog_search_tree::Cache;
 use dialog_storage::Blake3Hash;
 use std::sync::Arc;
 
@@ -177,7 +177,7 @@ impl<'a> SourceRef<'a> {
     }
 
     /// The shared node cache tree reads go through.
-    pub(crate) fn node_cache(self) -> Cache<NodeHash, Buffer> {
+    pub(crate) fn node_cache(self) -> ArtifactNodeCache {
         match self {
             SourceRef::Branch(branch) => branch.node_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().nodes.clone(),
@@ -325,7 +325,7 @@ impl<'a> SourceRef<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct Caches {
     /// Tree nodes by hash, so blocks one read fetched stay warm for the next.
-    pub(crate) nodes: Cache<NodeHash, Buffer>,
+    pub(crate) nodes: ArtifactNodeCache,
     /// Spilled value blocks by content reference.
     pub(crate) spills: SpillCache,
     /// Deductive-rule discovery (by head) and hydrated bodies (by entity).

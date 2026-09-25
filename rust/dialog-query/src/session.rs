@@ -1172,27 +1172,29 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
+        let operands = person.sorted_operands();
         let free = Match::new();
-        let adornment_free = Adornment::derive(&terms, &free);
-        let env_free = adornment_free.into_environment(&terms);
+        let adornment_free = Adornment::derive(&operands, &terms, &free);
+        let env_free = adornment_free.into_environment(&operands);
         let free_plan = rules.plan(&terms, &free);
 
         let mut bound = Match::new();
         bound
             .bind(&Term::var("e"), Value::from(Entity::new().unwrap()))
             .unwrap();
-        let adornment_bound = Adornment::derive(&terms, &bound);
-        let env_bound = adornment_bound.into_environment(&terms);
+        let adornment_bound = Adornment::derive(&operands, &terms, &bound);
+        let env_bound = adornment_bound.into_environment(&operands);
         let bound_plan = rules.plan(&terms, &bound);
 
-        // The entity-bound environment should contain "e"
+        // The entity-bound scope names the concept's `this` field, which
+        // the rule body is evaluated over; the free scope does not.
         assert!(
-            env_bound.contains("e"),
-            "Bound adornment should include entity variable in environment"
+            env_bound.contains("this"),
+            "Bound adornment should include the entity field in scope"
         );
         assert!(
-            !env_free.contains("e"),
-            "Free adornment should not include entity variable in environment"
+            !env_free.contains("this"),
+            "Free adornment should not include the entity field in scope"
         );
 
         // Verify the plans are structurally different

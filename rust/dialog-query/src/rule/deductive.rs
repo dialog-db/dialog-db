@@ -8,6 +8,7 @@ use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
 use crate::formula::attribute::AttributeParts;
+use crate::memo::Memo;
 use crate::negation::Negation;
 use crate::optional::OptionalAttributeQuery;
 pub use crate::planner::Plan;
@@ -26,6 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::iter;
+use std::sync::Arc;
 
 /// A deductive rule that has passed analysis: verified for every
 /// invariant and plannable by construction.
@@ -36,19 +38,28 @@ use std::iter;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeductiveRule {
     /// The narrowed premises, inferred types, and dependency graph
-    /// produced by analysis.
-    analysis: AnalyzedRule,
+    /// produced by analysis. Shared: a rule never changes once analyzed,
+    /// and rules are cloned per query (out of statics, caches, and rule
+    /// sets), so a clone should not copy the analysis.
+    analysis: Arc<AnalyzedRule>,
+    /// The rule's content-addressed identity, computed on first use:
+    /// plan-cache lookups ask for it on every query.
+    identity: Memo<Option<Entity>>,
 }
 impl Compile for DeductiveRule {
     const KIND: RuleKind = RuleKind::Deductive;
 
     fn from_analysis(analysis: AnalyzedRule) -> Self {
-        DeductiveRule { analysis }
+        DeductiveRule {
+            analysis: Arc::new(analysis),
+            identity: Memo::default(),
+        }
     }
 
     fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self {
         DeductiveRule {
-            analysis: AnalyzedRule::in_progress(conclusion, premises),
+            analysis: Arc::new(AnalyzedRule::in_progress(conclusion, premises)),
+            identity: Memo::default(),
         }
     }
 }
@@ -207,10 +218,14 @@ impl DeductiveRule {
     /// collision-free key for plan caching and the entity a rule's facts
     /// are stored under.
     pub fn try_this(&self) -> Option<Entity> {
-        use base58::ToBase58;
-        let hash = blake3::hash(&self.try_encode()?);
-        let encoded = hash.as_bytes().as_ref().to_base58();
-        format!("rule:{encoded}").parse().ok()
+        self.identity
+            .get_or_init(|| {
+                use base58::ToBase58;
+                let hash = blake3::hash(&self.try_encode()?);
+                let encoded = hash.as_bytes().as_ref().to_base58();
+                format!("rule:{encoded}").parse().ok()
+            })
+            .clone()
     }
 
     /// Canonical dag-cbor encoding, panicking if the rule has no

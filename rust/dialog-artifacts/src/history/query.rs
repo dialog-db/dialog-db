@@ -10,7 +10,8 @@ use crate::Value;
 use crate::history::VersionExt as _;
 use crate::tree::ArtifactTreeExt as _;
 use crate::tree::{
-    ArtifactTree, SPILL_LOOKAHEAD, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache,
+    ArtifactNodeCache, ArtifactTree, SPILL_LOOKAHEAD, SpillCache, TreeStorageBridge,
+    fetch_spilled_cached, spill_cache,
 };
 use crate::{
     Attribute, DialogArtifactsError, Entity, Key, State, history_claim_range, history_key_version,
@@ -113,11 +114,7 @@ where
     /// construction of [`extend_skips`](super::extend_skips)) re-walk the
     /// same tree spine, and content-addressed keys make sharing the cache
     /// with other readers of the same store safe.
-    pub fn from_root_with_cache(
-        root: &Blake3Hash,
-        store: S,
-        cache: dialog_search_tree::Cache<NodeHash, dialog_search_tree::Buffer>,
-    ) -> Self {
+    pub fn from_root_with_cache(root: &Blake3Hash, store: S, cache: ArtifactNodeCache) -> Self {
         Self::new(
             ArtifactTree::from_hash_with_cache(NodeHash::from(*root), cache),
             store,

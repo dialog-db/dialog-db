@@ -306,6 +306,26 @@ struct RuleCacheInner {
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
+    /// A concept's assembled rule set -- built-in, committed, and its
+    /// program analysis attached -- as of the tree root of every layer
+    /// it was resolved from. Assembling it is most of what planning a
+    /// warm query costs, and it changes only when a layer does. Only
+    /// sets resolved without overlay rules are kept, since those are
+    /// read fresh per query.
+    ///
+    /// Kept with the descriptor it was assembled for: the set carries
+    /// that descriptor's implicit rule, which binds its field names, and
+    /// descriptors differing only in field names share an identity.
+    bundles: HashMap<Entity, Bundle>,
+}
+
+/// A rule set assembled for one descriptor, as of the roots of the
+/// layers it was resolved from.
+#[derive(Debug, Clone)]
+struct Bundle {
+    roots: Vec<[u8; 32]>,
+    descriptor: ConceptDescriptor,
+    rules: ConceptRules,
 }
 
 impl RuleCache {
@@ -330,6 +350,43 @@ impl RuleCache {
             .write()
             .discovery
             .insert(concept, (head, entities));
+    }
+
+    /// The rule set assembled for `descriptor` over layers at `roots`,
+    /// if one was recorded for exactly that descriptor at exactly those
+    /// roots.
+    pub(crate) fn bundle(
+        &self,
+        descriptor: &ConceptDescriptor,
+        roots: &[[u8; 32]],
+    ) -> Option<ConceptRules> {
+        let inner = self.inner.read();
+        match inner.bundles.get(&descriptor.this()) {
+            Some(bundle)
+                if bundle.roots.as_slice() == roots && bundle.descriptor == *descriptor =>
+            {
+                Some(bundle.rules.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Record the rule set assembled for `descriptor` over layers at
+    /// `roots`, replacing one recorded for its concept before.
+    pub(crate) fn record_bundle(
+        &self,
+        descriptor: ConceptDescriptor,
+        roots: Vec<[u8; 32]>,
+        rules: ConceptRules,
+    ) {
+        self.inner.write().bundles.insert(
+            descriptor.this(),
+            Bundle {
+                roots,
+                descriptor,
+                rules,
+            },
+        );
     }
 
     /// A cached hydrated body by rule entity, if present.
@@ -434,6 +491,23 @@ pub(crate) fn assemble(
         concept_rules.install(rule);
     }
     concept_rules
+}
+
+/// Whether an overlay [`Changes`] batch installs any rule at all. Rule
+/// sets resolved from an overlay without rules can be cached with the
+/// committed layers alone.
+pub(crate) fn has_overlay_rules(changes: &Changes) -> bool {
+    let conclusion = conclusion_attr();
+    changes
+        .iter()
+        .any(|(_, attribute, _)| *attribute == conclusion)
+}
+
+/// Whether a session overlay holds any rule, for any concept.
+pub(crate) fn holds_rules(overlay: &crate::Ephemeral) -> bool {
+    !overlay
+        .scan(&ArtifactSelector::new().the(conclusion_attr()))
+        .is_empty()
 }
 
 /// Read rules from an overlay [`Changes`] batch concluding `concept`.

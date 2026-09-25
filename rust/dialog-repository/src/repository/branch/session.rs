@@ -14,14 +14,14 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
+use dialog_query::concept::query::ConceptRules;
 use dialog_query::concept::query::fixpoint::Continuation;
-use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
-use dialog_search_tree::Buffer;
+use dialog_search_tree::{Buffer, PersistentNode};
 use dialog_storage::{Blake3Hash, StorageBackend};
 use futures_util::future::try_join_all;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -32,8 +32,8 @@ use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
-    assemble, builtin, conclusion_attr, conclusion_selector, hydrate, overlay_rules, rule_entities,
-    source_attr, source_bytes, source_selector,
+    assemble, builtin, conclusion_attr, conclusion_selector, has_overlay_rules, holds_rules,
+    hydrate, overlay_rules, rule_entities, source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -153,6 +153,18 @@ impl<'a> QueryLayer<'a> {
     /// `operator` (from [`Identify`]) supplies the profile + operator
     /// DIDs the schema entities are derived from.
     pub fn metadata(&self, operator: &Capability<Operator>) -> Changes {
+        // Every query folds this in, and for a layer over one branch it
+        // depends only on the profile, the operator and the head, so the
+        // branch keeps it: deriving it hashes and base58-renders entities
+        // and re-parses both DIDs each time.
+        if let [SourceRef::Branch(branch)] = self.sources.as_slice() {
+            return branch.layer_metadata(operator, || self.derive_metadata(operator));
+        }
+        self.derive_metadata(operator)
+    }
+
+    /// Derive what [`metadata`](Self::metadata) folds in.
+    fn derive_metadata(&self, operator: &Capability<Operator>) -> Changes {
         let mut changes = Changes::new();
 
         let mut branch_entities = Vec::with_capacity(self.sources.len());
@@ -625,16 +637,18 @@ where
             let source = source.as_ref();
             let remote = source.fallback(self.env).await;
             let store = NetworkedIndex::new(self.env, source.archive().index(), remote);
-            let cached = source
-                .node_cache()
-                .get_or_fetch(&NodeHash::from(input), async |hash| {
-                    StorageBackend::get(&store, hash.as_bytes())
-                        .await
-                        .map(|bytes| bytes.map(Buffer::from))
-                })
-                .await?;
-            if let Some(buffer) = cached {
-                return Ok(Some(buffer.into_vec()));
+            let hash = NodeHash::from(input);
+            let cache = source.node_cache();
+            if let Some(node) = cache.get_cached(&hash) {
+                return Ok(Some(node.buffer().as_ref().to_vec()));
+            }
+            if let Some(bytes) = StorageBackend::get(&store, hash.as_bytes()).await? {
+                // A block that checks as a node joins the cache; any other
+                // block is returned as it is, for the caller to read.
+                if let Ok(node) = PersistentNode::try_from(Buffer::from(bytes.as_slice())) {
+                    cache.insert(hash, node);
+                }
+                return Ok(Some(bytes));
             }
         }
         Ok(None)
@@ -815,6 +829,37 @@ where
     /// [`RuleRegistry::acquire`]: dialog_query::session::RuleRegistry::acquire
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let concept = input.this();
+
+        // An assembled rule set depends only on the committed layers it was
+        // resolved from, so while none has moved the last one assembled
+        // stands. Not when rules are read fresh: from the query's overlay,
+        // or from a line's session overlay, which moves without moving its
+        // root. Nor when the query records what it reads, since reading
+        // the rules is what records a subscription's demand on them.
+        let roots: Vec<_> = self
+            .sources
+            .iter()
+            .map(|source| source.as_ref().root())
+            .collect();
+        let cache = self
+            .sources
+            .first()
+            .map(|source| source.as_ref().rule_cache())
+            .filter(|_| {
+                self.demand.is_none()
+                    && !has_overlay_rules(&self.changes)
+                    && !self
+                        .sources
+                        .iter()
+                        .any(|source| holds_rules(source.as_ref().overlay()))
+            });
+        if let Some(bundle) = cache
+            .as_ref()
+            .and_then(|cache| cache.bundle(&input, &roots))
+        {
+            return Ok(self.continuing(&concept, bundle));
+        }
+
         let mut rules: Vec<DeductiveRule> = Vec::new();
 
         // Built-in rules first: the derived version-control concepts
@@ -846,17 +891,29 @@ where
         let bundle = assemble(&input, rules, plan_cache);
         let analysis = self.program_analysis(&input, &bundle).await?;
         analysis.check(&input)?;
-        Ok(if analysis.is_recursive(&concept) {
-            let bundle = bundle.with_recursion(analysis);
-            match &self.fixpoint {
-                Some((entity, continuation)) if *entity == concept => {
-                    bundle.with_continuation(continuation.clone())
-                }
-                _ => bundle,
-            }
+        let bundle = if analysis.is_recursive(&concept) {
+            bundle.with_recursion(analysis)
         } else {
             bundle
-        })
+        };
+        if let Some(cache) = cache {
+            cache.record_bundle(input.clone(), roots, bundle.clone());
+        }
+        Ok(self.continuing(&concept, bundle))
+    }
+}
+
+impl<Env> QueryEnv<'_, Env> {
+    /// `bundle` carrying this query's retained fixpoint, when a polling
+    /// subscription is evaluating `concept` recursively. Attached per
+    /// query, never cached: it belongs to the subscription.
+    fn continuing(&self, concept: &Entity, bundle: ConceptRules) -> ConceptRules {
+        match &self.fixpoint {
+            Some((entity, continuation)) if entity == concept && bundle.recursion().is_some() => {
+                bundle.with_continuation(continuation.clone())
+            }
+            _ => bundle,
+        }
     }
 }
 
@@ -928,7 +985,10 @@ where
                         rules.extend(self.session_rules(source, &entity)?);
                     }
                     rules.extend(overlay_rules(&self.changes, &entity));
-                    let bundle = assemble(&descriptor, rules, PlanCache::default());
+                    // The analysis reads premises and never plans, so
+                    // these bundles share the root's cache rather than
+                    // allocating one each.
+                    let bundle = assemble(&descriptor, rules, root_bundle.plan_cache().clone());
                     Ok::<_, EvaluationError>((entity, bundle))
                 }))
                 .await?;
@@ -1042,6 +1102,83 @@ mod rule_tests {
             .try_vec()
             .await?;
         Ok(rows.iter().map(|c| c.entity().clone()).collect())
+    }
+
+    /// A concept over `org/person-name` under the field `field`.
+    fn person_under(field: &str) -> ConceptDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "with": { field: { "the": "org/person-name", "as": "Text" } }
+        }))
+        .expect("descriptor parses")
+    }
+
+    /// Names read through a concept with a single field `field`.
+    async fn names_under<Env>(
+        branch: &Branch,
+        operator: &Env,
+        field: &str,
+    ) -> anyhow::Result<Vec<String>>
+    where
+        Env: dialog_capability::Provider<Get>
+            + dialog_capability::Provider<Put>
+            + dialog_capability::Provider<Resolve>
+            + dialog_capability::Provider<Identify>
+            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<dialog_artifacts::Preload>
+            + dialog_capability::Provider<dialog_artifacts::Speculation>
+            + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert(field.into(), Term::var("value"));
+        let query = ConceptQuery {
+            predicate: person_under(field),
+            terms,
+        };
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(query)
+            .perform(operator)
+            .try_vec()
+            .await?;
+        rows.iter()
+            .map(|row| Ok(row.get::<String>(field)?))
+            .collect()
+    }
+
+    /// Two concepts over the same attributes under different field names
+    /// share an identity, since identity ignores field names. Each must
+    /// still be answered by its own implicit rule: querying one first
+    /// must not leave the other planned over the first one's fields.
+    #[dialog_common::test]
+    async fn it_answers_concepts_that_differ_only_in_field_names() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(person_under("name").this(), person_under("label").this());
+        assert_eq!(
+            names_under(&branch, &operator, "name").await?,
+            vec!["Alice"]
+        );
+        assert_eq!(
+            names_under(&branch, &operator, "label").await?,
+            vec!["Alice"]
+        );
+        Ok(())
     }
 
     // ----- (1) committed rule resolves via the durable (tree) layer ----

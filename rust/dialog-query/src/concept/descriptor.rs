@@ -23,11 +23,16 @@ use crate::{
 };
 use dialog_artifacts::Update;
 
+use crate::concept::query::adornment::Adornment;
+use crate::memo::Memo;
+use crate::planner::Conjunction;
+use crate::rule::DeductiveRule;
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 use serde_ipld_dagcbor::to_vec as to_cbor_vec;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Not;
+use std::sync::{Arc, RwLock};
 
 /// A concept descriptor: a named set of attribute descriptors that together
 /// describe an entity type. Concepts are similar to tables in relational
@@ -61,6 +66,30 @@ pub struct ConceptDescriptor {
     /// row. A concept must still declare at least one *required*
     /// attribute.
     with: NamedAttributes,
+    /// The concept's identity, computed on first use. Hashing every
+    /// attribute is not free, and rule dispatch, analysis and checking
+    /// all ask for it on every query; the attributes never change once
+    /// the descriptor is built, so neither does the identity.
+    #[serde(skip)]
+    identity: Memo<Entity>,
+    /// The concept's implicit rule -- matching an entity that carries
+    /// every required attribute -- analyzed on first use. It depends
+    /// only on the attributes, and every query assembling rules for the
+    /// concept needs it.
+    #[serde(skip)]
+    implicit: Memo<Arc<DeductiveRule>>,
+    /// The implicit rule's plan for each calling pattern, planned on
+    /// first use. Planning is most of what a warm query over a small
+    /// branch costs, and a plan is a function of the rule and the
+    /// adornment alone. Kept here rather than in a shared cache because
+    /// the rule binds this descriptor's field names, which the concept's
+    /// identity does not cover.
+    #[serde(skip)]
+    implicit_plans: Memo<RwLock<HashMap<Adornment, Conjunction>>>,
+    /// Every operand of the concept in sorted order, which numbers the
+    /// bits of an [`Adornment`]. Asked for on every planned call.
+    #[serde(skip)]
+    sorted_operands: Memo<Arc<[String]>>,
 }
 
 impl ConceptDescriptor {
@@ -78,6 +107,9 @@ impl ConceptDescriptor {
     /// with no doc comment doesn't serialize a blank field.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         let description = description.into();
+        // The implicit rule concludes this descriptor, description and
+        // all, so a copy with another description needs its own.
+        self.implicit = Memo::default();
         self.description = if description.is_empty() {
             None
         } else {
@@ -144,6 +176,18 @@ impl ConceptDescriptor {
                 vec![name.to_string(), Relation::key_operand(name)]
             }
         }
+    }
+
+    /// Every [operand](Self::operands) in sorted order: the numbering an
+    /// [`Adornment`] of a call of this concept is taken over.
+    pub fn sorted_operands(&self) -> Arc<[String]> {
+        self.sorted_operands
+            .get_or_init(|| {
+                let mut operands: Vec<String> = self.operands().collect();
+                operands.sort();
+                operands.into()
+            })
+            .clone()
     }
 
     /// The keyed-collection fields of this concept.
@@ -217,10 +261,39 @@ impl ConceptDescriptor {
     /// Identityfier for this concept (as in type identifier and not instance
     /// identifier)
     pub fn this(&self) -> Entity {
-        let encoded = self.hash().as_bytes().as_ref().to_base58();
-        format!("concept:{encoded}")
-            .parse()
-            .expect("valid entity URI")
+        self.identity
+            .get_or_init(|| {
+                let encoded = self.hash().as_bytes().as_ref().to_base58();
+                format!("concept:{encoded}")
+                    .parse()
+                    .expect("valid entity URI")
+            })
+            .clone()
+    }
+
+    /// The concept's implicit rule: an entity carrying every required
+    /// attribute is an instance.
+    pub fn implicit_rule(&self) -> DeductiveRule {
+        self.implicit
+            .get_or_init(|| Arc::new(DeductiveRule::from(self)))
+            .as_ref()
+            .clone()
+    }
+
+    /// The implicit rule's plan under `adornment`, computed with `plan`
+    /// on the first ask and reused by every clone of this descriptor.
+    pub(crate) fn implicit_plan(
+        &self,
+        adornment: Adornment,
+        plan: impl FnOnce() -> Conjunction,
+    ) -> Conjunction {
+        let plans = self.implicit_plans.get_or_init(Default::default);
+        if let Some(hit) = plans.read().unwrap().get(&adornment) {
+            return hit.clone();
+        }
+        let planned = plan();
+        plans.write().unwrap().insert(adornment, planned.clone());
+        planned
     }
 
     /// Creates a query application for this concept descriptor.
@@ -273,6 +346,10 @@ fn descriptor_from_with(with: NamedAttributes) -> ConceptDescriptor {
     ConceptDescriptor {
         description: None,
         with,
+        identity: Memo::default(),
+        implicit: Memo::default(),
+        implicit_plans: Memo::default(),
+        sorted_operands: Memo::default(),
     }
 }
 
