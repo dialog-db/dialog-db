@@ -21,7 +21,10 @@ pub struct Local;
 pub struct Session;
 
 /// A mode a [`Peer`](super::Peer) handle can be in.
-pub trait Mode: sealed::Sealed + Clone + Copy + ConditionalSend + ConditionalSync + 'static {}
+pub trait Mode:
+    sealed::Sealed + Clone + Copy + ConditionalSend + ConditionalSync + 'static
+{
+}
 
 impl Mode for Local {}
 impl Mode for Session {}
