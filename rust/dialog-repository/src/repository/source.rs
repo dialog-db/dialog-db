@@ -135,6 +135,14 @@ impl<'a> SourceRef<'a> {
         }
     }
 
+    /// Whether a read of this line can fetch what it lacks: whether it
+    /// has a remote to fall back to (see [`Self::fallback`]). Without one
+    /// every block it reads is local already, and warming ahead of
+    /// demand has nothing to do.
+    pub(crate) fn fetches(self) -> bool {
+        !matches!(self.fallback(), RemoteFallback::None)
+    }
+
     /// The remote block reads fall back to on a local miss: the first
     /// peer among a branch's upstreams, as last resolved (a branch that
     /// tracks a peer must hydrate blocks it holds by reference); none for

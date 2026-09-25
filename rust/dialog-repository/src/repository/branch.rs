@@ -286,12 +286,13 @@ impl Writer {
 impl Branch {
     /// The metadata a query layer over this branch alone folds in, as
     /// `derive` computes it, reused while the profile, operator, and head
-    /// are those it was derived under.
+    /// are those it was derived under. Shared rather than copied: every
+    /// query over the branch reads the same facts.
     pub(crate) fn layer_metadata(
         &self,
         operator: &Capability<Operator>,
         derive: impl FnOnce() -> Changes,
-    ) -> Changes {
+    ) -> Arc<Changes> {
         let profile = operator.profile();
         let did = operator.did();
         let revision = self.revision();
@@ -306,7 +307,7 @@ impl Branch {
         {
             return changes.clone();
         }
-        let changes = derive();
+        let changes = Arc::new(derive());
         *cache = Some((profile.clone(), did, revision, changes.clone()));
         changes
     }
@@ -318,7 +319,7 @@ type MetadataMemo = Arc<Mutex<Option<(Did, Option<Revision>, metadata::BranchMet
 
 /// A single-branch query layer's metadata memo: the profile, operator,
 /// and head it was derived under, and what was derived.
-type LayerMetadataMemo = Arc<Mutex<Option<(Did, Did, Option<Revision>, Changes)>>>;
+type LayerMetadataMemo = Arc<Mutex<Option<(Did, Did, Option<Revision>, Arc<Changes>)>>>;
 
 /// A memoized commit identity: the (profile, issuer) inputs it was derived
 /// from, and the derived branch entity and origin. See
