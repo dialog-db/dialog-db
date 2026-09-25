@@ -239,7 +239,9 @@ impl AttributeQueryOnly {
         // that wrapped or boxed it (several KiB per scan step, per row).
         Box::pin(try_stream! {
             for await each in selection {
-                let base = each?;
+                let mut base = each?;
+                // Every row this one extends into shares its bindings.
+                base.share();
 
                 // An Absent-bound parameter matches nothing at the
                 // scalar layer: filter the row without scanning.
