@@ -114,3 +114,42 @@ pub async fn locate<Env: RegistryEnv>(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{find, record};
+    use crate::helpers::test_repo;
+    use dialog_effects::storage::Location;
+    use dialog_peer::helpers::test_session_with_peer;
+    use dialog_varsig::did;
+
+    /// A name picks out one space: recording it for another repository
+    /// moves it there, rather than leaving the name naming two.
+    #[dialog_common::test]
+    async fn it_moves_a_name_to_the_repository_last_recorded_under_it() -> anyhow::Result<()> {
+        let (session, peer) = test_session_with_peer().await;
+        let repo = test_repo(&session, &peer).await;
+        let state = repo.branch("state").open().perform(&session).await?;
+        let first = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        let second = did!("key:z6MkkZfZmshVFcBYo9RS6ZyUstxYdjjStQaFaL2TSTVdsiJh");
+
+        record(&state, &first, "notes", &Location::temp("first"), &session).await?;
+        record(
+            &state,
+            &second,
+            "notes",
+            &Location::temp("second"),
+            &session,
+        )
+        .await?;
+
+        assert_eq!(
+            find(&state, "notes", &session).await?,
+            vec![(second, Location::temp("second"))]
+        );
+        Ok(())
+    }
+}
