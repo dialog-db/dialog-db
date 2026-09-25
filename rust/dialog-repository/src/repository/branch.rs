@@ -1,6 +1,6 @@
 use super::memory::Cell;
 use crate::rules::SharedRuleCache;
-use crate::{Ephemeral, ResolveError, Revision};
+use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory;
@@ -281,6 +281,16 @@ impl Branch {
     /// [`push`](Self::push) goes to every one.
     pub fn pushes(&self) -> Upstreams {
         self.tracked().pushes(&self.subject())
+    }
+
+    /// Where a read of content this branch holds by reference falls back
+    /// to: an upstream at a peer, or else a peer this branch pulled from
+    /// once without tracking it, whose tree it may have adopted unread.
+    pub(crate) fn fallback(&self) -> RemoteFallback {
+        match self.upstreams().fallback() {
+            RemoteFallback::None => self.tracked().synced_with(&self.subject()).fallback(),
+            fallback => fallback,
+        }
     }
 
     /// Every upstream, pulled from or pushed to.

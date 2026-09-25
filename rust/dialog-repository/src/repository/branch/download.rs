@@ -122,7 +122,7 @@ impl Download<'_> {
         };
         let fallback = match self.from {
             Some(upstream) => upstream.fallback(),
-            None => branch.upstreams().fallback(),
+            None => branch.fallback(),
         };
         let remote = match fallback {
             RemoteFallback::Remote(remote) => remote,

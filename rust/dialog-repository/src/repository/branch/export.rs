@@ -40,7 +40,7 @@ impl<E: Exporter> Export<'_, E> {
         let branch = self.branch;
         let mut exporter = self.exporter;
 
-        let remote = branch.upstreams().fallback();
+        let remote = branch.fallback();
 
         let catalog = ArchiveScope::new(branch.subject()).index();
         let store = NetworkedIndex::new(env, catalog, remote);

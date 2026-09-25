@@ -637,7 +637,7 @@ where
         // fallback rather than swallowed: the local archive alone may
         // still satisfy the poll, and a read that misses fails with the
         // load failure as its cause instead of a bare not-found.
-        let remote = self.branch.upstreams().fallback();
+        let remote = self.branch.fallback();
         let store = NetworkedIndex::new(
             env,
             ArchiveScope::new(self.branch.subject()).index(),
