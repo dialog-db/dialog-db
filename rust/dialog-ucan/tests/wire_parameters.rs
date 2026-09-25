@@ -20,7 +20,10 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use dialog_capability::identity::{Entity, Revision, TreeReference};
 use dialog_capability::{Subject, did};
+use dialog_effects::MethodExt as _;
+use dialog_effects::branch::prelude::*;
 use dialog_effects::memory::prelude::CellScope;
 use dialog_ucan::parameters;
 
@@ -92,4 +95,64 @@ fn it_keeps_path_segments_out_of_parameters() {
         "path-only links must not leak into prm: {prm:?}"
     );
     assert_eq!(chain().resolve().ability(), "/use/get/memory/cell");
+}
+
+fn revision() -> Revision {
+    Revision::new(
+        TreeReference::default(),
+        "did:key:zMain".parse::<Entity>().expect("valid entity"),
+        did!("key:zIssuer"),
+    )
+}
+
+/// An empty create sends exactly the parameters it always has: the
+/// optional revision is omitted, not sent as null, so a delegation
+/// caveated on the branch name alone keeps matching.
+#[dialog_common::test]
+fn it_keeps_an_empty_create_to_its_name() {
+    let prm = parameters(&subject().writer().branches().branch("feature").create());
+
+    assert_eq!(prm.get("name").unwrap(), &"feature".into());
+    assert!(!prm.contains_key("revision"), "{prm:?}");
+}
+
+/// A create at a revision and a delete both carry the revision, since
+/// that is what each is about: where the branch will point, and where
+/// it must still point to be removed.
+#[dialog_common::test]
+fn it_carries_the_revision_a_create_or_delete_names() {
+    let create = parameters(
+        &subject()
+            .writer()
+            .branches()
+            .branch("feature")
+            .create()
+            .revision(revision()),
+    );
+    let delete = parameters(
+        &subject()
+            .voider()
+            .branches()
+            .branch("feature")
+            .delete(revision()),
+    );
+
+    assert!(create.contains_key("revision"), "{create:?}");
+    assert!(delete.contains_key("revision"), "{delete:?}");
+}
+
+/// A switch carries the branch it points the replica at, and nothing
+/// that would scope it to a branch name: the branch need not be one the
+/// replica holds.
+#[dialog_common::test]
+fn it_carries_the_branch_a_switch_names() {
+    let branch: Entity = "did:key:zFeature".parse().expect("valid entity");
+    let switch = parameters(&subject().writer().branches().switch(branch.clone()));
+
+    assert_eq!(
+        switch.get("branch").unwrap(),
+        &branch.to_string().into(),
+        "a switch carries its branch: {switch:?}"
+    );
+    assert_eq!(switch.len(), 1, "and nothing else: {switch:?}");
 }
