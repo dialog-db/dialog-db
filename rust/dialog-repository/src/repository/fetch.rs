@@ -34,6 +34,7 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
+use futures_util::future::{FutureExt as _, Shared};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
@@ -47,12 +48,21 @@ use dialog_search_tree::{
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 
 use crate::repository::source::Source;
-use crate::{EMPTY_TREE_HASH, Hydrate, Index, NetworkedIndex, RemoteSite};
+use crate::{EMPTY_TREE_HASH, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + 'a>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type FallbackFuture<'a> = Pin<Box<dyn Future<Output = RemoteFallback> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type FallbackFuture<'a> = Pin<Box<dyn Future<Output = RemoteFallback> + 'a>>;
+
+/// A source's remote fallback, loaded at most once per driver and
+/// shared by every job that warms the source.
+type SharedFallback<'a> = Shared<FallbackFuture<'a>>;
 
 /// A stream that also drives the env's [`PreloadQueue`]: polling it
 /// executes queued preload hints, borrowing `env` for exactly the
@@ -63,10 +73,16 @@ type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + 'a>>;
 /// through the networked index, the local archive — so the later demand
 /// read is local. Job errors surface as nothing (a preload that fails
 /// must stay invisible; the demand read owns the error).
+///
+/// A source's remote fallback (a memory read of the remote's
+/// configuration) is loaded at most once per driver, on first need, and
+/// shared by every job: the remote a branch tracks does not change while
+/// one evaluation runs, and loading it per job put a store read in front
+/// of every warm-up.
 pub(crate) struct Driven<'a, S, Env> {
     inner: S,
     queue: Arc<PreloadQueue>,
-    sources: Vec<Source>,
+    sources: Vec<(Source, SharedFallback<'a>)>,
     env: &'a Env,
     budget: FetchBudget,
     likely_inflight: usize,
@@ -94,6 +110,15 @@ where
         env: &'a Env,
         queue: Arc<PreloadQueue>,
     ) -> Self {
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let loading = source.clone();
+                let fallback: FallbackFuture<'a> =
+                    Box::pin(async move { loading.as_ref().fallback(env).await });
+                (source, fallback.shared())
+            })
+            .collect();
         Self {
             inner: stream,
             budget: queue.budget(),
@@ -125,11 +150,11 @@ where
             let sources = self.sources.clone();
             let env = self.env;
             let future = async move {
-                for source in sources {
+                for (source, fallback) in sources {
                     // Warming is advisory: an error ends this source's
                     // walk silently, and the demand read that actually
                     // needs the data owns the failure.
-                    let _ = warm_source(source, env, &selector, likelihood).await;
+                    let _ = warm_source(source, fallback, env, &selector, likelihood).await;
                 }
                 likelihood
             };
@@ -200,6 +225,7 @@ where
 /// superset at the edges is harmless.
 async fn warm_source<Env>(
     source: Source,
+    fallback: SharedFallback<'_>,
     env: &Env,
     selector: &ArtifactSelector<Constrained>,
     likelihood: Likelihood,
@@ -217,7 +243,7 @@ where
     if root == EMPTY_TREE_HASH {
         return Ok(());
     }
-    let remote = source.as_ref().fallback(env).await;
+    let remote = fallback.await;
     let catalog = ArchiveScope::new(source.as_ref().subject()).index();
     let store = NetworkedIndex::new(env, catalog, remote).with_priority(likelihood.into());
     let store = CacheThrough {
@@ -299,6 +325,7 @@ mod tests {
     use super::*;
     use crate::RepositoryExt as _;
     use crate::helpers::Counting;
+    use crate::repository::source::SourceRef;
     use dialog_artifacts::{Preload, PreloadRequest, Speculation};
     use dialog_query::query::Output as _;
 
@@ -436,6 +463,102 @@ mod tests {
             env.count("archive::Get") - before,
             0,
             "a hinted range reads nothing from the backend"
+        );
+        Ok(())
+    }
+
+    /// Every warm-up job needs the source's remote fallback, and loading
+    /// it is a memory read of the remote's configuration. A driver loads
+    /// it once per source and shares it with every job, instead of once
+    /// per job: with four hints in flight the query pays one extra load,
+    /// not four.
+    #[dialog_common::test]
+    async fn it_loads_a_sources_remote_fallback_once_per_driver() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .repository(unique_name("fallback-once"))
+            .create()
+            .perform(&env)
+            .await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        let mut transaction = branch.transaction();
+        for index in 0..10 {
+            let entity: dialog_artifacts::Entity = format!("id:{index}").parse()?;
+            transaction = transaction
+                .assert(the!("a/name").of(entity.clone()).is(format!("a {index}")))
+                .assert(the!("b/name").of(entity.clone()).is(format!("b {index}")))
+                .assert(the!("c/name").of(entity.clone()).is(format!("c {index}")))
+                .assert(the!("d/name").of(entity.clone()).is(format!("d {index}")))
+                .assert(the!("e/name").of(entity).is(format!("e {index}")));
+        }
+        transaction.commit().publish().perform(&env).await?;
+
+        // Track a remote, so a warm-up has a fallback to load. Nothing
+        // here reaches the network: every block the query and the
+        // warm-ups read is local.
+        let site = dialog_remote_s3::Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()?;
+        let origin = repo.remote("origin").create(site).perform(&env).await?;
+        let remote_branch = origin.branch("main").open().perform(&env).await?;
+        branch.set_upstream(remote_branch).perform(&env).await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        let query = || {
+            AttributeQuery::new(
+                Term::from(the!("a/name")),
+                Term::blank(),
+                Term::blank(),
+                Term::blank(),
+                None,
+            )
+        };
+
+        // What one load of the fallback costs, and what the query costs
+        // with nothing to warm.
+        let before = env.count("memory::Resolve");
+        let _ = SourceRef::Branch(&branch).fallback(&env).await;
+        let load = env.count("memory::Resolve") - before;
+        assert!(load > 0, "loading the fallback reads memory");
+        let before = env.count("memory::Resolve");
+        branch
+            .query()
+            .select(query())
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let bare = env.count("memory::Resolve") - before;
+
+        for attribute in ["b/name", "c/name", "d/name", "e/name"] {
+            let listening = Provider::<Preload>::execute(
+                &env,
+                PreloadRequest {
+                    selector: selector(attribute),
+                    likelihood: Likelihood::Likely,
+                },
+            )
+            .await;
+            assert!(listening, "the default budget accepts hints");
+        }
+        let before = env.count("memory::Resolve");
+        branch
+            .query()
+            .select(query())
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let warmed = env.count("memory::Resolve") - before;
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the driven query executed every hint");
+
+        assert_eq!(
+            warmed - bare,
+            load,
+            "four warm-ups share one fallback load: {:?}",
+            env.snapshot()
         );
         Ok(())
     }
