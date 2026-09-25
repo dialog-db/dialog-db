@@ -15,7 +15,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
-use futures_util::future::{Either, try_join_all};
+use futures_util::future::{Either, join_all};
 
 use super::fetch::fetch_one;
 use super::resolve::resolve;
@@ -129,16 +129,29 @@ impl<'a> Pull<'a> {
         // work now, its blocks already fetched. A head moved by anything
         // else still fails the pull, as a single pull racing a commit does:
         // the caller refreshes and pulls again.
-        let prepared = try_join_all(
+        //
+        // An upstream that cannot be prepared -- unreachable, say -- does
+        // not keep the others from landing: the pull lands what it can and
+        // reports the rest.
+        let prepared = join_all(
             upstreams
                 .iter()
                 .map(|upstream| Box::pin(prepare_upstream(branch, upstream.clone(), env))),
         )
-        .await?;
+        .await;
+        let total = upstreams.len();
+        let mut unreached = Vec::new();
         // Like a single pull, answer the merged head, or `None` when no
         // upstream brought anything new.
         let mut landed = None;
         for (upstream, prepared) in upstreams.into_iter().zip(prepared) {
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    unreached.push((upstream.target(), error));
+                    continue;
+                }
+            };
             let committed = match prepared.commit(env).await {
                 Err(PullError::Publish(PublishError::VersionMismatch { .. }))
                     if landed.is_some() =>
@@ -155,7 +168,14 @@ impl<'a> Pull<'a> {
                 landed = committed;
             }
         }
-        Ok(landed)
+        match unreached.len() {
+            0 => Ok(landed),
+            failed if failed == total => Err(unreached.remove(0).1),
+            _ => Err(PullError::Partial {
+                landed: landed.map(Box::new),
+                unreached,
+            }),
+        }
     }
 
     /// Phase one: fetch the upstream, rebase local changes onto it, and persist
@@ -1120,7 +1140,7 @@ impl PreparedPull<'_> {
         // to another upstream, a set_upstream. On a version mismatch we
         // re-read the cell: if our entry is untouched (the concurrent
         // write was about a different entry), fold our advance into the
-        // current state and publish once more; if our own entry moved, a
+        // current state and publish again, until it lands; if our own entry moved, a
         // concurrent sync of this same upstream already established a
         // consistent (head, base) pair — clobbering it back would regress
         // the base — so we yield and return the head as it now stands.
@@ -1128,9 +1148,8 @@ impl PreparedPull<'_> {
         let marker = branch.tracking().checkpoint();
         let mut tracking = branch.tracked();
         tracking.record(&sync);
-        let publish = marker.publish(tracking, env).await;
-
-        if let Err(PublishError::VersionMismatch { .. }) = publish {
+        let mut publish = marker.publish(tracking, env).await;
+        while let Err(PublishError::VersionMismatch { .. }) = publish {
             branch.tracking().resolve().perform(env).await?;
             let marker = branch.tracking().checkpoint();
             let mut tracking = branch.tracked();
@@ -1139,15 +1158,9 @@ impl PreparedPull<'_> {
                 return Ok(branch.revision());
             }
             tracking.record(&sync);
-            match marker.publish(tracking, env).await {
-                // The cell is contended; give up on the marker advance —
-                // the merge itself landed, the next pull is just heavier.
-                Err(PublishError::VersionMismatch { .. }) => return Ok(branch.revision()),
-                other => other?,
-            }
-        } else {
-            publish?;
+            publish = marker.publish(tracking, env).await;
         }
+        publish?;
 
         Ok(Some(new_revision))
     }
@@ -1608,6 +1621,7 @@ mod tests {
     /// reports the one it could not reach.
     #[dialog_common::test]
     async fn it_pulls_what_it_can_reach_when_an_upstream_is_not() -> Result<()> {
+        use crate::PullError;
         use crate::RepositoryMemoryExt as _;
         use crate::registry::{apply, pull};
         use crate::schema::Replica;
@@ -1649,7 +1663,10 @@ mod tests {
             main.revision().map(|revision| revision.tree),
             "the reachable upstream's commit landed: {pulled:?}"
         );
-        assert!(pulled.is_err(), "the unreachable upstream is reported");
+        assert!(
+            matches!(pulled, Err(PullError::Partial { ref unreached, .. }) if unreached.len() == 1),
+            "the unreachable upstream is reported: {pulled:?}"
+        );
         Ok(())
     }
 }

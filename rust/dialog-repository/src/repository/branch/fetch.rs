@@ -1,4 +1,4 @@
-use futures_util::future::try_join_all;
+use futures_util::future::join_all;
 
 use super::resolve::resolve;
 use crate::registry::RegistryEnv;
@@ -42,13 +42,31 @@ impl Fetch<'_> {
                 branch: branch.name().to_string(),
             });
         }
-        try_join_all(upstreams.iter().map(|upstream| async move {
-            Ok(Fetched {
-                upstream: upstream.clone(),
-                revision: fetch_one(branch, upstream, env).await?,
-            })
-        }))
-        .await
+        // Every upstream is fetched, whether or not another can be
+        // reached: one that cannot does not hide what the rest are at.
+        let results = join_all(
+            upstreams
+                .iter()
+                .map(|upstream| async move { (upstream, fetch_one(branch, upstream, env).await) }),
+        )
+        .await;
+        let total = results.len();
+        let mut fetched = Vec::new();
+        let mut unreached = Vec::new();
+        for (upstream, result) in results {
+            match result {
+                Ok(revision) => fetched.push(Fetched {
+                    upstream: upstream.clone(),
+                    revision,
+                }),
+                Err(error) => unreached.push((upstream.target(), error)),
+            }
+        }
+        match unreached.len() {
+            0 => Ok(fetched),
+            failed if failed == total => Err(unreached.remove(0).1),
+            _ => Err(FetchError::Partial { fetched, unreached }),
+        }
     }
 }
 
