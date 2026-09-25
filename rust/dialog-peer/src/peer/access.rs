@@ -317,17 +317,36 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         cache.chains.insert(key, proof.proofs().to_vec());
     }
 
+    /// A certificate held for `principal` covering `claim`.
+    fn held_for(&self, principal: &Did, claim: &Prove<Ucan>) -> Option<Grant> {
+        self.inner_held()
+            .iter()
+            .find(|grant| {
+                grant.certificate.0.audience() == principal
+                    && Self::covers_subject(&grant.certificate, claim)
+                    && grant
+                        .certificate
+                        .verify(&claim.access)
+                        .is_ok_and(|range| range.covers(&claim.duration))
+            })
+            .cloned()
+    }
+
+    /// Whether `certificate` is over the subject `claim` is about.
+    fn covers_subject(certificate: &UcanCertificate, claim: &Prove<Ucan>) -> bool {
+        match certificate.0.subject() {
+            UcanSubject::Any => true,
+            UcanSubject::Specific(did) => {
+                claim.access.subject == UcanSubject::Specific(did.clone())
+            }
+        }
+    }
+
     /// The grants covering `claim`: its subject, its command and policy,
     /// and its duration.
     fn session_grants<'a>(&'a self, claim: &'a Prove<Ucan>) -> impl Iterator<Item = &'a Grant> {
         self.grants().iter().filter(|grant| {
-            let subject = match grant.certificate.0.subject() {
-                UcanSubject::Any => true,
-                UcanSubject::Specific(did) => {
-                    claim.access.subject == UcanSubject::Specific(did.clone())
-                }
-            };
-            subject
+            Self::covers_subject(&grant.certificate, claim)
                 && grant
                     .certificate
                     .verify(&claim.access)
@@ -456,6 +475,12 @@ impl<S: Clone, M: Mode> Peer<S, M> {
             && *subject == principal
         {
             return Ok(UcanProof::new(claim.access.clone()));
+        }
+        // A certificate this peer holds for the principal -- a session
+        // holding its peer's storage grant -- proves the principal's
+        // authority wherever it covers the claim.
+        if let Some(held) = self.held_for(&principal, claim) {
+            return Box::pin(self.prove_by(held, claim)).await;
         }
         let env = AccessEnv {
             operator: self.clone(),
