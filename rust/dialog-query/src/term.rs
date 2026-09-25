@@ -111,17 +111,23 @@ where
     /// value, returns a constant term with the bound value.
     /// Otherwise (unbound or `Absent`) returns the term unchanged.
     pub fn resolve(&self, source: &selection::Match) -> Self {
-        let term: Term<Any> = self.clone().into();
-        match source.lookup(&term).and_then(|b| b.content()) {
-            Ok(value) => {
-                if let Ok(converted) = T::try_from(value) {
-                    Term::Constant(converted.into())
-                } else {
-                    self.clone()
-                }
-            }
-            Err(_) => self.clone(),
+        let Some(name) = self.name() else {
+            return self.clone();
+        };
+        match source.get(name) {
+            Some(crate::Binding::Present(value)) => match T::try_from(value.clone()) {
+                Ok(converted) => Term::Constant(converted.into()),
+                Err(_) => self.clone(),
+            },
+            _ => self.clone(),
         }
+    }
+
+    /// The kind a value bound through this term must inhabit: the
+    /// kind this term has once widened to a `Term<Any>`, which is the
+    /// kind [`Match::bind`](selection::Match::bind) checks against.
+    pub(crate) fn binding_kind(&self) -> Option<type_system::Type> {
+        <<T as Typed>::Descriptor>::default().kind()
     }
 }
 

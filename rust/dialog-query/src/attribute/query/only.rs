@@ -296,7 +296,7 @@ impl AttributeQueryOnly {
                                                 && selector.admits(&winner) =>
                                         {
                                             let mut extension = base.clone();
-                                            selector.merge(&mut extension, &winner)?;
+                                            selector.merge(&mut extension, winner)?;
                                             yield extension;
                                         }
                                         _ => {}
@@ -318,7 +318,7 @@ impl AttributeQueryOnly {
                                     && selector.admits(&winner) =>
                             {
                                 let mut extension = base.clone();
-                                selector.merge(&mut extension, &winner)?;
+                                selector.merge(&mut extension, winner)?;
                                 yield extension;
                             }
                             _ => {}

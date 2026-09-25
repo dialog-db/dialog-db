@@ -34,33 +34,32 @@ use std::fmt::Display;
 /// variable names. Maps values from user-specified variable names
 /// to internal parameter names for scoped evaluation. Both Present
 /// and Absent bindings are propagated.
+///
+/// Parameters are bound by name: a concept's parameter variables are
+/// untyped (`Term::var`), so no kind check applies to them.
 fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
     let mut matched = Match::new();
 
     for (param_name, user_param) in terms.iter() {
         match user_param {
-            Term::Variable { name: Some(_), .. } => {
-                let param = Term::var(param_name);
-                match source.lookup(user_param) {
-                    Ok(Binding::Present(value)) => {
-                        matched.bind(&param, value)?;
-                    }
-                    Ok(Binding::Absent) => {
-                        matched.bind_absent(&param)?;
-                    }
-                    // Unbound is expected here: the user supplied a
-                    // placeholder term (e.g. `Term::var("alice")` in
-                    // `Query<Person> { this: ..., ... }`) that the
-                    // concept query is about to bind. Skip it:
-                    // downstream evaluation fills it in. Propagate
-                    // any other error.
-                    Err(EvaluationError::UnboundVariable { .. }) => {}
-                    Err(e) => return Err(e),
+            Term::Variable {
+                name: Some(name), ..
+            } => match source.get(name) {
+                Some(Binding::Present(value)) => {
+                    matched.bind_variable(param_name, None, value.clone())?;
                 }
-            }
+                Some(Binding::Absent) => {
+                    matched.bind_absent_variable(param_name)?;
+                }
+                // Unbound is expected here: the user supplied a
+                // placeholder term (e.g. `Term::var("alice")` in
+                // `Query<Person> { this: ..., ... }`) that the
+                // concept query is about to bind. Skip it:
+                // downstream evaluation fills it in.
+                None => {}
+            },
             Term::Constant(value) => {
-                let param = Term::var(param_name);
-                matched.bind(&param, value.clone())?;
+                matched.bind_variable(param_name, None, value.clone())?;
             }
             Term::Variable { name: None, .. } => {}
         }
@@ -84,20 +83,18 @@ fn merge_parameters(
             continue;
         }
 
-        let param = Term::var(param_name);
-        match result.lookup(&param) {
-            Ok(Binding::Present(value)) => {
-                merged.bind(user_param, value)?;
+        match result.get(param_name) {
+            Some(Binding::Present(value)) => {
+                merged.bind(user_param, value.clone())?;
             }
-            Ok(Binding::Absent) => {
+            Some(Binding::Absent) => {
                 merged.bind_absent(user_param)?;
             }
             // Unbound is expected: not every parameter survives the
             // concept evaluation (e.g. a blank slot the rule never
             // touched). Skip and let the user variable stay
-            // un-extended. Propagate any other error.
-            Err(EvaluationError::UnboundVariable { .. }) => {}
-            Err(e) => return Err(e),
+            // un-extended.
+            None => {}
         }
     }
 
