@@ -1602,6 +1602,56 @@ mod tests {
         assert!(again.is_none(), "nothing new from either upstream");
         Ok(())
     }
+
+    /// An upstream that cannot be reached does not keep the others from
+    /// being pulled: what the reachable ones bring lands, and the pull
+    /// reports the one it could not reach.
+    #[dialog_common::test]
+    async fn it_pulls_what_it_can_reach_when_an_upstream_is_not() -> Result<()> {
+        use crate::RepositoryMemoryExt as _;
+        use crate::registry::{apply, pull};
+        use crate::schema::Replica;
+        use dialog_artifacts::Changes;
+        use dialog_query::Statement as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:main".parse()?,
+            is: Value::String("Main data".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.pull_from(&main).perform(&operator).await?;
+
+        // Also pulls from a branch at a peer nothing says how to reach.
+        let nowhere = Replica::new(
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".parse()?,
+            repo.did(),
+        );
+        let target = nowhere.branch("main");
+        let this = Replica::new(profile.did(), repo.did()).branch("feature");
+        let mut changes = Changes::new();
+        nowhere.assert(&mut changes);
+        target.clone().assert(&mut changes);
+        pull(&this, &target).assert(&mut changes);
+        let registry = repo.subject().registry().open().perform(&operator).await?;
+        apply(&registry, changes, &operator).await?;
+
+        let pulled = feature.pull().perform(&operator).await;
+        assert_eq!(
+            feature.revision().map(|revision| revision.tree),
+            main.revision().map(|revision| revision.tree),
+            "the reachable upstream's commit landed: {pulled:?}"
+        );
+        assert!(pulled.is_err(), "the unreachable upstream is reported");
+        Ok(())
+    }
 }
 
 #[cfg(test)]
