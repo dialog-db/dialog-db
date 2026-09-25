@@ -110,32 +110,55 @@ impl Binding {
 /// ([`Selection`](super::Selection)): each premise receives the
 /// stream, potentially expands each match into zero or more new
 /// matches, and passes them to the next premise.
+///
+/// A row is its own bindings plus a shared, immutable [`Frame`] of the
+/// bindings of the row it extends. A premise that extends one row into
+/// many ([`Self::share`] it first) gives every extension the same frame
+/// rather than a copy of every binding and claim: a row's ancestry is
+/// shared, not copied, however many rows descend from it.
 #[derive(Clone, Debug, Default)]
 pub struct Match {
-    /// Named variable bindings: maps variable names to their
-    /// row-level binding (Present or Absent). A name absent from
-    /// this list means "no premise has touched this variable":
-    /// distinct from [`Binding::Absent`].
+    /// Named variable bindings made on this row since its frame was
+    /// taken: maps variable names to their row-level binding (Present
+    /// or Absent). A name absent from these and from the frame means
+    /// "no premise has touched this variable": distinct from
+    /// [`Binding::Absent`].
     ///
     /// Held as a small vec probed linearly, not a hash map: a query
-    /// binds a handful of variables, and a `Match` clones once per
-    /// yielded row — the vec clone is one allocation plus reference
-    /// bumps on the `Arc<str>` names, where the map cloned a bucket
-    /// table and re-allocated every `String` key, and every probe paid
-    /// a SipHash of the name before comparing anything.
+    /// binds a handful of variables, and every probe of a map paid a
+    /// SipHash of the name before comparing anything.
     bindings: Vec<(Arc<str>, Binding)>,
     // TODO: Once Value::Record supports the RecordFormat trait proposed in
     // https://github.com/dialog-db/dialog-db/pull/221 claims can be stored
     // directly as Value::Record in bindings, eliminating this separate list.
     claims: Vec<(Arc<str>, Arc<Claim>)>,
+    /// The bindings and claims this row extends, shared with every other
+    /// row extending the same ones.
+    frame: Option<Arc<Frame>>,
+    /// The row this one is evaluated on behalf of, when it belongs to a
+    /// nested scope (a concept's rule body). The scope's own names do not
+    /// see the caller's: this is never consulted by lookups. It is how a
+    /// concept evaluates every incoming row through one pipeline and still
+    /// merges each result back into the row it came from. The caller is
+    /// shared, not copied, by every row derived in the scope.
+    caller: Option<Arc<Match>>,
+}
+
+/// The bindings and claims a row extends: frozen by [`Match::share`],
+/// and shared by every row derived from it after.
+#[derive(Debug, Default)]
+struct Frame {
+    bindings: Vec<(Arc<str>, Binding)>,
+    claims: Vec<(Arc<str>, Arc<Claim>)>,
+    parent: Option<Arc<Frame>>,
 }
 
 /// Binding order is premise-evaluation order, an artifact of the plan;
 /// two rows are the same result when they bind the same names to the
-/// same values, in any order.
+/// same values, in any order, however their frames are split.
 impl PartialEq for Match {
     fn eq(&self, other: &Self) -> bool {
-        fn same<T: PartialEq>(left: &[(Arc<str>, T)], right: &[(Arc<str>, T)]) -> bool {
+        fn same<T: PartialEq>(left: Vec<&(Arc<str>, T)>, right: Vec<&(Arc<str>, T)>) -> bool {
             left.len() == right.len()
                 && left.iter().all(|(name, value)| {
                     right
@@ -143,7 +166,10 @@ impl PartialEq for Match {
                         .any(|(other_name, other_value)| name == other_name && value == other_value)
                 })
         }
-        same(&self.bindings, &other.bindings) && same(&self.claims, &other.claims)
+        same(
+            self.all_bindings().collect(),
+            other.all_bindings().collect(),
+        ) && same(self.all_claims(), other.all_claims())
     }
 }
 
@@ -161,6 +187,83 @@ impl Match {
     /// Create new empty match.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make room for `additional` more bindings on this row, so a premise
+    /// that binds several slots at once grows the row's own bindings once.
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.bindings.reserve(additional);
+    }
+
+    /// Freeze this row's own bindings and claims into its shared frame,
+    /// so clones of it (every row a premise extends it into) share them
+    /// instead of each copying them.
+    pub fn share(&mut self) {
+        if self.bindings.is_empty() && self.claims.is_empty() {
+            return;
+        }
+        let frame = Frame {
+            bindings: std::mem::take(&mut self.bindings),
+            claims: std::mem::take(&mut self.claims),
+            parent: self.frame.take(),
+        };
+        self.frame = Some(Arc::new(frame));
+    }
+
+    /// The frames this row extends, innermost first.
+    fn frames(&self) -> impl Iterator<Item = &Frame> {
+        std::iter::successors(self.frame.as_deref(), |frame| frame.parent.as_deref())
+    }
+
+    /// Every binding of this row, its own and its frames'. A name is
+    /// bound at most once along a row's ancestry, so nothing repeats.
+    fn all_bindings(&self) -> impl Iterator<Item = &(Arc<str>, Binding)> {
+        self.bindings
+            .iter()
+            .chain(self.frames().flat_map(|frame| frame.bindings.iter()))
+    }
+
+    /// Every claim this row cites, innermost first. A name cited again
+    /// replaces the earlier citation, so only a name's first occurrence
+    /// counts.
+    fn all_claims(&self) -> Vec<&(Arc<str>, Arc<Claim>)> {
+        let mut claims: Vec<&(Arc<str>, Arc<Claim>)> = Vec::new();
+        for entry in self
+            .claims
+            .iter()
+            .chain(self.frames().flat_map(|frame| frame.claims.iter()))
+        {
+            if !claims.iter().any(|(name, _)| *name == entry.0) {
+                claims.push(entry);
+            }
+        }
+        claims
+    }
+
+    /// The binding for `name` along this row's ancestry.
+    fn find(&self, name: &str) -> Option<&Binding> {
+        probe(&self.bindings, name)
+            .or_else(|| self.frames().find_map(|frame| probe(&frame.bindings, name)))
+    }
+
+    /// The claim cited for `name` along this row's ancestry.
+    fn find_claim(&self, name: &str) -> Option<&Arc<Claim>> {
+        probe(&self.claims, name)
+            .or_else(|| self.frames().find_map(|frame| probe(&frame.claims, name)))
+    }
+
+    /// Place this row in a scope nested in `caller`'s: the row is
+    /// evaluated on the caller's behalf, and [`Self::take_caller`] hands
+    /// the caller back when a result comes out of the scope.
+    pub(crate) fn within(mut self, caller: Arc<Match>) -> Self {
+        self.caller = Some(caller);
+        self
+    }
+
+    /// Take the row this one was evaluated on behalf of (see
+    /// [`Self::within`]).
+    pub(crate) fn take_caller(&mut self) -> Option<Arc<Match>> {
+        self.caller.take()
     }
 
     /// Wrap this match into a single-element `Selection` stream.
@@ -181,7 +284,7 @@ impl Match {
             }
         };
 
-        if let Some(claim) = probe(&self.claims, key) {
+        if let Some(claim) = self.find_claim(key) {
             Ok(claim.as_ref().clone())
         } else {
             Err(EvaluationError::Store(format!(
@@ -233,17 +336,20 @@ impl Match {
     /// kept. Claims from `other` fill in only where `self` has none, so a
     /// row's own provenance is never overwritten by the row it joins with.
     pub fn combine(mut self, other: &Match) -> Option<Match> {
-        for (name, binding) in &other.bindings {
-            match probe(&self.bindings, name) {
+        for (name, binding) in other.all_bindings() {
+            match self.find(name) {
                 None => self.bindings.push((name.clone(), binding.clone())),
                 Some(existing) if existing == binding => {}
                 Some(_) => return None,
             }
         }
-        for (name, claim) in &other.claims {
-            if probe(&self.claims, name).is_none() {
+        for (name, claim) in other.all_claims() {
+            if self.find_claim(name).is_none() {
                 self.claims.push((name.clone(), claim.clone()));
             }
+        }
+        if self.caller.is_none() {
+            self.caller = other.caller.clone();
         }
         Some(self)
     }
@@ -253,14 +359,14 @@ impl Match {
     /// that hold a variable's name rather than a [`Term`] and need not
     /// copy the value out.
     pub fn get(&self, name: &str) -> Option<&Binding> {
-        probe(&self.bindings, name)
+        self.find(name)
     }
 
     /// The `Present` value bound to `name`, if any. Used by the merge
     /// join to read the join key out of a row without going through a
     /// [`Term`].
     pub fn value_of(&self, name: &str) -> Option<&Value> {
-        match probe(&self.bindings, name) {
+        match self.find(name) {
             Some(Binding::Present(value)) => Some(value),
             _ => None,
         }
@@ -275,7 +381,7 @@ impl Match {
     /// merge-versus-nested-loop choice turns on.
     pub fn environment(&self) -> crate::Environment {
         let mut env = crate::Environment::new();
-        for (name, binding) in &self.bindings {
+        for (name, binding) in self.all_bindings() {
             if matches!(binding, Binding::Present(_)) {
                 env.add(name.as_ref());
             }
@@ -326,7 +432,7 @@ impl Match {
                 value_type: format!("{:?}", value.data_type()),
             });
         }
-        if let Some(existing) = probe(&self.bindings, name) {
+        if let Some(existing) = self.find(name) {
             match existing {
                 Binding::Present(existing_value) => {
                     if *existing_value != value {
@@ -368,7 +474,7 @@ impl Match {
 
     /// [`Self::bind_absent`] for a variable given by name.
     pub(crate) fn bind_absent_variable(&mut self, name: &str) -> Result<(), EvaluationError> {
-        if let Some(existing) = probe(&self.bindings, name) {
+        if let Some(existing) = self.find(name) {
             match existing {
                 Binding::Absent => Ok(()),
                 Binding::Present(value) => Err(EvaluationError::Assignment {
@@ -391,7 +497,7 @@ impl Match {
         match term {
             Term::Variable {
                 name: Some(key), ..
-            } => probe(&self.bindings, key).is_some(),
+            } => self.find(key).is_some(),
             Term::Variable { name: None, .. } => false,
             Term::Constant(_) => true,
         }
@@ -403,9 +509,7 @@ impl Match {
         match term {
             Term::Variable {
                 name: Some(key), ..
-            } => probe(&self.bindings, key)
-                .map(|b| b.is_present())
-                .unwrap_or(false),
+            } => self.find(key).map(|b| b.is_present()).unwrap_or(false),
             Term::Variable { name: None, .. } => false,
             Term::Constant(_) => true,
         }
@@ -427,7 +531,7 @@ impl Match {
             Term::Variable {
                 name: Some(key), ..
             } => {
-                if let Some(binding) = probe(&self.bindings, key) {
+                if let Some(binding) = self.find(key) {
                     Ok(binding.clone())
                 } else {
                     Err(EvaluationError::UnboundVariable {
