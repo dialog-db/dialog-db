@@ -502,7 +502,7 @@ where
     // ALL tracked upstreams, not only a remote default — a branch whose
     // default upstream is local but which tracks a remote must still be
     // able to hydrate blocks it holds by reference.
-    let remote = branch.upstreams().fallback();
+    let remote = branch.fallback();
     let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
     let base_tree_hash = base_revision
