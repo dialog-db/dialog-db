@@ -33,6 +33,9 @@ pub enum SpaceError {
 
 /// Record in `state` that the repository `subject` is known as `name` and
 /// stored at `location`.
+///
+/// A name picks out one repository: one recorded under it before, other
+/// than `subject`, stops being known by it.
 pub async fn record<Env: RegistryEnv>(
     state: &Branch,
     subject: &Did,
@@ -41,6 +44,11 @@ pub async fn record<Env: RegistryEnv>(
     env: &Env,
 ) -> Result<(), SpaceError> {
     let mut changes = Changes::new();
+    for previous in named(state, name, env).await? {
+        if previous.this != subject.this() {
+            previous.retract(&mut changes);
+        }
+    }
     Space {
         this: subject.this(),
         name: space::Name(name.to_string()),
@@ -50,13 +58,13 @@ pub async fn record<Env: RegistryEnv>(
     Ok(apply(state, changes, env).await?)
 }
 
-/// The repositories `state` knows by `name`, and where each is stored.
-pub async fn find<Env: RegistryEnv>(
+/// The records of the repositories `state` knows by `name`.
+async fn named<Env: RegistryEnv>(
     state: &Branch,
     name: &str,
     env: &Env,
-) -> Result<Vec<(Did, Location)>, SpaceError> {
-    let rows: Vec<Space> = Box::pin(
+) -> Result<Vec<Space>, SpaceError> {
+    Ok(Box::pin(
         state
             .query()
             .select(Query::<Space> {
@@ -67,8 +75,18 @@ pub async fn find<Env: RegistryEnv>(
             .perform(env)
             .try_vec(),
     )
-    .await?;
-    rows.into_iter()
+    .await?)
+}
+
+/// The repositories `state` knows by `name`, and where each is stored.
+pub async fn find<Env: RegistryEnv>(
+    state: &Branch,
+    name: &str,
+    env: &Env,
+) -> Result<Vec<(Did, Location)>, SpaceError> {
+    named(state, name, env)
+        .await?
+        .into_iter()
         .map(|row| {
             let subject = subject(&row.this)?;
             let location = Location::from_uri(&row.address.0).ok_or_else(|| {

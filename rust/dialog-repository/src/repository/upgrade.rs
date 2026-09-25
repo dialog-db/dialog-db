@@ -35,14 +35,16 @@ use dialog_query::Statement as _;
 use dialog_varsig::Principal;
 
 use super::branch::upstream::legacy;
+use super::peer::host;
 use crate::registry::{RegistryEnv, apply, pull, push};
 use crate::schema::{DidExt as _, Replica};
 use crate::{
-    Branch, Cell, PeersEnv, PublishError, RemoteAddress, RemoteEdition, Repository,
-    RepositoryMemoryExt as _, Resolved, Route, SiteAddress, Tracking, UpgradeError, contact,
-    peer_did,
+    AddAddressError, Branch, Cell, PeersEnv, PublishError, RemoteAddress, RemoteEdition,
+    Repository, RepositoryMemoryExt as _, Resolved, Route, SiteAddress, Tracking, UpgradeError,
+    contact, peer_did,
 };
 use dialog_artifacts::Entity;
+use dialog_effects::peer::prelude::*;
 
 /// The layout version this release stores in.
 pub const VERSION: u32 = 1;
@@ -215,12 +217,26 @@ where
         }
     }
 
+    // Contacts are the host's, and every repository's remote is usually
+    // named origin: a name another peer already has is not given again,
+    // so looking a peer up by it stays unambiguous.
     for carried in peers {
-        contact(&carried.peer)
-            .add_address(carried.site)
-            .name(carried.name)
+        let entity = carried.peer.this();
+        let known = host(env)
+            .await?
+            .reader()
+            .peers()
+            .find(carried.name.clone())
             .perform(env)
-            .await?;
+            .await
+            .map_err(AddAddressError::from)?;
+        let contact = contact(&carried.peer).add_address(carried.site);
+        let contact = if known.iter().all(|peer| *peer == entity) {
+            contact.name(carried.name)
+        } else {
+            contact
+        };
+        contact.perform(env).await?;
     }
 
     apply(registry, changes, env).await?;
