@@ -19,6 +19,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_query::{Output as _, Query, Term};
 use futures_util::stream;
 
 use crate::schema::{ActiveBranch, Branch as BranchConcept, Replica};
@@ -160,6 +161,27 @@ async fn apply<Env: RegistryEnv>(
     .await?;
 
     Ok(())
+}
+
+/// The branch the replica `operator` views has switched to, if any.
+pub async fn active<Env: RegistryEnv>(
+    registry: &Branch,
+    operator: &Capability<Operator>,
+    env: &Env,
+) -> Result<Option<Entity>, dialog_query::EvaluationError> {
+    let replica = Replica::new(operator.profile().clone(), registry.of().clone());
+    let rows: Vec<ActiveBranch> = Box::pin(
+        registry
+            .query()
+            .select(Query::<ActiveBranch> {
+                this: replica.this.into(),
+                branch: Term::var("branch"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    Ok(rows.into_iter().next().map(|row| row.branch.0))
 }
 
 /// Every branch recorded on the replica `operator` views.
