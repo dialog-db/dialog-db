@@ -9,6 +9,8 @@
 //!   within what the peer granted it. It cannot sign as the peer, so it
 //!   can neither delegate the peer's authority nor open further sessions.
 
+use dialog_common::{ConditionalSend, ConditionalSync};
+
 /// The peer acting with its own key.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Local;
@@ -19,7 +21,7 @@ pub struct Local;
 pub struct Session;
 
 /// A mode a [`Peer`](super::Peer) handle can be in.
-pub trait Mode: sealed::Sealed + Clone + Copy + Send + Sync + 'static {}
+pub trait Mode: sealed::Sealed + Clone + Copy + ConditionalSend + ConditionalSync + 'static {}
 
 impl Mode for Local {}
 impl Mode for Session {}
