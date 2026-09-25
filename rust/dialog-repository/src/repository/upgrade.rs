@@ -329,7 +329,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::{CELL, SPACE, Upgraded, VERSION};
+    use crate::RepositoryExt as _;
     use crate::helpers::test_repo;
+    use crate::repository::branch::resolve::resolve;
     use crate::schema::{BranchPull, BranchPush, Peer, PeerAddress, Replica};
     use crate::{
         Cell, REGISTRY, RemoteEdition, RepositoryMemoryExt as _, Route, SiteAddress, Target,
@@ -339,7 +341,8 @@ mod tests {
     use dialog_capability::Subject;
     use dialog_effects::memory::Version;
     use dialog_effects::memory::prelude::{CellScope, SpaceScope};
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_identity::SpaceHandle;
+    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
     use dialog_query::{Output as _, Query, Term};
     use dialog_remote_ucan::UcanAddress;
     use dialog_varsig::did;
@@ -604,6 +607,78 @@ mod tests {
                 if found == VERSION + 1 && supported == VERSION),
             "{refused:?}"
         );
+        Ok(())
+    }
+
+    /// A repository created by this release is already at the current
+    /// layout, so nothing a later upgrade could carry over exists.
+    #[dialog_common::test]
+    async fn it_creates_a_repository_at_the_current_version() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let version: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
+            .cell(CELL)
+            .into();
+        version.resolve().perform(&operator).await?;
+        assert_eq!(version.content(), Some(VERSION));
+        Ok(())
+    }
+
+    /// Opening a repository whose storage predates versioning upgrades
+    /// it: its upstreams are pulled from without anyone calling
+    /// `upgrade`.
+    #[dialog_common::test]
+    async fn it_upgrades_a_repository_when_it_opens() -> anyhow::Result<()> {
+        // `branch/draft/upstream`, in the older single-entry shape:
+        // `draft` on origin.
+        const ONE: &str = "a16652656d6f7465a3647472656598200909090909090909090909090909090909090909090909090909090909090909666272616e63686564726166746672656d6f7465666f726967696e";
+        // `remote/origin/address`: a UCAN service at
+        // https://tonk.network/ucan/ holding the repository below.
+        const REMOTE: &str = "a26761646472657373a1645563616ea168656e64706f696e74781a68747470733a2f2f746f6e6b2e6e6574776f726b2f7563616e2f677375626a65637478386469643a6b65793a7a364d6b68615867425a44766f74446b4c353235376661697a74694769433251744b4c4770626e6e4547746132646f4b";
+
+        fn bytes(hex: &str) -> Vec<u8> {
+            (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("valid hex"))
+                .collect()
+        }
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let name = unique_name("legacy");
+        let handle = || SpaceHandle {
+            profile_did: profile.did(),
+            name: name.clone(),
+        };
+        let repo = handle().open().perform(&operator).await?;
+
+        // What an earlier release left: no version, cells for a remote
+        // and an upstream.
+        let version: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
+            .cell(CELL)
+            .into();
+        version.resolve().perform(&operator).await?;
+        if version.content().is_some() {
+            version.retract().perform(&operator).await?;
+        }
+        for (space, cell, content) in [
+            ("remote/origin", "address", REMOTE),
+            ("branch/draft", "upstream", ONE),
+        ] {
+            CellScope::new(Subject::from(repo.did()), space, cell)
+                .publish(bytes(content), None)
+                .perform(&operator)
+                .await?;
+        }
+
+        let reopened = handle().open().perform(&operator).await?;
+        assert_eq!(reopened.did(), repo.did());
+
+        version.resolve().perform(&operator).await?;
+        assert_eq!(version.content(), Some(VERSION), "opening upgraded it");
+        let draft = reopened.branch("draft").open().perform(&operator).await?;
+        resolve(&draft, &operator).await?;
+        assert_eq!(draft.pulls().iter().count(), 1, "draft pulls from origin");
         Ok(())
     }
 }
