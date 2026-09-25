@@ -195,14 +195,12 @@ impl Unreachable for ResolveError {
     }
 }
 
+/// A publish is a conditional write, so only one that never left may be
+/// sent elsewhere: one that failed on the wire may have landed, and would
+/// then conflict with itself at the next address.
 impl Unreachable for PublishError {
     fn unreachable(&self) -> bool {
-        matches!(
-            self,
-            PublishError::Storage(_)
-                | PublishError::Io(_)
-                | PublishError::Rejected(Rejection::Unavailable { .. })
-        )
+        matches!(self, PublishError::Rejected(Rejection::Unavailable { .. }))
     }
 }
 
