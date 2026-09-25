@@ -296,7 +296,8 @@ mod tests {
 
     use crate::Operator;
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use dialog_artifacts::{Entity, Instruction};
+    use dialog_artifacts::{Artifact, Entity, Instruction, Value};
+    use dialog_capability::identity::TreeReference;
     use dialog_capability::{Did, Subject};
     use dialog_effects::MethodExt as _;
     use dialog_effects::authority::{Identify, OperatorExt as _};
@@ -717,6 +718,101 @@ mod tests {
 
         let names = listed(&operator, &did).await?;
         assert!(!names.contains(&"empty".into()), "{names:?}");
+        Ok(())
+    }
+
+    /// The branch the replica has switched to is the one it works on, so
+    /// it is not deleted out from under it: switch away first.
+    #[dialog_common::test]
+    async fn it_refuses_to_delete_the_active_branch() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        let source = commit(&operator, &did, "main").await?;
+
+        Subject::from(did.clone())
+            .writer()
+            .branches()
+            .branch("feature")
+            .create()
+            .revision(source.clone())
+            .perform(&operator)
+            .await?;
+        Subject::from(did.clone())
+            .writer()
+            .branches()
+            .switch(entity(&operator, &did, "feature").await?)
+            .perform(&operator)
+            .await?;
+
+        let deleted = Subject::from(did.clone())
+            .voider()
+            .branches()
+            .branch("feature")
+            .delete(source.clone())
+            .perform(&operator)
+            .await;
+        assert!(deleted.is_err(), "the active branch was deleted");
+        assert_eq!(head(&operator, &did, "feature").await?, Some(source));
+        Ok(())
+    }
+
+    /// A branch is created at a revision only if the revision is signed
+    /// by its issuer as it stands: a tampered one is refused.
+    #[dialog_common::test]
+    async fn it_refuses_to_create_at_a_tampered_revision() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        let mut forged = commit(&operator, &did, "main").await?;
+        forged.tree = TreeReference::default();
+
+        let created = Subject::from(did.clone())
+            .writer()
+            .branches()
+            .branch("forged")
+            .create()
+            .revision(forged)
+            .perform(&operator)
+            .await;
+        assert!(created.is_err(), "a tampered revision was pointed at");
+        assert_eq!(head(&operator, &did, "forged").await?, None);
+        Ok(())
+    }
+
+    /// A branch is created at a revision only if the repository holds its
+    /// tree: one minted in another repository points at nothing here.
+    #[dialog_common::test]
+    async fn it_refuses_to_create_at_a_revision_whose_tree_it_lacks() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let elsewhere = test_repo(&operator, &profile).await;
+        let foreign = elsewhere
+            .branch("main")
+            .open()
+            .perform(&operator)
+            .await?
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:elsewhere".parse()?,
+                is: Value::String("Elsewhere".into()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let created = Subject::from(repo.did())
+            .writer()
+            .branches()
+            .branch("borrowed")
+            .create()
+            .revision(foreign)
+            .perform(&operator)
+            .await;
+        assert!(
+            created.is_err(),
+            "a revision whose tree is elsewhere was pointed at"
+        );
         Ok(())
     }
 
