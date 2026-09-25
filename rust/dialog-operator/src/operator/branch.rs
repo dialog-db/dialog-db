@@ -598,6 +598,80 @@ mod tests {
         Ok(())
     }
 
+    /// A branch name is one path segment. The filesystem store resolves
+    /// `./meta`, `meta/` and `x/../meta` to the registry's own cells,
+    /// and `scratch/../main` reaches past a `scratch*` delegation, so a
+    /// name that is not a single plain segment is refused before
+    /// anything is written.
+    #[dialog_common::test]
+    async fn it_refuses_a_name_that_is_not_one_segment() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+
+        for name in [
+            "./meta",
+            "meta/",
+            "x/../meta",
+            "scratch/../main",
+            "a/b",
+            "",
+            ".",
+            "..",
+        ] {
+            let created = Subject::from(did.clone())
+                .writer()
+                .branches()
+                .branch(name)
+                .create()
+                .perform(&operator)
+                .await;
+            assert!(created.is_err(), "{name:?} is not a branch name");
+        }
+        let names = listed(&operator, &did).await?;
+        assert_eq!(names, vec![REGISTRY.to_string()], "nothing was recorded");
+        Ok(())
+    }
+
+    /// A delete that retracted the head and then stopped, before the
+    /// branch was forgotten, is finished by deleting again: the branch
+    /// no longer points at the revision the caller named, but only
+    /// because this delete already moved it.
+    #[dialog_common::test]
+    async fn it_finishes_a_delete_that_stopped_part_way() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        let source = commit(&operator, &did, "main").await?;
+
+        Subject::from(did.clone())
+            .writer()
+            .branches()
+            .branch("doomed")
+            .create()
+            .revision(source.clone())
+            .perform(&operator)
+            .await?;
+
+        // The first attempt got as far as retracting the head.
+        let head_cell = Subject::from(did.clone()).branch("doomed").revision();
+        head_cell.resolve().perform(&operator).await?;
+        head_cell.retract().perform(&operator).await?;
+        assert!(listed(&operator, &did).await?.contains(&"doomed".into()));
+
+        Subject::from(did.clone())
+            .voider()
+            .branches()
+            .branch("doomed")
+            .delete(source)
+            .perform(&operator)
+            .await?;
+
+        let names = listed(&operator, &did).await?;
+        assert!(!names.contains(&"doomed".into()), "{names:?}");
+        Ok(())
+    }
+
     /// The registry holds every other branch's record, so it refuses to
     /// be created or deleted through the same capability.
     #[dialog_common::test]
