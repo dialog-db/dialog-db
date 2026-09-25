@@ -7,7 +7,7 @@ use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
     Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
 };
-use dialog_capability::{Fork, Provider};
+use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveExt as _;
@@ -801,19 +801,12 @@ async fn remote_has_block<Env>(
 where
     Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    let found: Option<Vec<u8>> = remote
-        .reach(|address| async move {
-            address
-                .subject
-                .clone()
-                .reader()
-                .archive()
-                .catalog("index")
-                .get(hash.clone())
-                .fork(&address.address)
-                .perform(env)
-                .await
-        })
+    let found: Option<Vec<u8>> = Subject::from(remote.did())
+        .reader()
+        .archive()
+        .catalog("index")
+        .get(hash.clone())
+        .perform(&remote.connection(env))
         .await
         .map_err(dialog_storage::DialogStorageError::from)
         .map_err(dialog_search_tree::DialogSearchTreeError::from)?;
@@ -829,19 +822,12 @@ async fn remote_block<Env>(
 where
     Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    remote
-        .reach(|address| async move {
-            address
-                .subject
-                .clone()
-                .reader()
-                .archive()
-                .catalog("index")
-                .get(hash.clone())
-                .fork(&address.address)
-                .perform(env)
-                .await
-        })
+    Subject::from(remote.did())
+        .reader()
+        .archive()
+        .catalog("index")
+        .get(hash.clone())
+        .perform(&remote.connection(env))
         .await
         .map_err(dialog_storage::DialogStorageError::from)
         .map_err(dialog_search_tree::DialogSearchTreeError::from)
@@ -934,22 +920,12 @@ where
         + ConditionalSync
         + 'static,
 {
-    let probe = target
-        .reach(|address| {
-            let digest = digest.clone();
-            async move {
-                address
-                    .subject
-                    .clone()
-                    .reader()
-                    .archive()
-                    .blob()
-                    .read(digest)
-                    .fork(address.site())
-                    .perform(env)
-                    .await
-            }
-        })
+    let probe = Subject::from(target.did())
+        .reader()
+        .archive()
+        .blob()
+        .read(digest.clone())
+        .perform(&target.connection(env))
         .await;
     match probe {
         // Present; the unconsumed reader is dropped. (A ranged 1-byte
@@ -1016,19 +992,12 @@ where
         found => return found,
     }
     for origin in sources {
-        let found = origin
-            .reach(|address| async move {
-                address
-                    .subject
-                    .clone()
-                    .reader()
-                    .archive()
-                    .blob()
-                    .read(digest.clone())
-                    .fork(address.site())
-                    .perform(env)
-                    .await
-            })
+        let found = Subject::from(origin.did())
+            .reader()
+            .archive()
+            .blob()
+            .read(digest.clone())
+            .perform(&origin.connection(env))
             .await;
         match found {
             Err(BlobError::NotFound(_)) => continue,

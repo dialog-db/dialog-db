@@ -28,17 +28,11 @@ impl<'a> PublishRemoteBranch<'a> {
         // Publish to the upstream via fork. The in-memory upstream cell
         // picks up the new CAS edition internally; we then snapshot it
         // below.
-        let upstream = self.branch.upstream();
-        let revision = &self.revision;
+        let remote = self.branch.repository().connection(env);
         self.branch
-            .repository()
-            .reach(|address| async move {
-                upstream
-                    .publish(revision.clone())
-                    .fork(address.site())
-                    .perform(env)
-                    .await
-            })
+            .upstream()
+            .publish(self.revision)
+            .perform(&remote)
             .await?;
 
         // Persist the upstream edition so that a future open/load can
