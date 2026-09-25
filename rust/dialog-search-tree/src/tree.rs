@@ -17,8 +17,8 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, Key, Manifest, PersistentNode, Prefetch, SearchOptions,
+    Accessor, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential, Distribution,
+    Entry, Geometric, Key, Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions,
     SearchResult, TreeDifference, TreeWalker, Value, into_owned,
 };
 
@@ -64,7 +64,7 @@ where
     distribution: PhantomData<D>,
 
     root: Blake3Hash,
-    node_cache: Cache<Blake3Hash, Buffer>,
+    node_cache: NodeCache<Key, Value>,
 }
 
 // Manual impl: a derived `Clone` would demand `D: Clone`, but the
@@ -113,7 +113,7 @@ where
     ///
     /// Used to open a [`HitchhikerTree`](crate::HitchhikerTree) over this tree
     /// that shares its warm cache.
-    pub fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
+    pub fn node_cache(&self) -> NodeCache<Key, Value> {
         self.node_cache.clone()
     }
 
@@ -153,7 +153,7 @@ where
     /// without ever serving a stale entry. Use this to keep a cache warm across
     /// successive reconstructions of a tree from a moving root (e.g. a branch
     /// that reuses one cache across every read).
-    pub fn from_hash_with_cache(root: Blake3Hash, node_cache: Cache<Blake3Hash, Buffer>) -> Self {
+    pub fn from_hash_with_cache(root: Blake3Hash, node_cache: NodeCache<Key, Value>) -> Self {
         Self::seal(root, node_cache)
     }
 
@@ -448,7 +448,7 @@ where
     /// by [`TransientTree::persist`] to turn a finished edit batch back into a
     /// [`PersistentTree`] while carrying its cache forward. The batch's new nodes
     /// go into the caller's delta, not the tree.
-    pub(crate) fn seal(root: Blake3Hash, node_cache: Cache<Blake3Hash, Buffer>) -> Self {
+    pub(crate) fn seal(root: Blake3Hash, node_cache: NodeCache<Key, Value>) -> Self {
         PersistentTree {
             key: PhantomData,
             value: PhantomData,
@@ -639,7 +639,7 @@ mod tests {
         }
 
         let accessor = Accessor::new(tree.node_cache(), storage.clone());
-        let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
+        let root = accessor.get_node(tree.root()).await?;
         let estimate = root.scale().estimate();
 
         assert!(
@@ -755,7 +755,7 @@ mod tests {
         }
 
         let accessor = Accessor::new(tree.node_cache(), storage.clone());
-        let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
+        let root = accessor.get_node(tree.root()).await?;
         let flushed = root.scale();
 
         // A canonical tree carries no novelty, so its scale is a pure function
