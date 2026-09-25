@@ -38,11 +38,11 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
 use async_trait::async_trait;
-use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
+use dialog_artifacts::tree::{ArtifactNodeCache, TreeStorageBridge, selector_range};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{
-    Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Traversable as _,
+    Buffer, ContentAddressedStorage, DialogSearchTreeError, PersistentNode, Traversable as _,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 
@@ -252,10 +252,11 @@ where
 
 /// The node cache in front of a hydrating store, as a raw block backend:
 /// the traversal's reads hit the line's shared cache first (a job whose
-/// spine a peer already warmed re-reads nothing), and every miss lands
-/// in it, so the demand read that follows a warm is served from memory.
+/// spine a peer already warmed re-reads nothing), and every miss that
+/// checks as a node lands in it, so the demand read that follows a warm is
+/// served from memory without checking the node again.
 struct CacheThrough<'a, Env> {
-    cache: Cache<NodeHash, Buffer>,
+    cache: ArtifactNodeCache,
     store: NetworkedIndex<'a, Env>,
 }
 
@@ -283,16 +284,20 @@ where
     }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let buffer = self
-            .cache
-            .get_or_fetch(&NodeHash::from(*key), async |hash| {
-                self.store
-                    .get(hash.as_bytes())
-                    .await
-                    .map(|bytes| bytes.map(Buffer::from))
-            })
-            .await?;
-        Ok(buffer.map(|buffer| buffer.as_ref().to_vec()))
+        let hash = NodeHash::from(*key);
+        if let Some(node) = self.cache.get_cached(&hash) {
+            return Ok(Some(node.buffer().as_ref().to_vec()));
+        }
+        let bytes = self.store.get(hash.as_bytes()).await?;
+        // Bytes that do not check as a node stay out of the cache; the
+        // traversal reading them reports the failure.
+        if let Some(node) = bytes
+            .as_ref()
+            .and_then(|bytes| PersistentNode::try_from(Buffer::from(bytes.as_slice())).ok())
+        {
+            self.cache.insert(hash, node);
+        }
+        Ok(bytes)
     }
 }
 

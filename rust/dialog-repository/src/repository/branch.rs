@@ -15,14 +15,12 @@ use dialog_artifacts::history::Origin;
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
 };
-use dialog_artifacts::tree::SpillCache;
+use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
-use dialog_common::Blake3Hash;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_query::query::Application;
-use dialog_search_tree::{Buffer, Cache};
 use std::sync::{Arc, Mutex};
 
 mod blob;
@@ -133,7 +131,7 @@ pub struct Branch {
     /// carried (as a shared handle) into every `Select`'s tree, so blocks read
     /// by one query stay warm for the next instead of being re-fetched from
     /// storage. Content-addressed keys make sharing across revisions safe.
-    node_cache: Cache<Blake3Hash, Buffer>,
+    node_cache: ArtifactNodeCache,
     /// Shared cache of spilled value blocks, keyed by their 32-byte content
     /// reference. Like `node_cache`, created once per opened branch and carried
     /// into every select so a repeated read of the same large (spilled) value
@@ -373,7 +371,7 @@ impl Branch {
     }
 
     /// A shared handle to this branch's node cache, for seeding a read tree.
-    pub(crate) fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
+    pub(crate) fn node_cache(&self) -> ArtifactNodeCache {
         self.node_cache.clone()
     }
 

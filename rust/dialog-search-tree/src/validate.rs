@@ -110,7 +110,7 @@ where
             return Ok(Vec::new());
         }
         let manifest = self.manifest(storage).await?;
-        let accessor: Accessor<Backend> = Accessor::new(Default::default(), storage.clone());
+        let accessor: Accessor<K, V, Backend> = Accessor::new(Default::default(), storage.clone());
 
         let mut violations = Vec::new();
 

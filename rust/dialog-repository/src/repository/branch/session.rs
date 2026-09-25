@@ -21,7 +21,7 @@ use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
-use dialog_search_tree::Buffer;
+use dialog_search_tree::{Buffer, PersistentNode};
 use dialog_storage::{Blake3Hash, StorageBackend};
 use futures_util::future::try_join_all;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -607,16 +607,18 @@ where
             let source = source.as_ref();
             let remote = source.fallback(self.env).await;
             let store = NetworkedIndex::new(self.env, source.archive().index(), remote);
-            let cached = source
-                .node_cache()
-                .get_or_fetch(&NodeHash::from(input), async |hash| {
-                    StorageBackend::get(&store, hash.as_bytes())
-                        .await
-                        .map(|bytes| bytes.map(Buffer::from))
-                })
-                .await?;
-            if let Some(buffer) = cached {
-                return Ok(Some(buffer.into_vec()));
+            let hash = NodeHash::from(input);
+            let cache = source.node_cache();
+            if let Some(node) = cache.get_cached(&hash) {
+                return Ok(Some(node.buffer().as_ref().to_vec()));
+            }
+            if let Some(bytes) = StorageBackend::get(&store, hash.as_bytes()).await? {
+                // A block that checks as a node joins the cache; any other
+                // block is returned as it is, for the caller to read.
+                if let Ok(node) = PersistentNode::try_from(Buffer::from(bytes.as_slice())) {
+                    cache.insert(hash, node);
+                }
+                return Ok(Some(bytes));
             }
         }
         Ok(None)

@@ -40,8 +40,8 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
 use dialog_search_tree::{
-    Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Entry, HitchhikerTree,
-    Manifest, TransientTree,
+    Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Entry, HitchhikerTree, Manifest,
+    TransientTree,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
@@ -50,7 +50,9 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
 use crate::history::Version;
-use crate::tree::{ArtifactTree, TreeStorageBridge, WriteScope, write_instructions};
+use crate::tree::{
+    ArtifactNodeCache, ArtifactTree, TreeStorageBridge, WriteScope, write_instructions,
+};
 use crate::{Datum, DialogArtifactsError, Instruction, Key, State};
 
 /// The buffered counterpart of [`ArtifactTree`].
@@ -281,7 +283,7 @@ impl ArtifactWriter for BufferedArtifactTree {
 /// seal.
 pub struct BufferedBatch {
     tree: BufferedArtifactTree,
-    cache: Cache<NodeHash, Buffer>,
+    cache: ArtifactNodeCache,
     manifest: Manifest,
     changed: bool,
     slot: Option<SpineSlot>,
