@@ -552,10 +552,11 @@ mod tests {
     use dialog_capability::access::{Access, Proof as _, Prove, Retain};
     use dialog_capability::did;
     use dialog_credentials::Ed25519Signer;
+    use dialog_credentials::SignerCredential;
     use dialog_effects::storage::Location;
     use dialog_repository::{OpenReplicaBranchError, RepositoryAtExt as _, RepositoryExt as _};
     use dialog_storage::provider::storage::VolatileSpace;
-    use dialog_ucan::{Parameters, Scope, Ucan, UcanDelegation};
+    use dialog_ucan::{Parameters, Scope, Ucan, UcanCertificate, UcanDelegation};
     use dialog_ucan_core::command::Command as UcanCommand;
     use dialog_ucan_core::subject::Subject as UcanSubject;
     use dialog_ucan_core::time::Timestamp;
@@ -990,6 +991,109 @@ mod tests {
             .await?;
         assert_eq!(built.did(), session.did());
         assert_eq!(*built.home(), credential.did());
+        Ok(())
+    }
+
+    /// A certificate over every subject, from `issuer` to `audience`.
+    async fn certificate(
+        issuer: &SignerCredential,
+        audience: &Did,
+        expiration: Timestamp,
+    ) -> UcanCertificate {
+        UcanCertificate(
+            DelegationBuilder::new()
+                .issuer(issuer.signer().clone())
+                .audience(audience)
+                .subject(UcanSubject::Any)
+                .command(vec![])
+                .expiration(expiration)
+                .try_build()
+                .await
+                .unwrap(),
+        )
+    }
+
+    fn in_an_hour() -> Timestamp {
+        Timestamp::new(SystemTime::now() + Duration::from_secs(3600)).unwrap()
+    }
+
+    /// A session acts under certificates issued to its own key. One
+    /// issued to another key is not its authority, and is refused when
+    /// the session is built rather than carried as though it were.
+    #[dialog_common::test]
+    async fn it_refuses_a_certificate_issued_to_another_key() -> Result<()> {
+        let peer = open_peer(
+            Storage::<VolatileSpace>::volatile(),
+            Location::temp(unique_name("audience")),
+        )
+        .await?;
+        let agent = Ed25519Signer::generate().await?;
+        let other = Ed25519Signer::generate().await?;
+
+        let granted = certificate(peer.credential(), &other.did(), in_an_hour()).await;
+        let session = Peer::session_of(peer.home().clone())
+            .operator(agent)
+            .storage(peer.storage().clone())
+            .grant(granted)
+            .await;
+        assert!(session.is_err(), "the certificate is another key's");
+        Ok(())
+    }
+
+    /// A certificate that has already expired grants nothing, and is
+    /// refused when the session is built.
+    #[dialog_common::test]
+    async fn it_refuses_an_expired_certificate() -> Result<()> {
+        let peer = open_peer(
+            Storage::<VolatileSpace>::volatile(),
+            Location::temp(unique_name("expired")),
+        )
+        .await?;
+        let agent = Ed25519Signer::generate().await?;
+
+        let expired = Timestamp::new(SystemTime::now() - Duration::from_secs(60))?;
+        let granted = certificate(peer.credential(), &agent.did(), expired).await;
+        let session = Peer::session_of(peer.home().clone())
+            .operator(agent)
+            .storage(peer.storage().clone())
+            .grant(granted)
+            .await;
+        assert!(session.is_err(), "the certificate expired");
+        Ok(())
+    }
+
+    /// A session holding a grant scoped to one subject and a grant over
+    /// every subject proves a claim on a third subject by the second: the
+    /// first does not cover the claim, whatever its command.
+    #[dialog_common::test]
+    async fn it_proves_by_the_grant_that_covers_the_subject() -> Result<()> {
+        let peer = open_peer(
+            Storage::<VolatileSpace>::volatile(),
+            Location::temp(unique_name("grants")),
+        )
+        .await?;
+        let elsewhere = Ed25519Signer::generate().await?;
+
+        let session = peer
+            .session(b"grants")
+            .allow(Subject::from(elsewhere.did()).claim(peer.credential()))
+            .allow(Subject::any().claim(peer.credential()))
+            .await?;
+
+        let proof = Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(
+                session.did(),
+                storage_scope(&peer.did()),
+            ))
+            .perform(&session)
+            .await?;
+        let last = proof.proofs().last().expect("the session's grant");
+        assert_eq!(
+            *last.0.subject(),
+            UcanSubject::Any,
+            "the grant scoped to another subject was used"
+        );
         Ok(())
     }
 }
