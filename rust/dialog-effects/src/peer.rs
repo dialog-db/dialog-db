@@ -242,6 +242,16 @@ pub enum PeerError {
     #[error("Peer state failed: {0}")]
     Storage(String),
 
+    /// The contacts named are another subject's: a peer keeps only its
+    /// own.
+    #[error("The contacts of {subject} are not kept by {home}")]
+    Foreign {
+        /// The subject the contacts were asked of.
+        subject: String,
+        /// The subject whose contacts this peer keeps.
+        home: String,
+    },
+
     /// A memory cell operation failed.
     #[error(transparent)]
     Memory(#[from] MemoryError),
