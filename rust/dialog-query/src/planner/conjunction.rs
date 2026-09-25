@@ -94,7 +94,7 @@ impl Conjunction {
     {
         self.steps.into_iter().fold(
             Box::pin(selection) as Pin<Box<dyn Selection + 'a>>,
-            |selection, plan| Box::pin(plan.evaluate(selection, env)),
+            |selection, plan| plan.evaluate_boxed(selection, env),
         )
     }
 
