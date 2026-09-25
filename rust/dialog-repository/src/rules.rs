@@ -503,6 +503,13 @@ pub(crate) fn has_overlay_rules(changes: &Changes) -> bool {
         .any(|(_, attribute, _)| *attribute == conclusion)
 }
 
+/// Whether a session overlay holds any rule, for any concept.
+pub(crate) fn holds_rules(overlay: &crate::Ephemeral) -> bool {
+    !overlay
+        .scan(&ArtifactSelector::new().the(conclusion_attr()))
+        .is_empty()
+}
+
 /// Read rules from an overlay [`Changes`] batch concluding `concept`.
 ///
 /// The overlay is in-memory, so this is cheap and done fresh every
