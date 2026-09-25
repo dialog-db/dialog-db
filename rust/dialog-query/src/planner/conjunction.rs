@@ -234,6 +234,22 @@ impl Conjunction {
         Box::pin(crate::try_stream! {
             let mut selection = Box::pin(selection.peekable());
 
+            // Rows share one binding pattern, so the first says whether the
+            // caller already bound the join variable. If it did, every scan
+            // is a lookup on that one entity: the merge would read exactly
+            // what the fold reads, after resolving and estimating every scan
+            // per row and running each as a stream of its own. Fold instead.
+            let bound = matches!(
+                selection.as_mut().peek().await,
+                Some(Ok(first)) if first.value_of(&variable).is_some()
+            );
+            if bound {
+                for await row in self.into_fold(selection, env) {
+                    yield row?;
+                }
+                return;
+            }
+
             let scans: Vec<DynamicAttributeQuery> = self
                 .steps
                 .iter()
@@ -258,10 +274,7 @@ impl Conjunction {
 
             let mut listening = true;
             let mut hinted: HashSet<ArtifactSelector<Constrained>> = HashSet::new();
-            loop {
-                let Some(first) = selection.next().await else {
-                    break;
-                };
+            while let Some(first) = selection.next().await {
                 let first = first?;
                 let shape = fingerprint(&first);
                 let balanced = match &decided {
@@ -572,6 +585,96 @@ mod tests {
             .await?;
         assert_eq!(chosen.len(), 600 * 3 + 1, "every row's matches");
         assert_eq!(normalize(chosen), normalize(oracle));
+        Ok(())
+    }
+
+    /// Rows that bind the join variable read one entity per scan, so the
+    /// conjunction evaluates them as the fold does, row by row, and yields
+    /// each bound entity's own values and nothing else.
+    #[dialog_common::test]
+    async fn it_folds_rows_that_bind_the_join_variable() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut tx = branch.transaction();
+        for i in 0..50 {
+            let entity: Entity = format!("id:thing-{i}").parse()?;
+            tx = tx
+                .assert(
+                    the!("thing/name")
+                        .of(entity.clone())
+                        .is(format!("name-{i}")),
+                )
+                .assert(the!("thing/role").of(entity).is(format!("role-{i}")));
+        }
+        tx.commit().publish().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let env = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+                Term::from(the!("thing/name")),
+                Term::<Entity>::var("this"),
+                Term::<Any>::var("name"),
+                Term::var("c1"),
+                Some(Cardinality::One),
+            )))),
+            Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+                Term::from(the!("thing/role")),
+                Term::<Entity>::var("this"),
+                Term::<Any>::var("role"),
+                Term::var("c2"),
+                Some(Cardinality::One),
+            )))),
+        ])
+        .plan(&Environment::new())?;
+        assert_eq!(plan.merge_variable().as_deref(), Some("this"));
+
+        let bound = |i: usize| -> anyhow::Result<Match> {
+            let mut row = Match::new();
+            row.bind(
+                &Term::<Any>::var("this"),
+                Value::Entity(format!("id:thing-{i}").parse()?),
+            )?;
+            Ok(row)
+        };
+        let rows = vec![bound(3)?, bound(17)?, bound(3)?, bound(42)?];
+        let chosen = plan
+            .clone()
+            .evaluate(stream::iter(rows.clone().into_iter().map(Ok)), &env)
+            .try_collect::<Vec<_>>()
+            .await?;
+        let oracle = plan
+            .into_fold(stream::iter(rows.into_iter().map(Ok)), &env)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let values = |rows: &[Match]| -> Vec<(String, String)> {
+            rows.iter()
+                .map(|row| {
+                    (
+                        format!("{:?}", row.value_of("name")),
+                        format!("{:?}", row.value_of("role")),
+                    )
+                })
+                .collect()
+        };
+        let expected: Vec<(String, String)> = [3, 17, 3, 42]
+            .iter()
+            .map(|i| {
+                (
+                    format!("{:?}", Some(&Value::String(format!("name-{i}")))),
+                    format!("{:?}", Some(&Value::String(format!("role-{i}")))),
+                )
+            })
+            .collect();
+        assert_eq!(
+            values(&chosen),
+            expected,
+            "one row per bound entity, in order"
+        );
+        assert_eq!(chosen, oracle);
         Ok(())
     }
 
