@@ -204,6 +204,30 @@ mod tests {
         Ok(())
     }
 
+    /// A peer keeps the contacts of its own subject. A contact written
+    /// against another subject is not this peer's to record, and is
+    /// refused rather than recorded among its own.
+    #[dialog_common::test]
+    async fn it_refuses_contacts_written_for_another_subject() -> anyhow::Result<()> {
+        let (worker, _) = test_session_with_peer().await;
+        let address = dialog_repository::peer_address(
+            &UcanAddress::new("https://tonk.network/ucan/").into(),
+        )?;
+
+        let written = Subject::from(did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"))
+            .writer()
+            .peers()
+            .add_address(peer(), address)
+            .perform(&worker)
+            .await;
+        assert!(written.is_err(), "the contact is another subject's");
+        assert!(
+            matches!(connect(&worker).await, Err(PeerError::Unreachable { .. })),
+            "nothing was recorded among the peer's own contacts"
+        );
+        Ok(())
+    }
+
     /// A peer with no address is not connected to.
     #[dialog_common::test]
     async fn it_refuses_to_connect_to_a_peer_it_cannot_reach() -> anyhow::Result<()> {
