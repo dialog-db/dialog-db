@@ -116,14 +116,16 @@ impl CreateRevisionExt for Capability<Create> {
 
 /// Delete a branch.
 pub trait DeleteBranchExt {
-    /// Delete it, provided it still points at `revision`: retract its
-    /// memory cells and its facts.
-    fn delete(self, revision: Revision) -> Capability<Delete>;
+    /// Delete it, provided it still points at `revision` (or at nothing,
+    /// for `None`): retract its memory cells and its facts.
+    fn delete(self, revision: impl Into<Option<Revision>>) -> Capability<Delete>;
 }
 
 impl DeleteBranchExt for Capability<Branch<Void>> {
-    fn delete(self, revision: Revision) -> Capability<Delete> {
-        self.invoke(Delete { revision })
+    fn delete(self, revision: impl Into<Option<Revision>>) -> Capability<Delete> {
+        self.invoke(Delete {
+            revision: revision.into(),
+        })
     }
 }
 

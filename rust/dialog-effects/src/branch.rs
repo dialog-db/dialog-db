@@ -189,20 +189,24 @@ impl Effect for Create {
 /// subject's data is not the same as being able to destroy the thing
 /// that holds it.
 ///
-/// Deleting names the revision the branch is expected to point at, and
-/// is refused unless it points at exactly that one. A branch that moved
-/// since the caller last looked -- a commit landed, a pull advanced it
-/// -- is not the branch the caller decided to delete, so it is left
-/// alone rather than destroyed along with work the caller never saw.
+/// Deleting names the revision the branch is expected to point at, or
+/// none for a branch expected to be empty, and is refused if it points
+/// at any other. A branch that moved since the caller last looked -- a
+/// commit landed, a pull advanced it -- is not the branch the caller
+/// decided to delete, so it is left alone rather than destroyed along
+/// with work the caller never saw.
 ///
 /// The two halves cannot be one compare-and-swap, so the cells go first
 /// and the fact follows. A failure part-way therefore leaves a branch
-/// that is gone but still listed, rather than one that lists and is
-/// still there.
+/// that is gone but still listed, and deleting it again finishes the
+/// job: a branch that points at nothing has nothing left to lose.
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Delete {
-    /// The revision the branch must point at for the delete to proceed.
-    pub revision: Revision,
+    /// The revision the branch must point at for the delete to proceed,
+    /// or `None` when it is expected to point at nothing. Omitted from
+    /// the parameters when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<Revision>,
 }
 
 impl Policy for Delete {
@@ -211,6 +215,26 @@ impl Policy for Delete {
 
 impl Effect for Delete {
     type Output = Result<(), BranchError>;
+}
+
+/// Why `name` cannot name a branch, or `None` when it can.
+///
+/// A branch name is one plain path segment: stores lay a branch's cells
+/// out under its name, and one that is empty, is `.` or `..`, or holds a
+/// separator or a control character would reach cells that belong to
+/// something else (`x/../meta` is the registry's on a filesystem).
+pub fn invalid_name(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        Some("a branch name is not empty")
+    } else if name == "." || name == ".." {
+        Some("a branch name is not a relative path")
+    } else if name.contains(['/', '\\']) {
+        Some("a branch name is one path segment")
+    } else if name.chars().any(char::is_control) {
+        Some("a branch name holds no control characters")
+    } else {
+        None
+    }
 }
 
 /// Switch the replica to a branch: record it as the active one.

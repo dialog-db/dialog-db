@@ -9,9 +9,10 @@
 //! Creating and deleting touch both halves, and the two cannot be one
 //! compare-and-swap. The cell is the truth and the fact describes it,
 //! so the cell is written first on create and removed first on delete,
-//! with the fact following. A partial failure then always leaves a
-//! branch that exists but does not list, never one that lists but
-//! points at nothing.
+//! with the fact following. A create that stops part-way leaves a
+//! branch that exists but does not list; a delete that stops part-way
+//! leaves one that lists but points at nothing. Repeating the same
+//! operation finishes either.
 
 use super::Operator;
 use core::fmt::Display;
@@ -101,6 +102,13 @@ where
         let subject = input.subject().clone();
         let name = branch_fx::Branch::<method::Put>::of(&input).name.clone();
 
+        if let Some(reason) = branch_fx::invalid_name(&name) {
+            return Err(BranchError::Refused {
+                name,
+                operation: "created",
+                reason,
+            });
+        }
         if name == REGISTRY {
             return Err(BranchError::Refused {
                 name,
@@ -181,6 +189,13 @@ where
         let subject = input.subject().clone();
         let name = branch_fx::Branch::<Void>::of(&input).name.clone();
 
+        if let Some(reason) = branch_fx::invalid_name(&name) {
+            return Err(BranchError::Refused {
+                name,
+                operation: "deleted",
+                reason,
+            });
+        }
         if name == REGISTRY {
             return Err(BranchError::Refused {
                 name,
@@ -199,25 +214,30 @@ where
         // The cells go first, the head before the rest. It is checked
         // against the revision the caller named: a branch that moved
         // since they last looked is not the branch they decided to
-        // delete, and is left alone.
+        // delete, and is left alone. A head that is already gone passes:
+        // either the branch was empty, or an earlier delete got this far,
+        // and in both there is no work left to lose.
         let reference = Subject::from(subject.clone()).branch(name.as_str());
 
         let revision = reference.revision();
         revision.resolve().perform(self).await.map_err(failed)?;
-        if revision.content().as_ref() != Some(expected) {
-            return Err(moved());
+        match revision.content() {
+            None => {}
+            Some(head) if Some(&head) == expected.as_ref() => {
+                // The retraction names the version just read, so a commit
+                // that lands between the check above and this point is
+                // refused by the store rather than destroyed.
+                revision
+                    .retract()
+                    .perform(self)
+                    .await
+                    .map_err(|error| match error {
+                        RetractError::VersionMismatch { .. } => moved(),
+                        error => failed(error),
+                    })?;
+            }
+            Some(_) => return Err(moved()),
         }
-        // The retraction names the version just read, so a commit that
-        // lands between the check above and this point is refused by the
-        // store rather than destroyed.
-        revision
-            .retract()
-            .perform(self)
-            .await
-            .map_err(|error| match error {
-                RetractError::VersionMismatch { .. } => moved(),
-                error => failed(error),
-            })?;
 
         let upstream = reference.upstream();
         upstream.resolve().perform(self).await.map_err(failed)?;
@@ -669,6 +689,34 @@ mod tests {
 
         let names = listed(&operator, &did).await?;
         assert!(!names.contains(&"doomed".into()), "{names:?}");
+        Ok(())
+    }
+
+    /// A branch created empty is deleted by expecting it to point at
+    /// nothing.
+    #[dialog_common::test]
+    async fn it_deletes_an_empty_branch() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+
+        Subject::from(did.clone())
+            .writer()
+            .branches()
+            .branch("empty")
+            .create()
+            .perform(&operator)
+            .await?;
+        Subject::from(did.clone())
+            .voider()
+            .branches()
+            .branch("empty")
+            .delete(None)
+            .perform(&operator)
+            .await?;
+
+        let names = listed(&operator, &did).await?;
+        assert!(!names.contains(&"empty".into()), "{names:?}");
         Ok(())
     }
 
