@@ -1530,34 +1530,25 @@ mod tests {
     /// A bare pull takes from every branch the branch pulls from: the
     /// merges land one after another, each onto what the last left, and
     /// the pull answers the head they built.
-    /// An upstream in another repository on this device is that
-    /// repository's branch, not this one's branch of the same name:
-    /// pulling from it brings its commits.
+    /// A local upstream is named within its own repository, so a branch
+    /// of another repository on this device cannot be tracked as one:
+    /// it would silently track this repository's branch of that name.
     #[dialog_common::test]
-    async fn it_pulls_from_a_branch_in_another_local_repository() -> Result<()> {
+    async fn it_refuses_to_track_a_branch_of_another_local_repository() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let ours = test_repo(&operator, &profile).await;
         let theirs = test_repo(&operator, &profile).await;
 
-        let source = theirs.branch("main").open().perform(&operator).await?;
-        source
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:theirs".parse()?,
-                is: Value::String("Theirs".to_string()),
-                cause: None,
-            })]))
-            .perform(&operator)
-            .await?;
-
+        let source = theirs.branch("dev").open().perform(&operator).await?;
         let main = ours.branch("main").open().perform(&operator).await?;
-        main.set_upstream(&source).perform(&operator).await?;
-        let pulled = main.pull().perform(&operator).await?;
+        let tracked = main.set_upstream(&source).perform(&operator).await;
 
-        assert_eq!(
-            pulled.map(|revision| revision.tree),
-            source.revision().map(|revision| revision.tree),
-            "the pull adopted the other repository's head"
+        assert!(
+            matches!(
+                tracked,
+                Err(crate::SetUpstreamError::ForeignLocalUpstream { .. })
+            ),
+            "{tracked:?}"
         );
         Ok(())
     }
