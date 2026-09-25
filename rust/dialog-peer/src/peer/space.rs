@@ -169,19 +169,19 @@ where
     }
 
     /// Keep the sealed key of the repository `repository` in this peer's
-    /// state. A peer that keeps no state has nowhere to, and the space's
-    /// key would live only in its creator's memory: refused.
+    /// state, as it keeps the space's name and location: a peer keeping
+    /// its state only in memory keeps the sealed key as long as it does.
     async fn seal_space(
         &self,
         repository: &Did,
         sealed: Vec<u8>,
     ) -> Result<(), storage_fx::StorageError> {
-        let state = self.state_opt().ok_or_else(|| {
-            failed("a peer keeping no state has nowhere to keep a space's sealed key")
-        })?;
-        spaces::seal(state, repository, sealed, self)
-            .await
-            .map_err(failed)
+        match self.state_opt() {
+            Some(state) => spaces::seal(state, repository, sealed, self)
+                .await
+                .map_err(failed),
+            None => Ok(()),
+        }
     }
 }
 
@@ -238,6 +238,8 @@ where
             return Ok(handed::<M>(credential));
         }
         let signer = signer.signer().clone();
+        // Other algorithms are features; without them this always holds.
+        #[allow(irrefutable_let_patterns)]
         let Signer::Ed25519(ed25519) = &signer else {
             return Err(failed("only an Ed25519 space key can be sealed"));
         };
