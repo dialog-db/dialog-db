@@ -349,8 +349,8 @@ mod tests {
     use crate::repository::branch::resolve::resolve;
     use crate::schema::{BranchPull, BranchPush, DidExt as _, Replica};
     use crate::{
-        Cell, REGISTRY, RemoteEdition, RepositoryMemoryExt as _, Route, SiteAddress, Target,
-        TreeReference, UpgradeError, site_address,
+        Cell, REGISTRY, RemoteAddress, RemoteEdition, RepositoryMemoryExt as _, Route, SiteAddress,
+        Target, TreeReference, UpgradeError, site_address,
     };
     use dialog_artifacts::Instruction;
     use dialog_capability::Provider;
@@ -711,6 +711,40 @@ mod tests {
         let draft = reopened.branch("draft").open().perform(&operator).await?;
         resolve(&draft, &operator).await?;
         assert_eq!(draft.pulls().iter().count(), 1, "draft pulls from origin");
+        Ok(())
+    }
+
+    /// Every repository's legacy remote is usually named "origin", and
+    /// contacts are the host's, not a repository's. A name already given
+    /// to another peer is not given again, so looking a peer up by it
+    /// stays unambiguous.
+    #[dialog_common::test]
+    async fn it_names_a_carried_peer_only_if_the_name_is_free() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        for endpoint in ["https://one.example/ucan/", "https://two.example/ucan/"] {
+            let repo = test_repo(&operator, &profile).await;
+            unversion(&repo, &operator).await?;
+            let origin: Cell<RemoteAddress> =
+                SpaceScope::new(Subject::from(repo.did()), "remote/origin")
+                    .cell("address")
+                    .into();
+            origin
+                .publish(RemoteAddress {
+                    address: UcanAddress::new(endpoint).into(),
+                    subject: repo.did(),
+                })
+                .perform(&operator)
+                .await?;
+            repo.upgrade().perform(&operator).await?;
+        }
+
+        let named = Subject::from(profile.did())
+            .reader()
+            .peers()
+            .find("origin")
+            .perform(&operator)
+            .await?;
+        assert_eq!(named.len(), 1, "one peer is known as origin: {named:?}");
         Ok(())
     }
 }
