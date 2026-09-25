@@ -17,16 +17,19 @@
 use super::Operator;
 use core::fmt::Display;
 use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
+use dialog_common::Blake3Hash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Void;
+use dialog_effects::archive::prelude::{ArchiveScope, GetBlockExt as _};
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::branch::{self as branch_fx, BranchError, BranchRecord};
 use dialog_effects::memory::{MemoryError, Publish, Resolve, Retract};
 use dialog_effects::method;
-use dialog_repository::registry::{forget, list, record, switch};
+use dialog_repository::registry::{active, forget, list, record, switch};
+use dialog_repository::schema::{Branch as BranchConcept, Replica};
 use dialog_repository::{
-    Branch, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt, RetractError,
+    Branch, EMPTY_TREE_HASH, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt, RetractError,
 };
 
 /// The environment a branch operation runs against.
@@ -124,6 +127,32 @@ where
         // and the fact is recorded). The reverse order would leave a
         // branch that lists but points at nothing.
         if let Some(revision) = branch_fx::Create::of(&input).revision.clone() {
+            // A branch points only at a revision whose signature holds and
+            // whose tree this repository has: anything else points at
+            // content nobody vouches for, or at nothing.
+            if revision.verify().is_err() {
+                return Err(BranchError::Refused {
+                    name,
+                    operation: "created",
+                    reason: "the revision's signature does not hold",
+                });
+            }
+            if *revision.tree.hash() != EMPTY_TREE_HASH {
+                let tree = ArchiveScope::new(Subject::from(subject.clone()))
+                    .index()
+                    .read()
+                    .get(Blake3Hash::from(*revision.tree.hash()))
+                    .perform(self)
+                    .await
+                    .map_err(failed)?;
+                if tree.is_none() {
+                    return Err(BranchError::Refused {
+                        name,
+                        operation: "created",
+                        reason: "the repository does not hold the revision's tree",
+                    });
+                }
+            }
             // A fresh cell, never resolved: publishing with no expected
             // version is what refuses to move a branch that already
             // points at a different revision, while one that already
@@ -211,6 +240,20 @@ where
             reason: "it no longer points at the revision the delete expects",
         };
 
+        // The branch the replica works on is not deleted out from under
+        // it: switching away comes first.
+        let registry = self.registry(&subject).await?;
+        let operator = self.build_authority(subject.clone());
+        let replica = Replica::new(operator.profile().clone(), subject.clone());
+        let this = BranchConcept::new(&replica, name.as_str()).this;
+        if active(&registry, &operator, self).await.map_err(failed)? == Some(this) {
+            return Err(BranchError::Refused {
+                name,
+                operation: "deleted",
+                reason: "it is the branch the replica has switched to",
+            });
+        }
+
         // The cells go first, the head before the rest. It is checked
         // against the revision the caller named: a branch that moved
         // since they last looked is not the branch they decided to
@@ -253,8 +296,6 @@ where
 
         // And the fact goes last: the branch is gone before it stops
         // being listed, never the other way around.
-        let registry = self.registry(&subject).await?;
-        let operator = self.build_authority(subject);
 
         forget(&registry, &operator, name.as_str(), self)
             .await
