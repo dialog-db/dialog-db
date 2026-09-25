@@ -423,6 +423,10 @@ pub enum CommitError {
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
 
+    /// Reading the registry for what a write replaces failed.
+    #[error("Failed to read the registry: {0}")]
+    Registry(String),
+
     /// A write was attempted through a reference to a snapshot.
     ///
     /// A snapshot holds its revision by value, so nothing reached
