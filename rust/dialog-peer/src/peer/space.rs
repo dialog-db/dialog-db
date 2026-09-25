@@ -1,17 +1,19 @@
 //! Space capability providers for [`Peer`].
 
 use super::{Mode, Peer};
-use dialog_capability::access::{Access, FromCapability as _, Prove};
+use dialog_capability::access::{Access, FromCapability as _, Prove, Retain};
 use dialog_capability::{Ability, Capability, Constraint, Effect, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_credentials::Credential;
+use dialog_credentials::{Credential, Signer};
 use dialog_effects::credential::{self as credential_fx, prelude::*};
 use dialog_effects::space as space_fx;
 use dialog_effects::storage::{self as storage_fx, LocationExt as _};
 use dialog_repository::registry::RegistryEnv;
 use dialog_repository::spaces;
 use dialog_storage::provider::storage::Storage;
-use dialog_ucan::{Scope, Ucan};
+use dialog_ucan::{Scope, Ucan, UcanDelegation};
+use dialog_ucan_core::subject::Subject as UcanSubject;
+use dialog_ucan_core::{DelegationBuilder, DelegationChain};
 use dialog_varsig::{Did, Principal as _};
 
 /// The credential of a loaded space as a handle in mode `M` is given it:
@@ -29,7 +31,11 @@ impl<S, M: Mode> Provider<space_fx::Load> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Storage<S>: Provider<storage_fx::Load> + Provider<credential_fx::Load<Credential>>,
-    Self: RegistryEnv + Provider<Prove<Ucan>> + ConditionalSend + ConditionalSync,
+    Self: RegistryEnv
+        + Provider<Prove<Ucan>>
+        + Provider<Retain<Ucan>>
+        + ConditionalSend
+        + ConditionalSync,
 {
     /// A space name resolves to the repository the peer recorded under
     /// it, loaded from where it was recorded. A name the peer has no
@@ -178,6 +184,35 @@ where
         load.perform(&self.storage).await
     }
 
+    /// Have the space `space` is the key of delegate its whole authority
+    /// to the account this peer acts for, and retain the delegation where
+    /// the peer proves from.
+    async fn delegate_to_account(&self, space: &Signer) -> Result<(), storage_fx::StorageError>
+    where
+        Self: Provider<Retain<Ucan>>,
+    {
+        let delegation = DelegationBuilder::new()
+            .issuer(space.clone())
+            .audience(self.account())
+            .subject(UcanSubject::Specific(space.did()))
+            .command(Vec::new())
+            .try_build()
+            .await
+            .map_err(|error| storage_fx::StorageError::Storage(format!("{error:?}")))?;
+        Subject::from(self.home().clone())
+            .attenuate(Access)
+            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+                DelegationChain::new(delegation),
+            )))
+            .perform(self)
+            .await
+            .map_err(|error| {
+                storage_fx::StorageError::Storage(format!(
+                    "the space's delegation to its account was not kept: {error}"
+                ))
+            })
+    }
+
     /// Refuse `mount` unless this peer can prove the storage's system
     /// granted it: directly, for the peer acting as itself, or through
     /// the peer it is a session of.
@@ -216,7 +251,11 @@ where
     Storage<S>: Provider<storage_fx::Create>
         + Provider<storage_fx::Load>
         + Provider<credential_fx::Load<Credential>>,
-    Self: RegistryEnv + Provider<Prove<Ucan>> + ConditionalSend + ConditionalSync,
+    Self: RegistryEnv
+        + Provider<Prove<Ucan>>
+        + Provider<Retain<Ucan>>
+        + ConditionalSend
+        + ConditionalSync,
 {
     async fn execute(
         &self,
@@ -232,15 +271,27 @@ where
 
         let name = &space_fx::Space::of(&input).name;
         let credential = space_fx::Create::of(&input).credential.clone();
+        let Some(signer) = credential.signer().cloned() else {
+            return Err(storage_fx::StorageError::Storage(
+                "a space is created from its signing key, not a verifier".into(),
+            ));
+        };
         let location = storage_fx::Location::new(self.directory().clone(), name);
+
+        // The space keeps its identity, not its key: whoever holds the
+        // storage finds nothing to sign as the space with.
         let create = Subject::from(self.system().clone())
             .attenuate(storage_fx::Storage)
             .attenuate(location.clone())
-            .create(credential);
+            .create(Credential::from(signer.verifier()));
         self.may_mount(&create).await?;
         let created = create.perform(&self.storage).await?;
+
+        // Its authority goes to the account it is created for, where the
+        // peer acting for that account proves it from.
+        self.delegate_to_account(&signer).await?;
         self.record_space(&created.did(), name, &location).await;
-        Ok(created)
+        Ok(credential)
     }
 }
 
