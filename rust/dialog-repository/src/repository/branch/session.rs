@@ -431,14 +431,16 @@ impl<Env> Clone for QueryEnv<'_, Env> {
 /// helper so every line in a [`QueryEnv`] shares the exact same read path
 /// (a transaction query is itself a single-line `QueryEnv`).
 ///
-/// Takes the line by value (a cheap clone: shared caches) and moves it
-/// into the returned stream, so the stream borrows only the env —
-/// errors surface as the stream's first item.
-pub(crate) fn select_from_source<'a, Env>(
-    source: Source,
+/// The line is only borrowed while the scan is set up: the returned
+/// stream borrows nothing but the env. The setup runs here rather than
+/// inside the stream so the stream boxed per scan holds only the scan,
+/// not the setup's futures alongside it (together they came to 16 KiB,
+/// allocated and copied for every scan a query ran).
+pub(crate) async fn select_from_source<'a, Env>(
+    source: SourceRef<'_>,
     env: &'a Env,
     input: ArtifactSelector<Constrained>,
-) -> ArtifactStream<'a>
+) -> Result<ArtifactStream<'a>, DialogArtifactsError>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -448,18 +450,13 @@ where
         + ConditionalSync
         + 'static,
 {
-    Box::pin(async_stream::try_stream! {
-        let select = crate::Select::from_source(source.as_ref(), input);
-        let remote = source.as_ref().fallback(env).await;
-        // Concurrent reads of one digest share fetch-and-hydrate through
-        // the env's own `Hydrate` flight (see `crate::Hydrate`), with
-        // every other evaluation in the process.
-        let store = NetworkedIndex::new(env, select.catalog(), remote);
-        let stream = select.execute(store).await?;
-        for await artifact in stream {
-            yield artifact?;
-        }
-    })
+    let select = crate::Select::from_source(source, input);
+    let remote = source.fallback(env).await;
+    // Concurrent reads of one digest share fetch-and-hydrate through
+    // the env's own `Hydrate` flight (see `crate::Hydrate`), with
+    // every other evaluation in the process.
+    let store = NetworkedIndex::new(env, select.catalog(), remote);
+    Ok(Box::pin(select.execute(store).await?))
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -497,9 +494,9 @@ where
         // Line streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
         // retract in `with(..)`) suppresses matching source facts. Each
-        // owns its line clone and borrows only `self.env`.
+        // borrows only `self.env`.
         for source in &self.sources {
-            let raw = select_from_source(source.clone(), self.env, input.clone());
+            let raw = select_from_source(source.as_ref(), self.env, input.clone()).await?;
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
@@ -656,7 +653,8 @@ where
         }
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
-        select_from_source(source.clone(), self.env, selector)
+        select_from_source(source.as_ref(), self.env, selector)
+            .await?
             .owned()
             .try_collect()
             .await
