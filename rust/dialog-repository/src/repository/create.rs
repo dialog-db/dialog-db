@@ -1,8 +1,10 @@
+use crate::repository::upgrade::stamp;
 use crate::{CreateRepositoryError, Repository};
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
+use dialog_effects::memory::Publish;
 use dialog_effects::space::{self, SpaceExt};
 
 /// Command to create a new repository.
@@ -18,7 +20,7 @@ impl CreateRepository {
         env: &Env,
     ) -> Result<Repository<SignerCredential>, CreateRepositoryError>
     where
-        Env: Provider<space::Create> + ConditionalSync,
+        Env: Provider<space::Create> + Provider<Publish> + ConditionalSync,
     {
         self.with_credential(Ed25519Signer::generate().await?)
             .perform(env)
@@ -80,12 +82,14 @@ impl CreateRepositoryWith {
         env: &Env,
     ) -> Result<Repository<SignerCredential>, CreateRepositoryError>
     where
-        Env: Provider<space::Create> + ConditionalSync,
+        Env: Provider<space::Create> + Provider<Publish> + ConditionalSync,
     {
         self.space
             .create(Credential::Signer(self.credential.clone()))
             .perform(env)
             .await?;
-        Ok(Repository::from(self.credential))
+        let repository = Repository::from(self.credential);
+        stamp(&repository.subject(), env).await?;
+        Ok(repository)
     }
 }

@@ -84,6 +84,10 @@ pub enum OpenRepositoryError {
     /// Opening the repository's registry branch failed.
     #[error("Failed to open the branch registry: {0}")]
     Registry(#[from] ResolveError),
+
+    /// Upgrading the repository's storage to the current layout failed.
+    #[error("Failed to upgrade the repository: {0}")]
+    Upgrade(#[from] UpgradeError),
 }
 
 /// Errors returned by the load repository command.
@@ -96,6 +100,10 @@ pub enum LoadRepositoryError {
     /// Opening the repository's registry branch failed.
     #[error("Failed to open the branch registry: {0}")]
     Registry(#[from] ResolveError),
+
+    /// Upgrading the repository's storage to the current layout failed.
+    #[error("Failed to upgrade the repository: {0}")]
+    Upgrade(#[from] UpgradeError),
 }
 
 /// Errors returned by the create repository command.
@@ -108,6 +116,10 @@ pub enum CreateRepositoryError {
     /// Backend storage failed during create.
     #[error("Storage failed during create: {0}")]
     Storage(#[from] StorageError),
+
+    /// Recording the layout version of the new repository failed.
+    #[error("Failed to record the new repository's version: {0}")]
+    Version(#[from] PublishError),
 }
 
 /// Errors returned when connecting to a peer, or opening a branch there.
@@ -287,6 +299,17 @@ pub enum SetUpstreamError {
     UpstreamIsItself {
         /// The branch name.
         branch: String,
+    },
+
+    /// The upstream is a branch of another repository on this device.
+    /// A local upstream is named within its own repository, so tracking
+    /// one elsewhere would track this repository's branch of that name.
+    #[error("Branch {branch} cannot track {target} in another local repository")]
+    ForeignLocalUpstream {
+        /// The branch name.
+        branch: String,
+        /// The branch it was asked to track.
+        target: String,
     },
 
     /// The operator could not say who it acts for.
