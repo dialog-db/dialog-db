@@ -19,6 +19,7 @@ use dialog_capability::Provider;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
+use std::pin::Pin;
 
 /// Base EAV scan query that yields all matching artifacts.
 ///
@@ -314,7 +315,7 @@ impl AttributeQueryAll {
         self,
         env: &'a Env,
         selection: M,
-    ) -> impl Selection + 'a
+    ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
     {
@@ -324,13 +325,18 @@ impl AttributeQueryAll {
         // a cold replica replicates them concurrently instead of paying
         // one round trip per row (see `super::pipelined`).
         let hinted = selector.clone();
-        let selection = pipelined(selection, env, move |base| {
+        let selection = Box::pin(pipelined(selection, env, move |base| {
             if hinted.absent_blocked(base) {
                 return None;
             }
             (&hinted.resolve(base)).try_into().ok()
-        });
-        try_stream! {
+        }));
+        // The stream is boxed where it is built, and so is its input:
+        // the generator holds its input and the pinned copy it iterates,
+        // so an unboxed input sat in its state twice, and returning the
+        // generator unboxed copied the whole state again at every layer
+        // that wrapped or boxed it (several KiB per scan step, per row).
+        Box::pin(try_stream! {
             for await candidate in selection {
                 let base = candidate?;
 
@@ -368,7 +374,7 @@ impl AttributeQueryAll {
                     yield extension;
                 }
             }
-        }
+        })
     }
 
     /// Execute this query, returning a stream of claims.

@@ -16,6 +16,7 @@ use dialog_artifacts::{Artifact, ArtifactView, Cause, DialogArtifactsError, Sele
 use dialog_capability::Provider;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
+use std::pin::Pin;
 
 /// Materializes an election winner, treating a corrupt stored row
 /// ([`DialogArtifactsError::CorruptEntry`]) as an ignorable non-result
@@ -199,7 +200,7 @@ impl AttributeQueryOnly {
         self,
         env: &'a Env,
         selection: M,
-    ) -> impl Selection + 'a
+    ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
     {
@@ -211,7 +212,7 @@ impl AttributeQueryOnly {
         // mirrors the sliding-window path's blanked scan exactly; the
         // challenge path's secondary lookups are not hinted.
         let hinted = selector.clone();
-        let selection = pipelined(selection, env, move |base| {
+        let selection = Box::pin(pipelined(selection, env, move |base| {
             if hinted.absent_blocked(base) {
                 return None;
             }
@@ -230,8 +231,13 @@ impl AttributeQueryOnly {
             } else {
                 None
             }
-        });
-        try_stream! {
+        }));
+        // The stream is boxed where it is built, and so is its input:
+        // the generator holds its input and the pinned copy it iterates,
+        // so an unboxed input sat in its state twice, and returning the
+        // generator unboxed copied the whole state again at every layer
+        // that wrapped or boxed it (several KiB per scan step, per row).
+        Box::pin(try_stream! {
             for await each in selection {
                 let base = each?;
 
@@ -330,7 +336,7 @@ impl AttributeQueryOnly {
                     }
                 }
             }
-        }
+        })
     }
 
     /// Execute this query, returning a stream of claims.
