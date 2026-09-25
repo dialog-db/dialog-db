@@ -4,6 +4,7 @@ use super::{Mode, Peer};
 use dialog_capability::{Capability, Policy, Provider, Subject, did};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
+use dialog_effects::credential::{self as credential_fx, prelude::*};
 use dialog_effects::space as space_fx;
 use dialog_effects::storage::{self as storage_fx, LocationExt as _};
 use dialog_repository::registry::RegistryEnv;
@@ -16,7 +17,7 @@ use dialog_varsig::{Did, Principal as _};
 impl<S, M: Mode> Provider<space_fx::Load> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Storage<S>: Provider<storage_fx::Load>,
+    Storage<S>: Provider<storage_fx::Load> + Provider<credential_fx::Load<Credential>>,
     Self: RegistryEnv + ConditionalSend + ConditionalSync,
 {
     /// A space name resolves to the repository the peer recorded under
@@ -41,6 +42,27 @@ where
             if credential.did() != repository {
                 return Err(storage_fx::StorageError::Storage(format!(
                     "space {name} is recorded as {repository}, but its location holds {}",
+                    credential.did()
+                )));
+            }
+            return Ok(credential);
+        }
+
+        // A repository named by its DID is the one already mounted, if it
+        // is; else it may be recorded under another name, and is found by
+        // the repository it is, from where it was recorded.
+        if let Ok(repository) = name.parse::<Did>()
+            && let Some(credential) = self.mounted(&repository).await
+        {
+            return Ok(credential);
+        }
+        if let Ok(repository) = name.parse::<Did>()
+            && let Some(location) = self.located(&repository).await?
+        {
+            let credential = self.load_at(location).await?;
+            if credential.did() != repository {
+                return Err(storage_fx::StorageError::Storage(format!(
+                    "{repository} is recorded at a location that holds {}",
                     credential.did()
                 )));
             }
@@ -85,6 +107,21 @@ where
         }
     }
 
+    /// Where this peer recorded the repository `repository` is stored,
+    /// under any name. An ephemeral peer records nothing.
+    async fn located(
+        &self,
+        repository: &Did,
+    ) -> Result<Option<storage_fx::Location>, storage_fx::StorageError> {
+        let Some(state) = self.state_opt() else {
+            return Ok(None);
+        };
+        let found = spaces::locate(state, repository, self)
+            .await
+            .map_err(|error| storage_fx::StorageError::Storage(error.to_string()))?;
+        Ok(found.into_iter().next().map(|(_, location)| location))
+    }
+
     /// Record that the repository `repository` is known as `name` and
     /// stored at `location`.
     ///
@@ -100,8 +137,20 @@ where
 
 impl<S: Clone, M: Mode> Peer<S, M>
 where
-    Storage<S>: Provider<storage_fx::Load>,
+    Storage<S>: Provider<storage_fx::Load> + Provider<credential_fx::Load<Credential>>,
 {
+    /// The credential of the repository `repository`, if its space is
+    /// mounted in this peer's storage.
+    async fn mounted(&self, repository: &Did) -> Option<Credential> {
+        Subject::from(repository.clone())
+            .credential()
+            .key(credential_fx::SELF)
+            .load()
+            .perform(&self.storage)
+            .await
+            .ok()
+    }
+
     /// The credential of the space stored at `location`.
     async fn load_at(
         &self,
@@ -229,6 +278,48 @@ mod tests {
             spaces::find(state, &name, &peer).await?,
             vec![(repository.did(), location)]
         );
+        Ok(())
+    }
+
+    /// A repository created under a name is opened by its DID from a new
+    /// process over the same storage: nothing is mounted yet, and nothing
+    /// is at the location its DID names, so it is found from where the
+    /// peer recorded it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_opens_a_recorded_repository_by_did_after_a_restart() -> anyhow::Result<()> {
+        use dialog_repository::RepositoryAtExt as _;
+        use dialog_storage::provider::storage::NativeSpace;
+
+        let root = tempfile::tempdir()?;
+        let base = Directory::At(root.path().to_string_lossy().into_owned());
+        let name = unique_name("alice");
+
+        let first = Storage::<NativeSpace>::default();
+        let credential = OpenCredential::open(name.clone())
+            .at(base.clone())
+            .perform(&first)
+            .await?;
+        let peer = Peer::new(credential.clone())
+            .storage(first)
+            .base(base.clone())
+            .await?;
+        let notes = peer.space("notes").create().perform(&peer).await?;
+
+        let second = Storage::<NativeSpace>::default();
+        let credential = OpenCredential::load(name)
+            .at(base.clone())
+            .perform(&second)
+            .await?;
+        let restarted = Peer::new(credential).storage(second).base(base).await?;
+        let branch = restarted
+            .did()
+            .repository(notes.did())
+            .branch("main")
+            .open()
+            .perform(&restarted)
+            .await?;
+        assert_eq!(branch.subject().did(), &notes.did());
         Ok(())
     }
 }

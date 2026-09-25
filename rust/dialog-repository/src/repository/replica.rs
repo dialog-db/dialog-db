@@ -109,11 +109,30 @@ impl OpenReplicaBranch {
             });
         }
         let subject = match replica.by {
-            By::Entity(entity) => entity.to_string().parse::<Did>().map_err(|_| {
-                OpenReplicaBranchError::NotRepository {
-                    entity: entity.to_string(),
+            // A repository named by its DID is loaded as the space named by
+            // it: from where the peer recorded it, or else from the location
+            // its DID names, and it must be that repository.
+            By::Entity(entity) => {
+                let did = entity.to_string().parse::<Did>().map_err(|_| {
+                    OpenReplicaBranchError::NotRepository {
+                        entity: entity.to_string(),
+                    }
+                })?;
+                let loaded = SpaceHandle {
+                    peer: replica.peer.clone(),
+                    name: did.to_string(),
                 }
-            })?,
+                .load()
+                .perform(env)
+                .await?
+                .did();
+                if loaded != did {
+                    return Err(OpenReplicaBranchError::NotRepository {
+                        entity: entity.to_string(),
+                    });
+                }
+                did
+            }
             By::Name(name) => SpaceHandle {
                 peer: replica.peer.clone(),
                 name,
