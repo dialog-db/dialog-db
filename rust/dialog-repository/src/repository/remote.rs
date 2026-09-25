@@ -16,5 +16,8 @@ pub use archive::*;
 mod branch;
 pub use branch::*;
 
+mod connection;
+pub use connection::*;
+
 mod repository;
 pub use repository::*;
