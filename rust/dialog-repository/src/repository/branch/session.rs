@@ -32,8 +32,8 @@ use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
-    assemble, builtin, conclusion_attr, conclusion_selector, has_overlay_rules, hydrate,
-    overlay_rules, rule_entities, source_attr, source_bytes, source_selector,
+    assemble, builtin, conclusion_attr, conclusion_selector, has_overlay_rules, holds_rules,
+    hydrate, overlay_rules, rule_entities, source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -830,9 +830,12 @@ where
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let concept = input.this();
 
-        // An assembled rule set depends only on the layers it was resolved
-        // from, so while none has moved -- and the overlay installs no
-        // rules, which are read fresh -- the last one assembled stands.
+        // An assembled rule set depends only on the committed layers it was
+        // resolved from, so while none has moved the last one assembled
+        // stands. Not when rules are read fresh: from the query's overlay,
+        // or from a line's session overlay, which moves without moving its
+        // root. Nor when the query records what it reads, since reading
+        // the rules is what records a subscription's demand on them.
         let roots: Vec<_> = self
             .sources
             .iter()
@@ -842,7 +845,14 @@ where
             .sources
             .first()
             .map(|source| source.as_ref().rule_cache())
-            .filter(|_| !has_overlay_rules(&self.changes));
+            .filter(|_| {
+                self.demand.is_none()
+                    && !has_overlay_rules(&self.changes)
+                    && !self
+                        .sources
+                        .iter()
+                        .any(|source| holds_rules(source.as_ref().overlay()))
+            });
         if let Some(bundle) = cache
             .as_ref()
             .and_then(|cache| cache.bundle(&input, &roots))
