@@ -61,6 +61,7 @@
 //! # }
 //! ```
 
+use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
@@ -356,6 +357,8 @@ impl ReadBlob<'_> {
         // through a local digest-verified import sink. An attempt is the
         // whole transfer, since the read can fail at any point.
         let hash = &hash;
+        // Only the peer's side fails over: the local import would fail the
+        // same at every address.
         remote
             .reach(|address| async move {
                 let mut source = address
@@ -367,20 +370,23 @@ impl ReadBlob<'_> {
                     .read(hash.clone())
                     .fork(address.site())
                     .perform(env)
-                    .await?;
+                    .await
+                    .map_err(Step::Remote)?;
                 let mut sink = line
                     .archive()
                     .blob()
                     .import(hash.clone(), size)
                     .perform(env)
-                    .await?;
-                while let Some(chunk) = source.next().await? {
-                    sink.write_all(&chunk).await?;
+                    .await
+                    .map_err(Step::Local)?;
+                while let Some(chunk) = source.next().await.map_err(Step::Remote)? {
+                    sink.write_all(&chunk).await.map_err(Step::Local)?;
                 }
-                sink.finish().await?;
-                Ok::<_, BlobError>(())
+                sink.finish().await.map_err(Step::Local)?;
+                Ok::<_, Step<BlobError>>(())
             })
-            .await?;
+            .await
+            .map_err(Step::into_inner)?;
 
         // Serve the requested read from the now-local copy.
         line.archive()

@@ -80,6 +80,7 @@ use parking_lot::RwLock;
 
 use dialog_varsig::Principal;
 
+use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex, PublishError,
@@ -812,7 +813,8 @@ impl SnapshotExport {
                                         .read(digest.clone())
                                         .fork(address.site())
                                         .perform(env)
-                                        .await?;
+                                        .await
+                                        .map_err(Step::Remote)?;
                                     let mut sink = subject
                                         .clone()
                                         .writer()
@@ -820,14 +822,18 @@ impl SnapshotExport {
                                         .blob()
                                         .import(digest.clone(), size)
                                         .perform(env)
-                                        .await?;
-                                    while let Some(chunk) = source.next().await? {
-                                        sink.write_all(&chunk).await?;
+                                        .await
+                                        .map_err(Step::Local)?;
+                                    while let Some(chunk) =
+                                        source.next().await.map_err(Step::Remote)?
+                                    {
+                                        sink.write_all(&chunk).await.map_err(Step::Local)?;
                                     }
-                                    sink.finish().await?;
-                                    Ok::<_, BlobError>(())
+                                    sink.finish().await.map_err(Step::Local)?;
+                                    Ok::<_, Step<BlobError>>(())
                                 })
-                                .await?;
+                                .await
+                                .map_err(Step::into_inner)?;
                             subject
                                 .clone()
                                 .reader()
