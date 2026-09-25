@@ -517,6 +517,8 @@ mod tests {
         let sealed = spaces::sealed(peer.state()?, &created.did(), &peer)
             .await?
             .expect("the space's key is kept sealed");
+        // Other algorithms are features; without them this always holds.
+        #[allow(irrefutable_let_patterns)]
         let Signer::Ed25519(account) = credential.signer() else {
             panic!("the account is an Ed25519 key");
         };
@@ -526,6 +528,61 @@ mod tests {
             .await?;
         let key = Ed25519Signer::import(KeyExport::Extractable(seed)).await?;
         assert_eq!(key.did(), created.did());
+        Ok(())
+    }
+
+    /// A space from before keys were sealed still holds its signing key.
+    /// Loading it through a peer seals the key to the account, has the
+    /// space delegate to it, and leaves only the verifier in the space.
+    #[dialog_common::test]
+    async fn it_seals_the_key_of_a_space_from_before_keys_were_sealed() -> anyhow::Result<()> {
+        let storage = Storage::volatile();
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&storage)
+            .await?;
+        let peer = peer_at(&storage, &credential, "/legacy").await?;
+        let name = unique_name("notes");
+
+        // Created the way every space was before: its key stored in it.
+        let location = Location::new(Directory::At("/legacy".into()), name.as_str());
+        let repository =
+            Credential::Signer(SignerCredential::from(Ed25519Signer::generate().await?));
+        Subject::from(did!("local:storage"))
+            .attenuate(storage_fx::Storage)
+            .attenuate(location)
+            .create(repository.clone())
+            .perform(&storage)
+            .await?;
+
+        let loaded = peer.space(name).load().perform(&peer).await?;
+        assert_eq!(loaded.did(), repository.did());
+
+        let stored = Subject::from(repository.did())
+            .credential()
+            .key(credential_fx::SELF)
+            .load()
+            .perform(&storage)
+            .await?;
+        assert!(
+            matches!(stored, Credential::Verifier(_)),
+            "the space still holds its signing key"
+        );
+        assert!(
+            spaces::sealed(peer.state()?, &repository.did(), &peer)
+                .await?
+                .is_some(),
+            "the space's key was not sealed"
+        );
+        let scope = Scope {
+            subject: UcanSubject::Specific(repository.did()),
+            command: UcanCommand(vec!["archive".to_string()]),
+            parameters: Parameters::default(),
+        };
+        Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(peer.did(), scope))
+            .perform(&peer)
+            .await?;
         Ok(())
     }
 
