@@ -4,7 +4,7 @@
 //!
 //! - **Slim facts** under the reserved `dialog.ucan/*` attributes, one per
 //!   queried field (audience, subject, issuer, command, and the validity
-//!   bounds when present), on the entity `blob:<hash>` of the certificate's
+//!   bounds when present), on the entity `asset:<hash>` of the certificate's
 //!   encoded envelope. They are ordinary version-controlled facts: they ride
 //!   the fact indexes, replicate with the tree, merge with observed-remove
 //!   semantics, and answer datalog queries.
@@ -347,9 +347,16 @@ impl RetractDelegation<'_> {
                 continue;
             }
 
+            // A certificate retained before content entities moved to
+            // `asset:` holds its facts on its `blob:` entity, so retract the
+            // facts under both names. Retracting a fact that is not there is
+            // a no-op, so the name that holds nothing costs nothing.
             let entity = Entity::from_blob(&index_hash)?;
-            for artifact in field_artifacts(&entity, &certificate)? {
-                instructions.push(Instruction::Retract(artifact));
+            let legacy = Entity::from_legacy_blob(&index_hash)?;
+            for holder in [&entity, &legacy] {
+                for artifact in field_artifacts(holder, &certificate)? {
+                    instructions.push(Instruction::Retract(artifact));
+                }
             }
             entries.push(BlobRecord::retract_entry(&index_hash));
             retracted.push(entity);
@@ -385,7 +392,7 @@ mod tests {
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::blob::BlobReader;
     use dialog_effects::storage::Location;
-    use dialog_peer::Peer;
+    use dialog_peer::{Peer, Session};
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_ucan_core::subject::Subject as UcanSubject;
     use dialog_ucan_core::{DelegationBuilder, DelegationChain};
@@ -624,6 +631,74 @@ mod tests {
             branch.revision().map(|revision| revision.version()),
             head.map(|revision| revision.version()),
         );
+        Ok(())
+    }
+
+    /// The facts `branch` holds about `entity`.
+    async fn facts_of(
+        branch: &crate::Branch,
+        operator: &Peer<VolatileSpace, Session>,
+        entity: &Entity,
+    ) -> Result<Vec<Artifact>> {
+        Ok(branch
+            .claims()
+            .select(ArtifactSelector::new().of(entity.clone()))
+            .perform(operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|item| item.and_then(|view| view.to_owned()))
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// A certificate retained before content entities moved to `asset:`
+    /// keeps its facts on its `blob:` entity. Retracting the delegation
+    /// still reaches them there.
+    #[dialog_common::test]
+    async fn it_retracts_a_delegation_retained_under_the_legacy_name() -> Result<()> {
+        let (branch, operator) = open_branch("delegation-legacy").await?;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let chain = delegate(&space, &holder, UcanSubject::Specific(space.did())).await;
+
+        // Retain the way it was done before the switch: the same facts and
+        // index entry, on the `blob:` entity.
+        let mut instructions = Vec::new();
+        let mut entries = Vec::new();
+        let mut legacy = Vec::new();
+        for certificate in chain.certificates() {
+            let bytes = encode(&certificate)?;
+            let mut sink = branch.archive().blob().write().perform(&operator).await?;
+            sink.write_all(&bytes).await?;
+            let hash = *sink.finish().await?.as_bytes();
+            let entity = Entity::from_legacy_blob(&hash)?;
+            for artifact in field_artifacts(&entity, &certificate)? {
+                instructions.push(Instruction::Assert(artifact));
+            }
+            entries.push(BlobRecord::new(bytes.len() as u64).entry(&hash));
+            legacy.push(entity);
+        }
+        branch
+            .commit(stream::iter(instructions))
+            .machinery()
+            .with_entries(entries)
+            .perform(&operator)
+            .await?;
+        for entity in &legacy {
+            assert!(!facts_of(&branch, &operator, entity).await?.is_empty());
+        }
+
+        branch
+            .delegations()
+            .retract(chain)
+            .perform(&operator)
+            .await?;
+
+        for entity in &legacy {
+            let facts = facts_of(&branch, &operator, entity).await?;
+            assert!(facts.is_empty(), "legacy facts retracted: {facts:?}");
+        }
         Ok(())
     }
 
