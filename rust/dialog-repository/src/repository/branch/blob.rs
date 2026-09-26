@@ -2,7 +2,7 @@
 //!
 //! A blob is a whole, hash-addressable binary object that rides the artifact
 //! tree via the blob index. It is referenced by its content-derived entity
-//! `blob:<hash>` (see [`Entity::from_blob`]), so a blob is a first-class
+//! `asset:<hash>` (see [`Entity::from_blob`]), so a blob is a first-class
 //! resource other facts can point at — attach a name, a media type, an author
 //! as ordinary assertions, then find blobs with a normal datalog query rather
 //! than a full-index scan.
@@ -212,7 +212,7 @@ impl<S> BlobImportBuilder<S> {
     }
 }
 
-/// The `blob:<hash>` hash carried by `entity`, or a `NotFound` error naming it.
+/// The hash an `asset:<hash>` entity names, or a `NotFound` error naming it.
 fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
     entity
         .blob_hash()
@@ -412,7 +412,7 @@ impl<S> WriteBlob<'_, S>
 where
     S: Stream<Item = Result<Vec<u8>, BlobError>> + ConditionalSend + Unpin,
 {
-    /// Execute the write, returning the blob's entity (`blob:<hash>`).
+    /// Execute the write, returning the blob's entity (`asset:<hash>`).
     ///
     /// Streams the source into the local blob store (hashing and counting bytes
     /// as it goes), records the resulting `{size}` in the blob index, then
@@ -734,7 +734,7 @@ mod tests {
             .write((&branch).into())
             .perform(&operator)
             .await?;
-        assert!(entity.as_str().starts_with("blob:"));
+        assert!(entity.as_str().starts_with("asset:"));
 
         // size from the index, no fetch
         assert_eq!(
