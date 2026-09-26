@@ -411,7 +411,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::unique_name;
+    use crate::helpers::{test_grant, test_storage, test_system, unique_name};
     use crate::{ClaimExt as _, Peer};
     use dialog_capability::access::{Access, Prove};
     use dialog_capability::{Subject, did};
@@ -437,6 +437,7 @@ mod tests {
     ) -> anyhow::Result<Peer<VolatileSpace>> {
         Ok(Peer::new(credential.clone())
             .storage(storage.clone())
+            .grant(test_grant().await)
             .base(Directory::At(base.into()))
             .await?)
     }
@@ -446,7 +447,7 @@ mod tests {
     /// no record of somewhere else.
     #[dialog_common::test]
     async fn it_resolves_a_name_from_where_it_was_recorded() -> anyhow::Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
@@ -467,7 +468,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_refuses_to_build_a_peer_over_a_storage_it_was_not_granted() -> anyhow::Result<()> {
         let system = SignerCredential::from(Ed25519Signer::generate().await?);
-        let storage = Storage::volatile().owned_by(system);
+        let storage = Storage::volatile().owned_by(system.did());
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
@@ -485,7 +486,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_opens_a_space_for_a_session_only_with_the_storages_authority() -> anyhow::Result<()>
     {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
@@ -517,7 +518,7 @@ mod tests {
     /// space's identity there, but nothing to sign as it with.
     #[dialog_common::test]
     async fn it_keeps_no_signing_key_in_a_created_space() -> anyhow::Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
@@ -546,7 +547,7 @@ mod tests {
     /// no delegation minted by hand.
     #[dialog_common::test]
     async fn it_proves_authority_over_a_space_it_created() -> anyhow::Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
@@ -574,7 +575,7 @@ mod tests {
     /// opens it: the key it reveals is the one the space is named by.
     #[dialog_common::test]
     async fn it_seals_a_created_spaces_key_to_its_account() -> anyhow::Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
@@ -607,7 +608,7 @@ mod tests {
     /// space delegate to it, and leaves only the verifier in the space.
     #[dialog_common::test]
     async fn it_seals_the_key_of_a_space_from_before_keys_were_sealed() -> anyhow::Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
@@ -661,7 +662,7 @@ mod tests {
     /// name, is recorded the first time it is loaded.
     #[dialog_common::test]
     async fn it_records_a_name_found_in_the_base_directory() -> anyhow::Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
@@ -705,23 +706,28 @@ mod tests {
         let base = Directory::At(root.path().to_string_lossy().into_owned());
         let name = unique_name("alice");
 
-        let first = Storage::<NativeSpace>::default();
+        let first = Storage::<NativeSpace>::default().owned_by(test_system().await.did());
         let credential = OpenCredential::open(name.clone())
             .at(base.clone())
             .perform(&first)
             .await?;
         let peer = Peer::new(credential.clone())
             .storage(first)
+            .grant(test_grant().await)
             .base(base.clone())
             .await?;
         let notes = peer.space("notes").create().perform(&peer).await?;
 
-        let second = Storage::<NativeSpace>::default();
+        let second = Storage::<NativeSpace>::default().owned_by(test_system().await.did());
         let credential = OpenCredential::load(name)
             .at(base.clone())
             .perform(&second)
             .await?;
-        let restarted = Peer::new(credential).storage(second).base(base).await?;
+        let restarted = Peer::new(credential)
+            .storage(second)
+            .grant(test_grant().await)
+            .base(base)
+            .await?;
         let branch = restarted
             .did()
             .repository(notes.did())

@@ -30,7 +30,9 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
 use dialog_effects::peer::prelude::*;
 use dialog_peer::OpenCredential;
-use dialog_peer::helpers::{open_peer, test_session_with_peer, unique_name};
+use dialog_peer::helpers::{
+    open_peer, test_grant, test_session_with_peer, test_storage, unique_name,
+};
 // Only the native-only tests below construct one.
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::BlobError;
@@ -63,7 +65,7 @@ use dialog_search_tree::NoveltyOp;
 use dialog_search_tree::{
     ArchivedNodeBody, ContentAddressedStorage as TreeStorage, Traversable as _, Visit, into_owned,
 };
-use dialog_storage::provider::storage::{Storage, VolatileSpace};
+use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::{StreamExt, stream};
 
 fn s3_site_address(s3: &S3Address) -> S3SiteAddress {
@@ -2488,7 +2490,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
 
     // --- The account: its own identity, its own repository, the durable
     // home of delegations. ---
-    let account_storage = Storage::volatile();
+    let account_storage = test_storage().await;
     let account_signer = Ed25519Signer::generate().await?;
     let account_name = unique_name("account");
     StorageFx::profile(account_name.clone())
@@ -2503,6 +2505,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
             .await?;
         Peer::new(credential)
             .storage(account_storage.clone())
+            .grant(test_grant().await)
             .await?
     };
     let account_operator = account_profile
@@ -2562,7 +2565,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
     // --- The device: fresh profile and operator. "Login" retains the
     // account-to-profile powerline locally (handed over out of band) and
     // points the profile's access branch at the account. ---
-    let device_storage = Storage::volatile();
+    let device_storage = test_storage().await;
     let device_profile = open_peer(
         device_storage.clone(),
         Location::profile(unique_name("device")),
@@ -2671,7 +2674,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
     let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
 
     // The account, holding a space's grant in its pushed access branch.
-    let account_storage = Storage::volatile();
+    let account_storage = test_storage().await;
     let account_signer = Ed25519Signer::generate().await?;
     let account_name = unique_name("account");
     StorageFx::profile(account_name.clone())
@@ -2686,6 +2689,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
             .await?;
         Peer::new(credential)
             .storage(account_storage.clone())
+            .grant(test_grant().await)
             .await?
     };
     let account_operator = account_profile
@@ -2739,7 +2743,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
 
     // The device logs in: retain the powerline, point at the account,
     // pull WITH download.
-    let device_storage = Storage::volatile();
+    let device_storage = test_storage().await;
     let device_profile = open_peer(
         device_storage.clone(),
         Location::profile(unique_name("device")),
@@ -2902,7 +2906,7 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
     // --- Bob: the delegation lands in his LEGACY certificate store, the
     // way an old install left it (storage-routed, not through the
     // operator). ---
-    let bob_storage = Storage::volatile();
+    let bob_storage = test_storage().await;
     let bob_profile = open_peer(
         bob_storage.clone(),
         Location::profile(unique_name("migrate-bob")),
@@ -3574,7 +3578,7 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
     assert_eq!(expected_blobs, 1, "site A's export carries the blob");
 
     // --- Site B: same remote, empty local store, head only. ---
-    let storage_b = Storage::<VolatileSpace>::volatile();
+    let storage_b = test_storage().await;
     let profile_b = open_peer(storage_b.clone(), Location::profile(unique_name("reach-b"))).await?;
     let operator_b = profile_b.session(b"test").allow(Subject::any()).await?;
     let repo_b = profile_b
@@ -3729,7 +3733,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
 
     // --- Site B: pull the fact, then advance on its own so the next pull
     // is a real merge rather than a fast-forward adoption. ---
-    let storage_b = Storage::<VolatileSpace>::volatile();
+    let storage_b = test_storage().await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("retire-b")),
@@ -3866,7 +3870,7 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
 
     // The account publishes its access branch, holding one grant, to the
     // access service.
-    let account_storage = Storage::volatile();
+    let account_storage = test_storage().await;
     let account_signer = Ed25519Signer::generate().await?;
     let account_name = unique_name("account");
     StorageFx::profile(account_name.clone())
@@ -3881,6 +3885,7 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
             .await?;
         Peer::new(credential)
             .storage(account_storage.clone())
+            .grant(test_grant().await)
             .await?
     };
     let account_operator = account_profile
@@ -3931,7 +3936,7 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
 
     // A device of the account: its login grant retained locally, the
     // account tracked as its access upstream.
-    let device_storage = Storage::volatile();
+    let device_storage = test_storage().await;
     let device_profile = open_peer(
         device_storage.clone(),
         Location::profile(unique_name("device")),

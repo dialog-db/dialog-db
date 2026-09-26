@@ -54,7 +54,7 @@ impl DialogRepo<Peer<VolatileSpace, Session>> {
     /// Open a fresh volatile (in-memory) repository — the CPU-isolation
     /// signal, like `dialog_mem`.
     pub async fn volatile() -> Result<Self> {
-        let storage = Storage::volatile();
+        let storage = dialog_peer::helpers::test_storage().await;
         let profile = dialog_peer::helpers::open_peer(
             storage.clone(),
             Location::profile(unique_name("baseline")),

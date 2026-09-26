@@ -9,12 +9,11 @@ use dialog_capability::{Ability, Capability, Constraint, Subject, did};
 use dialog_common::Holdings;
 use dialog_credentials::{Ed25519Signer, Signer, SignerCredential};
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
-use dialog_identity::access::Claim;
+use dialog_identity::access::{Access, Claim};
 use dialog_network::Network;
 use dialog_repository::{ACCESS_BRANCH, Repository};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, UcanCertificate};
-use dialog_ucan_core::subject::Subject as UcanSubject;
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
 use dialog_varsig::{Did, Principal as _};
 
@@ -144,6 +143,17 @@ enum AllowanceKind {
 }
 
 impl Allowance {
+    /// A grant from `system` of the storage it owns: mounting spaces in
+    /// it. What a peer is given to open spaces in a storage
+    /// [owned by](Storage::owned_by) `system`, for as long as the peer is
+    /// open.
+    pub fn storage(system: &SignerCredential) -> Self {
+        Allowance::from(
+            Access::new(system).claim(Subject::from(system.did()).attenuate(storage_fx::Storage)),
+        )
+        .unbounded()
+    }
+
     fn unbounded(mut self) -> Self {
         if let AllowanceKind::Scope { unbounded, .. } = &mut self.kind {
             *unbounded = true;
@@ -262,7 +272,15 @@ impl<S: Clone> PeerBuilder<PeerKey, Storage<S>, Session> {
             branch: peer.branch().map(str::to_string),
             issuer: Some(peer.credential().clone()),
             allowed: Vec::new(),
-            held: Vec::new(),
+            // The peer's grants from the storage's system: links a
+            // session's chains to the storage pass through, which it can
+            // extend but not use alone.
+            held: peer
+                .grants()
+                .iter()
+                .filter(|grant| &grant.issuer == peer.system())
+                .cloned()
+                .collect(),
             mode: PhantomData,
         }
     }
@@ -464,18 +482,7 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
 
         let audience = credential.did();
         let mut grants = Vec::with_capacity(self.allowed.len());
-        // Every key that grants this peer anything, which a session's
-        // chains pass through on their way to the storage's system.
-        let mut grantors: Vec<SignerCredential> = self.issuer.iter().cloned().collect();
         for allowance in self.allowed {
-            if let AllowanceKind::Scope {
-                issuer: Some(issuer),
-                ..
-            } = &allowance.kind
-                && !grantors.iter().any(|known| known.did() == issuer.did())
-            {
-                grantors.push(issuer.clone());
-            }
             let grant = match allowance.kind {
                 AllowanceKind::Certificate(certificate) => {
                     // A certificate is this peer's authority only when it
@@ -546,29 +553,31 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
             grants.push(grant);
         }
 
-        // Mounting a space takes the storage's authority. Whoever holds
-        // the storage holds its system, so a peer acting as itself is
-        // granted it here; a session is not, and proves through its peer,
-        // whose grant it holds as a link it can extend but not use alone.
-        let system = self
-            .storage
-            .system()
-            .await
-            .map_err(|error| PeerError::Key(error.to_string()))?;
-        let mut held = self.held;
-        if M::HOLDS_KEYS {
-            grants.push(storage_grant(&system, &audience).await?);
-        } else {
-            for grantor in &grantors {
-                held.push(storage_grant(&system, &grantor.did()).await?);
-            }
+        // Mounting a space takes the authority of the system the storage
+        // belongs to. Nothing grants it implicitly: the peer, or the peer
+        // a session acts for, must hold a grant from that system.
+        let Some(system) = self.storage.system().cloned() else {
+            return Err(PeerError::Storage(
+                "the storage belongs to no system: give it one with `Storage::owned_by`"
+                    .to_string(),
+            ));
+        };
+        let held = self.held;
+        if !grants
+            .iter()
+            .chain(held.iter())
+            .any(|grant| grant.issuer == system)
+        {
+            return Err(PeerError::Storage(format!(
+                "nothing grants {audience} the storage of {system}: grant it with `Allowance::storage`"
+            )));
         }
 
         let peer = Peer::assemble(
             self.storage,
             Inner {
                 credential,
-                system: system.did(),
+                system,
                 held,
                 home: self.home.clone(),
                 directory,
@@ -595,24 +604,6 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
 
         Ok(peer)
     }
-}
-
-/// A grant from `system` to `audience` over the storage it owns: mounting
-/// spaces in it. Minted in memory at build, like every grant a peer
-/// holds.
-async fn storage_grant(system: &SignerCredential, audience: &Did) -> Result<Grant, PeerError> {
-    let delegation = DelegationBuilder::new()
-        .issuer(system.signer().clone())
-        .audience(audience)
-        .subject(UcanSubject::Specific(system.did()))
-        .command(vec!["storage".to_string()])
-        .try_build()
-        .await
-        .map_err(|error| PeerError::Delegation(format!("{error:?}")))?;
-    Ok(Grant {
-        issuer: system.did(),
-        certificate: UcanCertificate(delegation),
-    })
 }
 
 /// The future an awaited builder runs.
@@ -657,4 +648,8 @@ pub enum PeerError {
     /// A certificate given as a grant is not this peer's authority.
     #[error("Certificate error: {0}")]
     Certificate(String),
+
+    /// The peer holds no grant over the storage it is built on.
+    #[error("Storage error: {0}")]
+    Storage(String),
 }

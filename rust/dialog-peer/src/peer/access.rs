@@ -622,11 +622,11 @@ mod tests {
     use crate::{Mode, Peer, Session};
     use dialog_effects::storage::Location;
 
-    use crate::helpers::{open_peer, unique_name};
+    use crate::helpers::{open_peer, test_storage, unique_name};
     use anyhow::Result;
     use dialog_common::time;
     use dialog_credentials::Ed25519Signer;
-    use dialog_storage::provider::storage::{Storage, VolatileSpace};
+    use dialog_storage::provider::storage::VolatileSpace;
     use dialog_ucan::{Parameters, Scope, UcanDelegation};
     use dialog_ucan_core::DelegationBuilder;
     use dialog_ucan_core::DelegationChain;
@@ -639,7 +639,7 @@ mod tests {
     }
 
     async fn operator(name: &str) -> (Peer<VolatileSpace, Session>, Peer<VolatileSpace>) {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(storage.clone(), Location::profile(unique(name)))
             .await
             .unwrap();
@@ -695,7 +695,7 @@ mod tests {
     async fn it_keeps_proofs_on_the_configured_access_branch() -> Result<()> {
         use dialog_repository::ACCESS_BRANCH;
 
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile =
             open_peer(storage.clone(), Location::profile(unique("access-branch"))).await?;
         let operator = profile.session(b"test").branch("account/test").await?;
@@ -1033,7 +1033,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_leaves_no_session_residue() -> Result<()> {
         let (operator, profile) = {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(storage.clone(), Location::profile(unique("no-residue")))
                 .await
                 .unwrap();
@@ -1089,7 +1089,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_composes_the_session_link_over_a_retained_chain() -> Result<()> {
         let (operator, profile) = {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(storage.clone(), Location::profile(unique("compose")))
                 .await
                 .unwrap();
@@ -1140,7 +1140,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_bounds_in_memory_sessions_without_retaining_them() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique("bounded-session")),
@@ -1222,7 +1222,7 @@ mod tests {
     }
     #[dialog_common::test]
     async fn it_selects_a_session_grant_covering_the_requested_window() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique("session-windows")),

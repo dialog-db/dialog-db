@@ -1,12 +1,14 @@
 use std::str::FromStr;
 
-use crate::{Mode, OpenPeer, Peer, PeerError, PeerSpace, Session};
+use crate::{Allowance, Mode, OpenPeer, Peer, PeerError, PeerSpace, Session};
 use anyhow::Result;
 use base58::ToBase58;
 use dialog_artifacts::{Artifact, Attribute, Entity, Value};
 use dialog_capability::Subject;
+use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Location;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
+use dialog_varsig::Principal as _;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -40,17 +42,40 @@ pub fn unique_name(prefix: &str) -> String {
     format!("{prefix}-{ts}-{pid}-{seq}")
 }
 
-/// Open a root peer whose credential lives at `location` in `storage`.
+/// The system every test storage belongs to: one fixed key, so a
+/// storage and the grant of it can be made anywhere in a test.
+pub async fn test_system() -> SignerCredential {
+    let signer = Ed25519Signer::import(&[0x5e; 32])
+        .await
+        .expect("test_system: a fixed seed imports");
+    SignerCredential::from(signer)
+}
+
+/// A volatile storage owned by the [test system](test_system).
+pub async fn test_storage() -> Storage<VolatileSpace> {
+    Storage::volatile().owned_by(test_system().await.did())
+}
+
+/// The grant of a storage owned by the [test system](test_system).
+pub async fn test_grant() -> Allowance {
+    Allowance::storage(&test_system().await)
+}
+
+/// Open a root peer whose credential lives at `location` in `storage`,
+/// granted the storage by the [test system](test_system).
 pub async fn open_peer<S: PeerSpace>(
     storage: Storage<S>,
     location: Location,
 ) -> Result<Peer<S>, PeerError> {
-    OpenPeer::open(location).perform(&storage).await
+    OpenPeer::open(location)
+        .grant(test_grant().await)
+        .perform(&storage)
+        .await
 }
 
 /// A fresh volatile peer under a unique name.
 pub async fn test_peer() -> Peer<VolatileSpace> {
-    open_peer(Storage::volatile(), Location::profile(unique_name("test")))
+    open_peer(test_storage().await, Location::profile(unique_name("test")))
         .await
         .expect("test_peer: failed to open peer")
 }

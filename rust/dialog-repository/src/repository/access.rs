@@ -311,7 +311,7 @@ mod tests {
     use dialog_effects::storage::Location;
     use dialog_peer::Peer;
 
-    use dialog_peer::helpers::{open_peer, unique_name};
+    use dialog_peer::helpers::{open_peer, test_storage, unique_name};
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan_core::DelegationBuilder;
     use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -361,7 +361,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_migrates_compacts_and_drains() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(storage.clone(), Location::profile(unique_name("migrate"))).await?;
         let space = signer().await;
         let other_space = signer().await;
@@ -459,7 +459,7 @@ mod tests {
         use dialog_ucan::Scope;
         use dialog_ucan_core::command::Command as UcanCommand;
 
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique_name("migrate-prove")),
@@ -580,7 +580,7 @@ mod tests {
     /// drain.
     #[dialog_common::test]
     async fn it_completes_the_drain_on_rerun() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique_name("migrate-rerun")),
@@ -631,7 +631,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_is_a_noop_on_an_empty_store() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique_name("migrate-empty")),

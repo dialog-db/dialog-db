@@ -38,7 +38,7 @@ use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{List, Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
-use dialog_peer::helpers::{generate_data, open_peer, unique_name};
+use dialog_peer::helpers::{generate_data, open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{
     Branch, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
@@ -567,7 +567,7 @@ impl BenchEnv<Peer<VolatileSpace, Session>> {
     ///
     /// Use for CPU/memory-read isolated signals — no disk I/O.
     pub async fn volatile() -> Result<Self> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         Self::with_storage(storage).await
     }
 }
