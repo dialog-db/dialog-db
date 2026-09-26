@@ -30,7 +30,7 @@
 //! # The three properties this exists to pin down
 //!
 //! **Sealing preserves convergence.** Identical plaintext under one epoch
-//! seals to identical bytes and therefore an identical address, so a prolly
+//! seals to identical bytes and therefore an identical address, so a search
 //! tree diff can still prune matching subtrees without reading them. This is
 //! why the nonce is derived rather than random — see [`Sealed`].
 //!

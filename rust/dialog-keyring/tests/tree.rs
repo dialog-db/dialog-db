@@ -1,8 +1,8 @@
 //! Sealing composed with the shapes the search tree actually produces.
 //!
 //! The unit tests pin the sealing layer's properties against synthetic bytes.
-//! These pin the two claims that only hold if it composes with a real prolly
-//! tree: that sealing does not disturb how the tree chunks itself, and that
+//! These pin the two claims that only hold if it composes with a real Dialog
+//! search tree: that sealing does not disturb how the tree chunks itself, and that
 //! two replicas which independently build the same tree still agree on every
 //! address.
 //!

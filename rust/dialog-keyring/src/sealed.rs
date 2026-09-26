@@ -13,7 +13,7 @@
 //!
 //! # Why the nonce is derived from the plaintext
 //!
-//! A prolly tree is content-addressed, and the whole point of that is that two
+//! The Dialog search tree is content-addressed, and the whole point of that is that two
 //! replicas which independently compute the same node compute the same hash,
 //! so a diff can prune matching subtrees without reading them. A random nonce
 //! would destroy that: identical nodes would seal to different bytes, hash
