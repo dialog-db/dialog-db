@@ -221,7 +221,7 @@ impl AttributeQueryOnly {
             let attribute_known = resolved.the().is_constant();
             let value_known = resolved.is().is_constant();
             if entity_known || (attribute_known && !value_known) {
-                let scan = AttributeQueryAll::new(
+                let scan = AttributeQueryAll::lookup(
                     resolved.the().clone(),
                     resolved.of().clone(),
                     Term::blank(),
@@ -261,7 +261,7 @@ impl AttributeQueryOnly {
                     // Sliding window path.
                     let value_constraint = resolved.is().as_constant().cloned();
 
-                    let scan = AttributeQueryAll::new(
+                    let scan = AttributeQueryAll::lookup(
                         resolved.the().clone(),
                         resolved.of().clone(),
                         Term::blank(),

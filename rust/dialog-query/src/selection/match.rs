@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::Claim;
 use crate::artifact::Value;
 use crate::error::EvaluationError;
-use crate::term::Term;
+use crate::term::{Term, VariableName};
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Record;
@@ -406,12 +406,13 @@ impl Match {
     /// [`Self::bind`] for a variable given by name and kind, so a
     /// caller holding a typed term need not widen it to a
     /// `Term<Any>` (a copy of its name) for every value it binds.
-    pub(crate) fn bind_variable(
+    pub(crate) fn bind_variable<N: AsRef<str> + VariableName>(
         &mut self,
-        name: &str,
+        name: N,
         kind: Option<Kind>,
         value: Value,
     ) -> Result<(), EvaluationError> {
+        let key = name.as_ref();
         // Contract check: a typed variable only accepts values
         // inhabiting its kind. Scans filter mismatched facts
         // before reaching here, so a failure at this point is
@@ -422,20 +423,20 @@ impl Match {
             && !kind.admits(&value)
         {
             return Err(EvaluationError::KindMismatch {
-                variable: name.to_string(),
+                variable: key.to_string(),
                 kind: kind.to_string(),
                 value: format!("{value:?}"),
                 value_type: format!("{:?}", value.data_type()),
             });
         }
-        if let Some(existing) = self.find(name) {
+        if let Some(existing) = self.find(key) {
             match existing {
                 Binding::Present(existing_value) => {
                     if *existing_value != value {
                         Err(EvaluationError::Assignment {
                             reason: format!(
                                 "Can not set {:?} to {:?} because it is already set to {:?}.",
-                                name, value, existing_value
+                                key, value, existing_value
                             ),
                         })
                     } else {
@@ -445,12 +446,13 @@ impl Match {
                 Binding::Absent => Err(EvaluationError::Assignment {
                     reason: format!(
                         "Can not set {:?} to {:?} because it is already bound to Absent.",
-                        name, value
+                        key, value
                     ),
                 }),
             }
         } else {
-            self.bindings.push((name.into(), Binding::Present(value)));
+            self.bindings
+                .push((name.into_name(), Binding::Present(value)));
             Ok(())
         }
     }
@@ -469,19 +471,23 @@ impl Match {
     }
 
     /// [`Self::bind_absent`] for a variable given by name.
-    pub(crate) fn bind_absent_variable(&mut self, name: &str) -> Result<(), EvaluationError> {
-        if let Some(existing) = self.find(name) {
+    pub(crate) fn bind_absent_variable<N: AsRef<str> + VariableName>(
+        &mut self,
+        name: N,
+    ) -> Result<(), EvaluationError> {
+        let key = name.as_ref();
+        if let Some(existing) = self.find(key) {
             match existing {
                 Binding::Absent => Ok(()),
                 Binding::Present(value) => Err(EvaluationError::Assignment {
                     reason: format!(
                         "Can not set {:?} to Absent because it is already set to {:?}.",
-                        name, value
+                        key, value
                     ),
                 }),
             }
         } else {
-            self.bindings.push((name.into(), Binding::Absent));
+            self.bindings.push((name.into_name(), Binding::Absent));
             Ok(())
         }
     }

@@ -50,6 +50,29 @@ impl AttributeQueryAll {
     /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery), so a `Nothing` bit
     /// on the `is` term's kind is meaningless here and is stripped.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+        Self::with_source(the, of, is, cause, Term::<Record>::unique())
+    }
+
+    /// The scan a resolved query reads, to be turned into its selector.
+    ///
+    /// Its claim is never cited, so it takes a blank source rather than
+    /// minting a unique one: a query resolves one of these per row.
+    pub(crate) fn lookup(
+        the: Term<The>,
+        of: Term<Entity>,
+        is: Term<Any>,
+        cause: Term<Cause>,
+    ) -> Self {
+        Self::with_source(the, of, is, cause, Term::blank())
+    }
+
+    fn with_source(
+        the: Term<The>,
+        of: Term<Entity>,
+        is: Term<Any>,
+        cause: Term<Cause>,
+        source: Term<Record>,
+    ) -> Self {
         let is = match (is.name(), is.kind()) {
             (Some(name), Some(kind)) if kind.is_optional() => {
                 Term::<Any>::typed_var(name.to_string(), kind.required())
@@ -61,7 +84,7 @@ impl AttributeQueryAll {
             of,
             is,
             cause,
-            source: Term::<Record>::unique(),
+            source,
         }
     }
 
@@ -145,20 +168,20 @@ impl AttributeQueryAll {
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(artifact);
         candidate.reserve(4);
-        if let Some(name) = self.the.name() {
+        if let Some(name) = self.the.shared_name() {
             candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;
         }
-        if let Some(name) = self.of.name() {
+        if let Some(name) = self.of.shared_name() {
             candidate.bind_variable(
                 name,
                 self.of.binding_kind(),
                 Value::Entity(claim.of().clone()),
             )?;
         }
-        if let Some(name) = self.is.name() {
+        if let Some(name) = self.is.shared_name() {
             candidate.bind_variable(name, self.is.kind(), claim.is().clone())?;
         }
-        if let Some(name) = self.cause.name() {
+        if let Some(name) = self.cause.shared_name() {
             candidate.bind_variable(
                 name,
                 self.cause.binding_kind(),
