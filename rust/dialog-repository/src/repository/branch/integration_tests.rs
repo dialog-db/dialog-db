@@ -58,6 +58,8 @@ use dialog_effects::{
     blob::{BlobWriter, Import as BlobImportEffect},
 };
 use dialog_peer::Peer;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_peer::helpers::test_owned;
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -65,6 +67,8 @@ use dialog_search_tree::NoveltyOp;
 use dialog_search_tree::{
     ArchivedNodeBody, ContentAddressedStorage as TreeStorage, Traversable as _, Visit, into_owned,
 };
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_storage::provider::storage::Storage;
 use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::{StreamExt, stream};
 
@@ -298,7 +302,7 @@ async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
 async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -> Result<()> {
     use crate::helpers::Counting;
 
-    let storage = Storage::temp();
+    let storage = test_owned(Storage::temp()).await;
     let profile = open_peer(
         storage.clone(),
         Location::profile(unique_name("ship-overlap")),
@@ -403,7 +407,7 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
 #[dialog_common::test]
 async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()> {
     // --- Site A: write a blob, reference it, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("blob-ship-a")),
@@ -443,7 +447,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
 
     // --- Site B: same remote subject, separate local store; pull then read. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("blob-ship-b")),
@@ -508,7 +512,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
 #[dialog_common::test]
 async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
     // --- Site A: write a blob, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("blob-retract-a")),
@@ -548,7 +552,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
 
     // --- Site B: pull and hydrate the bytes while still referenced. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("blob-retract-b")),
@@ -619,7 +623,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
 
     // --- Site C: fresh replica, pulls after the retraction; it can neither
     // see the reference nor hydrate the bytes. ---
-    let storage_c = Storage::temp();
+    let storage_c = test_owned(Storage::temp()).await;
     let profile_c = open_peer(
         storage_c.clone(),
         Location::profile(unique_name("blob-retract-c")),
@@ -687,7 +691,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
     use dialog_credentials::Ed25519Signer;
 
     // --- Site A: retain a delegation, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("delegation-ship-a")),
@@ -740,7 +744,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
 
     // --- Site B: pull, query by audience, read the envelope. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("delegation-ship-b")),
@@ -869,7 +873,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     let reference = value.to_reference();
 
     // --- Site A: commit a spilling fact, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("spill-ship-a")),
@@ -941,7 +945,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     );
 
     // --- Site B: same remote subject, separate local store; pull then select. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("spill-ship-b")),
@@ -1020,7 +1024,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
     };
 
     // --- Site A: commit the spilling fact, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("spill-retract-a")),
@@ -1053,7 +1057,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
 
     // --- Site B: separate local store; pull, retract WITHOUT selecting, push. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("spill-retract-b")),
@@ -1134,7 +1138,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
     let body = "b".repeat(inline_n + 1);
 
     // --- Site A: repo + remote. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("spill-sub-a")),
@@ -1162,7 +1166,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .await?;
 
     // --- Site B: separate store, subscribed to doc bodies. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("spill-sub-b")),
@@ -4835,7 +4839,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         Peer<NativeTempSpace>,
         crate::Repository<SignerCredential>,
     )> {
-        let storage = Storage::temp();
+        let storage = test_owned(Storage::temp()).await;
         let profile = open_peer(storage.clone(), Location::profile(unique_name(name))).await?;
         let operator = profile.session(b"test").allow(Subject::any()).await?;
         let repo = profile

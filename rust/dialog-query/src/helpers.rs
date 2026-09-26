@@ -38,6 +38,8 @@ use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{List, Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
+#[cfg(not(target_arch = "wasm32"))]
+use dialog_peer::helpers::test_owned;
 use dialog_peer::helpers::{generate_data, open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{
@@ -579,7 +581,7 @@ impl BenchEnv<Peer<NativeTempSpace, Session>> {
     ///
     /// Use for real-world latency signals where I/O dominates.
     pub async fn temp() -> Result<Self> {
-        let storage = Storage::temp();
+        let storage = test_owned(Storage::temp()).await;
         Self::with_storage(storage).await
     }
 }
