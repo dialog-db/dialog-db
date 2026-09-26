@@ -435,7 +435,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         let shared = [ #( self.#field_names.name() ),* ]
                             .into_iter()
                             .flatten()
-                            .any(|other| other == name.as_str());
+                            .any(|other| other == &**name);
                         if shared {
                             return Restriction::Unsupported;
                         }

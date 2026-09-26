@@ -1059,7 +1059,7 @@ fn bind_seed(
             if matched.bind(term, value).is_err() {
                 return false;
             }
-            scope.add(name);
+            scope.add(name.as_ref());
             true
         }
         Some(Term::Constant(expected)) => *expected == value,
