@@ -126,8 +126,8 @@ impl<'a, Changes> Commit<'a, Changes> {
     /// sides' facts survive, and a value both set is elected by version
     /// when read.
     ///
-    /// A head moved by this commit's own writer -- a pull it ran in the
-    /// background, say -- is not a concurrent change: the commit is built
+    /// A head moved by this commit's own writer, a pull it ran in the
+    /// background say, is not a concurrent change: the commit is built
     /// on it rather than merged with it. A handle that raced its own
     /// writer some other way still fails, since the version it minted is
     /// taken.

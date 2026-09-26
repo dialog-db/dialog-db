@@ -314,30 +314,33 @@ mod tests {
         Ok(())
     }
 
-    /// A writer racing itself mints the edition the winner already holds,
-    /// so its revision cannot be kept and merging refuses.
+    /// A second handle of the same writer that lost the race builds on
+    /// the head its writer moved rather than merging with it: its
+    /// writer's own commit is not a concurrent change, and both writes
+    /// land.
     #[dialog_common::test]
-    async fn it_refuses_to_merge_a_writer_racing_itself() -> Result<()> {
+    async fn it_builds_on_a_head_its_own_writer_moved() -> Result<()> {
         let (worker, peer) = test_session_with_peer().await;
         let repo = test_repo(&worker, &peer).await;
         let first = repo.branch("main").open().perform(&worker).await?;
         let second = repo.branch("main").open().perform(&worker).await?;
 
-        first
+        let won = first
             .commit(stream::iter(vec![name("user:a", "Alice")?]))
             .perform(&worker)
             .await?;
-        let raced = second
+        let landed = second
             .commit(stream::iter(vec![name("user:b", "Bob")?]))
             .merge()
             .perform(&worker)
-            .await;
-        assert!(
-            matches!(
-                raced,
-                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
-            ),
-            "{raced:?}"
+            .await?;
+
+        assert_ne!(landed.version(), won.version());
+        let fresh = repo.branch("main").open().perform(&worker).await?;
+        assert_eq!(fresh.revision(), Some(landed));
+        assert_eq!(
+            names(&fresh, &worker).await?,
+            vec![Value::String("Alice".into()), Value::String("Bob".into())]
         );
         Ok(())
     }
