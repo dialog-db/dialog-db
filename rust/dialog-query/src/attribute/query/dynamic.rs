@@ -132,7 +132,7 @@ impl DynamicAttributeQuery {
             Err(_) => self.is().clone(),
         };
         let cause = self.cause().resolve(source);
-        let resolved = AttributeQueryAll::new(the, of, is, cause);
+        let resolved = AttributeQueryAll::lookup(the, of, is, cause);
         ArtifactSelector::try_from(&resolved)
     }
 
