@@ -247,6 +247,17 @@ impl<T: Typed> Term<T> {
         }
     }
 
+    /// This term's name as the shared string it is held as, for callers
+    /// that keep the name (binding a row) rather than only compare it.
+    pub fn shared_name(&self) -> Option<&Arc<str>> {
+        match self {
+            Term::Variable {
+                name: Some(name), ..
+            } => Some(name),
+            _ => None,
+        }
+    }
+
     /// Get the unified type kind for this term.
     ///
     /// For variables: delegates to the descriptor's `kind()`.
