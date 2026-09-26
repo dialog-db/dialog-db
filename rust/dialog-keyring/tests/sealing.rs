@@ -41,7 +41,7 @@ async fn the_ciphertext_does_not_contain_the_plaintext() {
 #[dialog_common::test]
 async fn identical_content_seals_to_an_identical_address() {
     // Two replicas that have never spoken, holding the same space secret and
-    // the same epoch. This is the property a prolly tree's convergence rests
+    // the same epoch. This is the property the search tree's convergence rests
     // on: independently computing the same node must yield the same address,
     // or a diff would see changes that are not there.
     let one = replica();

@@ -241,7 +241,7 @@ with the rest of Dialog.
 
 ## What does not map, and should not be forced to
 
-**The prolly tree is not the BeeKEM tree.** This is worth being blunt about
+**The Dialog search tree is not the BeeKEM tree.** This is worth being blunt about
 because the surface similarity invites a bad idea.
 
 | | `dialog-search-tree` | BeeKEM tree |
@@ -256,7 +256,7 @@ because the surface similarity invites a bad idea.
 They share the word "tree" and nothing else. The BeeKEM tree is a few hundred
 lines of array-indexed binary tree arithmetic — `parent(i)`, `sibling(i)`,
 `direct_path(i)`, plus resolution computation. There is no version of
-"leverage the prolly tree for this" that ends well; it would mean paying
+"leverage the search tree for this" that ends well; it would mean paying
 content-addressed persistence costs for a structure that is derived state,
 rebuilt from the op log on every structural merge anyway.
 
@@ -278,8 +278,8 @@ and `Link { node: Blake3Hash, .. }` addresses children by that hash. If we
 encrypt node buffers with a random nonce, two replicas that independently
 compute the *same logical node* produce *different* ciphertexts, hence
 different hashes, hence different links all the way up. Structural sharing
-collapses, diffs blow up, and the convergence property that makes a prolly tree
-a prolly tree is gone.
+collapses, diffs blow up, and the convergence property that makes the Dialog search tree
+worth having is gone.
 
 The fix is the one BeeKEM's own implementation already uses for content:
 derive the nonce from the plaintext with SIV.
@@ -468,7 +468,7 @@ right next to it.
 
 So the real question is where the *op log* lives, and there the instinct to
 reach for a separate region of the tree is right. It is the idiom we already
-use: one prolly tree, partitioned by a leading tag byte.
+use: one Dialog search tree, partitioned by a leading tag byte.
 
 | Tag | Region |
 | --- | --- |
@@ -495,7 +495,7 @@ So this splits into two phases, and the first one is deliberately dumber:
 
 - **Phase 1 — the keyring is its own tree.** Its own root hash, never
   encrypted, published in the branch's commit alongside the data tree's root.
-  Same prolly tree machinery, same CAS, same blob replication, no interaction
+  Same search tree machinery, same CAS, same blob replication, no interaction
   with the encryption layering at all. A reader fetches it with no key, which
   is the whole point.
 - **Phase 2 — the keyring becomes tag 6.** Once `notes/privacy.md`'s nested
@@ -755,7 +755,7 @@ one runs on both targets:
 - **Convergence survives sealing.** Two replicas that never spoke, holding the
   same secret and epoch, seal identical content to byte-identical blobs at the
   same address. Asserted against synthetic bytes *and* against the real node
-  buffers a 512-entry prolly tree produces.
+  buffers a 512-entry search tree produces.
 - **Boundaries do not move.** The tree chunks itself identically whether or
   not its buffers are later sealed — as it must, since `rank(key)` runs while
   a node is built and sealing happens after.
