@@ -20,10 +20,10 @@ use dialog_capability::access::Access as AccessAttenuation;
 use dialog_capability::access::{CertificateStore, Prove, TimeRange};
 use dialog_credentials::Ed25519Signer;
 use dialog_effects::storage::{Directory, Location};
-use dialog_peer::helpers::open_peer;
+use dialog_peer::helpers::{open_peer, test_storage};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, RepositoryExt as _};
-use dialog_storage::provider::storage::{Storage, VolatileSpace};
+use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::provider::{FileSystem, Volatile};
 use dialog_storage::resource::Resource as _;
 use dialog_ucan::{Parameters, Scope, Ucan, UcanDelegation};
@@ -55,7 +55,7 @@ fn scope(subject: &Did) -> Scope {
 }
 
 async fn open_branch(name: &str) -> (Branch, Peer<VolatileSpace, Session>) {
-    let storage = Storage::volatile();
+    let storage = test_storage().await;
     let profile = open_peer(storage.clone(), Location::profile(name.to_string()))
         .await
         .unwrap();
@@ -83,7 +83,7 @@ async fn operator_with_retained(
     n: usize,
 ) -> Peer<VolatileSpace, Session> {
     use dialog_capability::access::Retain;
-    let storage = Storage::volatile();
+    let storage = test_storage().await;
     let profile = open_peer(
         storage.clone(),
         Location::profile(format!("delegation-cached-{n}-{}", std::process::id())),

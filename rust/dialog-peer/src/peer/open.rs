@@ -11,7 +11,7 @@ use dialog_identity::OpenCredential;
 use dialog_network::Network;
 use dialog_storage::provider::storage::Storage;
 
-use super::{Peer, PeerError, PeerSpace, Runtime};
+use super::{Allowance, Peer, PeerError, PeerSpace, Runtime};
 
 enum Mode {
     Open,
@@ -30,6 +30,7 @@ pub struct OpenPeer {
     runtime: Runtime,
     base: Option<Directory>,
     branch: Option<String>,
+    allowed: Vec<Allowance>,
 }
 
 impl OpenPeer {
@@ -58,6 +59,7 @@ impl OpenPeer {
             runtime: Runtime::default(),
             base: None,
             branch: None,
+            allowed: Vec::new(),
         }
     }
 
@@ -86,6 +88,14 @@ impl OpenPeer {
         self
     }
 
+    /// Grant the peer `allowance` when it opens, as
+    /// [`PeerBuilder::grant`](super::PeerBuilder::grant) does. A peer opens only with a grant over
+    /// its storage, [`Allowance::storage`].
+    pub fn grant(mut self, allowance: impl Into<Allowance>) -> Self {
+        self.allowed.push(allowance.into());
+        self
+    }
+
     /// Open the credential in `storage` and the peer over it.
     pub async fn perform<S: PeerSpace>(self, storage: &Storage<S>) -> Result<Peer<S>, PeerError> {
         let name = self.location.name.clone();
@@ -107,6 +117,9 @@ impl OpenPeer {
             .base(self.base.unwrap_or(self.location.directory));
         if let Some(branch) = self.branch {
             builder = builder.branch(branch);
+        }
+        for allowance in self.allowed {
+            builder = builder.grant(allowance);
         }
         builder.await
     }

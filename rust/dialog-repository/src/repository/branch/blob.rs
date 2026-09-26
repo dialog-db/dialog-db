@@ -679,9 +679,8 @@ mod tests {
     use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_effects::blob::{BlobError, BlobReader, ByteRange};
-    use dialog_peer::helpers::{open_peer, unique_name};
+    use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 
-    use dialog_storage::provider::storage::Storage;
     use futures_util::stream;
 
     async fn drain(mut reader: BlobReader) -> Vec<u8> {
@@ -696,7 +695,7 @@ mod tests {
     // both native and wasm — no filesystem, no target gate.
     #[dialog_common::test]
     async fn it_writes_a_blob_and_reads_it_back_by_entity() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(storage.clone(), Location::profile(unique_name("blob"))).await?;
         let operator = profile.session(b"test").allow(Subject::any()).await?;
         let repo = profile
@@ -749,7 +748,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_a_blob_from_the_index_but_not_the_store() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique_name("blob-retract")),
@@ -819,7 +818,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_rejects_a_non_blob_entity() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique_name("blob-reject")),
