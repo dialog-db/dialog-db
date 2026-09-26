@@ -1,4 +1,4 @@
-use crate::helpers::{open_peer, unique_name};
+use crate::helpers::{open_peer, test_storage, unique_name};
 use dialog_effects::storage::Location;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 
@@ -8,7 +8,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_builds_operator_from_profile() {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
 
         let profile = open_peer(storage.clone(), Location::profile(unique_name("test")))
             .await
@@ -21,13 +21,13 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_derives_different_operators_from_different_contexts() {
-        let storage1 = Storage::volatile();
+        let storage1 = test_storage().await;
         let profile1 = open_peer(storage1.clone(), Location::profile(unique_name("ctx1")))
             .await
             .unwrap();
         let op1 = profile1.session(b"context-a").await.unwrap();
 
-        let storage2 = Storage::volatile();
+        let storage2 = test_storage().await;
         let profile2 = open_peer(storage2.clone(), Location::profile(unique_name("ctx2")))
             .await
             .unwrap();
@@ -44,7 +44,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn self_grant_produces_delegation() {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
 
             let profile = open_peer(storage.clone(), Location::profile(unique_name("self")))
                 .await
@@ -73,7 +73,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn powerline_self_grant_produces_delegation() {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
 
             let profile = open_peer(storage.clone(), Location::profile(unique_name("psg")))
                 .await
@@ -97,7 +97,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn scoped_delegation_found() {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
 
             let profile = open_peer(storage.clone(), Location::profile(unique_name("found")))
                 .await
@@ -130,7 +130,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn scoped_delegation_denied() {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
 
             let profile = open_peer(storage.clone(), Location::profile(unique_name("deny")))
                 .await
@@ -159,7 +159,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn powerline_delegation_allows_anything() {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
 
             let profile = open_peer(storage.clone(), Location::profile(unique_name("power")))
                 .await
@@ -188,7 +188,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn no_delegation_fails() {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
 
             let profile = open_peer(storage.clone(), Location::profile(unique_name("none")))
                 .await
@@ -213,7 +213,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn no_issuer_uses_profile_did() {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
 
             let profile = open_peer(storage.clone(), Location::profile(unique_name("nois")))
                 .await
@@ -263,7 +263,7 @@ mod tests {
         /// Only explicitly delegated capabilities will be available.
         async fn build_restricted_operator_with_profile()
         -> (Peer<VolatileSpace, Session>, Peer<VolatileSpace>) {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("time-restricted")),
@@ -704,7 +704,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_fails_without_saved_credential(s3: S3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("s3-no-cred")),
@@ -740,7 +740,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_loads_saved_credential_for_get(s3: S3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(storage.clone(), Location::profile(unique_name("s3-get")))
                 .await
                 .unwrap();
@@ -779,7 +779,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_loads_saved_credential_for_put_and_get(s3: S3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("s3-put-get")),
@@ -834,7 +834,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_memory_publish_and_resolve(s3: S3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("s3-mem-pub")),
@@ -882,7 +882,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_memory_update_existing(s3: S3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("s3-mem-upd")),
@@ -939,7 +939,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_memory_cas_conflict(s3: S3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("s3-mem-cas")),
@@ -1006,7 +1006,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_memory_retract(s3: S3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("s3-mem-ret")),
@@ -1081,7 +1081,7 @@ mod tests {
         async fn fork_archive_get_returns_none_for_missing(
             s3: UcanS3Address,
         ) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-get-miss")),
@@ -1106,7 +1106,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_archive_put_and_get(s3: UcanS3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-put-get")),
@@ -1144,7 +1144,7 @@ mod tests {
         async fn fork_memory_resolve_returns_none_for_missing(
             s3: UcanS3Address,
         ) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-mem-miss")),
@@ -1170,7 +1170,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_memory_publish_and_resolve(s3: UcanS3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-mem-pub")),
@@ -1210,7 +1210,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_memory_update_existing(s3: UcanS3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-mem-upd")),
@@ -1259,7 +1259,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_memory_cas_conflict(s3: UcanS3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-mem-cas")),
@@ -1321,7 +1321,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_memory_retract(s3: UcanS3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-mem-ret")),
@@ -1369,7 +1369,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn fork_with_scoped_delegation(s3: UcanS3Address) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-scoped")),
@@ -1437,7 +1437,7 @@ mod tests {
         async fn fork_performs_in_the_request_that_proves_it(
             s3: UcanS3Address,
         ) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-direct")),
@@ -1480,7 +1480,7 @@ mod tests {
         async fn fork_goes_through_permits_when_the_address_asks(
             s3: UcanS3Address,
         ) -> anyhow::Result<()> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("ucan-permits")),
@@ -1617,7 +1617,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_denies_space_load_for_wrong_subject() {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("space-deny")),
@@ -1644,7 +1644,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_allows_space_for_profile_subject() {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("space-allow")),

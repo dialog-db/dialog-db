@@ -25,17 +25,26 @@ See `notes/peer-and-session.md`.
 
 ```rust,no_run
 # use dialog_capability::Subject;
+# use dialog_credentials::{Ed25519Signer, SignerCredential};
 # use dialog_identity::OpenCredential;
-# use dialog_peer::Peer;
+# use dialog_peer::{Allowance, Peer};
 # use dialog_repository::RepositoryExt as _;
 # use dialog_storage::provider::storage::{Storage, VolatileSpace};
+# use dialog_varsig::Principal as _;
 # async fn example() -> anyhow::Result<()> {
+// The storage belongs to a system: opening spaces in it takes the
+// system's grant.
+let system = SignerCredential::from(Ed25519Signer::generate().await?);
+let storage = Storage::<VolatileSpace>::volatile().owned_by(system.did());
+
 // The credential is opened apart from the peer; here from the storage.
-let storage = Storage::<VolatileSpace>::volatile();
 let credential = OpenCredential::open("alice").perform(&storage).await?;
 
-// The peer, acting with its own key.
-let alice = Peer::new(credential).storage(storage).await?;
+// The peer, acting with its own key, granted the storage.
+let alice = Peer::new(credential)
+    .storage(storage)
+    .grant(Allowance::storage(&system))
+    .await?;
 
 // A session: a derived key, allowed what the peer grants it.
 let job = alice.session(b"my-app").allow(Subject::any()).await?;
@@ -47,8 +56,8 @@ let contacts = alice.space("contacts").open().perform(&job).await?;
 # }
 ```
 
-A session needs no open handle on its peer, only the peer's credential and
-the storage:
+A session needs no open handle on its peer, only the peer's credential,
+the storage and a grant of it:
 
 ```rust,no_run
 # use dialog_capability::Subject;
@@ -56,10 +65,12 @@ the storage:
 # async fn example(
 #     credential: dialog_credentials::SignerCredential,
 #     storage: dialog_storage::provider::storage::Storage<dialog_storage::provider::storage::VolatileSpace>,
+#     granted: dialog_peer::Allowance,
 # ) -> anyhow::Result<()> {
 let session = Peer::new(credential)
     .session(b"worker")
     .storage(storage)
+    .grant(granted)
     .ephemeral()
     .allow(Subject::any())
     .await?;
