@@ -1,31 +1,33 @@
 //! A repository held at a peer.
 
 use crate::schema::{DidExt as _, Replica};
-use crate::{PublishError, RemoteAddress, ResolveError, SiteAddress};
+use crate::{PublishError, RemoteAddress, ResolveError, SiteAddress, site_address};
 use dialog_artifacts::Entity;
 use dialog_capability::{Did, Subject};
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::blob::BlobError;
 use dialog_effects::memory::MemoryError;
+use dialog_effects::peer::PeerConnection;
 use dialog_varsig::Principal;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// A peer's replica of a repository, connected to: which peer holds it,
-/// the addresses the peer is reached at, and which repository it is a
-/// replica of. The local repository is a replica too; this is one held
-/// elsewhere, reached through [`peer(..).connect()`](crate::PeerReference::connect).
+/// A replica on a connected peer: which peer holds it, the addresses
+/// the host reaches that peer at, and which repository it is a replica
+/// of. The local repository is a replica too; this is one held
+/// elsewhere, reached through
+/// [`contact(..).connect()`](crate::ContactReference::connect).
 ///
 /// What was a named remote is these two things together. The peer is
 /// who holds it and where to reach them; the repository is which of the
-/// peer's replicas this is. Their state is cached locally, under the
-/// repository this handle was reached from, keyed by entity.
+/// peer's replicas this is. Their state is cached locally, keyed by
+/// entity.
 ///
 /// Requests go to one of the peer's addresses at a time, starting with
-/// the one that last answered. One that cannot be reached is passed over
-/// for the next.
+/// the one that last answered, as the host's connection to the peer
+/// records it. One that cannot be reached is passed over for the next.
 #[derive(Debug, Clone)]
 pub struct ConnectedReplica {
     host: Subject,
@@ -57,6 +59,38 @@ impl ConnectedReplica {
             subject,
             answered: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// The replica of `subject` at the peer `connection` reaches, with
+    /// its state cached under `host`. Reaching it goes through the
+    /// connection's addresses, and shares with every other user of the
+    /// connection which of them answered last.
+    pub(crate) fn connected(
+        host: Subject,
+        connection: &PeerConnection,
+        name: Option<String>,
+        subject: Did,
+    ) -> Result<Self, crate::PeerError> {
+        let addresses = connection
+            .addresses()
+            .iter()
+            .map(site_address)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            host,
+            peer: connection.peer().clone(),
+            name,
+            addresses,
+            subject,
+            answered: connection.answers(),
+        })
+    }
+
+    /// This replica, reaching its peer through `answered`: the record of
+    /// which address answered last that the host's connection keeps.
+    pub(crate) fn sharing(mut self, answered: Arc<AtomicUsize>) -> Self {
+        self.answered = answered;
+        self
     }
 
     /// The subject DID of the repository.
@@ -104,11 +138,25 @@ impl ConnectedReplica {
     /// the next address reaches the same peer, which would say the same.
     /// Only an address that could not be reached is passed over. When
     /// none can be, the last one's error is returned.
-    pub(crate) async fn reach<T, E, F, Fut>(&self, mut request: F) -> Result<T, E>
+    pub(crate) async fn reach<T, E, F, Fut>(&self, request: F) -> Result<T, E>
     where
         F: FnMut(RemoteAddress) -> Fut,
         Fut: Future<Output = Result<T, E>>,
         E: Unreachable,
+    {
+        self.reach_unless(E::unreachable, request).await
+    }
+
+    /// [`reach`](Self::reach), passing a failure on to the next address
+    /// only when `elsewhere` says the request may be sent there.
+    pub(crate) async fn reach_unless<T, E, F, Fut>(
+        &self,
+        elsewhere: impl Fn(&E) -> bool,
+        mut request: F,
+    ) -> Result<T, E>
+    where
+        F: FnMut(RemoteAddress) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
     {
         let count = self.addresses.len();
         let first = self.answered.load(Ordering::Relaxed) % count;
@@ -116,10 +164,10 @@ impl ConnectedReplica {
         loop {
             let result = request(self.at(index)).await;
             match &result {
-                Err(error) if error.unreachable() && (index + 1) % count != first => {
+                Err(error) if elsewhere(error) && (index + 1) % count != first => {
                     index = (index + 1) % count;
                 }
-                Err(error) if error.unreachable() => return result,
+                Err(error) if elsewhere(error) => return result,
                 _ => {
                     self.answered.store(index, Ordering::Relaxed);
                     return result;
@@ -155,6 +203,37 @@ impl ConnectedReplica {
 pub(crate) trait Unreachable {
     /// Whether another address is worth trying.
     fn unreachable(&self) -> bool;
+}
+
+/// A failure of one step of a request to a peer, tagged with where the
+/// step ran. A request that also reads or writes here -- a transfer
+/// streaming a blob between the peer and the local archive -- fails over
+/// only on the peer's failures: one of the local steps would fail at
+/// every address alike.
+#[derive(Debug)]
+pub(crate) enum Step<E> {
+    /// A step carried out at the peer.
+    Remote(E),
+    /// A step carried out here.
+    Local(E),
+}
+
+impl<E> Step<E> {
+    /// The failure, wherever it happened.
+    pub(crate) fn into_inner(self) -> E {
+        match self {
+            Step::Remote(error) | Step::Local(error) => error,
+        }
+    }
+}
+
+impl<E: Unreachable> Unreachable for Step<E> {
+    fn unreachable(&self) -> bool {
+        match self {
+            Step::Remote(error) => error.unreachable(),
+            Step::Local(_) => false,
+        }
+    }
 }
 
 impl Unreachable for ArchiveError {
@@ -215,7 +294,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::ConnectedReplica;
+    use super::{ConnectedReplica, Step};
     use crate::PublishError;
     use crate::SiteAddress;
     use dialog_artifacts::Entity;
@@ -354,5 +433,31 @@ mod tests {
             .await;
         assert!(answered.is_ok());
         assert_eq!(attempts, 2);
+    }
+
+    /// A step of the request that ran here failed: the next address would
+    /// fail it the same way, so it is not tried.
+    #[dialog_common::test]
+    async fn it_does_not_fail_over_on_a_local_step() {
+        let remote = remote(&["https://a.example", "https://b.example"]);
+        let mut attempts = 0;
+        let answered: Result<(), Step<MemoryError>> = remote
+            .reach(|_| {
+                attempts += 1;
+                async { Err(Step::Local(unreachable())) }
+            })
+            .await;
+        assert!(matches!(answered, Err(Step::Local(_))));
+        assert_eq!(attempts, 1);
+
+        let mut attempts = 0;
+        let answered: Result<(), Step<MemoryError>> = remote
+            .reach(|_| {
+                attempts += 1;
+                async { Err(Step::Remote(unreachable())) }
+            })
+            .await;
+        assert!(matches!(answered, Err(Step::Remote(_))));
+        assert_eq!(attempts, 2, "a step at the peer still fails over");
     }
 }

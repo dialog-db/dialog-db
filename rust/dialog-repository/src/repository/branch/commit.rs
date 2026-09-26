@@ -1,7 +1,8 @@
+use super::merge::merge_with_winner;
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
-    Revision, Snapshot, TreeReference, origin_of,
+    RepositoryMemoryExt as _, Revision, Snapshot, TreeReference, origin_of,
 };
 use dialog_artifacts::history::{
     Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
@@ -29,6 +30,7 @@ pub struct Commit<'a, Changes> {
     canonicalize: bool,
     scope: WriteScope,
     entries: Vec<(Key, State<Datum>)>,
+    merge: bool,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -40,6 +42,7 @@ impl<'a, Changes> Commit<'a, Changes> {
             canonicalize: false,
             scope: WriteScope::Application,
             entries: Vec::new(),
+            merge: false,
         }
     }
 
@@ -109,6 +112,27 @@ impl<'a, Changes> Commit<'a, Changes> {
     /// marking a point in history or forcing a sync point.
     pub fn allow_empty(mut self) -> Self {
         self.allow_empty = true;
+        self
+    }
+
+    /// Merge with the head that won instead of failing when another
+    /// writer advanced it first.
+    ///
+    /// By default a commit that loses the race for the branch's head
+    /// fails with [`VersionMismatch`](PublishError::VersionMismatch), and
+    /// the caller decides what to do. With `merge`, the commit's revision
+    /// is kept exactly as minted and a merge of it with the head that won
+    /// is published instead, as a pull merges two peers' changes: both
+    /// sides' facts survive, and a value both set is elected by version
+    /// when read.
+    ///
+    /// A head moved by this commit's own writer, a pull it ran in the
+    /// background say, is not a concurrent change: the commit is built
+    /// on it rather than merged with it. A handle that raced its own
+    /// writer some other way still fails, since the version it minted is
+    /// taken.
+    pub fn merge(mut self) -> Self {
+        self.merge = true;
         self
     }
 }
@@ -181,6 +205,29 @@ where
             + ConditionalSync
             + 'static,
     {
+        // One writer moves the head at a time within an environment: its
+        // commits and its pulls of this branch take turns, since both mint
+        // under its origin and would otherwise take the same edition.
+        let lock = branch.write_lock();
+        let _writing = lock.lock().await;
+
+        // A merging commit builds on a head its own writer moved since
+        // this handle read it, a pull of its own say: that is not a
+        // concurrent change to merge with, and minting on the older head
+        // would take the edition the newer one holds. A head another writer
+        // moved stays a race, merged as the commit asked.
+        if self.merge {
+            let stored = branch.subject().branch(branch.name()).revision();
+            stored.resolve().perform(env).await?;
+            let issuer = Identify.perform(env).await?.did();
+            if let Some(newer) = stored.content()
+                && Some(&newer) != branch.revision().as_ref()
+                && newer.issuer == issuer
+            {
+                branch.revision.resolve().perform(env).await?;
+            }
+        }
+
         // Checkpoint the head: capture the version we build this commit on top
         // of, so the publish below CAS's against it. A concurrent commit or
         // pull that advances the head while we apply changes then makes this
@@ -189,6 +236,7 @@ where
         let head = branch.revision.checkpoint();
         let base_revision = branch.revision();
         let base_version = branch.revision.edition().map(|edition| edition.version);
+        let merging = self.merge.then(|| base_revision.clone());
 
         let minted = Mint {
             source: SourceRef::from(branch),
@@ -232,7 +280,14 @@ where
             Outcome::Minted(minted) => *minted,
         };
 
-        head.publish(revision.clone(), env).await?;
+        if let Err(lost) = head.publish(revision.clone(), env).await {
+            return match (lost, merging) {
+                (lost @ PublishError::VersionMismatch { .. }, Some(base)) => {
+                    merge_with_winner(branch, base, revision, lost, env).await
+                }
+                (lost, _) => Err(lost.into()),
+            };
+        }
 
         // Seed the memos with what was just published: the next commit's
         // skip-table walk starts at this very record, and later pulls
@@ -610,7 +665,7 @@ mod tests {
     use crate::TreeReference;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use futures_util::{StreamExt, stream};
@@ -626,7 +681,7 @@ mod tests {
     /// fact was deleted as a "superseded prior".
     #[dialog_common::test]
     async fn it_keeps_both_facts_across_two_commits() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -670,7 +725,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_and_selects() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -720,7 +775,7 @@ mod tests {
     async fn it_fails_a_commit_racing_another_then_reconciles_on_refresh() -> Result<()> {
         use crate::PublishError;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // Two independent handles to the same branch — both snapshot the same
@@ -802,7 +857,7 @@ mod history_tests {
 
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::history::{
         Causality, History as _, HistorySelector, causality, common_ancestor,
@@ -824,7 +879,7 @@ mod history_tests {
     /// conflict detection, and every revision's DAG edge is recorded.
     #[dialog_common::test]
     async fn it_records_claim_lineage_across_commits() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -919,7 +974,7 @@ mod history_tests {
     /// adopts on pull — breaks verification.
     #[dialog_common::test]
     async fn it_signs_the_published_head() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -960,7 +1015,7 @@ mod history_tests {
     async fn it_rejects_writes_to_the_reserved_dialog_namespace() -> Result<()> {
         use dialog_artifacts::DialogArtifactsError;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -998,7 +1053,7 @@ mod history_tests {
     /// edition, no new history.
     #[dialog_common::test]
     async fn it_keeps_the_revision_for_an_empty_commit() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1047,7 +1102,7 @@ mod history_tests {
     /// so the branch keeps its revision and mints no new edition.
     #[dialog_common::test]
     async fn it_keeps_the_revision_when_a_commit_only_retracts_absent_facts() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1088,7 +1143,7 @@ mod history_tests {
     /// `VersionMismatch` and the caller refreshes and retries.
     #[dialog_common::test]
     async fn it_does_not_treat_a_stale_snapshot_as_a_noop() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let seed = repo.branch("main").open().perform(&operator).await?;
@@ -1150,7 +1205,7 @@ mod history_tests {
     /// version, so later commits can derive what they supersede.
     #[dialog_common::test]
     async fn it_tags_committed_data_with_the_revision_version() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

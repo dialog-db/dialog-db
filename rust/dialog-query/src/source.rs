@@ -23,12 +23,12 @@ pub(crate) mod test {
     use dialog_artifacts::selector::Constrained;
     use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
-    use dialog_operator::Operator as DialogOperator;
+    use dialog_peer::Peer as DialogOperator;
     use dialog_repository::{Branch, NetworkedIndex};
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_storage::{Blake3Hash, StorageBackend};
 
-    type Operator = DialogOperator<VolatileSpace>;
+    type Operator = DialogOperator<VolatileSpace, dialog_peer::Session>;
 
     /// Test environment that implements both `Provider<Select<'a>>` and
     /// `Provider<SelectRules>`, bridging a Branch + Operator with a RuleRegistry.

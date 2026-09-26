@@ -303,7 +303,7 @@ mod tests {
     use dialog_capability::{Command, Provider};
     use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Priority};
     use dialog_effects::archive::{Get, Put};
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_storage::StorageBackend as _;
     use parking_lot::Mutex;
 
@@ -358,13 +358,13 @@ mod tests {
     /// site's slot from a read someone is waiting on.
     #[dialog_common::test]
     async fn it_ranks_its_hydrations_at_its_priority() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let site = dialog_remote_s3::Address::builder("https://s3.us-east-1.amazonaws.com")
             .region("us-east-1")
             .bucket("bucket")
             .build()?;
-        let origin = connect(&repo, "origin", site, repo.did(), &operator).await?;
+        let origin = connect("origin", site, repo.did(), &operator).await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let env = Recording {
             inner: operator,
@@ -402,7 +402,7 @@ mod tests {
     /// "Block not found" with the cause erased.
     #[dialog_common::test]
     async fn it_fails_a_miss_loudly_when_the_tracked_remote_is_unavailable() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

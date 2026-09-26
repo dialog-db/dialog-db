@@ -15,7 +15,6 @@
 //! and node caches warm the way a running app would.
 //!
 //! [`Artifacts`]: dialog_artifacts::Artifacts
-
 use anyhow::Result;
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::{ConditionalSync, Holds};
@@ -23,10 +22,10 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{List, Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
-use dialog_network::Network;
-use dialog_operator::helpers::unique_name;
-use dialog_operator::{DeriveOperator as _, Operator, Profile};
-use dialog_repository::{Branch, RemoteSite, RepositoryExt as _};
+use dialog_effects::storage::Location;
+use dialog_peer::helpers::unique_name;
+use dialog_peer::{Peer, Session};
+use dialog_repository::{Branch, PeersEnv, RemoteSite, RepositoryExt as _};
 use dialog_storage::NativeTempSpace;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use futures_util::stream;
@@ -51,38 +50,32 @@ pub struct DialogRepo<Env> {
     branch: Branch,
 }
 
-impl DialogRepo<Operator<VolatileSpace>> {
+impl DialogRepo<Peer<VolatileSpace, Session>> {
     /// Open a fresh volatile (in-memory) repository — the CPU-isolation
     /// signal, like `dialog_mem`.
     pub async fn volatile() -> Result<Self> {
         let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("baseline"))
-            .perform(&storage)
-            .await?;
-        let operator = profile
-            .derive(b"baseline")
-            .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
-            .await?;
+        let profile = dialog_peer::helpers::open_peer(
+            storage.clone(),
+            Location::profile(unique_name("baseline")),
+        )
+        .await?;
+        let operator = profile.session(b"baseline").allow(Subject::any()).await?;
         Self::assemble(operator, &profile).await
     }
 }
 
-impl DialogRepo<Operator<NativeTempSpace>> {
+impl DialogRepo<Peer<NativeTempSpace, Session>> {
     /// Open a fresh repository rooted in the platform temp directory — the
     /// real-latency signal, like `dialog_disk`.
     pub async fn temp() -> Result<Self> {
         let storage = Storage::temp();
-        let profile = Profile::open(unique_name("baseline"))
-            .perform(&storage)
-            .await?;
-        let operator = profile
-            .derive(b"baseline")
-            .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
-            .await?;
+        let profile = dialog_peer::helpers::open_peer(
+            storage.clone(),
+            Location::profile(unique_name("baseline")),
+        )
+        .await?;
+        let operator = profile.session(b"baseline").allow(Subject::any()).await?;
         Self::assemble(operator, &profile).await
     }
 }
@@ -99,6 +92,7 @@ where
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
         + Provider<List>
+        + PeersEnv
         + Provider<dialog_repository::Hydrate>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
@@ -107,10 +101,10 @@ where
         + ConditionalSync
         + 'static,
 {
-    /// Open the repository under `profile` and its `main` branch.
-    async fn assemble(operator: Env, profile: &Profile) -> Result<Self> {
+    /// Open the repository under `peer` and its `main` branch.
+    async fn assemble<S: Clone>(operator: Env, profile: &Peer<S>) -> Result<Self> {
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&operator)
             .await?;

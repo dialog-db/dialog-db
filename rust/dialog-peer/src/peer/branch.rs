@@ -1,4 +1,4 @@
-//! Branch capability providers for Operator.
+//! Branch capability providers for Peer.
 //!
 //! A branch exists as a set of memory cells; the fact that it exists is
 //! what makes it findable, and that fact lives in the repository's
@@ -14,7 +14,7 @@
 //! leaves one that lists but points at nothing. Repeating the same
 //! operation finishes either.
 
-use super::Operator;
+use super::{Mode, Peer};
 use core::fmt::Display;
 use dialog_capability::{Capability, Fork, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
@@ -78,7 +78,7 @@ fn failed(error: impl Display) -> BranchError {
     BranchError::Memory(MemoryError::Storage(error.to_string()))
 }
 
-impl<S> Operator<S>
+impl<S, M: Mode> Peer<S, M>
 where
     S: Clone,
     Self: BranchEnv,
@@ -96,7 +96,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<branch_fx::Create> for Operator<S>
+impl<S, M: Mode> Provider<branch_fx::Create> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: BranchEnv + ConditionalSend,
@@ -189,7 +189,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<branch_fx::List> for Operator<S>
+impl<S, M: Mode> Provider<branch_fx::List> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: BranchEnv + ConditionalSend,
@@ -209,7 +209,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<branch_fx::Delete> for Operator<S>
+impl<S, M: Mode> Provider<branch_fx::Delete> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: BranchEnv + ConditionalSend,
@@ -307,7 +307,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<branch_fx::Switch> for Operator<S>
+impl<S, M: Mode> Provider<branch_fx::Switch> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: BranchEnv + ConditionalSend,
@@ -335,8 +335,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::Operator;
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::{test_repo, test_session_with_peer};
+    use crate::{Mode, Peer};
     use dialog_artifacts::{Artifact, Entity, Instruction, Value};
     use dialog_capability::identity::TreeReference;
     use dialog_capability::{Did, Subject};
@@ -352,7 +352,7 @@ mod tests {
 
     /// Mint a real head on `name` by committing nothing to it.
     async fn commit(
-        operator: &Operator<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         subject: &Did,
         name: &str,
     ) -> anyhow::Result<Revision> {
@@ -370,7 +370,7 @@ mod tests {
 
     /// Where `name` points, as seen by opening it.
     async fn head(
-        operator: &Operator<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         subject: &Did,
         name: &str,
     ) -> anyhow::Result<Option<Revision>> {
@@ -384,7 +384,7 @@ mod tests {
 
     /// The branch the replica has switched to, if any.
     async fn active(
-        operator: &Operator<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         subject: &Did,
     ) -> anyhow::Result<Vec<Entity>> {
         let identity = Identify.perform(operator).await?;
@@ -408,7 +408,7 @@ mod tests {
 
     /// The entity of the branch `name` on the replica `operator` views.
     async fn entity(
-        operator: &Operator<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         subject: &Did,
         name: &str,
     ) -> anyhow::Result<Entity> {
@@ -418,7 +418,7 @@ mod tests {
     }
 
     async fn listed(
-        operator: &Operator<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         subject: &Did,
     ) -> anyhow::Result<Vec<String>> {
         Ok(Subject::from(subject.clone())
@@ -437,7 +437,7 @@ mod tests {
     /// commit.
     #[dialog_common::test]
     async fn it_creates_a_branch_at_a_revision() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let source = commit(&operator, &did, "main").await?;
@@ -461,7 +461,7 @@ mod tests {
     /// fork stays connected to where it came from.
     #[dialog_common::test]
     async fn it_commits_onto_the_revision_a_branch_was_created_at() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let source = commit(&operator, &did, "main").await?;
@@ -486,7 +486,7 @@ mod tests {
     /// nothing to point at yet.
     #[dialog_common::test]
     async fn it_creates_an_empty_branch() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
 
@@ -511,7 +511,7 @@ mod tests {
     /// Creating the same branch at the same revision twice converges.
     #[dialog_common::test]
     async fn it_creates_idempotently() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let source = commit(&operator, &did, "main").await?;
@@ -537,7 +537,7 @@ mod tests {
     /// else is refused, and it stays where it was.
     #[dialog_common::test]
     async fn it_refuses_to_move_an_existing_branch() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let first = commit(&operator, &did, "main").await?;
@@ -564,7 +564,7 @@ mod tests {
     /// not make.
     #[dialog_common::test]
     async fn it_records_only_a_branch_it_created() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         // `main` exists as cells but was never created through the
@@ -595,7 +595,7 @@ mod tests {
     /// longer opens to a head, and it is no longer listed.
     #[dialog_common::test]
     async fn it_deletes_a_branch_at_its_revision() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let source = commit(&operator, &did, "main").await?;
@@ -627,7 +627,7 @@ mod tests {
     /// left exactly as it was.
     #[dialog_common::test]
     async fn it_refuses_to_delete_a_branch_that_moved() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let source = commit(&operator, &did, "main").await?;
@@ -667,7 +667,7 @@ mod tests {
     /// anything is written.
     #[dialog_common::test]
     async fn it_refuses_a_name_that_is_not_one_segment() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
 
@@ -701,7 +701,7 @@ mod tests {
     /// because this delete already moved it.
     #[dialog_common::test]
     async fn it_finishes_a_delete_that_stopped_part_way() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let source = commit(&operator, &did, "main").await?;
@@ -738,7 +738,7 @@ mod tests {
     /// nothing.
     #[dialog_common::test]
     async fn it_deletes_an_empty_branch() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
 
@@ -766,7 +766,7 @@ mod tests {
     /// it is not deleted out from under it: switch away first.
     #[dialog_common::test]
     async fn it_refuses_to_delete_the_active_branch() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let source = commit(&operator, &did, "main").await?;
@@ -802,7 +802,7 @@ mod tests {
     /// by its issuer as it stands: a tampered one is refused.
     #[dialog_common::test]
     async fn it_refuses_to_create_at_a_tampered_revision() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let mut forged = commit(&operator, &did, "main").await?;
@@ -825,7 +825,7 @@ mod tests {
     /// tree: one minted in another repository points at nothing here.
     #[dialog_common::test]
     async fn it_refuses_to_create_at_a_revision_whose_tree_it_lacks() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let elsewhere = test_repo(&operator, &profile).await;
         let foreign = elsewhere
@@ -861,7 +861,7 @@ mod tests {
     /// branch created again under the same name starts with none.
     #[dialog_common::test]
     async fn it_forgets_where_a_deleted_branch_pulled_from() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         commit(&operator, &did, "main").await?;
@@ -894,7 +894,7 @@ mod tests {
     /// be created or deleted through the same capability.
     #[dialog_common::test]
     async fn it_refuses_to_touch_the_registry() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let source = commit(&operator, &did, "main").await?;
@@ -923,7 +923,7 @@ mod tests {
     /// switching again replaces it rather than adding a second.
     #[dialog_common::test]
     async fn it_switches_the_active_branch() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         assert_eq!(active(&operator, &did).await?, Vec::<Entity>::new());
@@ -947,7 +947,7 @@ mod tests {
     /// replica can be switched to.
     #[dialog_common::test]
     async fn it_switches_to_a_branch_it_does_not_hold() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let elsewhere: Entity = "did:key:zElsewhere".parse()?;
@@ -967,7 +967,7 @@ mod tests {
     /// entity derived from `(replica, name)`, its name, and its replica.
     #[dialog_common::test]
     async fn it_lists_branch_records() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
 

@@ -224,15 +224,40 @@ pub mod replica {
     );
 }
 
-/// Attribute newtypes for [`Peer`] entities.
+/// Attribute newtypes for [`Space`].
 ///
-/// All attributes here live under the `dialog.peer` domain. A peer is
-/// whoever holds replicas: this device's profile, or a remote service
-/// reached at one or more addresses.
+/// All attributes here live under the `dialog.space` domain: the
+/// repositories a peer keeps, by name, and where each is stored.
+pub mod space {
+    use super::Attribute;
+
+    /// `dialog.space/name` — the name the peer knows the repository by.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Name(
+        /// The name.
+        pub String,
+    );
+
+    /// `dialog.space/address` — where the repository is stored, as the
+    /// URI of its storage location (`file:///path/name`,
+    /// `file:profile/name`).
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Address(
+        /// The location's URI.
+        pub String,
+    );
+}
+
+/// Attribute newtypes for [`PeerAddress`] and [`Contact`].
+///
+/// All attributes here live under the `dialog.peer` domain: what a host
+/// knows about the peers it can reach.
 pub mod peer {
     use super::Attribute;
 
-    /// `dialog.peer/name` — the name the peer is known by locally.
+    /// `dialog.peer/name` — the name the host knows the peer by.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.peer")]
     pub struct Name(
@@ -643,48 +668,54 @@ impl AsRef<Entity> for Branch {
     }
 }
 
-/// A peer: whoever holds replicas, identified by its DID.
+/// An address a peer is reached at, as the host records it.
 ///
-/// A remote service's DID is derived from where it is reached (see
-/// [`Peer::at`]), so two replicas that name the same service converge
-/// on one peer.
+/// A peer is a role, not a record: an entity is a peer because a
+/// [`Replica`] names it as the holder. Which peers the host can reach is
+/// the host's own business, recorded in its own state, one of these per
+/// address. Its entity is the peer's DID.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Peer {
+pub struct PeerAddress {
     /// The peer's entity: its DID.
     pub this: Entity,
-    /// The name the peer is known by locally.
-    pub name: peer::Name,
+    /// An address the peer is reached at, encoded.
+    pub address: peer::Address,
 }
 
-impl Peer {
-    /// Describe the peer with this DID under a local name.
-    pub fn new(did: &Did, name: impl Into<String>) -> Self {
-        Self {
-            this: did.this(),
-            name: peer::Name(name.into()),
-        }
-    }
-
-    /// This peer's replica of the repository `subject`.
-    pub fn repository(&self, subject: Did) -> Replica {
-        Replica::derive(self.this.clone(), subject.this())
-    }
-}
-
-impl AsRef<Entity> for Peer {
+impl AsRef<Entity> for PeerAddress {
     fn as_ref(&self) -> &Entity {
         &self.this
     }
 }
 
-/// One address a [`Peer`] is reached at. Cardinality-many: a peer
-/// reached several ways has one of these per address.
+/// A repository a peer keeps, by the name it knows it by and where it
+/// is stored. Its entity is the repository's DID.
+///
+/// What a peer's space names resolve to: looking a repository up by name
+/// reads these before anything is looked for on disk.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PeerAddress {
-    /// The peer's entity (same as [`Peer::this`]).
+pub struct Space {
+    /// The repository's entity: its DID.
     pub this: Entity,
-    /// The encoded address.
-    pub address: peer::Address,
+    /// The name the peer knows it by.
+    pub name: space::Name,
+    /// Where it is stored.
+    pub address: space::Address,
+}
+
+/// A contact: a peer the host knows by name.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Contact {
+    /// The peer's entity: its DID.
+    pub this: Entity,
+    /// The name the host knows it by.
+    pub name: peer::Name,
+}
+
+impl AsRef<Entity> for Contact {
+    fn as_ref(&self) -> &Entity {
+        &self.this
+    }
 }
 
 /// One branch a branch pulls from. Cardinality-many: a branch pulling

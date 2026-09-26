@@ -7,7 +7,7 @@ use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
     Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
 };
-use dialog_capability::{Fork, Provider};
+use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveExt as _;
@@ -22,7 +22,8 @@ use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use super::resolve::resolve;
-use crate::registry::RegistryEnv;
+use crate::ResolveEnv;
+use crate::repository::remote::Step;
 use crate::{
     Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex,
     RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
@@ -138,7 +139,7 @@ impl Push<'_> {
     /// for content reachable from no store at all.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PushError>
     where
-        Env: RegistryEnv
+        Env: ResolveEnv
             + Provider<BlobRead>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Put>>
@@ -216,7 +217,7 @@ async fn push_upstream<Env>(
     env: &Env,
 ) -> Result<Option<Revision>, PushError>
 where
-    Env: RegistryEnv
+    Env: ResolveEnv
         + Provider<BlobRead>
         + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Put>>
@@ -619,7 +620,7 @@ where
     let host = branch.subject();
     gather(&branch.upstreams(), &mut remotes, &mut visited, &mut locals);
     gather(
-        &branch.tracked().synced_with(&host),
+        &branch.sharing(branch.tracked().synced_with(&host)),
         &mut remotes,
         &mut visited,
         &mut locals,
@@ -628,7 +629,7 @@ where
         let local = branch.subject().branch(name).load().perform(env).await?;
         gather(&local.upstreams(), &mut remotes, &mut visited, &mut locals);
         gather(
-            &local.tracked().synced_with(&host),
+            &branch.sharing(local.tracked().synced_with(&host)),
             &mut remotes,
             &mut visited,
             &mut locals,
@@ -801,19 +802,12 @@ async fn remote_has_block<Env>(
 where
     Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    let found: Option<Vec<u8>> = remote
-        .reach(|address| async move {
-            address
-                .subject
-                .clone()
-                .reader()
-                .archive()
-                .catalog("index")
-                .get(hash.clone())
-                .fork(&address.address)
-                .perform(env)
-                .await
-        })
+    let found: Option<Vec<u8>> = Subject::from(remote.did())
+        .reader()
+        .archive()
+        .catalog("index")
+        .get(hash.clone())
+        .perform(&remote.connection(env))
         .await
         .map_err(dialog_storage::DialogStorageError::from)
         .map_err(dialog_search_tree::DialogSearchTreeError::from)?;
@@ -829,19 +823,12 @@ async fn remote_block<Env>(
 where
     Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    remote
-        .reach(|address| async move {
-            address
-                .subject
-                .clone()
-                .reader()
-                .archive()
-                .catalog("index")
-                .get(hash.clone())
-                .fork(&address.address)
-                .perform(env)
-                .await
-        })
+    Subject::from(remote.did())
+        .reader()
+        .archive()
+        .catalog("index")
+        .get(hash.clone())
+        .perform(&remote.connection(env))
         .await
         .map_err(dialog_storage::DialogStorageError::from)
         .map_err(dialog_search_tree::DialogSearchTreeError::from)
@@ -934,22 +921,12 @@ where
         + ConditionalSync
         + 'static,
 {
-    let probe = target
-        .reach(|address| {
-            let digest = digest.clone();
-            async move {
-                address
-                    .subject
-                    .clone()
-                    .reader()
-                    .archive()
-                    .blob()
-                    .read(digest)
-                    .fork(address.site())
-                    .perform(env)
-                    .await
-            }
-        })
+    let probe = Subject::from(target.did())
+        .reader()
+        .archive()
+        .blob()
+        .read(digest.clone())
+        .perform(&target.connection(env))
         .await;
     match probe {
         // Present; the unconsumed reader is dropped. (A ranged 1-byte
@@ -968,10 +945,14 @@ where
         .reach(|address| {
             let digest = digest.clone();
             let opened = opened.take();
+            // Only the target's side fails over: reading the source here
+            // would fail the same for every address.
             async move {
                 let mut source = match opened {
                     Some(source) => source,
-                    None => blob_source(&digest, branch, sources, env).await?,
+                    None => blob_source(&digest, branch, sources, env)
+                        .await
+                        .map_err(Step::Local)?,
                 };
                 let mut sink = address
                     .subject
@@ -982,15 +963,17 @@ where
                     .import(digest, size)
                     .fork(address.site())
                     .perform(env)
-                    .await?;
-                while let Some(chunk) = source.next().await? {
-                    sink.write_all(&chunk).await?;
+                    .await
+                    .map_err(Step::Remote)?;
+                while let Some(chunk) = source.next().await.map_err(Step::Local)? {
+                    sink.write_all(&chunk).await.map_err(Step::Remote)?;
                 }
-                sink.finish().await?;
-                Ok::<_, BlobError>(())
+                sink.finish().await.map_err(Step::Remote)?;
+                Ok::<_, Step<BlobError>>(())
             }
         })
-        .await?;
+        .await
+        .map_err(Step::into_inner)?;
     Ok(())
 }
 
@@ -1016,19 +999,12 @@ where
         found => return found,
     }
     for origin in sources {
-        let found = origin
-            .reach(|address| async move {
-                address
-                    .subject
-                    .clone()
-                    .reader()
-                    .archive()
-                    .blob()
-                    .read(digest.clone())
-                    .fork(address.site())
-                    .perform(env)
-                    .await
-            })
+        let found = Subject::from(origin.did())
+            .reader()
+            .archive()
+            .blob()
+            .read(digest.clone())
+            .perform(&origin.connection(env))
             .await;
         match found {
             Err(BlobError::NotFound(_)) => continue,
@@ -1177,14 +1153,14 @@ mod tests {
     use crate::PushError;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::{StreamExt as _, stream};
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1222,7 +1198,7 @@ mod tests {
     /// nothing new is a no-op (no re-upload).
     #[dialog_common::test]
     async fn it_pushes_spilled_value_blocks_once() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1294,7 +1270,7 @@ mod tests {
     /// regression where an idle sync tick re-pushed on every drain.
     #[dialog_common::test]
     async fn it_is_a_noop_when_nothing_new_to_push() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1345,9 +1321,9 @@ mod tests {
     async fn it_folds_tracking_updates_when_pushing_from_a_stale_handle() -> Result<()> {
         use crate::Upstream;
         use crate::helpers::test_repo;
-        use dialog_operator::helpers::test_operator_with_profile;
+        use dialog_peer::helpers::test_session_with_peer;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1413,7 +1389,7 @@ mod tests {
     async fn it_pushes_to_a_non_default_upstream_and_tracks_it() -> Result<()> {
         use crate::Upstream;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1475,7 +1451,7 @@ mod tests {
     /// empty target can be fast-forwarded onto. Pull it first.
     #[dialog_common::test]
     async fn it_refuses_pushing_to_an_untracked_nonempty_target() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let occupied = repo.branch("occupied").open().perform(&operator).await?;
@@ -1511,7 +1487,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_non_fast_forward_on_local_upstream_diverged() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1549,7 +1525,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_has_no_upstream_by_default() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("feature").open().perform(&operator).await?;
 
@@ -1560,7 +1536,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_pushing_branch_without_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("feature").open().perform(&operator).await?;
 
@@ -1575,7 +1551,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_when_pushing_empty_branch() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1592,7 +1568,7 @@ mod tests {
     /// records how far it got.
     #[dialog_common::test]
     async fn it_pushes_to_every_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
@@ -1637,7 +1613,7 @@ mod tests {
     /// time, and be refused as not a fast-forward for good.
     #[dialog_common::test]
     async fn it_records_every_push_of_a_concurrent_push() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let feature = repo.branch("feature").open().perform(&operator).await?;

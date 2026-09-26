@@ -548,8 +548,8 @@ mod tests {
     use crate::{Branch, CommitError, PublishError};
     use anyhow::Result;
     use dialog_artifacts::history::Edition;
-    use dialog_operator::Operator;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::Peer;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
     use dialog_query::{Concept, Entity, Query, Term};
     use dialog_storage::provider::storage::VolatileSpace;
@@ -572,7 +572,10 @@ mod tests {
         })
     }
 
-    async fn bodies(branch: &Branch, operator: &Operator<VolatileSpace>) -> Result<Vec<String>> {
+    async fn bodies(
+        branch: &Branch,
+        operator: &Peer<VolatileSpace, dialog_peer::Session>,
+    ) -> Result<Vec<String>> {
         let mut bodies: Vec<String> = branch
             .query()
             .select(Query::<Note> {
@@ -593,7 +596,7 @@ mod tests {
     /// every link lands atomically at exactly the versions minted.
     #[dialog_common::test]
     async fn it_stages_privately_and_publishes_atomically() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -652,7 +655,7 @@ mod tests {
     /// history reports for the commit carrying the claims.
     #[dialog_common::test]
     async fn it_captures_the_version_a_commit_minted() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -691,7 +694,7 @@ mod tests {
     /// re-run against the fresh head reconciles.
     #[dialog_common::test]
     async fn it_fails_publish_after_the_head_moved_then_recovers() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -748,7 +751,7 @@ mod tests {
     /// branch until the batch publishes its first-ever head.
     #[dialog_common::test]
     async fn it_stages_a_genesis_chain() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         assert_eq!(branch.revision(), None);
@@ -777,7 +780,7 @@ mod tests {
     /// success from a stale view either.
     #[dialog_common::test]
     async fn it_treats_an_empty_batch_as_a_noop_only_at_the_current_head() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

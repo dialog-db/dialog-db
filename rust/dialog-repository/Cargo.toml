@@ -52,7 +52,7 @@ tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-ucan-core = { workspace = true, features = ["helpers"] }
 dialog-remote-fs = { workspace = true }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }

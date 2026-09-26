@@ -1,4 +1,4 @@
-//! Access capability providers for Operator.
+//! Access capability providers for [`Peer`].
 //!
 //! Proofs resolve from the profile repository's access branch: the walk
 //! over its `dialog.ucan/*` facts finds the cross-party chain proving the
@@ -32,7 +32,7 @@
 //! does not want proving to pay download latency materializes the branch
 //! up front with `Branch::download`.
 
-use super::Operator;
+use super::{Grant, Local, Mode, Peer};
 use dialog_capability::access::{
     Access, Authorize, AuthorizeError, Certificate as _, Export, Proof as _, Protocol, Prove,
     Retain, Scope as _, TimeRange,
@@ -121,19 +121,19 @@ impl<T> LocalEnv for T where
 /// would otherwise open. Before the reach is installed (during build)
 /// and offline, the forks degrade to reporting content unavailable, and
 /// the walk skips what it cannot read.
-struct AccessEnv<S: Clone> {
-    operator: Operator<S>,
+struct AccessEnv<S: Clone, M: Mode = Local> {
+    operator: Peer<S, M>,
 }
 
 macro_rules! delegate_local {
     ($($effect:ty),+ $(,)?) => {$(
         #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-        impl<S> Provider<$effect> for AccessEnv<S>
+        impl<S, M: Mode> Provider<$effect> for AccessEnv<S, M>
         where
             S: Clone + ConditionalSend + ConditionalSync + 'static,
             <$effect as Command>::Input: ConditionalSend,
-            Operator<S>: Provider<$effect> + ConditionalSync,
+            Peer<S, M>: Provider<$effect> + ConditionalSync,
         {
             async fn execute(
                 &self,
@@ -151,7 +151,7 @@ delegate_local!(
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Fork<RemoteSite, Get>> for AccessEnv<S>
+impl<S, M: Mode> Provider<Fork<RemoteSite, Get>> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: ConditionalSync,
@@ -178,7 +178,7 @@ where
 // fetch, so its work is not interchangeable with an ordinary read's.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<dialog_repository::Hydrate> for AccessEnv<S>
+impl<S, M: Mode> Provider<dialog_repository::Hydrate> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
@@ -193,7 +193,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Fork<RemoteSite, Resolve>> for AccessEnv<S>
+impl<S, M: Mode> Provider<Fork<RemoteSite, Resolve>> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: ConditionalSync,
@@ -211,7 +211,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Fork<RemoteSite, BlobRead>> for AccessEnv<S>
+impl<S, M: Mode> Provider<Fork<RemoteSite, BlobRead>> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: ConditionalSync,
@@ -229,11 +229,11 @@ where
     }
 }
 
-impl<S: Clone> Operator<S> {
+impl<S: Clone, M: Mode> Peer<S, M> {
     /// The number of chains currently cached (for tests).
     #[cfg(test)]
     pub(crate) fn cached_chains(&self) -> usize {
-        self.chains.lock().chains.len()
+        self.chains().lock().chains.len()
     }
 
     /// The cache key for a claim, or `None` when the claim is not
@@ -259,9 +259,9 @@ impl<S: Clone> Operator<S> {
     /// duration, and still unlapsed. `None` on a miss or when the cached
     /// chain rejects this particular claim.
     fn cached(&self, key: &(Did, Did, String), claim: &Prove<Ucan>) -> Option<UcanProof> {
-        let branch = self.delegations.get()?;
+        let branch = self.state_opt()?;
         let epoch = branch.revision().map(|revision| revision.version());
-        let cache = self.chains.lock();
+        let cache = self.chains().lock();
         if cache.epoch != epoch {
             return None;
         }
@@ -309,7 +309,7 @@ impl<S: Clone> Operator<S> {
     /// until the next head movement; stamped with the pre-walk head, such
     /// an entry simply never matches a live epoch again.
     fn record(&self, key: (Did, Did, String), epoch: Option<Version>, proof: &UcanProof) {
-        let mut cache = self.chains.lock();
+        let mut cache = self.chains().lock();
         if cache.epoch != epoch {
             cache.chains.clear();
             cache.epoch = epoch;
@@ -317,12 +317,21 @@ impl<S: Clone> Operator<S> {
         cache.chains.insert(key, proof.proofs().to_vec());
     }
 
-    /// The session grant covering `claim`, if the operator holds one.
-    fn session_grant(&self, claim: &Prove<Ucan>) -> Option<&UcanCertificate> {
-        self.session.iter().find(|grant| {
-            grant
-                .verify(&claim.access)
-                .is_ok_and(|range| range.covers(&claim.duration))
+    /// The grants covering `claim`: its subject, its command and policy,
+    /// and its duration.
+    fn session_grants<'a>(&'a self, claim: &'a Prove<Ucan>) -> impl Iterator<Item = &'a Grant> {
+        self.grants().iter().filter(|grant| {
+            let subject = match grant.certificate.0.subject() {
+                UcanSubject::Any => true,
+                UcanSubject::Specific(did) => {
+                    claim.access.subject == UcanSubject::Specific(did.clone())
+                }
+            };
+            subject
+                && grant
+                    .certificate
+                    .verify(&claim.access)
+                    .is_ok_and(|range| range.covers(&claim.duration))
         })
     }
 
@@ -363,8 +372,7 @@ impl<S: Clone> Operator<S> {
         // Captured before the walk: the facts the walk reads are at most
         // this fresh, so the record must not claim a later head.
         let epoch = self
-            .delegations
-            .get()
+            .state_opt()
             .and_then(|branch| branch.revision())
             .map(|revision| revision.version());
 
@@ -393,12 +401,34 @@ impl<S: Clone> Operator<S> {
         Self: LocalEnv,
         S: ConditionalSend + ConditionalSync + 'static,
     {
-        let Some(grant) = self.session_grant(claim) else {
-            return self.walk(claim.principal.clone(), claim).await;
-        };
-        let grant = grant.clone();
+        // Every grant covering the claim is tried in turn: one whose
+        // issuer cannot prove the claim does not hide one that can.
+        let mut refused = None;
+        for grant in self.session_grants(claim).cloned().collect::<Vec<_>>() {
+            match self.prove_by(grant, claim).await {
+                Ok(proof) => return Ok(proof),
+                Err(error) => refused = Some(error),
+            }
+        }
+        match refused {
+            Some(error) => Err(error),
+            None => self.walk(claim.principal.clone(), claim).await,
+        }
+    }
 
-        let mut proof = self.walk(self.profile_did(), claim).await?;
+    /// The proof of `claim` through `grant`: the grant's issuer's
+    /// authority, then the grant.
+    async fn prove_by(&self, grant: Grant, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
+        let Grant {
+            issuer,
+            certificate: grant,
+        } = grant;
+
+        let mut proof = self.walk(issuer, claim).await?;
         let range = grant.verify(&claim.access)?;
         let effective = proof.duration().intersect(&range);
         if !effective.covers(&claim.duration) {
@@ -412,12 +442,21 @@ impl<S: Clone> Operator<S> {
         Ok(proof)
     }
 
-    /// The tree walk over the access branch's delegation records.
+    /// The tree walk over the state branch's delegation records.
+    ///
+    /// A principal's authority over its own subject is self-issued: the
+    /// empty chain, resolved without a state branch, so an ephemeral peer
+    /// and a peer still opening its branch prove it alike.
     async fn walk(&self, principal: Did, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
     where
         Self: LocalEnv,
         S: ConditionalSend + ConditionalSync + 'static,
     {
+        if let UcanSubject::Specific(subject) = &claim.access.subject
+            && *subject == principal
+        {
+            return Ok(UcanProof::new(claim.access.clone()));
+        }
         let env = AccessEnv {
             operator: self.clone(),
         };
@@ -434,7 +473,7 @@ impl<S: Clone> Operator<S> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Prove<Ucan>> for Operator<S>
+impl<S, M: Mode> Provider<Prove<Ucan>> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: LocalEnv + ConditionalSend,
@@ -449,7 +488,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Retain<Ucan>> for Operator<S>
+impl<S, M: Mode> Provider<Retain<Ucan>> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: LocalEnv + ConditionalSend,
@@ -506,7 +545,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S, P> Provider<Export<P>> for Operator<S>
+impl<S, P, M: Mode> Provider<Export<P>> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     P: Protocol,
@@ -526,7 +565,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Authorize<Ucan>> for Operator<S>
+impl<S, M: Mode> Provider<Authorize<Ucan>> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: LocalEnv + ConditionalSend,
@@ -544,7 +583,7 @@ where
             .perform(self)
             .await?;
 
-        let operator_signer = self.authority.operator_signer().clone();
+        let operator_signer = self.authority().operator_signer().clone();
         proof.claim(operator_signer)
     }
 }
@@ -555,13 +594,13 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::DeriveOperator as _;
-    use crate::Profile;
-    use crate::helpers::unique_name;
+    use crate::{Mode, Peer, Session};
+    use dialog_effects::storage::Location;
+
+    use crate::helpers::{open_peer, unique_name};
     use anyhow::Result;
     use dialog_common::time;
     use dialog_credentials::Ed25519Signer;
-    use dialog_network::Network;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan::{Parameters, Scope, UcanDelegation};
     use dialog_ucan_core::DelegationBuilder;
@@ -574,15 +613,12 @@ mod tests {
         unique_name(prefix)
     }
 
-    async fn operator(name: &str) -> (Operator<VolatileSpace>, Profile) {
+    async fn operator(name: &str) -> (Peer<VolatileSpace, Session>, Peer<VolatileSpace>) {
         let storage = Storage::volatile();
-        let profile = Profile::open(unique(name)).perform(&storage).await.unwrap();
-        let operator = profile
-            .derive(b"test")
-            .network(Network::default())
-            .build(storage)
+        let profile = open_peer(storage.clone(), Location::profile(unique(name)))
             .await
             .unwrap();
+        let operator = profile.session(b"test").await.unwrap();
         (operator, profile)
     }
 
@@ -595,7 +631,7 @@ mod tests {
     }
 
     async fn retain_grant(
-        operator: &Operator<VolatileSpace>,
+        operator: &Peer<VolatileSpace, impl Mode>,
         space: &Ed25519Signer,
         holder: &Ed25519Signer,
         expiration: Option<Timestamp>,
@@ -610,7 +646,7 @@ mod tests {
         }
         let delegation = builder.try_build().await.unwrap();
         let chain = UcanDelegation::new(DelegationChain::new(delegation));
-        Subject::from(operator.profile_did())
+        Subject::from(operator.home().clone())
             .attenuate(Access)
             .invoke(Retain::<Ucan>::new(chain.clone()))
             .perform(operator)
@@ -632,18 +668,12 @@ mod tests {
     /// branch.
     #[dialog_common::test]
     async fn it_keeps_proofs_on_the_configured_access_branch() -> Result<()> {
-        use dialog_repository::{ACCESS_BRANCH, Repository};
+        use dialog_repository::ACCESS_BRANCH;
 
         let storage = Storage::volatile();
-        let profile = Profile::open(unique("access-branch"))
-            .perform(&storage)
-            .await?;
-        let operator = profile
-            .derive(b"test")
-            .network(Network::default())
-            .access_branch("account/test")
-            .build(storage)
-            .await?;
+        let profile =
+            open_peer(storage.clone(), Location::profile(unique("access-branch"))).await?;
+        let operator = profile.session(b"test").branch("account/test").await?;
 
         let space = Ed25519Signer::generate().await?;
         let holder = Ed25519Signer::generate().await?;
@@ -654,7 +684,8 @@ mod tests {
             .await
             .expect("the operator proves from the branch it retained into");
 
-        let configured = Repository::from(&profile)
+        let configured = profile
+            .repository(profile.home())
             .branch("account/test")
             .open()
             .perform(&operator)
@@ -669,7 +700,8 @@ mod tests {
             "the grant is on the configured branch",
         );
 
-        let default = Repository::from(&profile)
+        let default = profile
+            .repository(profile.home())
             .branch(ACCESS_BRANCH)
             .open()
             .perform(&operator)
@@ -699,7 +731,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_retains_after_another_handle_moved_the_head() -> Result<()> {
         use dialog_artifacts::{Attribute, Changes, Entity, Update as _, Value};
-        use dialog_repository::{ACCESS_BRANCH, Repository};
+        use dialog_repository::ACCESS_BRANCH;
 
         let (operator, profile) = operator("retain-stale-head").await;
 
@@ -713,7 +745,8 @@ mod tests {
         // head) and then committing through it — a display-name write, a
         // projection, a pull. This advances the head the operator's own
         // build-time handle still caches.
-        let elsewhere = Repository::from(&profile)
+        let elsewhere = profile
+            .repository(profile.home())
             .branch(ACCESS_BRANCH)
             .open()
             .perform(&operator)
@@ -868,7 +901,7 @@ mod tests {
         operator.resolve(claim(&holder, &space)).await?;
         assert_eq!(operator.cached_chains(), 1, "the walk's chain is recorded");
 
-        let key = Operator::<VolatileSpace>::cache_key(&claim(&holder, &space))
+        let key = Peer::<VolatileSpace>::cache_key(&claim(&holder, &space))
             .expect("a specific subject and a distinct holder are cacheable");
         assert!(
             operator.cached(&key, &claim(&holder, &space)).is_none(),
@@ -904,7 +937,7 @@ mod tests {
             .try_build()
             .await
             .unwrap();
-        Subject::from(operator.profile_did())
+        Subject::from(operator.home().clone())
             .attenuate(Access)
             .invoke(Retain::<Ucan>::new(UcanDelegation::new(
                 DelegationChain::new(constrained),
@@ -947,8 +980,8 @@ mod tests {
 
         // The epoch a hypothetical walk would have started under.
         let stale = operator
-            .delegations
-            .get()
+            .delegations()
+            .ok()
             .and_then(|branch| branch.revision())
             .map(|revision| revision.version());
         let proof = operator.resolve(claim(&holder, &space)).await?;
@@ -959,7 +992,7 @@ mod tests {
         let other = Ed25519Signer::generate().await?;
         retain_grant(&operator, &other, &holder, None).await;
         let key =
-            Operator::<VolatileSpace>::cache_key(&claim(&holder, &space)).expect("cacheable claim");
+            Peer::<VolatileSpace>::cache_key(&claim(&holder, &space)).expect("cacheable claim");
         operator.record(key.clone(), stale, &proof);
         assert!(
             operator.cached(&key, &claim(&holder, &space)).is_none(),
@@ -976,15 +1009,12 @@ mod tests {
     async fn it_leaves_no_session_residue() -> Result<()> {
         let (operator, profile) = {
             let storage = Storage::volatile();
-            let profile = Profile::open(unique("no-residue"))
-                .perform(&storage)
+            let profile = open_peer(storage.clone(), Location::profile(unique("no-residue")))
                 .await
                 .unwrap();
             let operator = profile
-                .derive(b"test")
+                .session(b"test")
                 .allow(Subject::any())
-                .network(Network::default())
-                .build(storage)
                 .await
                 .unwrap();
             (operator, profile)
@@ -1019,7 +1049,7 @@ mod tests {
             .resolve(Prove::<Ucan>::new(
                 operator.did(),
                 Scope {
-                    subject: UcanSubject::Specific(operator.profile_did()),
+                    subject: UcanSubject::Specific(operator.home().clone()),
                     command: UcanCommand(vec![]),
                     parameters: Parameters::default(),
                 },
@@ -1035,15 +1065,12 @@ mod tests {
     async fn it_composes_the_session_link_over_a_retained_chain() -> Result<()> {
         let (operator, profile) = {
             let storage = Storage::volatile();
-            let profile = Profile::open(unique("compose"))
-                .perform(&storage)
+            let profile = open_peer(storage.clone(), Location::profile(unique("compose")))
                 .await
                 .unwrap();
             let operator = profile
-                .derive(b"test")
+                .session(b"test")
                 .allow(Subject::any())
-                .network(Network::default())
-                .build(storage)
                 .await
                 .unwrap();
             (operator, profile)
@@ -1073,7 +1100,7 @@ mod tests {
         assert_eq!(proof.proofs().len(), 2);
         Ok(())
     }
-    async fn retained_count(operator: &Operator<VolatileSpace>) -> Result<usize> {
+    async fn retained_count(operator: &Peer<VolatileSpace, impl Mode>) -> Result<usize> {
         use futures_util::TryStreamExt as _;
         let rows: Vec<_> = operator
             .delegations()?
@@ -1089,10 +1116,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_bounds_in_memory_sessions_without_retaining_them() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Profile::open(unique("bounded-session"))
-            .perform(&storage)
-            .await?;
-        let setup = profile.derive(b"setup").build(storage.clone()).await?;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique("bounded-session")),
+        )
+        .await?;
+        let setup = profile.session(b"setup").await?;
         let space = Ed25519Signer::generate().await?;
         let now = now_s();
         let upstream_end = now + 7200;
@@ -1118,9 +1147,13 @@ mod tests {
             .await?;
         for session_end in [now + 3600, now + 10800, now - 60] {
             let operator = profile
-                .derive(session_end.to_le_bytes())
-                .allow_until(Subject::any(), Timestamp::try_from(session_end as i128)?)
-                .build(storage.clone())
+                .session(session_end.to_le_bytes())
+                .allow(
+                    profile
+                        .access()
+                        .claim(Subject::any())
+                        .expires(Timestamp::try_from(session_end as i128)?),
+                )
                 .await?;
             assert_eq!(operator.delegations()?.revision(), revision);
             let end = session_end.min(upstream_end);
@@ -1136,7 +1169,7 @@ mod tests {
                 assert_eq!(proof.proofs()[0].0.audience(), proof.proofs()[1].0.issuer());
                 assert_eq!(proof.proofs()[1].0.audience(), &operator.did());
             }
-            let key = Operator::<VolatileSpace>::cache_key(&claim).unwrap();
+            let key = Peer::<VolatileSpace>::cache_key(&claim).unwrap();
             assert_eq!(operator.cached(&key, &claim).is_some(), session_end > now);
             claim.duration = TimeRange {
                 not_before: Some(now),
@@ -1165,15 +1198,26 @@ mod tests {
     #[dialog_common::test]
     async fn it_selects_a_session_grant_covering_the_requested_window() -> Result<()> {
         let storage = Storage::volatile();
-        let profile = Profile::open(unique("session-windows"))
-            .perform(&storage)
-            .await?;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique("session-windows")),
+        )
+        .await?;
         let now = now_s();
         let operator = profile
-            .derive(b"test")
-            .allow_until(Subject::any(), Timestamp::try_from((now - 60) as i128)?)
-            .allow_until(Subject::any(), Timestamp::try_from((now + 3600) as i128)?)
-            .build(storage)
+            .session(b"test")
+            .allow(
+                profile
+                    .access()
+                    .claim(Subject::any())
+                    .expires(Timestamp::try_from((now - 60) as i128)?),
+            )
+            .allow(
+                profile
+                    .access()
+                    .claim(Subject::any())
+                    .expires(Timestamp::try_from((now + 3600) as i128)?),
+            )
             .await?;
         let mut claim = Prove::<Ucan>::new(
             operator.did(),

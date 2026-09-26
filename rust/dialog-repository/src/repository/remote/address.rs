@@ -1,6 +1,6 @@
 //! Remote address types.
 //!
-//! Re-exports [`NetworkAddress`] and [`Network`] from dialog-operator.
+//! Re-exports [`NetworkAddress`] and [`Network`] from dialog-peer.
 //! [`RemoteAddress`] pairs a site address with a subject DID to identify
 //! a specific remote repository.
 

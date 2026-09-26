@@ -1,7 +1,7 @@
 use futures_util::future::join_all;
 
 use super::resolve::resolve;
-use crate::registry::RegistryEnv;
+use crate::ResolveEnv;
 use crate::{Branch, FetchError, RepositoryMemoryExt, Revision, Upstream};
 
 /// Command fetching the current revision of every branch a branch pulls
@@ -33,7 +33,7 @@ impl Branch {
 
 impl Fetch<'_> {
     /// Fetch every upstream this branch pulls from, concurrently.
-    pub async fn perform<Env: RegistryEnv>(self, env: &Env) -> Result<Vec<Fetched>, FetchError> {
+    pub async fn perform<Env: ResolveEnv>(self, env: &Env) -> Result<Vec<Fetched>, FetchError> {
         let branch = self.branch;
         resolve(branch, env).await?;
         let upstreams = branch.pulls();
@@ -72,7 +72,7 @@ impl Fetch<'_> {
 
 /// The current revision of `upstream`: read locally for a branch on this
 /// replica, fetched from its peer for one on another.
-pub(crate) async fn fetch_one<Env: RegistryEnv>(
+pub(crate) async fn fetch_one<Env: ResolveEnv>(
     branch: &Branch,
     upstream: &Upstream,
     env: &Env,
@@ -109,14 +109,14 @@ mod tests {
 
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_fetches_local_upstream_revision() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -150,7 +150,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_does_not_modify_local_state_on_fetch() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;

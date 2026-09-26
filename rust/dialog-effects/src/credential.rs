@@ -224,6 +224,11 @@ pub enum CredentialError {
     /// Credential data is corrupted or unreadable.
     #[error("Corrupted credential: {0}")]
     Corrupted(String),
+
+    /// The credential is not handed to whoever asked: a key is held only
+    /// by its owner.
+    #[error("Credential withheld: {0}")]
+    Withheld(String),
 }
 
 impl From<StorageError> for CredentialError {

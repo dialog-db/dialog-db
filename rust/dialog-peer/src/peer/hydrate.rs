@@ -30,11 +30,11 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_repository::{Hydrate, HydrationRequest, RemoteSite, hydrate};
 
-use crate::Operator;
+use super::{Mode, Peer};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<Hydrate> for Operator<S>
+impl<S, M: Mode> Provider<Hydrate> for Peer<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     Self: Provider<Get>
@@ -57,7 +57,7 @@ where
         // as their rendering and never cached, so retry semantics are
         // unchanged.
         let outcome = self
-            .hydration
+            .hydration()
             .join(site, digest, priority, move || {
                 let env = self.clone();
                 async move {

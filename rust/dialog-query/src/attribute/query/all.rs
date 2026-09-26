@@ -637,7 +637,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::type_system::{Interval, IntervalBound, NameShape, Refinement};
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use std::collections::BTreeSet;
 
     /// A prefix refinement stamped onto a variable term becomes a
@@ -923,7 +923,7 @@ mod tests {
     /// bound-equal rows included.
     #[dialog_common::test]
     async fn it_scans_with_pushed_interval_bounds() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -963,7 +963,7 @@ mod tests {
     /// the Datomic `[(<= "Q" ?name)]` example, index-accelerated.
     #[dialog_common::test]
     async fn it_scans_with_pushed_string_bounds() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1009,7 +1009,7 @@ mod tests {
     /// the scan produces no false negatives.
     #[dialog_common::test]
     async fn it_keeps_mixed_numeric_rows_without_single_type_kind() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1056,7 +1056,7 @@ mod tests {
     /// artifacts-layer `Directory`/`Sequence` `admit` split).
     #[dialog_common::test]
     async fn it_filters_domain_scans_by_name_shape() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1112,7 +1112,7 @@ mod tests {
     /// without the stored `AttributeDescriptor` declaring it.
     #[dialog_common::test]
     async fn it_preserves_a_name_shape_scan_across_a_json_round_trip() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1183,7 +1183,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_keeps_symbol_matches_under_prefix_pushdown() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1225,7 +1225,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_all_variables() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1269,7 +1269,7 @@ mod tests {
     /// which errors and aborts the stream.
     #[dialog_common::test]
     async fn it_does_not_emit_absent_on_optional_value_mismatch() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_constant_entity() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1354,7 +1354,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_multiple_values() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1405,7 +1405,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_constant_value() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

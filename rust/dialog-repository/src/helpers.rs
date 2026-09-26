@@ -8,8 +8,8 @@ use dialog_capability::{Command, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use parking_lot::Mutex;
 
-// Operator-dependent helpers (test_operator, unique_name, ...) live in
-// `dialog_operator::helpers`: the operator sits above this crate, so tests
+// Operator-dependent helpers (test_session, unique_name, ...) live in
+// `dialog_peer::helpers`: the operator sits above this crate, so tests
 // import them from there via the dev-dependency. `test_repo` is the one
 // exception: it returns THIS crate's types, and through the dev-dependency
 // cycle the operator's copy of this crate is a distinct compilation — its
@@ -19,55 +19,49 @@ use parking_lot::Mutex;
 /// Create a test repository (this crate's types) using the given operator
 /// as the effect environment.
 #[cfg(test)]
-pub async fn test_repo(
-    operator: &dialog_operator::Operator<VolatileSpaceForTests>,
-    profile: &dialog_identity::Profile,
+pub async fn test_repo<M: dialog_peer::Mode>(
+    session: &dialog_peer::Peer<VolatileSpaceForTests, M>,
+    peer: &dialog_peer::Peer<VolatileSpaceForTests>,
 ) -> crate::Repository<dialog_credentials::Credential> {
     use crate::RepositoryExt as _;
     use dialog_identity::SpaceHandle;
-    use dialog_operator::helpers::unique_name;
+    use dialog_peer::helpers::unique_name;
     let handle = SpaceHandle {
-        profile_did: dialog_varsig::Principal::did(profile),
+        peer: dialog_varsig::Principal::did(peer),
         name: unique_name("repo"),
     };
     handle
         .open()
-        .perform(operator)
+        .perform(session)
         .await
         .expect("test_repo: failed to open repository")
 }
 
 #[cfg(test)]
-use crate::registry::RegistryEnv;
+use crate::{ConnectedReplica, PeersEnv, SiteAddress, contact, peer_did};
 #[cfg(test)]
-use crate::{ConnectedReplica, Repository, SiteAddress, peer_did};
-#[cfg(test)]
-use dialog_varsig::{Did, Principal};
+use dialog_varsig::Did;
 
-/// Add the peer reached at `address` under `name`, and connect to the
-/// repository `subject` there: what tests once did by creating a named
-/// remote. The peer's DID is derived from the address.
+/// Make the peer reached at `address` a contact named `name`, and connect
+/// to its replica of the repository `subject`: what tests once did by
+/// creating a named remote. The peer's DID is derived from the address,
+/// and connecting goes by it: names are the host's, so two tests' peers
+/// may share one.
 #[cfg(test)]
-pub async fn connect<C, Env>(
-    repo: &Repository<C>,
+pub async fn connect<Env: PeersEnv>(
     name: &str,
     address: impl Into<SiteAddress>,
     subject: Did,
     env: &Env,
-) -> anyhow::Result<ConnectedReplica>
-where
-    C: Principal,
-    Env: RegistryEnv,
-{
+) -> anyhow::Result<ConnectedReplica> {
     let address = address.into();
     let did = peer_did(&address)?;
-    repo.peer(&did)
+    contact(&did)
         .add_address(address)
         .name(name)
         .perform(env)
         .await?;
-    Ok(repo
-        .peer(name)
+    Ok(contact(&did)
         .connect()
         .repository(subject)
         .open()
