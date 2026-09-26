@@ -44,6 +44,7 @@ serde_ipld_dagcbor = { workspace = true }
 serde_json = { workspace = true }
 sieve-cache = { workspace = true }
 signature = { workspace = true }
+tracing = { workspace = true }
 thiserror = { workspace = true }
 
 # Optional dependencies (helpers feature, cross-platform)

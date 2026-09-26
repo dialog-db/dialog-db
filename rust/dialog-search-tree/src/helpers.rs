@@ -213,10 +213,9 @@ where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSend,
 {
-    let bytes = storage
-        .retrieve(hash)
-        .await?
-        .ok_or_else(|| DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}")))?;
+    let bytes = storage.retrieve(hash).await?.ok_or_else(|| {
+        DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
+    })?;
     PersistentNode::try_from(Buffer::from(bytes))
 }
 
@@ -310,6 +309,21 @@ pub async fn yield_once() {
 pub struct ObservingBackend {
     backend: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
     reads: Arc<Mutex<Reads>>,
+    /// Reads admitted at once; `0` is unlimited. See
+    /// [`with_capacity`](Self::with_capacity).
+    capacity: usize,
+}
+
+/// One edge of a read's life, in the order the backend saw them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadEvent {
+    /// The read was handed to the backend: its first poll, before it
+    /// waits for a slot under a cap. This is the moment a reader decided
+    /// to fetch, which is what tells a reader's shape apart; when the
+    /// read is admitted is the transport's business.
+    Requested,
+    /// The read answered.
+    Completed,
 }
 
 #[derive(Default)]
@@ -317,29 +331,157 @@ struct Reads {
     log: Vec<Blake3Hash>,
     in_flight: usize,
     peak_in_flight: usize,
+    /// Every start and completion, in order.
+    events: Vec<(Blake3Hash, ReadEvent)>,
 }
 
 impl ObservingBackend {
-    /// An empty backend, observing from the first read.
+    /// An unlimited backend that records every read.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Forgets everything observed so far, keeping the stored values.
+    /// A backend that admits at most `slots` reads at once, like a
+    /// browser's per-host connection limit: a read past the cap waits
+    /// for a slot, and takes it the moment one frees. The cap makes the
+    /// backend queue requests the way a transport does, so a reader's
+    /// shape shows in WHEN it requests, not when it is served: a reader
+    /// that queues a node's children as soon as the node lands requests
+    /// them while its parent's siblings are still in flight, and a
+    /// reader that walks level by level requests nothing below a level
+    /// until every read of it has completed. (Who gets a freed slot is
+    /// poll order here, which is push order, so admission alone cannot
+    /// tell the two apart.)
+    pub fn with_capacity(slots: usize) -> Self {
+        Self {
+            backend: Default::default(),
+            reads: Default::default(),
+            capacity: slots,
+        }
+    }
+
+    /// Forget every read seen so far, so what follows is measured alone.
     pub fn reset(&self) {
         *self.reads.lock() = Reads::default();
     }
 
-    /// The keys read since the last [`reset`](Self::reset), in the order the
-    /// reads were issued. A key read twice appears twice.
+    /// Every read since the last reset, in the order it was issued.
     pub fn read_log(&self) -> Vec<Blake3Hash> {
         self.reads.lock().log.clone()
     }
 
-    /// The greatest number of reads that were ever in flight at once since
-    /// the last [`reset`](Self::reset).
+    /// The most reads ever in flight at once since the last reset.
     pub fn peak_reads_in_flight(&self) -> usize {
         self.reads.lock().peak_in_flight
+    }
+
+    /// The reads in flight right now.
+    pub fn reads_in_flight(&self) -> usize {
+        self.reads.lock().in_flight
+    }
+
+    /// Every read's start and completion since the last reset, in the
+    /// order the backend saw them.
+    pub fn events(&self) -> Vec<(Blake3Hash, ReadEvent)> {
+        self.reads.lock().events.clone()
+    }
+
+    /// The longest run of consecutive reads that were each alone: requested
+    /// with nothing in flight and completed before anything else was
+    /// requested. Over a remote backend each such read is its own round
+    /// trip, so this is the serial chain a reader pays, where a peak
+    /// (which any one wide wave lifts) would hide it.
+    pub fn longest_solo_run(&self) -> usize {
+        let events = self.reads.lock().events.clone();
+        let (mut open, mut run, mut longest, mut alone) = (0usize, 0usize, 0usize, false);
+        for (_, event) in events {
+            match event {
+                ReadEvent::Requested => {
+                    alone = open == 0;
+                    if !alone {
+                        run = 0;
+                    }
+                    open += 1;
+                }
+                ReadEvent::Completed => {
+                    open -= 1;
+                    if alone && open == 0 {
+                        run += 1;
+                        longest = longest.max(run);
+                    }
+                    alone = false;
+                }
+            }
+        }
+        longest
+    }
+
+    /// Whether some read of `below` was requested before every read of `above`
+    /// had completed: the signature of a reader that keeps going on one
+    /// path while another is still outstanding, as opposed to one that
+    /// drains a level before opening the next. Reads absent from the
+    /// events (never issued, or served from a cache) are ignored.
+    pub fn requested_before_level_completed(
+        &self,
+        above: &[Blake3Hash],
+        below: &[Blake3Hash],
+    ) -> bool {
+        let events = self.reads.lock().events.clone();
+        let last_completion_above = events
+            .iter()
+            .enumerate()
+            .filter(|(_, (hash, event))| *event == ReadEvent::Completed && above.contains(hash))
+            .map(|(at, _)| at)
+            .max();
+        let Some(last_completion_above) = last_completion_above else {
+            return false;
+        };
+        events.iter().enumerate().any(|(at, (hash, event))| {
+            *event == ReadEvent::Requested && below.contains(hash) && at < last_completion_above
+        })
+    }
+
+    /// The tree under `root` as levels of node hashes, root first, read
+    /// through this backend (so call it before [`reset`](Self::reset)
+    /// when the reads that follow are what is being measured).
+    pub async fn levels_of<Key, Value>(
+        &self,
+        root: Blake3Hash,
+    ) -> anyhow::Result<Vec<Vec<Blake3Hash>>>
+    where
+        Key: crate::Key,
+        Value: crate::Value,
+        Value::Archived: for<'a> rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let mut levels = Vec::new();
+        let mut level = vec![root];
+        while !level.is_empty() {
+            let mut next = Vec::new();
+            for hash in &level {
+                let Some(bytes) = self.backend.get(hash).await? else {
+                    anyhow::bail!("node {hash} is not stored");
+                };
+                let node = crate::PersistentNode::<Key, Value>::try_from(
+                    dialog_common::Buffer::from(bytes),
+                )?;
+                if let crate::ArchivedNodeBody::Index(index) = node.body() {
+                    for link in index.links()? {
+                        next.push(link.node);
+                    }
+                }
+            }
+            levels.push(level);
+            level = next;
+        }
+        Ok(levels)
     }
 }
 
@@ -355,17 +497,32 @@ impl StorageBackend for ObservingBackend {
     }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        {
-            let mut reads = self.reads.lock();
-            reads.log.push(key.clone());
-            reads.in_flight += 1;
-            reads.peak_in_flight = reads.peak_in_flight.max(reads.in_flight);
+        self.reads
+            .lock()
+            .events
+            .push((key.clone(), ReadEvent::Requested));
+        // Wait for a slot under a cap, then take it.
+        loop {
+            {
+                let mut reads = self.reads.lock();
+                if self.capacity == 0 || reads.in_flight < self.capacity {
+                    reads.log.push(key.clone());
+                    reads.in_flight += 1;
+                    reads.peak_in_flight = reads.peak_in_flight.max(reads.in_flight);
+                    break;
+                }
+            }
+            yield_once().await;
         }
 
         yield_once().await;
         let value = self.backend.get(key).await;
 
-        self.reads.lock().in_flight -= 1;
+        {
+            let mut reads = self.reads.lock();
+            reads.in_flight -= 1;
+            reads.events.push((key.clone(), ReadEvent::Completed));
+        }
 
         value
     }

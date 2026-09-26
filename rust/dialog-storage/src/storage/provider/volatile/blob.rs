@@ -181,6 +181,7 @@ mod tests {
         // Ingest: stream in, get the discovered hash back.
         let mut sink = subject
             .clone()
+            .writer()
             .archive()
             .blob()
             .write()
@@ -195,6 +196,7 @@ mod tests {
         // Read the whole blob back by hash.
         let reader = subject
             .clone()
+            .reader()
             .archive()
             .blob()
             .read(hash.clone())
@@ -204,6 +206,7 @@ mod tests {
 
         // Ranged read: 9 bytes from offset 10.
         let reader = subject
+            .reader()
             .archive()
             .blob()
             .invoke(Read::range(hash, 10, Some(9)))
@@ -218,6 +221,7 @@ mod tests {
         let provider = Volatile::new();
         let subject = unique_subject("blob-missing");
         let result = subject
+            .reader()
             .archive()
             .blob()
             .read([9u8; 32])
@@ -237,6 +241,7 @@ mod tests {
         // Import under the correct digest succeeds.
         let mut sink = subject
             .clone()
+            .writer()
             .archive()
             .blob()
             .import(digest.clone(), payload.len() as u64)
@@ -247,6 +252,7 @@ mod tests {
 
         let reader = subject
             .clone()
+            .reader()
             .archive()
             .blob()
             .read(digest)
@@ -259,6 +265,7 @@ mod tests {
         let wrong = Blake3Hash::from([0u8; 32]);
         let mut sink = subject
             .clone()
+            .writer()
             .archive()
             .blob()
             .import(wrong.clone(), payload.len() as u64)
@@ -270,6 +277,7 @@ mod tests {
             Err(BlobError::DigestMismatch { .. })
         ));
         let missing = subject
+            .reader()
             .archive()
             .blob()
             .read(wrong)
@@ -286,11 +294,23 @@ mod tests {
         let bob = unique_subject("blob-bob");
         let payload = b"alice's bytes".to_vec();
 
-        let mut sink = alice.archive().blob().write().perform(&provider).await?;
+        let mut sink = alice
+            .writer()
+            .archive()
+            .blob()
+            .write()
+            .perform(&provider)
+            .await?;
         sink.write_all(&payload).await?;
         let hash = sink.finish().await?;
 
-        let missing = bob.archive().blob().read(hash).perform(&provider).await;
+        let missing = bob
+            .reader()
+            .archive()
+            .blob()
+            .read(hash)
+            .perform(&provider)
+            .await;
         assert!(matches!(missing, Err(BlobError::NotFound(_))));
         Ok(())
     }

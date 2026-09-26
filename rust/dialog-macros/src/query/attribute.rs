@@ -267,9 +267,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 <Self as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor()
             }
 
-            /// Returns the attribute identifier.
+            /// Returns the attribute identifier. A derived attribute
+            /// always names one attribute — the keyed-collection
+            /// relation has no derive path.
             pub fn the() -> dialog_query::The {
-                Self::descriptor().the().clone()
+                match Self::descriptor().the() {
+                    dialog_query::Relation::Attribute(the) => the.clone(),
+                    _ => unreachable!("a derived attribute names one relation"),
+                }
             }
 
             /// Returns the cardinality of this attribute.
@@ -288,8 +293,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let desc = Self::descriptor();
                 f.debug_struct(stringify!(#struct_name))
-                    .field("domain", &desc.domain())
-                    .field("name", &desc.name())
+                    .field("the", &desc.the().to_string())
                     .field("value", &self.0)
                     .finish()
             }
@@ -299,11 +303,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl std::fmt::Display for #struct_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let desc = Self::descriptor();
-                write!(f, "{}/{}: {:?}",
-                    desc.domain(),
-                    desc.name(),
-                    self.0
-                )
+                write!(f, "{}: {:?}", desc.the(), self.0)
             }
         }
 

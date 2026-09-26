@@ -6,12 +6,15 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use dialog_effects::MethodExt as _;
+use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use dialog_operator::DeriveOperator as _;
 use std::collections::HashSet;
 
 use crate::{
-    Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryArchiveExt as _,
-    RepositoryExt as _, Revision, SiteAddress, SnapshotError,
+    Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryExt as _, Revision,
+    SiteAddress, SnapshotError,
 };
 use anyhow::{Context as _, Result};
 use dialog_artifacts::tree::TreeStorageBridge;
@@ -22,11 +25,14 @@ use dialog_artifacts::{
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 // Only the native-only tests below construct one.
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::BlobError;
+// The first-contact rig builds its sites on temp storage; native-only
+// like every test that does.
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_storage::NativeTempSpace;
 // The aborted-push rig and its closure audit are native-only, like the
 // tests that use them.
 #[cfg(not(feature = "web-integration-tests"))]
@@ -36,9 +42,9 @@ use dialog_artifacts::{ShipmentRef, shipment_ref};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_capability::{Fork, Provider};
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _};
+use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _, GetBlockExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::{
     Rejection,
@@ -169,6 +175,120 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
         "should have upstream after push"
     );
 
+    Ok(())
+}
+
+/// The push ships what its nodes reference (blob bytes and spilled value
+/// blocks) BEFORE the nodes, and those shipments must overlap: a push of
+/// a few dozen large values that awaits each shipment in turn costs one
+/// round trip per value, which on the sign-in path measured as the
+/// single largest cost (28 spilled blocks at 4.2 s each over a throttled
+/// link, strictly one after another, while the node upload right after
+/// them fanned out six wide).
+///
+/// The measurement is the longest run of remote forks with nothing else
+/// in flight, on the same `Counting` gauge the login-path tests use. A
+/// serial shipment loop measures one solo fork per shipped block, so
+/// with 24 spilled values and 4 blobs the run is at least 28; overlapped
+/// shipments leave only the push's inherent head (the upstream resolve
+/// and the differential's first reads).
+// Native only: built on `Storage::temp()` so the real filesystem backend
+// is exercised, not the in-memory one. See the note on
+// `it_ships_blobs_on_push_and_hydrates_on_read` for why the gate is on
+// the feature rather than the target.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let storage = Storage::temp();
+    let profile = Profile::open(unique_name("ship-overlap"))
+        .perform(&storage)
+        .await?;
+    let operator = profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage)
+        .await?;
+    let repo = profile
+        .repository(unique_name("ship-overlap"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let site = s3_site_address(&s3);
+    profile
+        .credential()
+        .site(&site)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator)
+        .await?;
+    let origin = repo
+        .remote("origin")
+        .create(site)
+        .perform(&operator)
+        .await?;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+
+    // Distinct values past the inline threshold: each spills to its own
+    // block, so the push has SPILLED distinct blocks to ship.
+    const SPILLED: usize = 24;
+    const BLOBS: usize = 4;
+    let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+    let facts: Vec<_> = (0..SPILLED)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "doc/body".parse().expect("valid attribute"),
+                of: format!("doc:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("{i:04}{}", "x".repeat(inline_n))),
+                cause: None,
+            })
+        })
+        .collect();
+    branch
+        .commit(stream::iter(facts))
+        .perform(&operator)
+        .await?;
+    for i in 0..BLOBS {
+        let payload: Vec<u8> = (0..20_000u32)
+            .map(|j| ((j + i as u32) % 199) as u8)
+            .collect();
+        let chunks: Vec<Result<Vec<u8>, BlobError>> =
+            payload.chunks(8192).map(|c| Ok(c.to_vec())).collect();
+        Blob::import(stream::iter(chunks))
+            .write((&branch).into())
+            .perform(&operator)
+            .await?;
+    }
+
+    let env = Counting::new(operator.clone());
+    assert!(branch.push().perform(&env).await?.is_some());
+
+    let forks = env.count("fork::Fork");
+    let peak = env.peak_forks_in_flight();
+    let serial_run = env.longest_serial_fetch_run();
+    println!(
+        "SHIP forks={forks} peak={peak} serial_run={serial_run} effects={:?}",
+        env.longest_serial_fetch_run_effects()
+    );
+    assert!(
+        forks as usize >= SPILLED + BLOBS,
+        "every spilled value and blob must cross the wire (forks={forks})"
+    );
+    // A serial shipment loop measures SPILLED + BLOBS solo forks in a row.
+    // The push's inherent head is a handful (the upstream resolve and
+    // the first dependent reads); 8 leaves room for the gauge's load
+    // sensitivity (see the login-path tests) while staying well under 28.
+    assert!(
+        serial_run < 8,
+        "the push shipped {forks} blocks and {serial_run} of them crossed one at a time \
+         with nothing else in flight (peak {peak}): the shipment loop is serial again"
+    );
     Ok(())
 }
 
@@ -1650,6 +1770,7 @@ delegate_provider!(
     dialog_effects::memory::Resolve,
     dialog_effects::memory::Publish,
     dialog_effects::blob::Read,
+    crate::Hydrate,
     Fork<RemoteSite, dialog_effects::archive::Get>,
     Fork<RemoteSite, dialog_effects::archive::Put>,
     Fork<RemoteSite, dialog_effects::memory::Resolve>,
@@ -1741,6 +1862,7 @@ async fn assert_remote_closure_complete(
         let found: Option<Vec<u8>> = address
             .subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(hash.clone())
@@ -1775,6 +1897,7 @@ async fn assert_remote_closure_complete(
                     let probe = address
                         .subject
                         .clone()
+                        .reader()
                         .archive()
                         .blob()
                         .read(digest.clone())
@@ -1798,6 +1921,7 @@ async fn assert_remote_closure_complete(
                     let found: Option<Vec<u8>> = address
                         .subject
                         .clone()
+                        .reader()
                         .archive()
                         .catalog("index")
                         .get(reference.clone())
@@ -2231,7 +2355,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
 
 // UCAN integration tests
 
-use dialog_remote_ucan_s3::UcanAddress;
+use dialog_remote_ucan::UcanAddress;
 use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
 /// The login flow: the ACCOUNT repository is the durable home of
@@ -2432,8 +2556,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
 async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result<()> {
     use dialog_capability::access::{Access as AccessAttenuation, Retain};
     use dialog_credentials::{Credential as RawCredential, Ed25519Signer, SignerCredential};
-    use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
-    use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+    use dialog_effects::archive::prelude::ArchiveExt as _;
     use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
     use dialog_operator::DeriveOperator as _;
     use dialog_ucan::{Ucan, UcanDelegation};
@@ -2584,6 +2707,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
             .expect("delegation entities are blob entities");
         let mut reader = device_branch
             .subject()
+            .reader()
             .archive()
             .blob()
             .read(digest)
@@ -3459,7 +3583,7 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
     repository: &Repository<C>,
     revision: &Revision,
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
-    let catalog = repository.subject().archive().index();
+    let catalog = ArchiveScope::new(repository.subject()).index();
     let index = NetworkedIndex::new(env, catalog, None);
     let storage = TreeStorage::new(TreeStorageBridge(index));
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
@@ -3630,5 +3754,1641 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
             "the export must carry the spilled value the tree references: {reference}"
         );
     }
+    Ok(())
+}
+
+/// A proof walk that has to fetch a node of the access branch must never
+/// wait on that fetch's own proof.
+///
+/// The access branch is what authorization walks, and it is also a
+/// synced branch: a head adopted by root can reference nodes the local
+/// archive does not hold. The next proof then fetches such a node
+/// through the walk's reach, and that fetch is itself proven by a walk
+/// over the same branch that needs the same node. Read through one
+/// shared node cache, the inner walk joined the outer fetch's
+/// single-flight claim and waited on the proof it was itself producing:
+/// no I/O, nothing dropped, forever.
+///
+/// Bounded completion is the property; the outcome is not. An inner
+/// proof that resolves from what is local lets the fetch proceed, and
+/// one that cannot fails the operation it was proving.
+// Native only: the bound is tokio's timer, which has no wasm runtime. Kept
+// out of the wasm integration run too, or its native half would provision
+// for a wasm half that was never compiled.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web-integration-tests")))]
+#[dialog_common::test]
+async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_archive(
+    ucan: UcanS3Address,
+) -> Result<()> {
+    use dialog_capability::access::{Access as AccessAttenuation, Retain};
+    use dialog_credentials::{Credential as RawCredential, Ed25519Signer, SignerCredential};
+    use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
+    use dialog_operator::DeriveOperator as _;
+    use dialog_ucan::{Ucan, UcanDelegation};
+    use dialog_ucan_core::subject::Subject as UcanSubject;
+    use dialog_ucan_core::{DelegationBuilder, DelegationChain};
+    use dialog_varsig::Principal as _;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    // The account publishes its access branch, holding one grant, to the
+    // access service.
+    let account_storage = Storage::volatile();
+    let account_signer = Ed25519Signer::generate().await?;
+    let account_name = unique_name("account");
+    StorageFx::profile(account_name.clone())
+        .create(RawCredential::Signer(SignerCredential::from(
+            account_signer.clone(),
+        )))
+        .perform(&account_storage)
+        .await?;
+    let account_profile = Profile::load(account_name)
+        .perform(&account_storage)
+        .await?;
+    let account_operator = account_profile
+        .derive(b"account-device")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(account_storage)
+        .await?;
+    let space = Ed25519Signer::generate().await?;
+    let space_grant = DelegationBuilder::new()
+        .issuer(dialog_credentials::Signer::from(space.clone()))
+        .audience(&account_signer)
+        .subject(UcanSubject::Specific(space.did()))
+        .command(vec!["storage".to_string()])
+        .try_build()
+        .await?;
+    Subject::from(account_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+            DelegationChain::new(space_grant),
+        )))
+        .perform(&account_operator)
+        .await?;
+    let account_repo = crate::Repository::from(&account_profile);
+    let account_origin = account_repo
+        .remote("origin")
+        .create(ucan_site.clone())
+        .perform(&account_operator)
+        .await?;
+    let account_branch = account_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    let account_remote_branch = account_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    account_branch
+        .set_upstream(account_remote_branch)
+        .perform(&account_operator)
+        .await?;
+    account_branch.push().perform(&account_operator).await?;
+    let head = account_branch
+        .revision()
+        .context("the push established a head")?;
+
+    // A device of the account: its login grant retained locally, the
+    // account tracked as its access upstream.
+    let device_storage = Storage::volatile();
+    let device_profile = Profile::open(unique_name("device"))
+        .perform(&device_storage)
+        .await?;
+    let device_operator = device_profile
+        .derive(b"device")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(device_storage)
+        .await?;
+    let login_grant = DelegationBuilder::new()
+        .issuer(dialog_credentials::Signer::from(account_signer.clone()))
+        .audience(&device_profile.did())
+        .subject(UcanSubject::Any)
+        .command(vec![])
+        .try_build()
+        .await?;
+    Subject::from(device_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+            DelegationChain::new(login_grant),
+        )))
+        .perform(&device_operator)
+        .await?;
+    let device_repo = crate::Repository::from(&device_profile);
+    let device_origin = device_repo
+        .remote("account")
+        .create(ucan_site)
+        .subject(account_profile.did())
+        .perform(&device_operator)
+        .await?;
+    let device_branch = device_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let device_remote_branch = device_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    device_branch
+        .set_upstream(device_remote_branch)
+        .perform(&device_operator)
+        .await?;
+
+    // The head runs ahead of the archive: the account's revision, none
+    // of its nodes. Every proof from here has to fetch to read.
+    device_branch.reset(head).perform(&device_operator).await?;
+
+    let outcome = timeout(
+        Duration::from_secs(30),
+        device_branch.pull().perform(&device_operator),
+    )
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "the proof over an access head that ran ahead of the archive waited on its own fetch"
+    );
+    Ok(())
+}
+
+/// `download().operational()` materializes what reads need and skips the
+/// history region.
+///
+/// Device A commits enough revisions that history is a real share of the
+/// tree, then pushes. A second device pulls by reference and downloads
+/// only the operational regions. Three things must hold afterwards, and
+/// they are what the whole feature rests on:
+///
+/// 1. Facts read from the local store — the download genuinely put the
+///    data regions on disk, rather than leaving reads to hydrate lazily.
+/// 2. The scoped download reads strictly fewer blocks than a full one of
+///    the same revision.
+/// 3. The revision DAG survives: `log` walks ancestry, because revision
+///    records are ordinary facts in the data indexes rather than
+///    history-region entries.
+#[dialog_common::test]
+async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let (alice_repo, alice) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "operational-a").await?;
+
+    // Several commits, so the history region holds many records rather
+    // than one: history grows per edit, the data regions per live fact.
+    for round in 0..6 {
+        let facts: Vec<_> = (0..120)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    // Wide enough that the fixture fills real leaves: a
+                    // tree of a few 64KiB segments has no structure to
+                    // prune, and the whole point is the pruning.
+                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        alice.commit(stream::iter(facts)).perform(&operator).await?;
+    }
+    assert!(alice.push().perform(&operator).await?.is_some());
+
+    // A device that adopts Alice's head by reference, then materializes
+    // only the operational regions.
+    let open_replica = async |name: &str| -> Result<Branch> {
+        let repo = profile
+            .repository(unique_name(name))
+            .open()
+            .perform(&operator)
+            .await?;
+        let origin = repo
+            .remote("origin")
+            .create(s3_site_address(&s3))
+            .subject(alice_repo.did())
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let remote_branch = origin.branch("main").open().perform(&operator).await?;
+        branch
+            .set_upstream(remote_branch)
+            .perform(&operator)
+            .await?;
+        Ok(branch)
+    };
+
+    let scoped = open_replica("operational-b").await?;
+    let scoped_env = Counting::new(operator.clone());
+    assert!(scoped.pull().perform(&scoped_env).await?.is_some());
+    scoped_env.reset();
+    scoped.download().operational().perform(&scoped_env).await?;
+    let scoped_reads = scoped_env.block_reads();
+
+    // The same revision, materialized in full, for the comparison.
+    let full = open_replica("operational-c").await?;
+    let full_env = Counting::new(operator.clone());
+    assert!(full.pull().perform(&full_env).await?.is_some());
+    full_env.reset();
+    full.download().perform(&full_env).await?;
+    let full_reads = full_env.block_reads();
+
+    assert!(
+        scoped_reads < full_reads,
+        "an operational download must read fewer blocks than a full one \
+         (scoped {scoped_reads}, full {full_reads})"
+    );
+
+    // Every live fact is readable, and the revision DAG walks: revision
+    // records are data-region facts, so a scoped download keeps them.
+    // Read through the counting env with the tally cleared: the download
+    // must have put these blocks on disk, so the reads may not reach the
+    // remote. Without this the assertion would pass on lazy hydration
+    // alone, which is exactly what the download is supposed to make
+    // unnecessary.
+    scoped_env.reset();
+    let facts: Vec<_> = scoped
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&scoped_env)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        facts.len(),
+        720,
+        "every live fact survives an operational download"
+    );
+    assert_eq!(
+        scoped_env.count("fork::Fork"),
+        0,
+        "the facts must read from the local store, not hydrate from the remote"
+    );
+
+    let log = scoped.log(&scoped_env, 100).await?;
+    assert!(
+        log.len() >= 6,
+        "the revision DAG survives an operational download (got {} entries)",
+        log.len()
+    );
+
+    Ok(())
+}
+
+/// #492: a download's block reads must overlap.
+///
+/// The scenario is a space join: create a database, put facts in it, add
+/// a remote upstream, and materialize it with
+/// `pull().download().operational()`. Over a remote archive every block
+/// that misses locally is a network round trip, so the number that
+/// decides whether this takes a second or a minute is how many of those
+/// round trips are in flight AT ONCE, not how many there are.
+///
+/// A read tally cannot see this: n serial reads and n overlapped reads
+/// count identically, which is why the neighbouring download tests bound
+/// the count and would pass while the app crawled. This measures the
+/// overlap, over bare S3: the download's level-order walk
+/// (`traverse`, `buffer_unordered(FETCH_CONCURRENCY)`) drained one item
+/// per poll by `Download::perform`, which is the shape the app runs.
+#[dialog_common::test]
+async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // A database with facts in it, published to the remote. Wide values
+    // over several commits so the tree has interior structure: a couple
+    // of blocks could be fetched serially without anyone noticing.
+    let (source_repo, source) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "serial-download-a").await?;
+    for round in 0..6 {
+        let facts: Vec<_> = (0..120)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        source
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+
+    // Blobs too: the account database stores delegation envelopes as
+    // blobs, and those travel their own channel rather than the archive
+    // index, so a download that parallelizes blocks may still serialize
+    // these.
+    for i in 0..24 {
+        let bytes = format!("delegation envelope {i} ").repeat(64).into_bytes();
+        Blob::import(stream::iter(vec![Ok(bytes)]))
+            .write(source.blobs())
+            .perform(&operator)
+            .await?;
+    }
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // A second database that adds the first as its upstream.
+    let replica_repo = profile
+        .repository(unique_name("serial-download-b"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(source_repo.did())
+        .perform(&operator)
+        .await?;
+    let replica = replica_repo
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+
+    // The replica has facts OF ITS OWN before it ever syncs, so the pull
+    // is a real merge rather than a bare adoption: this is the app's
+    // shape, where a profile has local state before joining a space.
+    let local: Vec<_> = (0..80)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "post/title".parse().expect("valid attribute"),
+                of: format!("post:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("ours-{i}").repeat(24)),
+                cause: None,
+            })
+        })
+        .collect();
+    replica
+        .commit(stream::iter(local))
+        .perform(&operator)
+        .await?;
+
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+
+    // The call under test, measured from cold.
+    let env = Counting::new(operator.clone());
+    replica
+        .pull()
+        .download()
+        .operational()
+        .perform(&env)
+        .await?
+        .expect("the replica adopts the upstream head");
+
+    let reads = env.block_reads();
+    let peak = env.peak_block_reads_in_flight();
+    println!("MEASURED reads={reads} peak_in_flight={peak}");
+
+    assert!(
+        reads > 8,
+        "the download must fetch a real tree for this to measure anything \
+         (got {reads} reads): {:?}",
+        env.snapshot()
+    );
+    assert!(
+        peak > 1,
+        "pull().download().operational() fetched {reads} blocks but never \
+         had more than {peak} in flight at once, so each cost its own \
+         round trip.",
+    );
+
+    Ok(())
+}
+
+/// The same download, over a UCAN remote instead of bare S3.
+///
+/// Every block read over a UCAN remote first redeems a permit at the
+/// access service. Permits are keyed `(site, method, path)` and the path
+/// is the block digest, so per-block redemption is correct by design; 16
+/// concurrent GETs simply need 16 concurrent redeems, and this pins that
+/// redemption does not serialize them.
+#[dialog_common::test]
+async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    // A database with facts in it, published to the UCAN remote.
+    let source_repo = profile
+        .repository(unique_name("ucan-serial-a"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let chain = source_repo
+        .access()
+        .claim(&source_repo)
+        .delegate(profile.did())
+        .perform(&operator)
+        .await?;
+    profile.access().save(chain).perform(&operator).await?;
+    let source_origin = source_repo
+        .remote("origin")
+        .create(site.clone())
+        .perform(&operator)
+        .await?;
+    let source = source_repo.branch("main").open().perform(&operator).await?;
+    let source_remote = source_origin
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    source
+        .set_upstream(source_remote)
+        .perform(&operator)
+        .await?;
+    for round in 0..6 {
+        let facts: Vec<_> = (0..120)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        source
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // A replica that adds it as upstream and materializes it.
+    let replica_repo = profile
+        .repository(unique_name("ucan-serial-b"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(site)
+        .subject(source_repo.did())
+        .perform(&operator)
+        .await?;
+    let replica = replica_repo
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+
+    let env = Counting::new(operator.clone());
+    replica
+        .pull()
+        .download()
+        .operational()
+        .perform(&env)
+        .await?
+        .expect("the replica adopts the upstream head");
+
+    let reads = env.block_reads();
+    let peak = env.peak_block_reads_in_flight();
+    println!("UCAN MEASURED reads={reads} peak_in_flight={peak}");
+
+    assert!(
+        reads > 8,
+        "the download must fetch a real tree (got {reads}): {:?}",
+        env.snapshot()
+    );
+    assert!(
+        peak > 1,
+        "over a UCAN remote the download fetched {reads} blocks but never \
+         had more than {peak} in flight at once, so each cost its own \
+         round trip.",
+    );
+
+    Ok(())
+}
+
+/// #492: the login path's remote fetches must overlap the way a push's
+/// uploads do.
+///
+/// A throttled HAR of a real space join measured, in one run, over one
+/// link, against one UCAN remote: PUT (push) 29 requests at peak 15 in
+/// flight; GET (pull) 20 requests at peak 1, in exact lockstep with their
+/// `/ucan` redeems. Both directions share the app, the browser, the link,
+/// the remote, the block `Flight` and the worker, so the push is the
+/// control: whatever serialized the pull was in the pull's own read shape.
+/// (It was the merge's integrate, resolving one change at a time; see
+/// `it_joins_an_account_from_a_seeded_device`.)
+///
+/// This asserts the contrast directly, in one test: push the tree
+/// (measuring PUT overlap), then pull it into a cold replica that holds
+/// state of its own (measuring the overlap of the remote fetches). It
+/// runs on wasm as well as native, the browser being where the symptom
+/// was observed.
+#[dialog_common::test]
+async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    // A database with enough facts that its tree has interior structure:
+    // a handful of blocks could be fetched serially unnoticed.
+    let source_repo = profile
+        .repository(unique_name("serial-get-a"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let chain = source_repo
+        .access()
+        .claim(&source_repo)
+        .delegate(profile.did())
+        .perform(&operator)
+        .await?;
+    profile.access().save(chain).perform(&operator).await?;
+    let source_origin = source_repo
+        .remote("origin")
+        .create(site.clone())
+        .perform(&operator)
+        .await?;
+    let source = source_repo.branch("main").open().perform(&operator).await?;
+    let source_remote = source_origin
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    source
+        .set_upstream(source_remote)
+        .perform(&operator)
+        .await?;
+    for round in 0..4 {
+        let facts: Vec<_> = (0..120)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                    cause: None,
+                })
+            })
+            .collect();
+        source
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+
+    // The push, measured. This is the control: the same tree, the same
+    // remote, the same authorization, going the other way.
+    let push_env = Counting::new(operator.clone());
+    assert!(source.push().perform(&push_env).await?.is_some());
+    let writes = push_env.count("fork::Fork");
+    let push_peak = push_env.peak_forks_in_flight();
+
+    // A cold replica on a SECOND operator, hence a second local archive.
+    //
+    // This is load-bearing and easy to get wrong: two repositories opened
+    // on one operator share its storage, so a "replica" built that way
+    // already holds every block the push just wrote. Its download then
+    // reads locally, issues no remote hydration at all, and reports a
+    // healthy peak while measuring nothing. The `fork::Fork` assertion
+    // below is what keeps that mistake from passing silently.
+    let (replica_operator, replica_profile) = test_operator_with_profile().await;
+    replica_profile
+        .access()
+        .save(
+            source_repo
+                .access()
+                .claim(&source_repo)
+                .delegate(replica_profile.did())
+                .perform(&operator)
+                .await?,
+        )
+        .perform(&replica_operator)
+        .await?;
+    let replica_repo = replica_profile
+        .repository(unique_name("serial-get-b"))
+        .open()
+        .perform(&replica_operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(site)
+        .subject(source_repo.did())
+        .perform(&replica_operator)
+        .await?;
+    let replica = replica_repo
+        .branch("main")
+        .open()
+        .perform(&replica_operator)
+        .await?;
+    // Facts of its own BEFORE it ever syncs, so the pull is a real merge
+    // rather than a bare adoption -- the app's shape, where a profile has
+    // local state before joining a space.
+    let local: Vec<_> = (0..80)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "post/title".parse().expect("valid attribute"),
+                of: format!("post:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("ours-{i}").repeat(24)),
+                cause: None,
+            })
+        })
+        .collect();
+    replica
+        .commit(stream::iter(local))
+        .perform(&replica_operator)
+        .await?;
+
+    let remote_branch = origin
+        .branch("main")
+        .open()
+        .perform(&replica_operator)
+        .await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&replica_operator)
+        .await?;
+
+    // The download, measured as the app performs it: chained onto the
+    // pull, which is what `hydrate_untrusted` calls at login.
+    //
+    // Splitting the two and measuring only the download was tried and is
+    // wrong: the merge hydrates the blocks it walks, so by the time a
+    // separate download ran, the replica was warm and the measurement
+    // covered local reads. The merge's own differential does fan out, so
+    // a healthy peak here is not by itself proof the download's walk
+    // parallelized -- what this pins is that the whole login path does
+    // not collapse to one request at a time, which is the symptom.
+    let pull_env = Counting::new(replica_operator.clone());
+    replica
+        .pull()
+        .download()
+        .operational()
+        .perform(&pull_env)
+        .await?
+        .expect("the replica adopts the upstream head");
+    let reads = pull_env.block_reads();
+    let pull_peak = pull_env.peak_block_reads_in_flight();
+    // The number that corresponds to the HAR: concurrent ROUND TRIPS.
+    // Block reads that hit the local store overlap for free and tell us
+    // nothing about wall time.
+    let remote_peak = pull_env.peak_forks_in_flight();
+
+    let hydrations = pull_env.count("hydrate::Hydrate");
+
+    // The tree's depth, read back from the replica: the descent is
+    // root-to-leaf and each level's read names the next, so depth bounds
+    // how many fetches CANNOT overlap however wide the fan-out is.
+    let head = NodeHash::from(*replica.revision().expect("pulled").tree.hash());
+    let depth_index = NetworkedIndex::new(&replica_operator, replica.archive().index(), None);
+    let depth_storage = TreeStorage::new(TreeStorageBridge(depth_index));
+    let mut depth = 0usize;
+    let mut at = Some(head);
+    while let Some(hash) = at.take() {
+        let Some(bytes) = depth_storage.retrieve(&hash).await? else {
+            break;
+        };
+        depth += 1;
+        let node = dialog_search_tree::PersistentNode::<Key, State<Datum>>::try_from(
+            dialog_search_tree::Buffer::from(bytes),
+        )?;
+        if let ArchivedNodeBody::Index(index) = node.body() {
+            at = index.links()?.first().map(|link| link.node.clone());
+        }
+    }
+
+    let serial_run = pull_env.longest_serial_fetch_run();
+    println!(
+        "PUSH writes={writes} peak={push_peak} | \
+         PULL reads={reads} peak={pull_peak} hydrations={hydrations} \
+         remote_peak={remote_peak} depth={depth} serial_run={serial_run} \
+         serial_effects={:?}",
+        pull_env.longest_serial_fetch_run_effects()
+    );
+
+    assert!(
+        hydrations > 0,
+        "the replica read {reads} blocks without one remote fetch, so it was \
+         not cold and this measured local reads. The download must hydrate \
+         through the remote for its overlap to mean anything. Effects seen: \
+         {:?}",
+        pull_env.snapshot()
+    );
+    assert!(
+        writes > 8 && reads > 8,
+        "both directions must move a real tree to compare them \
+         (writes={writes}, reads={reads})"
+    );
+    assert!(
+        push_peak > 1,
+        "the push is the control and must fan out: {writes} uploads reached \
+         peak {push_peak}. If this fails the comparison proves nothing and \
+         the harness is at fault, not the download."
+    );
+    assert!(
+        hydrations > 8,
+        "the download made only {hydrations} remote fetches, too few for its \
+         overlap to mean anything: the replica must actually pull the tree \
+         across the wire. Effects seen: {:?}",
+        pull_env.snapshot()
+    );
+    assert!(
+        remote_peak > 1,
+        "the push fanned out to peak {push_peak} over {writes} uploads, but \
+         the login path's remote fetches reached only peak {remote_peak} \
+         over {hydrations} of them -- one round trip at a time, which is \
+         the HAR's shape exactly. Local block overlap ({pull_peak}) does \
+         not pay for wall time; concurrent round trips do."
+    );
+    assert!(
+        pull_peak > 1,
+        "the push fanned out to peak {push_peak} over {writes} uploads, but \
+         the download of the SAME tree over the SAME remote reached only \
+         peak {pull_peak} over {reads} reads."
+    );
+    // And no stretch of the pull went one fetch at a time: the floor is
+    // the head chain (the resolve and the dependent reads it names),
+    // measured at 3. The same 12 as the account join, for the same
+    // load-sensitivity reason recorded there.
+    assert!(
+        serial_run < 12,
+        "the pull made {serial_run} remote fetches in a row with nothing \
+         else in flight: some reader went back to one round trip at a \
+         time ({:?})",
+        pull_env.longest_serial_fetch_run_effects()
+    );
+
+    Ok(())
+}
+
+/// #492, the login path: a profile branch carrying what tonk's does.
+///
+/// Modelled on `hydrate_untrusted` in tonk's
+/// `router/account_state.rs`, which is what runs when a device signs in:
+/// point the profile's main branch at the account remote, then
+/// `pull().download().operational()` so the authorization walk afterwards
+/// reads entirely locally.
+///
+/// The content matters as much as the call. A tonk profile branch is not
+/// uniform facts -- it accumulates, on one branch:
+///
+/// - retained delegations, each decomposing into facts PLUS a signed
+///   envelope blob (`branch/delegation.rs`),
+/// - device-link rows and space/replica index rows, ordinary facts.
+///
+/// Blobs are the part the fact-only sibling cannot reach: they travel
+/// their own channel in the snapshot export, a second `buffer_unordered`
+/// loop downstream of the block walk, and each consults the tree's blob
+/// index before its bytes can be fetched. A fan-out restored in the
+/// traversal alone does not cover them.
+///
+/// The call is chained exactly as the app chains it, rather than split
+/// into a pull and a separate download: the ordering is part of what is
+/// under test. `PullDownload` materializes BEFORE advancing the head, so
+/// the measurement covers the download the login actually performs.
+///
+/// Peak overlap is the assertion for the usual reason: it is
+/// latency-independent, so a memory-backed local server cannot hide a
+/// serial download behind fast responses.
+#[dialog_common::test]
+async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Result<()> {
+    use crate::helpers::Counting;
+    use dialog_credentials::Ed25519Signer;
+    use dialog_ucan_core::subject::Subject;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    let source_repo = profile
+        .repository(unique_name("blob-sync-a"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let chain = source_repo
+        .access()
+        .claim(&source_repo)
+        .delegate(profile.did())
+        .perform(&operator)
+        .await?;
+    profile.access().save(chain).perform(&operator).await?;
+    let source_origin = source_repo
+        .remote("origin")
+        .create(site.clone())
+        .perform(&operator)
+        .await?;
+    let source = source_repo.branch("main").open().perform(&operator).await?;
+    let source_remote = source_origin
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    source
+        .set_upstream(source_remote)
+        .perform(&operator)
+        .await?;
+
+    // Many retained delegations: each contributes facts AND one envelope
+    // blob, which is what makes this the profile's shape rather than a
+    // generic fact sync.
+    let space = Ed25519Signer::generate().await?;
+    for _ in 0..24 {
+        let holder = Ed25519Signer::generate().await?;
+        let delegation = dialog_ucan_core::DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&dialog_varsig::Principal::did(&holder))
+            .subject(Subject::Specific(dialog_varsig::Principal::did(&space)))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await?;
+        source
+            .delegations()
+            .retain(dialog_ucan::UcanDelegation::new(
+                dialog_ucan_core::DelegationChain::new(delegation),
+            ))
+            .perform(&operator)
+            .await?;
+    }
+    // Device links and space index rows: the ordinary facts that sit
+    // beside the delegations on a real profile branch, so the download
+    // walks a tree of mixed content rather than one uniform region.
+    let rows: Vec<_> = (0..160)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "device/link".parse().expect("valid attribute"),
+                of: format!("device:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("device-{i}").repeat(24)),
+                cause: None,
+            })
+        })
+        .collect();
+    source.commit(stream::iter(rows)).perform(&operator).await?;
+    assert!(source.push().perform(&operator).await?.is_some());
+
+    // A cold replica on its own profile, operator and space: two repos on
+    // one operator would share an archive and make every read local. The
+    // `fork::Fork` assertion below is what keeps that from passing quietly.
+    let (replica_operator, replica_profile) = test_operator_with_profile().await;
+    replica_profile
+        .access()
+        .save(
+            source_repo
+                .access()
+                .claim(&source_repo)
+                .delegate(replica_profile.did())
+                .perform(&operator)
+                .await?,
+        )
+        .perform(&replica_operator)
+        .await?;
+    let replica_repo = replica_profile
+        .repository(unique_name("blob-sync-b"))
+        .open()
+        .perform(&replica_operator)
+        .await?;
+    let origin = replica_repo
+        .remote("origin")
+        .create(site)
+        .subject(source_repo.did())
+        .perform(&replica_operator)
+        .await?;
+    let replica = replica_repo
+        .branch("main")
+        .open()
+        .perform(&replica_operator)
+        .await?;
+    let remote_branch = origin
+        .branch("main")
+        .open()
+        .perform(&replica_operator)
+        .await?;
+    replica
+        .set_upstream(remote_branch)
+        .perform(&replica_operator)
+        .await?;
+
+    // The login call itself, chained as `hydrate_untrusted` chains it.
+    //
+    // This measures the merge's reads as well as the download's, and the
+    // merge's differential has a fan-out of its own -- so unlike the
+    // fact-only sibling (which splits the two to keep the download
+    // isolated) a healthy peak here does not prove the download
+    // parallelized. That is deliberate: this test's job is to reproduce
+    // what the app does, and `blob::Read` below is what pins the blob
+    // channel specifically, whose reads no differential issues.
+    let env = Counting::new(replica_operator.clone());
+    replica
+        .pull()
+        .download()
+        .operational()
+        .perform(&env)
+        .await?
+        .expect("the replica adopts the upstream head");
+
+    let reads = env.block_reads();
+    let peak = env.peak_block_reads_in_flight();
+    let hydrations = env.count("hydrate::Hydrate");
+    let blob_reads = env.count("blob::Read");
+    let remote_peak = env.peak_forks_in_flight();
+    let serial_run = env.longest_serial_fetch_run();
+    println!(
+        "PROFILE reads={reads} peak={peak} forks={hydrations} \
+         blob_reads={blob_reads} remote_peak={remote_peak} \
+         serial_run={serial_run} serial_effects={:?}",
+        env.longest_serial_fetch_run_effects()
+    );
+
+    assert!(
+        hydrations > 0,
+        "the replica materialized without one remote fetch, so it was not \
+         cold and this measured local reads"
+    );
+    assert!(
+        reads > 8,
+        "the download must move a real tree to measure anything (got {reads})"
+    );
+    assert!(
+        blob_reads > 0,
+        "the 24 retained delegations must have shipped envelope blobs for \
+         this to exercise the blob channel at all (blob::Read={blob_reads}). \
+         Without them this is just another fact sync and the sibling test \
+         already covers it."
+    );
+    assert!(
+        remote_peak > 1,
+        "a profile carrying 24 delegation envelope blobs made {hydrations} \
+         remote fetches but never had more than {remote_peak} open at once \
+         -- one round trip at a time, the HAR's shape. Blobs travel their \
+         own channel downstream of the block walk, so a fan-out restored in \
+         the traversal alone does not cover them."
+    );
+    assert!(
+        peak > 1,
+        "a profile carrying 24 delegation envelope blobs materialized \
+         {reads} reads but never had more than {peak} in flight at once, so \
+         each cost its own round trip. Blobs travel their own channel in \
+         the snapshot export, downstream of the block walk, so a fan-out \
+         restored in the traversal alone does not cover them."
+    );
+    // The guard a peak cannot give: no phase of the login path is allowed
+    // to fall back to one fetch at a time. The floor is the head chain
+    // (the resolve and the dependent reads it names), measured at 3. The
+    // bound is loose because the gauge is load-sensitive, and is the
+    // account join's 12 -- see its note there, and bead dialog-db-88.
+    assert!(
+        serial_run < 12,
+        "the login path made {serial_run} remote fetches in a row with \
+         nothing else in flight: some reader went back to one round trip \
+         at a time ({:?})",
+        env.longest_serial_fetch_run_effects()
+    );
+
+    Ok(())
+}
+
+/// Replicas that have never observed one another (no origin in common)
+/// integrate each other's changes unscreened on first contact: nothing
+/// either side minted can have been covered or superseded by the other,
+/// so every screen is a no-op, and the history screen in particular
+/// would otherwise scan the upstream tree once per covering record the
+/// small side carries, the first scan a root-to-leaf descent, before
+/// the integrate begins.
+///
+/// Two independently seeded replicas contact the same churning upstream,
+/// one carrying only assertions and one carrying the same assertions plus
+/// their retractions (covering records). Screened, the retractions cost
+/// upstream-tree scans on top of their own integrate; unscreened, the
+/// covering replica reads what its own paths cost and nothing more.
+// Native only: built on `Storage::temp()` so the real filesystem backend
+// is exercised, not the in-memory one. See the note on
+// `it_ships_blobs_on_push_and_hydrates_on_read` for why the gate is on
+// the feature rather than the target.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
+    use crate::helpers::Counting;
+
+    async fn site(
+        s3: &S3Address,
+        name: &str,
+    ) -> Result<(
+        Operator<NativeTempSpace>,
+        Profile,
+        crate::Repository<SignerCredential>,
+    )> {
+        let storage = Storage::temp();
+        let profile = Profile::open(unique_name(name)).perform(&storage).await?;
+        let operator = profile
+            .derive(b"test")
+            .allow(Subject::any())
+            .network(Network::default())
+            .build(storage)
+            .await?;
+        let repo = profile
+            .repository(unique_name(name))
+            .create()
+            .perform(&operator)
+            .await?;
+        let site = s3_site_address(s3);
+        profile
+            .credential()
+            .site(&site)
+            .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+            .perform(&operator)
+            .await?;
+        Ok((operator, profile, repo))
+    }
+
+    // The churning upstream, published under its own subject.
+    let (operator_a, _profile_a, repo_a) = site(&s3, "first-contact-upstream").await?;
+    let origin_a = repo_a
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .perform(&operator_a)
+        .await?;
+    let main_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    main_a
+        .set_upstream(origin_a.branch("main").open().perform(&operator_a).await?)
+        .perform(&operator_a)
+        .await?;
+    // Wide enough for a root over many leaves, so a screening scan of
+    // this tree is a root-to-leaf descent, not one read; and in more
+    // commits than either replica below has, so the pull replays the
+    // replica's few revisions onto the adopted upstream tree (the small
+    // side) rather than screening the upstream's delta onto the replica,
+    // which would read the whole upstream regardless of screening.
+    const UPSTREAM_FACTS: usize = 4000;
+    for chunk in (0..UPSTREAM_FACTS).collect::<Vec<_>>().chunks(100) {
+        let facts: Vec<_> = chunk
+            .iter()
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{i:04}").repeat(16)),
+                    cause: None,
+                })
+            })
+            .collect();
+        main_a
+            .commit(stream::iter(facts))
+            .perform(&operator_a)
+            .await?;
+    }
+    assert!(main_a.push().perform(&operator_a).await?.is_some());
+
+    // A small replica seeded apart from the upstream: `covering` retracts
+    // what it asserted, so its history carries covering records.
+    async fn contact(
+        s3: &S3Address,
+        name: &str,
+        upstream: &crate::Repository<SignerCredential>,
+        covering: bool,
+    ) -> Result<(u64, Vec<&'static str>)> {
+        let (operator, _profile, repo) = site(s3, name).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let facts = |i: usize| Artifact {
+            the: "post/title".parse().expect("valid attribute"),
+            of: format!("post:{i}").parse().expect("valid entity"),
+            is: Value::String("ours".into()),
+            cause: None,
+        };
+        const OWN_FACTS: usize = 16;
+        branch
+            .commit(stream::iter(
+                (0..OWN_FACTS).map(|i| Instruction::Assert(facts(i))),
+            ))
+            .perform(&operator)
+            .await?;
+        if covering {
+            // One covering record per retraction: screened, each scans
+            // the upstream tree at the slot it covers.
+            for i in 0..OWN_FACTS {
+                branch
+                    .commit(stream::iter(vec![Instruction::Retract(facts(i))]))
+                    .perform(&operator)
+                    .await?;
+            }
+        }
+        let remote = repo
+            .remote("upstream")
+            .create(s3_site_address(s3))
+            .subject(upstream.did())
+            .perform(&operator)
+            .await?;
+        branch
+            .set_upstream(remote.branch("main").open().perform(&operator).await?)
+            .perform(&operator)
+            .await?;
+
+        let env = Counting::new(operator.clone());
+        branch.pull().perform(&env).await?.expect("merged");
+        let reads = env.block_reads();
+        let run = env.longest_serial_fetch_run_effects();
+
+        let adopted: Vec<_> = branch
+            .claims()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(adopted.len(), 4000, "the upstream's facts are all adopted");
+        let ours: Vec<_> = branch
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            ours.len(),
+            if covering { 0 } else { 16 },
+            "our own facts keep their local state through the merge"
+        );
+        Ok((reads, run))
+    }
+
+    let (plain_reads, plain_run) = contact(&s3, "first-contact-plain", &repo_a, false).await?;
+    let (covering_reads, covering_run) =
+        contact(&s3, "first-contact-covering", &repo_a, true).await?;
+    println!(
+        "FIRST CONTACT plain reads={plain_reads} run={} | covering reads={covering_reads} run={}",
+        plain_run.len(),
+        covering_run.len()
+    );
+    // The sixteen retractions route their tombstones into the same few
+    // leaves as the assertions they retract, so unscreened they add a
+    // handful of reads. Screened, each of the sixteen covering records
+    // also scans the upstream tree at the slot it covers, root to leaf,
+    // through the raw store: two reads per record on top.
+    assert!(
+        covering_reads <= plain_reads + 12,
+        "a first-contact pull carrying covering records must not scan the upstream \
+         tree per record: {covering_reads} reads against {plain_reads} without them \
+         (serial effects: {covering_run:?})"
+    );
+    Ok(())
+}
+
+/// #492, the scenario the HAR traces: a SECOND DEVICE joining an account.
+///
+/// Both sides are seeded, and that is the whole point. A device's first
+/// load creates its own profile with the shipped defaults -- concept
+/// definitions, rules, views, a starter space -- before it has ever seen
+/// an account. Signing in then points that already-populated branch at
+/// the account's remote and pulls, so the pull is a MERGE of two
+/// independently seeded trees, not the adoption of an empty one.
+///
+/// Every earlier version of this test got that wrong in one of two ways:
+/// a replica with nothing local (the merge has no base, so its
+/// differential fetches nothing and a download finds the tree already
+/// there), or a replica sharing the source's storage (every read local,
+/// nothing measured). Both passed while the app crawled.
+///
+/// The measurement is concurrent ROUND TRIPS (`Hydrate` for a download's
+/// block fetches, forked effects for a push's uploads) -- never block
+/// reads, which hit the local store and overlap for free.
+///
+/// What it caught, once it reproduced: the serial run belonged to the
+/// MERGE, not the download. Read-site labels attributed all ~30 serial
+/// fetches to `TransientTree::integrate`, which awaited one change's
+/// resolving lookup before pulling the next, so every change cost its own
+/// round trip while the download's traversal overlapped 6-16 at a time in
+/// the same run. It reproduces identically on native, which is what ruled
+/// out the single-threaded-wasm theory the earlier passes chased.
+#[dialog_common::test]
+async fn it_joins_an_account_from_a_seeded_device(ucan: UcanS3Address) -> Result<()> {
+    use crate::helpers::{Counting, fill_account_branch};
+    use crate::repository::snapshot::codec;
+    use ruzstd::decoding::StreamingDecoder;
+    use std::io;
+
+    // The fixture is a real CAR captured from a running tonk profile,
+    // stored zstd-compressed: 820 KiB of tree becomes 54. `ruzstd` is
+    // pure Rust, so it decompresses in the browser as well as natively.
+    let compressed = include_bytes!("../../../tests/fixtures/profile.car.zst");
+    let mut snapshot = Vec::new();
+    io::copy(&mut StreamingDecoder::new(&compressed[..])?, &mut snapshot)?;
+    let (items, roots) = codec::decode_with_roots(&snapshot)?;
+    let blobs = items
+        .iter()
+        .filter(|item| matches!(item, Ok(crate::Item::Blob { .. })))
+        .count();
+
+    // The joining device's OWN content, captured from a real first load
+    // before it had ever seen an account: definitions, rules, views, a
+    // starter space. This is what makes the pull a merge -- a device with
+    // nothing local gives the differential no base to diff, so it fetches
+    // nothing and the download that follows finds the tree already there.
+    let device_compressed = include_bytes!("../../../tests/fixtures/device.car.zst");
+    let mut device_snapshot = Vec::new();
+    io::copy(
+        &mut StreamingDecoder::new(&device_compressed[..])?,
+        &mut device_snapshot,
+    )?;
+    let device_items = codec::decode(&device_snapshot)?;
+    println!(
+        "FIXTURE account: blocks={} blobs={blobs} roots={roots:?} | device: {} items",
+        items.len() - blobs,
+        device_items.len()
+    );
+    assert!(
+        !roots.is_empty(),
+        "the CAR must name its tree root, or the imported blocks are \
+         reachable from nothing"
+    );
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    // Device 1: the account. Seed it the way a first load seeds a profile,
+    // then publish it.
+    let account_repo = profile
+        .repository(unique_name("join-account"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let chain = account_repo
+        .access()
+        .claim(&account_repo)
+        .delegate(profile.did())
+        .perform(&operator)
+        .await?;
+    profile.access().save(chain).perform(&operator).await?;
+    let account_origin = account_repo
+        .remote("origin")
+        .create(site.clone())
+        .perform(&operator)
+        .await?;
+    let account = account_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&operator)
+        .await?;
+    account
+        .set_upstream(
+            account_origin
+                .branch(crate::ACCESS_BRANCH)
+                .open()
+                .perform(&operator)
+                .await?,
+        )
+        .perform(&operator)
+        .await?;
+    // The account's content is the REAL captured tree, imported blocks and
+    // blobs alike -- not a synthetic stand-in. Importing puts the content
+    // in the archive; committing the facts is what gives the branch a head
+    // that references it, which is what a push has to ship and a join has
+    // to pull.
+    let imported = account_repo
+        .import(stream::iter(items))
+        .perform(&operator)
+        .await?;
+    println!("IMPORTED {imported:?}");
+    let delegations = fill_account_branch(&account, 2, &operator).await?;
+
+    // The push is the control: same tree, same remote, other direction.
+    let push_env = Counting::new(operator.clone());
+    let pushed = account.push().perform(&push_env).await?;
+    let uploads = push_env.count("fork::Fork");
+    let push_peak = push_env.peak_forks_in_flight();
+    println!(
+        "PUSH pushed={} uploads={uploads} peak={push_peak}",
+        pushed.is_some()
+    );
+
+    // Device 2: its own profile, its own storage, SEEDED with defaults of
+    // its own before it ever sees the account -- the state a first load
+    // leaves behind.
+    let (device_operator, device_profile) = test_operator_with_profile().await;
+    device_profile
+        .access()
+        .save(
+            account_repo
+                .access()
+                .claim(&account_repo)
+                .delegate(device_profile.did())
+                .perform(&operator)
+                .await?,
+        )
+        .perform(&device_operator)
+        .await?;
+    let device_repo = device_profile
+        .repository(unique_name("join-device"))
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let device = device_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let device_imported = device_repo
+        .import(stream::iter(device_items))
+        .perform(&device_operator)
+        .await?;
+    println!("DEVICE IMPORTED {device_imported:?}");
+    fill_account_branch(&device, 1, &device_operator).await?;
+
+    // Sign in: point the seeded branch at the account and pull.
+    let device_remote = device_repo
+        .remote("account-access")
+        .create(site)
+        .subject(account_repo.did())
+        .perform(&device_operator)
+        .await?;
+    device
+        .set_upstream(
+            device_remote
+                .branch(crate::ACCESS_BRANCH)
+                .open()
+                .perform(&device_operator)
+                .await?,
+        )
+        .perform(&device_operator)
+        .await?;
+
+    let env = Counting::new(device_operator.clone());
+    device.pull().download().perform(&env).await?;
+
+    let hydrations = env.count("hydrate::Hydrate");
+    let remote_peak = env.peak_forks_in_flight();
+    let reads = env.block_reads();
+    let local_peak = env.peak_block_reads_in_flight();
+    let serial_run = env.longest_serial_fetch_run();
+    println!(
+        "JOIN delegations={delegations} hydrations={hydrations} \
+         remote_peak={remote_peak} serial_run={serial_run} \
+         reads={reads} local_peak={local_peak} \
+         serial_effects={:?}",
+        env.longest_serial_fetch_run_effects()
+    );
+
+    assert!(
+        hydrations > 8,
+        "the joining device must pull the account across the wire for its \
+         overlap to mean anything (hydrations={hydrations}). Effects: {:?}",
+        env.snapshot()
+    );
+    // The serial RUN, not the peak. A peak over the whole pull can read
+    // healthy while a long prefix of it is strictly one-at-a-time, which
+    // is what let this bug hide: the download's traversal overlapped 6-16
+    // at a time and pulled the peak up, while the merge ahead of it fetched
+    // ~30 blocks strictly one after another.
+    //
+    // The floor is the head chain, and it is inherently serial: the
+    // upstream head resolve, then the revision, root and first frontier
+    // reads it names, each dependent on the one before (the run's effects,
+    // printed above, are always one Resolve followed by Hydrates).
+    //
+    // The bound is loose because the gauge is load-sensitive. "Alone in
+    // flight" is decided by whether two fetches overlap in wall time, so
+    // on a saturated machine sibling fetches drift apart and a run that
+    // measures 4 in isolation measures more -- the same chain, spread
+    // thinner. Measured: 4 on eight consecutive solo runs, 4/5/4 under a
+    // parallel package run, 8 once during a full suite.
+    //
+    // So 12: three times the chain, half again the worst reading seen,
+    // and under half the 29-to-32 this pins. It is derived from those
+    // three numbers and nothing else -- in particular it is NOT the
+    // fetch-concurrency 16 the read paths use, which is a width of
+    // parallel fetches and says nothing about how many may run in a row.
+    // Making the gauge load-independent is bead dialog-db-88.
+    assert!(
+        serial_run < 12,
+        "a device joining the account made {hydrations} remote fetches, and \
+         {serial_run} of them ran back-to-back with nothing else in flight \
+         (peak {remote_peak} over the whole pull). One round trip at a time \
+         is the HAR's shape exactly. This reproduces on BOTH native and \
+         wasm, so a failure here is the merge's read shape, not the runtime."
+    );
+
+    Ok(())
+}
+
+/// What a push does when its cached view of upstream has gone stale:
+/// another writer advanced the remote after our last fetch.
+///
+/// Pinned because push's own refresh is what keeps this case from
+/// reaching the upload. The refresh costs a round trip on every push,
+/// so it is a candidate for skipping when the observation is recent;
+/// this test says what must remain true if it ever is skipped. The
+/// contract is not "push succeeds" — it is that a stale base is
+/// *caught*, upstream keeps the revision the other writer published,
+/// and the failure is the typed one callers already recognize.
+#[dialog_common::test]
+async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // Alice publishes the branch both writers track.
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "stale-alice").await?;
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+
+    // Bob tracks the same branch and pulls, so his cache holds the
+    // upstream edition Alice just published.
+    let bob_repo = profile
+        .repository(unique_name("stale-bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = bob_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob_branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+    bob_branch.pull().perform(&operator).await?;
+
+    // Alice advances upstream behind Bob's back. Bob's cache now names
+    // a revision that is no longer the remote's head.
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice-again".parse()?,
+            is: Value::String("Alice again".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+    let ahead = alice_branch
+        .upstream()
+        .map(|upstream| upstream.tree().clone())
+        .expect("alice's upstream records what she published");
+
+    // Bob commits on his stale base and pushes.
+    bob_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:bob".parse()?,
+            is: Value::String("Bob".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    let refused = bob_branch.push().perform(&operator).await;
+
+    // The push is refused, not silently accepted.
+    assert!(
+        matches!(refused, Err(crate::PushError::NonFastForward { .. })),
+        "a push from a stale base must be refused, got: {refused:?}"
+    );
+
+    // And upstream still carries Alice's second revision: a refused
+    // push leaves the head exactly where the other writer put it.
+    let observer = bob_repo.remote("origin").load().perform(&operator).await?;
+    let observed = observer.branch("main").open().perform(&operator).await?;
+    observed.fetch().perform(&operator).await?;
+    assert_eq!(
+        observed.revision().map(|revision| revision.tree),
+        Some(ahead),
+        "upstream keeps the revision the other writer published"
+    );
+
+    // Bob converges the ordinary way: pull, then push.
+    bob_branch.pull().perform(&operator).await?;
+    bob_branch.push().perform(&operator).await?;
+
+    Ok(())
+}
+
+/// The same stale-base race, but with the caller declaring it already
+/// knows where upstream stands.
+///
+/// The push is still refused and upstream still keeps the other
+/// writer's revision — the head write is conditional, so safety does
+/// not rest on the check that was skipped. What changes is when the
+/// refusal arrives and what it is called: after the upload rather than
+/// before it, and as a version mismatch rather than a non-fast-forward.
+/// A caller that reports conflicts has to recognize both, which is the
+/// trade [`Push::assuming_upstream`] documents.
+#[dialog_common::test]
+async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "assumed-alice").await?;
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+
+    let bob_repo = profile
+        .repository(unique_name("assumed-bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = bob_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob_branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+    bob_branch.pull().perform(&operator).await?;
+
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice-again".parse()?,
+            is: Value::String("Alice again".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+    let ahead = alice_branch
+        .upstream()
+        .map(|upstream| upstream.tree().clone())
+        .expect("alice's upstream records what she published");
+
+    bob_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:bob".parse()?,
+            is: Value::String("Bob".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    let refused = bob_branch
+        .push()
+        .assuming_upstream()
+        .perform(&operator)
+        .await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(crate::PushError::PublishRemoteBranch(
+                crate::PublishRemoteBranchError::Publish(
+                    crate::PublishError::VersionMismatch { .. }
+                )
+            ))
+        ),
+        "an assumed push whose upstream moved is refused by the conditional write, got: {refused:?}"
+    );
+
+    let observer = bob_repo.remote("origin").load().perform(&operator).await?;
+    let observed = observer.branch("main").open().perform(&operator).await?;
+    observed.fetch().perform(&operator).await?;
+    assert_eq!(
+        observed.revision().map(|revision| revision.tree),
+        Some(ahead),
+        "upstream keeps the revision the other writer published"
+    );
+
+    // And the ordinary route still converges.
+    bob_branch.pull().perform(&operator).await?;
+    bob_branch.push().perform(&operator).await?;
+
     Ok(())
 }

@@ -6,6 +6,7 @@ use std::error;
 use std::fmt;
 
 use crate::artifact::{ArtifactTypeError, DialogArtifactsError, Type, Value};
+use crate::attribute::Keyed;
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
 use crate::reduce::Aggregator;
@@ -50,6 +51,35 @@ pub enum TypeError {
         expected: Kind,
         /// Actual term provided.
         actual: Box<Term<Any>>,
+    },
+
+    /// A keyed collection field was asked to produce one fact.
+    #[error(
+        "Binding \"{binding}\" is the keyed collection {domain}: every \
+         entry needs its own key, so it cannot take a single value"
+    )]
+    UnkeyedCollection {
+        /// The binding's name.
+        binding: String,
+        /// The collection's domain.
+        domain: String,
+    },
+
+    /// A collection entry's key has the wrong name shape for its
+    /// collection.
+    #[error(
+        "Binding \"{binding}\" key {key:?} is not a valid {keyed:?} key for \
+         collection {domain}"
+    )]
+    KeyShape {
+        /// The binding's name.
+        binding: String,
+        /// The collection's domain.
+        domain: String,
+        /// The offending key.
+        key: String,
+        /// The collection's key kind.
+        keyed: Keyed,
     },
 
     /// A required binding was not provided.
@@ -108,6 +138,19 @@ pub enum TypeError {
     OptionalConformance {
         /// The offending attribute selector.
         the: String,
+    },
+    /// A keyed collection field is marked optional. A collection's
+    /// key is projected by a formula over the matched attribute, and
+    /// a formula filters an `Absent` input, so an optional collection
+    /// could never yield the widened row it promises. A collection
+    /// is already zero-or-more; leave it required.
+    #[error(
+        "collection field over {domain} is optional; a keyed collection is \
+         zero-or-more already and cannot be widened"
+    )]
+    OptionalCollection {
+        /// The collection's domain.
+        domain: String,
     },
 
     /// A rule declares a parameter that none of its premises use.
@@ -411,6 +454,30 @@ pub enum FieldTypeError {
         /// Actual term provided.
         actual: Box<Term<Any>>,
     },
+    /// A collection field was asked to produce one fact. Its facts
+    /// are keyed per entry, so the key comes from the writer rather
+    /// than from the schema.
+    #[error(
+        "Cannot write a single fact for the keyed collection {domain}: \
+         every entry needs its own key"
+    )]
+    UnkeyedCollection {
+        /// The collection's domain.
+        domain: String,
+    },
+    /// A collection entry's key does not have the collection's name
+    /// shape: a sequence is keyed by positions, a dictionary by
+    /// symbols, and a key of the other shape would land in the other
+    /// half of the domain.
+    #[error("key {key:?} is not a valid {keyed:?} key for collection {domain}")]
+    KeyShape {
+        /// The collection's domain.
+        domain: String,
+        /// The offending key.
+        key: String,
+        /// The collection's key kind.
+        keyed: Keyed,
+    },
     /// A required term is missing.
     #[error("Required term is missing")]
     OmittedRequirement,
@@ -432,6 +499,15 @@ impl FieldTypeError {
                 binding,
                 expected,
                 actual,
+            },
+            FieldTypeError::UnkeyedCollection { domain } => {
+                TypeError::UnkeyedCollection { binding, domain }
+            }
+            FieldTypeError::KeyShape { domain, key, keyed } => TypeError::KeyShape {
+                binding,
+                domain,
+                key,
+                keyed,
             },
             FieldTypeError::OmittedRequirement => TypeError::OmittedRequirement { binding },
             FieldTypeError::BlankRequirement => TypeError::BlankRequirement { binding },

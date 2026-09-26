@@ -4,7 +4,8 @@ use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Select, SortKey, Statement,
+    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey,
+    Speculation, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -22,57 +23,66 @@ use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::Buffer;
 use dialog_storage::{Blake3Hash, StorageBackend};
+use futures_util::future::try_join_all;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
+use crate::REGISTRY;
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::repository::fetch::Driven;
+use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
-    assemble, builtin, conclusion_selector, hydrate, overlay_rules, rule_entities, source_bytes,
-    source_selector,
+    assemble, builtin, conclusion_attr, conclusion_selector, hydrate, overlay_rules, rule_entities,
+    source_attr, source_bytes, source_selector,
 };
-use crate::schema::{DidExt as _, Session, SessionBranch, session};
-use crate::{
-    Branch, NetworkedIndex, RemoteFallback, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Upstream,
+use crate::schema::{
+    Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
+use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot};
 
-/// A composable query over one or more branches plus an in-memory
-/// overlay.
+/// A composable query over one or more lines (branches, snapshots)
+/// plus an in-memory overlay.
 ///
-/// `branch.query()` returns a `QueryLayer` rooted at that branch.
-/// From there:
+/// `branch.query()` (or `snapshot.query()`) returns a `QueryLayer`
+/// rooted at that line. From there:
 ///
 /// - [`with`](Self::with) folds any [`Statement`] (a concept
 ///   instance, an attribute expression, a [`Changes`] batch) into the
-///   overlay — its asserts/replaces surface alongside branch facts,
-///   its retracts tombstone matching branch facts.
-/// - [`join`](Self::join) merges in another branch or `QueryLayer`.
+///   overlay — its asserts/replaces surface alongside stored facts,
+///   its retracts tombstone matching stored facts.
+/// - [`join`](Self::join) merges in another branch, snapshot, or
+///   `QueryLayer`.
 /// - [`select`](Self::select) stages a query; `.perform(&env)` runs it.
 ///
-/// All branches in the layer are peers — there is no distinguished
-/// "primary". A query reads the union of every branch's facts plus
-/// the overlay.
+/// All lines in the layer are peers — there is no distinguished
+/// "primary". A query reads the union of every line's facts plus the
+/// overlay.
 ///
 /// # Auto-injected schema metadata
 ///
 /// At `.perform(env)` the layer resolves the operator's identity via
 /// [`Identify`] and folds in [`metadata`](Self::metadata): one
-/// [`Origin`](crate::schema::Replica) + [`Branch`](crate::schema::Branch)
+/// [`Replica`](crate::schema::Replica) + [`Branch`](crate::schema::Branch)
 /// (+ [`BranchRevision`](crate::schema::BranchRevision) when committed)
-/// per branch, plus a single [`Session`]. Callers don't pass the
-/// profile or operator DID, and nothing is written to any branch's
-/// tree.
+/// per branch, a [`Replica`](crate::schema::Replica) per snapshot,
+/// plus a single [`Session`]. Callers don't pass the profile or
+/// operator DID, and nothing is written to any line's tree.
 ///
-/// ```ignore
-/// branch.query()
-///     .join(&other_branch)            // another branch source
-///     .with(custom_concept_instance)  // user-asserted overlay facts
-///     .select(query)
-///     .perform(&env);                 // metadata auto-injected
+/// ```no_run
+/// # use dialog_repository::{Branch, Snapshot};
+/// # use dialog_query::query::Application;
+/// # fn example<Q: Application>(branch: &Branch, snapshot: &Snapshot, query: Q, facts: dialog_artifacts::Changes) {
+/// let layer = branch
+///     .query()
+///     .join(snapshot)                 // another line
+///     .with(facts);                   // user-asserted overlay facts
+/// let staged = layer.select(query);   // `.perform(&env)` injects metadata
+/// # let _ = staged;
+/// # }
 /// ```
 #[derive(Default, Clone)]
 pub struct QueryLayer<'a> {
-    branches: Vec<&'a Branch>,
+    sources: Vec<SourceRef<'a>>,
     changes: Changes,
 }
 
@@ -96,19 +106,37 @@ impl<'a> QueryLayer<'a> {
         self
     }
 
-    /// Merge another layer in: union the branches, fold the other
+    /// Merge another layer in: union the lines, fold the other
     /// layer's changes via its `Statement` impl. Accepts anything
-    /// convertible into a `QueryLayer` — a `&Branch` or a `Changes`.
+    /// convertible into a `QueryLayer` — a `&Branch`, a `&Snapshot`, or
+    /// a `Changes`.
     pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
         let other = other.into();
-        self.branches.extend(other.branches);
+        self.sources.extend(other.sources);
         other.changes.assert(&mut self.changes);
         self
     }
 
-    /// The branches this layer reads from.
-    pub fn branches(&self) -> &[&'a Branch] {
-        &self.branches
+    /// The branches this layer reads from, in join order.
+    pub fn branches(&self) -> Vec<&'a Branch> {
+        self.sources
+            .iter()
+            .filter_map(|source| match source {
+                SourceRef::Branch(branch) => Some(*branch),
+                SourceRef::Snapshot(_) => None,
+            })
+            .collect()
+    }
+
+    /// The snapshots this layer reads from, in join order.
+    pub fn snapshots(&self) -> Vec<&'a Snapshot> {
+        self.sources
+            .iter()
+            .filter_map(|source| match source {
+                SourceRef::Snapshot(snapshot) => Some(*snapshot),
+                SourceRef::Branch(_) => None,
+            })
+            .collect()
     }
 
     /// The caller-supplied overlay changes (no auto-injected metadata).
@@ -117,20 +145,37 @@ impl<'a> QueryLayer<'a> {
     }
 
     /// The schema-metadata [`Changes`] for this layer: every branch's
-    /// [`BranchMetadata`](super::metadata::BranchMetadata) plus a
-    /// single [`Session`] (with one cardinality-many
-    /// `dialog.session/branch` per branch in scope).
+    /// [`BranchMetadata`](super::metadata::BranchMetadata), every
+    /// snapshot's [`Replica`](crate::schema::Replica), plus a single
+    /// [`Session`] (with one cardinality-many `dialog.session/branch`
+    /// per branch in scope — a snapshot is not a branch and gets none).
     ///
     /// `operator` (from [`Identify`]) supplies the profile + operator
     /// DIDs the schema entities are derived from.
     pub fn metadata(&self, operator: &Capability<Operator>) -> Changes {
         let mut changes = Changes::new();
 
-        let mut branch_entities = Vec::with_capacity(self.branches.len());
-        for branch in &self.branches {
-            let metadata = branch.metadata(operator);
-            branch_entities.push(metadata.branch.this.clone());
-            metadata.assert(&mut changes);
+        let mut branch_entities = Vec::with_capacity(self.sources.len());
+        for source in &self.sources {
+            if let Some(entity) = source.metadata(operator, &mut changes) {
+                branch_entities.push(entity);
+            }
+        }
+
+        // The registry describes itself here rather than in its own
+        // tree: a branch registry that had to record itself would have
+        // to exist before it could be created. Synthesizing the fact
+        // means a listing sees `meta` like any other branch while
+        // nothing about it is ever stored.
+        //
+        // One per repository in scope, since each has its own registry.
+        let mut described = HashSet::new();
+        for source in &self.sources {
+            let subject = source.subject();
+            if described.insert(subject.did().clone()) {
+                let replica = Replica::new(operator.profile().clone(), subject.did().clone());
+                BranchConcept::new(&replica, REGISTRY).assert(&mut changes);
+            }
         }
 
         let session_entity = Session::entity();
@@ -172,24 +217,36 @@ impl<'a> QueryLayer<'a> {
     }
 }
 
-// Folds the branch's transient session overlay
-// ([`Branch::overlay`]): every read path — `branch.select`,
-// `branch.query`, transaction queries, subscription evaluations —
-// constructs through here, so session facts participate in all of
-// them with no per-path wiring.
+// A line's session overlay ([`Branch::overlay`], [`Snapshot::overlay`])
+// is not folded here: [`QueryEnv`] reads it live at every evaluation,
+// so every read path — `select`, `query`, transaction queries,
+// subscription evaluations — sees session facts with no per-path
+// wiring and no snapshot to go stale.
+impl<'a> From<SourceRef<'a>> for QueryLayer<'a> {
+    fn from(source: SourceRef<'a>) -> Self {
+        Self {
+            sources: vec![source],
+            changes: Changes::new(),
+        }
+    }
+}
+
 impl<'a> From<&'a Branch> for QueryLayer<'a> {
     fn from(branch: &'a Branch) -> Self {
-        Self {
-            branches: vec![branch],
-            changes: branch.overlay().changes(),
-        }
+        Self::from(SourceRef::from(branch))
+    }
+}
+
+impl<'a> From<&'a Snapshot> for QueryLayer<'a> {
+    fn from(snapshot: &'a Snapshot) -> Self {
+        Self::from(SourceRef::from(snapshot))
     }
 }
 
 impl From<Changes> for QueryLayer<'_> {
     fn from(changes: Changes) -> Self {
         Self {
-            branches: Vec::new(),
+            sources: Vec::new(),
             changes,
         }
     }
@@ -202,9 +259,9 @@ pub struct SelectQuery<'a, Q> {
 }
 
 impl<'a, Q> SelectQuery<'a, Q> {
-    pub(crate) fn new(branch: &'a Branch, query: Q) -> Self {
+    pub(crate) fn new(source: impl Into<SourceRef<'a>>, query: Q) -> Self {
         Self {
-            layer: QueryLayer::from(branch),
+            layer: QueryLayer::from(source.into()),
             query,
         }
     }
@@ -216,7 +273,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// Resolves the operator's identity via [`Identify`], builds the
     /// query overlay (caller changes + auto-injected schema metadata)
     /// via [`QueryLayer::overlay`], lifts any retracts in it into
-    /// tombstones, and unions every branch stream (tombstone-filtered)
+    /// tombstones, and unions every line's stream (tombstone-filtered)
     /// with the overlay.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
@@ -224,7 +281,9 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Hydrate>
+            + Provider<Preload>
+            + Provider<Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -237,19 +296,25 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
 
             let overlay = layer.overlay(&operator);
-            let tombstones = Arc::new(tombstones_from(&overlay));
-
-            let branches = layer.branches.iter().map(|&branch| branch.clone()).collect();
-            let query_env = QueryEnv::new(branches, overlay, tombstones, env);
+            let sources: Vec<Source> =
+                layer.sources.iter().map(|source| source.to_source()).collect();
+            let query_env = QueryEnv::new(sources.clone(), overlay, env);
             let results = Box::pin(query.perform(&query_env));
-            for await result in results {
+            // The query's own stream drives the env's preload queue:
+            // evaluator hints (its own and any concurrent evaluation's)
+            // execute while this stream is polled, borrowing this same
+            // env and ending with the stream. See
+            // `crate::repository::fetch`.
+            let queue = Provider::<Speculation>::execute(env, ()).await;
+            let driven = Driven::new(results, sources, env, queue);
+            for await result in driven {
                 yield result?;
             }
         }
     }
 }
 
-/// The runtime environment that bridges the layer's branches and
+/// The runtime environment that bridges the layer's lines and
 /// per-query overlay changes into the query engine's Provider bounds.
 ///
 /// Built fresh on each `.perform(env)`; the environment reference
@@ -262,13 +327,18 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// enclosing future `Send`-general on native (two independent
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
-    branches: Vec<Branch>,
+    sources: Vec<Source>,
     /// All overlay facts — caller-asserted + auto-injected metadata —
     /// merged into one batch. Queried via `Provider<Select> for Changes`.
     changes: Changes,
-    /// `sort_key`s of every retracted fact in `changes`. Each branch
+    /// `sort_key`s of every retracted fact in `changes`. Each line's
+    /// session overlay stream is filtered against these before the
+    /// merge so a staged retract suppresses a session fact.
+    staged: Arc<HashSet<SortKey>>,
+    /// `staged` plus every line's session tombstones. Each line's tree
     /// stream is filtered against these before the merge so retracts
-    /// in the overlay suppress matching facts in the source.
+    /// in the per-query changes and session tombstones suppress
+    /// matching facts in the tree.
     tombstones: Arc<HashSet<SortKey>>,
     /// When present, every selector this environment executes —
     /// fact scans and rule-discovery reads alike — records its
@@ -284,24 +354,37 @@ pub(crate) struct QueryEnv<'a, Env> {
 }
 
 impl<'a, Env> QueryEnv<'a, Env> {
-    /// Build a runtime env from already-resolved parts: the branches to
+    /// Build a runtime env from already-resolved parts: the lines to
     /// read, the per-query overlay (caller changes + injected metadata),
-    /// the tombstones lifted from it, and the underlying capability env.
+    /// and the underlying capability env. The tombstones are lifted
+    /// here: the per-query retracts, plus each line's session
+    /// tombstones for the tree streams.
     ///
-    /// Both `Branch::query` and the transaction-query path construct
-    /// through here so there is exactly one query env — a transaction
-    /// query is just a single-branch `QueryEnv`. Deductive-rule
-    /// resolution is built in (a durable layer per branch + the overlay
-    /// as a transient layer), so the two paths can never diverge on it.
-    pub(crate) fn new(
-        branches: Vec<Branch>,
-        changes: Changes,
-        tombstones: Arc<HashSet<SortKey>>,
-        env: &'a Env,
-    ) -> Self {
+    /// `Branch::query`, `Snapshot::query`, and the transaction-query
+    /// paths all construct through here so there is exactly one query
+    /// env — a transaction query is just a single-line `QueryEnv`.
+    /// Deductive-rule resolution is built in (a durable layer per line,
+    /// its session overlay, and the per-query changes as a transient
+    /// layer), so the paths can never diverge on it.
+    pub(crate) fn new(sources: Vec<Source>, changes: Changes, env: &'a Env) -> Self {
+        let staged = tombstones_from(&changes);
+        // The common case, one line and nothing staged, shares the
+        // overlay's own set rather than copying it per query.
+        let tombstones = match sources.as_slice() {
+            [only] if staged.is_empty() => only.as_ref().overlay().tombstones(),
+            _ => {
+                let mut tombstones = staged.clone();
+                for source in &sources {
+                    let session = source.as_ref().overlay().tombstones();
+                    tombstones.extend(session.iter().cloned());
+                }
+                Arc::new(tombstones)
+            }
+        };
         Self {
-            branches,
+            sources,
             changes,
+            staged: Arc::new(staged),
             tombstones,
             demand: None,
             fixpoint: None,
@@ -336,8 +419,9 @@ impl<'a, Env> QueryEnv<'a, Env> {
 impl<Env> Clone for QueryEnv<'_, Env> {
     fn clone(&self) -> Self {
         Self {
-            branches: self.branches.clone(),
+            sources: self.sources.clone(),
             changes: self.changes.clone(),
+            staged: self.staged.clone(),
             tombstones: self.tombstones.clone(),
             demand: self.demand.clone(),
             fixpoint: self.fixpoint.clone(),
@@ -346,16 +430,16 @@ impl<Env> Clone for QueryEnv<'_, Env> {
     }
 }
 
-/// Execute a select against a single branch, transparently routing through
-/// the branch's remote upstream when configured. Extracted as a freestanding
-/// helper so every branch in a [`QueryEnv`] shares the exact same branch-read
-/// path (a transaction query is itself a single-branch `QueryEnv`).
+/// Execute a select against a single line, transparently routing through
+/// a branch's remote upstream when configured. Extracted as a freestanding
+/// helper so every line in a [`QueryEnv`] shares the exact same read path
+/// (a transaction query is itself a single-line `QueryEnv`).
 ///
-/// Takes the branch by value (a cheap clone: shared caches) and moves
-/// it into the returned stream, so the stream borrows only the env —
+/// Takes the line by value (a cheap clone: shared caches) and moves it
+/// into the returned stream, so the stream borrows only the env —
 /// errors surface as the stream's first item.
-pub(crate) fn select_from_branch<'a, Env>(
-    branch: Branch,
+pub(crate) fn select_from_source<'a, Env>(
+    source: Source,
     env: &'a Env,
     input: ArtifactSelector<Constrained>,
 ) -> ArtifactStream<'a>
@@ -363,27 +447,17 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
     Box::pin(async_stream::try_stream! {
-        let select = branch.claims().select(input);
-
-        let remote = match branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => {
-                let loaded = branch
-                    .subject()
-                    .remote(name.clone())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            _ => RemoteFallback::None,
-        };
-
+        let select = crate::Select::from_source(source.as_ref(), input);
+        let remote = source.as_ref().fallback(env).await;
+        // Concurrent reads of one digest share fetch-and-hydrate through
+        // the env's own `Hydrate` flight (see `crate::Hydrate`), with
+        // every other evaluation in the process.
         let store = NetworkedIndex::new(env, select.catalog(), remote);
         let stream = select.execute(store).await?;
         for await artifact in stream {
@@ -412,7 +486,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -422,15 +496,29 @@ where
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
         self.record_demand(&input);
-        let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.branches.len() + 1);
+        let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
 
-        // Branch streams — each filtered by tombstones from the
+        // Line streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
-        // retract in `with(..)`) suppresses matching source facts. Each
-        // owns its branch clone and borrows only `self.env`.
-        for branch in &self.branches {
-            let raw = select_from_branch(branch.clone(), self.env, input.clone());
+        // retract in `with(..)`) suppresses matching source facts, and
+        // by the line's session tombstones. Each owns its line clone
+        // and borrows only `self.env`.
+        for source in &self.sources {
+            let raw = select_from_source(source.clone(), self.env, input.clone());
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
+        }
+
+        // Each line's session overlay, read live. Filtered by the
+        // staged retracts only: the overlay's own tombstones hide facts
+        // *beneath* it, never its own. Pushed only when it has rows,
+        // for the same reason the per-query stream is below.
+        for source in &self.sources {
+            let mut session =
+                Provider::<Select<'a>>::execute(source.as_ref().overlay(), input.clone()).await?;
+            if let Some(first) = futures_util::StreamExt::next(&mut session).await {
+                let rows: ArtifactStream<'a> = Box::pin(stream::iter(vec![first]).chain(session));
+                streams.push(filter_tombstones(rows, self.staged.clone()));
+            }
         }
 
         // Overlay stream — Changes itself is a Provider<Select>. The
@@ -453,15 +541,69 @@ where
     }
 }
 
+// A range-size estimate for the planner's merge-versus-fold choice:
+// the range's edge paths per line, summed. The `Changes` overlay is not
+// consulted (small, and irrelevant to the order-of-magnitude answer a
+// strategy heuristic needs). Summing lines is an upper bound — a fact
+// on two lines counts twice — which is the safe direction for a "how
+// broad is this range" question. `None` from every line (all empty)
+// yields `None`.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env> Provider<Estimate> for QueryEnv<'_, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(
+        &self,
+        input: ArtifactSelector<Constrained>,
+    ) -> Result<Option<u64>, DialogArtifactsError> {
+        let mut total: Option<u64> = None;
+        for source in &self.sources {
+            let select = crate::Select::from_source(source.as_ref(), input.clone());
+            let remote = source.as_ref().fallback(self.env).await;
+            let store = NetworkedIndex::new(self.env, select.catalog(), remote);
+            if let Some(estimate) = select.estimate(store).await? {
+                total = Some(total.unwrap_or(0).saturating_add(estimate));
+            }
+        }
+        Ok(total)
+    }
+}
+
+// A `Preload` hint forwards to the underlying env's ambient queue —
+// the enqueue half of speculative replication; whichever driven
+// evaluation stream polls next does the fetching (see
+// `crate::repository::fetch`). Forwarding unconditionally is the whole
+// point of the ambient design: every construction site (plain queries,
+// subscriptions, transaction queries) emits hints with no per-path
+// wiring, and the env's budget decides whether anyone listens.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env> Provider<Preload> for QueryEnv<'_, Env>
+where
+    Env: Provider<Preload> + ConditionalSync,
+{
+    async fn execute(&self, input: PreloadRequest) -> bool {
+        Provider::<Preload>::execute(self.env, input).await
+    }
+}
+
 // The idempotent block-load behind resolver premises (`tree/node` &
 // co). No demand is recorded: the block behind a hash is
 // content-addressed and can never change, so no tree diff could ever
 // invalidate a row derived from it — the soundness argument lives in
-// `dialog_artifacts::inspect`. Reads go through each branch's archive
+// `dialog_artifacts::inspect`. Reads go through each line's archive
 // catalog capability with the same remote fallback a fact scan uses;
-// the first branch that has the block wins (content addressing makes
+// the first line that has the block wins (content addressing makes
 // them interchangeable), and a block absent everywhere contributes
-// nothing. Reads go through the branch's shared node cache (the same
+// nothing. Reads go through the line's shared node cache (the same
 // one the eager root probe in `select.rs` and `Subscription::touched`
 // use): a resolver join re-resolves the same reference once per outer
 // row, and a raw backend get would re-fetch that identical immutable
@@ -473,27 +615,17 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
     async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
-        for branch in &self.branches {
-            let remote = match branch.upstream() {
-                Some(Upstream::Remote { remote: name, .. }) => {
-                    let loaded = branch
-                        .subject()
-                        .remote(name.clone())
-                        .load()
-                        .perform(self.env)
-                        .await;
-                    RemoteFallback::from_load(name, loaded)
-                }
-                _ => RemoteFallback::None,
-            };
-            let store = NetworkedIndex::new(self.env, branch.archive().index(), remote);
-            let cached = branch
+        for source in &self.sources {
+            let source = source.as_ref();
+            let remote = source.fallback(self.env).await;
+            let store = NetworkedIndex::new(self.env, source.archive().index(), remote);
+            let cached = source
                 .node_cache()
                 .get_or_fetch(&NodeHash::from(input), async |hash| {
                     StorageBackend::get(&store, hash.as_bytes())
@@ -514,19 +646,20 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
+        + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
-    /// Read a `dialog.rule/*` selector against a single branch's committed
+    /// Read a `dialog.rule/*` selector against a single line's committed
     /// tree only (NOT the overlay) and collect the matching artifacts.
     /// The durable layer's reads must be tree-only so the head-keyed
     /// discovery cache stays correct — overlay rules are handled
     /// separately, fresh, by the transient layer.
     async fn select_tree(
         &self,
-        branch: &Branch,
+        source: &Source,
         selector: ArtifactSelector<Constrained>,
     ) -> Result<Vec<Artifact>, DialogArtifactsError> {
         // Rule-discovery reads are demand too: a rule committed
@@ -539,31 +672,82 @@ where
         }
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
-        select_from_branch(branch.clone(), self.env, selector)
+        select_from_source(source.clone(), self.env, selector)
             .owned()
             .try_collect()
             .await
     }
 
-    /// The durable rules concluding `concept` on `branch`: the committed
-    /// `dialog.rule/*` rules, read from the tree and cached by branch head
+    /// The rules concluding `concept` held in `source`'s session
+    /// overlay: session-asserted `dialog.rule/*` facts, read fresh (the
+    /// overlay is in memory and never head-cached). Recorded as rule
+    /// demand, so a subscription re-evaluates when a session rule for
+    /// the concept arrives or goes.
+    fn session_rules(
+        &self,
+        source: &Source,
+        concept: &Entity,
+    ) -> Result<Vec<DeductiveRule>, EvaluationError> {
+        let overlay = source.as_ref().overlay();
+        let conclusions = conclusion_selector(concept);
+        if let Some(demand) = &self.demand {
+            demand.record_rules(&conclusions);
+        }
+        let entities = rule_entities(overlay.scan(&conclusions));
+        let mut rules = Vec::with_capacity(entities.len());
+        for rule_entity in entities {
+            let sources = source_selector(&rule_entity);
+            if let Some(demand) = &self.demand {
+                demand.record_rules(&sources);
+            }
+            let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
+                continue;
+            };
+            rules.push(hydrate(&bytes)?);
+        }
+        Ok(rules)
+    }
+
+    /// The durable rules concluding `concept` on `source`: the committed
+    /// `dialog.rule/*` rules, read from the tree and cached by head
     /// (re-scanned only when the head moves), with hydrated bodies
     /// cached by content-addressed rule entity.
     async fn durable_rules(
         &self,
-        branch: &Branch,
+        source: &Source,
         concept: &Entity,
     ) -> Result<Vec<DeductiveRule>, EvaluationError> {
-        let cache = branch.rule_cache();
-        let head = branch.revision();
+        let cache = source.as_ref().rule_cache();
+        let head = source.as_ref().revision();
 
         // Discovery: which rule entities conclude this concept (committed).
         // Cached per (concept, head); a head move (commit/pull) re-scans.
         let rule_entities = match head.as_ref().and_then(|h| cache.discovered(concept, h)) {
             Some(entities) => entities,
             None => {
+                // The moment any resolution scans cold, the whole
+                // `dialog.rule/*` region is committed work: this
+                // concept's rules read it now, and every concept its
+                // rule bodies reference reads it next (rule premises
+                // recurse). The region is small — rules, not facts —
+                // so hint both spans whole and let the ambient driver
+                // replicate them level-parallel while this walk
+                // demand-reads; closure depth then finds it local.
+                for attribute in [conclusion_attr(), source_attr()] {
+                    let listening = Provider::<Preload>::execute(
+                        self,
+                        PreloadRequest {
+                            selector: ArtifactSelector::new().the(attribute),
+                            likelihood: Likelihood::Likely,
+                        },
+                    )
+                    .await;
+                    if !listening {
+                        break;
+                    }
+                }
                 let claims = self
-                    .select_tree(branch, conclusion_selector(concept))
+                    .select_tree(source, conclusion_selector(concept))
                     .await
                     .map_err(|e| {
                         EvaluationError::Store(format!("rule conclusion lookup: {e:?}"))
@@ -576,26 +760,30 @@ where
             }
         };
 
-        // Hydration: reuse cached bodies (content-addressed, never stale),
-        // fetch + compile the rest from each rule's `dialog.rule/source`.
-        let mut rules = Vec::with_capacity(rule_entities.len());
-        for rule_entity in rule_entities {
+        // Hydration: reuse cached bodies (content-addressed, never
+        // stale) and fetch + compile the rest from each rule's
+        // `dialog.rule/source` — concurrently, because the fetches are
+        // independent point selects and a head move with N installed
+        // rules must not pay N sequential round trips (blocks already
+        // in flight join through the env's `Hydrate` flight).
+        let cache = &cache;
+        let rules = try_join_all(rule_entities.into_iter().map(|rule_entity| async move {
             if let Some(body) = cache.body(&rule_entity) {
-                rules.push(body);
-                continue;
+                return Ok::<_, EvaluationError>(Some(body));
             }
             let source_claims = self
-                .select_tree(branch, source_selector(&rule_entity))
+                .select_tree(source, source_selector(&rule_entity))
                 .await
                 .map_err(|e| EvaluationError::Store(format!("rule source lookup: {e:?}")))?;
-            let Some(source) = source_bytes(source_claims) else {
-                continue;
+            let Some(bytes) = source_bytes(source_claims) else {
+                return Ok(None);
             };
-            let body = hydrate(&source)?;
+            let body = hydrate(&bytes)?;
             cache.record_body(rule_entity, body.clone());
-            rules.push(body);
-        }
-        Ok(rules)
+            Ok(Some(body))
+        }))
+        .await?;
+        Ok(rules.into_iter().flatten().collect())
     }
 }
 
@@ -606,13 +794,14 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
+        + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
     /// Resolve a concept's deductive rules by unioning across layers:
-    /// each branch is a durable layer (committed `dialog.rule/*`, head-cached),
+    /// each line is a durable layer (committed `dialog.rule/*`, head-cached),
     /// the overlay is a transient layer (uncommitted `dialog.rule/*`, fresh).
     /// The implicit per-descriptor rule is assembled once on top.
     ///
@@ -636,20 +825,22 @@ where
         // `dialog.revision/*`.
         rules.extend(builtin(&concept));
 
-        // Durable layers — one per branch.
-        for branch in &self.branches {
-            rules.extend(self.durable_rules(branch, &concept).await?);
+        // Durable layers — one per line — and each line's session
+        // overlay, read fresh.
+        for source in &self.sources {
+            rules.extend(self.durable_rules(source, &concept).await?);
+            rules.extend(self.session_rules(source, &concept)?);
         }
         // Transient layer — the per-query overlay, read fresh.
         rules.extend(overlay_rules(&self.changes, &concept));
 
-        // Plan cache rides a branch (peers share content-addressed plans;
-        // any branch's cache is correct). The overlay-only query has no
-        // branch, so it falls back to a private cache.
+        // Plan cache rides a line (peers share content-addressed plans;
+        // any line's cache is correct). The overlay-only query has no
+        // line, so it falls back to a private cache.
         let plan_cache = self
-            .branches
+            .sources
             .first()
-            .map(|branch| branch.plan_cache())
+            .map(|source| source.as_ref().plan_cache())
             .unwrap_or_default();
 
         let bundle = assemble(&input, rules, plan_cache);
@@ -674,7 +865,8 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Hydrate>
+        + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -715,19 +907,35 @@ where
         referenced(root_bundle, &mut queue);
         entries.push((root.this(), root_bundle.clone()));
 
-        while let Some(descriptor) = queue.pop() {
-            let entity = descriptor.this();
-            if !seen.insert(entity.clone()) {
-                continue;
+        // Level by level: everything a frontier references is known
+        // needed, so each level's concepts resolve their rules
+        // concurrently instead of paying one round trip per concept.
+        // Only closure depth remains a sequential cost, and the span
+        // hints `durable_rules` emits usually make deeper levels local.
+        while !queue.is_empty() {
+            let mut frontier = Vec::new();
+            while let Some(descriptor) = queue.pop() {
+                let entity = descriptor.this();
+                if seen.insert(entity.clone()) {
+                    frontier.push((entity, descriptor));
+                }
             }
-            let mut rules: Vec<DeductiveRule> = builtin(&entity);
-            for branch in &self.branches {
-                rules.extend(self.durable_rules(branch, &entity).await?);
+            let resolved =
+                try_join_all(frontier.into_iter().map(|(entity, descriptor)| async move {
+                    let mut rules: Vec<DeductiveRule> = builtin(&entity);
+                    for source in &self.sources {
+                        rules.extend(self.durable_rules(source, &entity).await?);
+                        rules.extend(self.session_rules(source, &entity)?);
+                    }
+                    rules.extend(overlay_rules(&self.changes, &entity));
+                    let bundle = assemble(&descriptor, rules, PlanCache::default());
+                    Ok::<_, EvaluationError>((entity, bundle))
+                }))
+                .await?;
+            for (entity, bundle) in resolved {
+                referenced(&bundle, &mut queue);
+                entries.push((entity, bundle));
             }
-            rules.extend(overlay_rules(&self.changes, &entity));
-            let bundle = assemble(&descriptor, rules, PlanCache::default());
-            referenced(&bundle, &mut queue);
-            entries.push((entity, bundle));
         }
 
         Ok(Arc::new(ProgramAnalysis::analyze(
@@ -767,7 +975,7 @@ mod rule_tests {
 
     use super::*;
     use crate::Branch;
-    use crate::helpers::test_repo;
+    use crate::helpers::{Counting, test_repo};
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
@@ -813,7 +1021,9 @@ mod rule_tests {
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
-            + dialog_capability::Provider<Fork<RemoteSite, Get>>
+            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<dialog_artifacts::Preload>
+            + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -852,6 +1062,7 @@ mod rule_tests {
             )
             .assert(employee_from_person())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         // refresh handle so the durable layer sees the new head
@@ -859,6 +1070,46 @@ mod rule_tests {
 
         let employees = query_employees(&branch, &operator).await?;
         assert!(employees.contains(&alice), "committed rule must resolve");
+        Ok(())
+    }
+
+    /// Resolving a concept's rules cold hints the whole `dialog.rule/*`
+    /// region (conclusion and source spans) into the env's ambient
+    /// queue: the region is committed work the moment any resolution
+    /// scans it, and warming it whole makes every deeper closure
+    /// level's discovery and hydration local. The query's own driven
+    /// stream executes the hints, leaving nothing pending.
+    #[dialog_common::test]
+    async fn it_hints_the_rule_region_when_resolving_cold() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let env = Counting::new(operator);
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(employee_from_person())
+            .commit()
+            .publish()
+            .perform(&env)
+            .await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        env.reset();
+        let employees = query_employees(&branch, &env).await?;
+        assert!(employees.contains(&alice), "committed rule must resolve");
+        assert!(
+            env.count("Preload") >= 2,
+            "cold rule resolution hints the conclusion and source spans"
+        );
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the query's own stream drove the hints");
         Ok(())
     }
 
@@ -910,6 +1161,7 @@ mod rule_tests {
             .assert(the!("org/salary").of(bob.clone()).is(4u32))
             .assert(&rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -949,6 +1201,7 @@ mod rule_tests {
             .transaction()
             .assert(the!("org/person-name").of(alice).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -975,6 +1228,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1017,6 +1271,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1062,6 +1317,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1110,6 +1366,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1122,6 +1379,7 @@ mod rule_tests {
             .transaction()
             .assert(employee_from_person())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1169,6 +1427,7 @@ mod rule_tests {
             .assert(&r1)
             .assert(&r2)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1212,6 +1471,7 @@ mod rule_tests {
             )
             .assert(&r1)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1240,6 +1500,175 @@ mod rule_tests {
         Ok(())
     }
 
+    /// The `employee` query binding every field to a variable.
+    fn employees() -> ConceptQuery {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        ConceptQuery {
+            predicate: employee_descriptor(),
+            terms,
+        }
+    }
+
+    /// A rule asserted into the branch's session overlay resolves like
+    /// a committed one: session-held rules are a rule source of their
+    /// own, read fresh every query and never head-cached.
+    #[dialog_common::test]
+    async fn it_resolves_a_rule_held_in_the_session_overlay() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let before: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(before.is_empty(), "no rule, no employees");
+
+        branch
+            .overlay()
+            .assert(rule_with_person_attr("org/contractor-name"));
+        let after: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            after.iter().map(|c| c.entity().clone()).collect::<Vec<_>>(),
+            vec![bob],
+            "the session rule concludes Bob"
+        );
+
+        branch.overlay().clear();
+        let cleared: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(
+            cleared.is_empty(),
+            "dropping the session rule drops its conclusions"
+        );
+        Ok(())
+    }
+
+    /// A session rule arriving after a subscription evaluated must
+    /// reach it: session rule reads are recorded as rule demand, so
+    /// the rule's instant lands in the cover and the poll re-evaluates.
+    /// Without that record the instant falls outside the cover and the
+    /// poll wrongly reports nothing changed.
+    #[dialog_common::test]
+    async fn it_propagates_a_session_rule_to_a_subscription() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(employees());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty(), "no rule, no employees");
+
+        branch
+            .overlay()
+            .assert(rule_with_person_attr("org/contractor-name"));
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the session rule reaches the subscription");
+        assert_eq!(
+            delta
+                .asserted
+                .iter()
+                .map(|c| c.entity().clone())
+                .collect::<Vec<_>>(),
+            vec![bob]
+        );
+
+        branch.overlay().clear();
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("dropping the session rule reaches the subscription");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(delta.retracted.len(), 1);
+        Ok(())
+    }
+
+    /// A subscription over a rule-derived concept stays quiet when the
+    /// overlay changes facts it never reads: the session stamp lands
+    /// outside both its fact cover and its rule-discovery cover, so the
+    /// poll neither recomputes nor maintains.
+    #[dialog_common::test]
+    async fn it_ignores_unrelated_overlay_writes_under_a_rule_backed_subscription()
+    -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(employee_from_person())
+            .assert(
+                the!("org/person-name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(employees());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted.len(),
+            1,
+            "the committed rule derives Alice"
+        );
+
+        for path in ["/", "/hub", "/space"] {
+            let site = Entity::new()?;
+            branch
+                .overlay()
+                .assert(the!("xyz.tonk.site/path").of(site).is(path.to_string()));
+            assert!(
+                subscription.poll(&operator).await?.is_none(),
+                "an unrelated session stamp changes nothing"
+            );
+        }
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 0);
+        Ok(())
+    }
+
     // ----- (4) discovery cache keys on head: a stale handle (head not
     // advanced) keeps using its cached discovery and does NOT pick up a
     // rule committed via another handle until it refreshes. This proves
@@ -1262,6 +1691,7 @@ mod rule_tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1277,6 +1707,7 @@ mod rule_tests {
             .transaction()
             .assert(employee_from_person())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1320,6 +1751,7 @@ mod rule_tests {
             )
             .assert(&r_person)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1338,6 +1770,7 @@ mod rule_tests {
             )
             .assert(&r_contractor)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1389,6 +1822,7 @@ mod rule_tests {
             )
             .assert(&rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1400,6 +1834,7 @@ mod rule_tests {
             .transaction()
             .retract(&rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1435,6 +1870,7 @@ mod rule_tests {
             )
             .assert(&v1)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1456,6 +1892,7 @@ mod rule_tests {
             )
             .assert(&v2)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1507,7 +1944,7 @@ mod resolver_tests {
                     .is(format!("entry-{at}")),
             );
         }
-        tx.commit().perform(operator).await?;
+        tx.commit().publish().perform(operator).await?;
         let revision = branch
             .revision()
             .expect("branch has a revision after commit");
@@ -1605,7 +2042,7 @@ mod resolver_tests {
                     .is(format!("entry-{at}-{pad}")),
             );
         }
-        tx.commit().perform(operator).await?;
+        tx.commit().publish().perform(operator).await?;
         let revision = branch
             .revision()
             .expect("branch has a revision after commit");
@@ -1745,6 +2182,7 @@ mod resolver_tests {
             .transaction()
             .assert(the!("probe/tree").of(probe.clone()).is(root.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1778,6 +2216,7 @@ mod resolver_tests {
             .transaction()
             .assert(&rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1921,6 +2360,7 @@ mod resolver_tests {
             .transaction()
             .assert(the!("test/name").of(Entity::new()?).is("later".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let revision = branch.revision().expect("second revision");
@@ -1975,6 +2415,7 @@ mod resolver_tests {
             .transaction()
             .assert(the!("test/big").of(Entity::new()?).is(big.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let revision = branch.revision().expect("committed");
@@ -2108,6 +2549,7 @@ mod ordered_relation_tests {
             .assert(membership(&list, &at_milk, &milk))
             .assert(membership(&list, &at_bread, &bread))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2126,6 +2568,7 @@ mod ordered_relation_tests {
                 cardinality: None,
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 

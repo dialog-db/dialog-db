@@ -19,8 +19,7 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    BLOB_KEY_TAG, BlobKey, BlobRecord, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, Key,
-    KeyView, State,
+    BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum, DialogArtifactsError, Key, State,
     tree::{ArtifactTree, TreeStorageBridge},
 };
 
@@ -45,7 +44,7 @@ pub enum ShipmentRef {
 
 /// Stream everything a push must ship from ONE walk of an already-computed
 /// tree differential: blob-index changes (`BLOB` tag) and newly-referenced
-/// spilled value blocks (EAV-tagged additions whose key carries a reference,
+/// spilled value blocks (any addition whose key carries a reference,
 /// deduplicated). Push runs the node-level differential anyway to upload
 /// novel nodes; draining this from the same [`TreeDifference`] means the
 /// changed paths are read once instead of once per concern.
@@ -67,45 +66,57 @@ pub fn shipment_ref(
     value: &State<Datum>,
     removed: bool,
 ) -> Result<Option<ShipmentRef>, DialogArtifactsError> {
-    match key.tag() {
-        BLOB_KEY_TAG => {
-            let hash = BlobKey(key.clone()).blob_hash();
-            // Decoding rejects a malformed record; a `None` decode is a
-            // retraction tombstone, a reference only when removed.
-            Ok(match (removed, BlobRecord::from_state(value)?) {
-                (false, Some(record)) => Some(ShipmentRef::BlobAdded {
-                    hash,
-                    size: record.size,
-                }),
-                (true, _) => Some(ShipmentRef::BlobRemoved(hash)),
-                (false, None) => None,
-            })
-        }
-        // Count each spilled value via the EAV ordering only: a value shared
-        // by the EAV/AEV/VAE orderings would otherwise surface three times.
-        ENTITY_KEY_TAG if !removed => {
-            if !matches!(value, State::Added(_)) {
-                return Ok(None);
-            }
-            let view = EntityKey(key);
-            let Some(hash) = view.value_spill_hash() else {
-                return Ok(None);
-            };
-            let reference: Blake3Hash = hash.try_into().map_err(|_| {
-                DialogArtifactsError::InvalidKey(
-                    "spilled value reference is not 32 bytes".to_string(),
-                )
-            })?;
-            Ok(Some(ShipmentRef::SpilledValue(reference)))
-        }
-        _ => Ok(None),
+    let tag = key.tag();
+    if tag == BLOB_KEY_TAG {
+        let hash = BlobKey(key.clone()).blob_hash();
+        // Decoding rejects a malformed record; a `None` decode is a
+        // retraction tombstone, a reference only when removed.
+        return Ok(match (removed, BlobRecord::from_state(value)?) {
+            (false, Some(record)) => Some(ShipmentRef::BlobAdded {
+                hash,
+                size: record.size,
+            }),
+            (true, _) => Some(ShipmentRef::BlobRemoved(hash)),
+            (false, None) => None,
+        });
     }
+
+    // Every ordering that embeds a value in its key can spill it, and each
+    // spilling key names the same content-addressed block. Duplicates are
+    // dropped by the `seen` set in `shipment_refs` rather than by counting
+    // one ordering and ignoring the rest: restricting to EAV loses blocks
+    // no EAV entry names any more. A fact asserted and then retracted
+    // before the push that would have shipped it is exactly that -- the
+    // retraction erases all three data keys outright (observed-remove
+    // leaves no tombstone), so the differential carries no EAV addition,
+    // while the assertion's HISTORY record survives and its key references
+    // the same block through the same encoding. A reader of that record
+    // needs it (`Record::try_from_key_datum_with_value`).
+    //
+    // COVERAGE is the one region excluded, because its spill slot is not a
+    // block reference: a coverage entry is value-free by construction and
+    // carries the whole-value hash purely as an identity marker, so it
+    // names a "spilled" hash even for values that were stored inline and
+    // have no block at all (see `key::history::coverage_key`).
+    if removed || tag == COVERAGE_KEY_TAG {
+        return Ok(None);
+    }
+    if !matches!(value, State::Added(_)) {
+        return Ok(None);
+    }
+    let Some(hash) = key.value_spill_hash() else {
+        return Ok(None);
+    };
+    let reference: Blake3Hash = hash.try_into().map_err(|_| {
+        DialogArtifactsError::InvalidKey("spilled value reference is not 32 bytes".to_string())
+    })?;
+    Ok(Some(ShipmentRef::SpilledValue(reference)))
 }
 
 /// Stream everything a push must ship from ONE walk of an already-computed
 /// tree differential: blob-index changes (`BLOB` tag) and newly-referenced
-/// spilled value blocks (EAV-tagged additions whose key carries a
-/// reference, deduplicated). Push runs the node-level differential anyway
+/// spilled value blocks (any addition whose key carries a reference,
+/// deduplicated). Push runs the node-level differential anyway
 /// to upload novel nodes; draining this from the same [`TreeDifference`]
 /// means the changed paths are read once instead of once per concern.
 ///
@@ -277,6 +288,121 @@ mod tests {
         assert!(
             refs.is_empty(),
             "a retraction ships no spilled blocks: {refs:?}"
+        );
+        Ok(())
+    }
+
+    /// A spilled value asserted and then retracted before the push that
+    /// would have shipped it must still ship its block.
+    ///
+    /// The data keys are erased outright by a retraction (observed-remove:
+    /// no tombstone survives), so between two pushes the EAV addition that
+    /// would have carried the reference never appears in the differential.
+    /// The history record of the assertion DOES survive, and its key
+    /// carries the same spilled value through the same encoding, so a
+    /// reader of that record needs the block. Without it,
+    /// `Record::try_from_key_datum_with_value` fails.
+    #[dialog_common::test]
+    async fn it_ships_a_spill_asserted_and_retracted_before_the_push()
+    -> Result<(), DialogArtifactsError> {
+        use crate::history::{Edition, Origin, Version};
+
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let artifact = Artifact {
+            the: "doc/body".parse().unwrap(),
+            of: "doc:1".parse().unwrap(),
+            is: Value::String("z".repeat(inline_n + 1)),
+            cause: None,
+        };
+        let reference = artifact.is.to_reference();
+
+        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        let mut delta = Delta::zero();
+
+        // Base: what the remote already has — nothing.
+        let base = ArtifactTree::empty();
+
+        // Locally: assert the spilling fact, then retract it, each its own
+        // version-tagged commit, before pushing either.
+        let mut current = base.clone();
+        current
+            .apply_versioned(
+                &mut store,
+                &mut delta,
+                Some(Version::new(Origin::from([1u8; 32]), Edition::new(0))),
+                stream::iter(vec![Instruction::Assert(artifact.clone())]),
+            )
+            .await?;
+        flush(&mut store, &mut delta).await?;
+        current
+            .apply_versioned(
+                &mut store,
+                &mut delta,
+                Some(Version::new(Origin::from([1u8; 32]), Edition::new(1))),
+                stream::iter(vec![Instruction::Retract(artifact)]),
+            )
+            .await?;
+        flush(&mut store, &mut delta).await?;
+
+        let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
+        assert!(
+            refs.contains(&reference),
+            "the assert record's spilled block must ship even though the \
+             data entry that named it was retracted before the push: {refs:?}"
+        );
+        Ok(())
+    }
+
+    /// A coverage entry names no block, even though its key always looks
+    /// spilled.
+    ///
+    /// Coverage is value-free by construction: it matches claims by
+    /// version, so its key carries the whole-value hash as an identity
+    /// marker rather than a block reference, and it does so even for a
+    /// value small enough to have been stored inline with no block behind
+    /// it at all. Shipping from coverage would demand blocks that were
+    /// never written.
+    #[dialog_common::test]
+    async fn it_ships_nothing_from_the_coverage_region() -> Result<(), DialogArtifactsError> {
+        use crate::history::{Edition, Origin, Version};
+
+        // An INLINE value: small, so no spill block exists anywhere.
+        let artifact = Artifact {
+            the: "user/name".parse().unwrap(),
+            of: "user:1".parse().unwrap(),
+            is: Value::String("Alice".to_string()),
+            cause: None,
+        };
+
+        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        let mut delta = Delta::zero();
+
+        let base = ArtifactTree::empty();
+        let mut current = base.clone();
+        current
+            .apply_versioned(
+                &mut store,
+                &mut delta,
+                Some(Version::new(Origin::from([2u8; 32]), Edition::new(0))),
+                stream::iter(vec![Instruction::Assert(artifact.clone())]),
+            )
+            .await?;
+        flush(&mut store, &mut delta).await?;
+        // A retraction mints the coverage entry that mirrors it.
+        current
+            .apply_versioned(
+                &mut store,
+                &mut delta,
+                Some(Version::new(Origin::from([2u8; 32]), Edition::new(1))),
+                stream::iter(vec![Instruction::Retract(artifact)]),
+            )
+            .await?;
+        flush(&mut store, &mut delta).await?;
+
+        let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
+        assert!(
+            refs.is_empty(),
+            "an inline value's coverage entry must name no block: {refs:?}"
         );
         Ok(())
     }

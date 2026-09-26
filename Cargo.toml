@@ -25,7 +25,6 @@ members = [
     "rust/dialog-effects",
     "rust/dialog-macros",
     "rust/dialog-diagnose",
-    "rust/dialog-dbsp",
     "rust/dialog-encoding",
     "rust/dialog-csv",
     "rust/dialog-query",
@@ -35,12 +34,14 @@ members = [
     "rust/dialog-ucan",
     "rust/dialog-remote-s3",
     "rust/dialog-remote-ucan-s3",
+    "rust/dialog-remote-ucan",
     "rust/dialog-remote-fs",
     "rust/dialog-network",
     "rust/dialog-identity",
     "rust/dialog-keyring",
     "rust/dialog-operator",
     "rust/dialog-repository",
+    "rust/dialog-soak",
     "rust/dialog-varsig",
     "rust/wbg-pool",
 ]
@@ -80,6 +81,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 futures = "0.3"
 futures-core = "0.3"
+flate2 = "1"
 futures-util = "0.3"
 hashbrown = "0.16"
 hkdf = "0.12"
@@ -132,7 +134,6 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "json",
 ] }
-rexie = "0.6"
 memchr = "2"
 rkyv = "0.8"
 rsa = "0.9"
@@ -142,6 +143,7 @@ serde = "1"
 serde-value = "0.7"
 serde-big-array = "0.5"
 serde_bytes = "0.11"
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 serde_ipld_dagcbor = "0.6"
 serde_ipld_dagjson = "0.2"
 serde_json = "1"
@@ -238,6 +240,9 @@ path = "./rust/dialog-remote-s3"
 
 [workspace.dependencies.dialog-remote-ucan-s3]
 path = "./rust/dialog-remote-ucan-s3"
+
+[workspace.dependencies.dialog-remote-ucan]
+path = "./rust/dialog-remote-ucan"
 
 [workspace.dependencies.dialog-remote-fs]
 path = "./rust/dialog-remote-fs"

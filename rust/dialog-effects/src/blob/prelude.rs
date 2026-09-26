@@ -3,15 +3,23 @@
 //! ```
 //! use dialog_effects::blob::prelude::*;
 //! ```
+//!
+//! A chain is written in the order the path reads:
+//!
+//! ```text
+//! subject.reader().archive().blob().read(digest)
+//!                              = /use/get/archive/blob
+//! ```
 
-use dialog_capability::{Capability, Policy};
+use dialog_capability::{Capability, Constraint, Policy};
 use dialog_common::Blake3Hash;
 
 use crate::archive::Archive;
+use crate::{Method, method};
 
 use super::{Blob, ByteRange, Import, Read, Write};
 
-/// Scope an archive capability to its blob store.
+/// Scope the archive to its blob store.
 pub trait ArchiveBlobExt {
     /// The resulting blob chain type.
     type Blob;
@@ -19,39 +27,37 @@ pub trait ArchiveBlobExt {
     fn blob(self) -> Self::Blob;
 }
 
-impl ArchiveBlobExt for Capability<Archive> {
-    type Blob = Capability<Blob>;
-    fn blob(self) -> Capability<Blob> {
-        self.attenuate(Blob)
+impl<M: Method> ArchiveBlobExt for Capability<Archive<M>>
+where
+    M::Of: Constraint,
+{
+    type Blob = Capability<Blob<M>>;
+    fn blob(self) -> Self::Blob {
+        self.attenuate(Blob::new())
     }
 }
 
-/// Invoke effects on the blob store.
-pub trait BlobExt {
-    /// The resulting read chain type.
-    type Read;
-    /// The resulting write (ingest) chain type.
-    type Write;
-    /// The resulting import chain type.
-    type Import;
-
+/// Read a blob.
+pub trait ReadBlobExt {
     /// Read a blob by hash.
-    fn read(self, digest: impl Into<Blake3Hash>) -> Self::Read;
-    /// Ingest a blob whose hash is discovered during the write.
-    fn write(self) -> Self::Write;
-    /// Import a blob whose hash is already known.
-    fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Self::Import;
+    fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read>;
 }
 
-impl BlobExt for Capability<Blob> {
-    type Read = Capability<Read>;
-    type Write = Capability<Write>;
-    type Import = Capability<Import>;
-
+impl ReadBlobExt for Capability<Blob<method::Get>> {
     fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read> {
         self.invoke(Read::new(digest))
     }
+}
 
+/// Write a blob.
+pub trait WriteBlobExt {
+    /// Ingest a blob whose hash is discovered during the write.
+    fn write(self) -> Capability<Write>;
+    /// Import a blob whose hash is already known.
+    fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Capability<Import>;
+}
+
+impl WriteBlobExt for Capability<Blob<method::Put>> {
     fn write(self) -> Capability<Write> {
         self.invoke(Write::new())
     }

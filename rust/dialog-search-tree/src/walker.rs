@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     future::Future,
     marker::PhantomData,
     ops::{Bound, RangeBounds},
@@ -25,14 +26,6 @@ use crate::{
     Accessor, ArchivedNodeBody, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NoveltyOp,
     PersistentNode, Value, into_owned,
 };
-
-/// How many sibling reads a range scan keeps in flight while it walks.
-///
-/// A scan reads a whole run of siblings, one after another, and each read that
-/// misses locally can cost a round trip. Reading ahead of the walk turns a run
-/// of round trips into an overlapping few, and bounding it keeps a scan that
-/// stops early from having fetched much it never looked at.
-const PREFETCH_CONCURRENCY: usize = 16;
 
 /// How [`TreeWalker::stream`] materializes the keys of the entries it yields.
 ///
@@ -462,8 +455,9 @@ where
             let mut search_path = search_result.into_indexed();
             let mut entered_range = false;
             let mut warming = FuturesUnordered::new();
+            let mut queued = HashSet::new();
 
-            while let Some((node, maybe_index)) = search_path.pop() {
+            'walk: while let Some((node, maybe_index)) = search_path.pop() {
                 let body = node.body();
                 let is_segment = matches!(body, ArchivedNodeBody::Segment(_));
                 if !is_segment {
@@ -480,19 +474,44 @@ where
                         // The scan will walk this node's remaining children in
                         // turn, so start reading them now and let them land in
                         // the cache while the walk descends into the first of
-                        // them.
-                        for sibling in (child_index + 1)..index.len() {
-                            if warming.len() >= PREFETCH_CONCURRENCY {
-                                break;
+                        // them. Only children the range can still visit are
+                        // warmed: a narrow scan (an entity probe) would
+                        // otherwise queue siblings past its end bound at every
+                        // level, fetches the walk then drops mid-flight when
+                        // the stream ends — paid for on a remote backend,
+                        // delivered to no one. A sibling still queued from an
+                        // earlier descent is not queued twice. Nothing caps
+                        // the read-ahead here: a scan reads every one of these
+                        // siblings unless it stops early, and how many cross
+                        // the wire at once is the hydration scheduler's
+                        // decision per site, where a read this scan has queued
+                        // but the scheduler has not admitted costs nothing to
+                        // abandon.
+                        let visitable = index.children_within(match range.end_bound() {
+                            Bound::Included(bound) => Bound::Included(bound.as_ref()),
+                            Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
+                            Bound::Unbounded => Bound::Unbounded,
+                        })?;
+                        for sibling in (child_index + 1)..visitable {
+                            let hash = index.hash_at(sibling)?.clone();
+                            if queued.insert(hash.clone()) {
+                                warming.push(accessor.warm(hash));
                             }
-                            warming.push(accessor.warm(index.hash_at(sibling)?.clone()));
                         }
 
-                        let next_node = while_warming(
-                            accessor.get_node(index.hash_at(child_index)?),
-                            &mut warming,
-                        )
-                        .await?;
+                        // A child whose read-ahead is still in flight is joined
+                        // by driving that read-ahead to completion. This walk
+                        // queued it, so this walk polls it: the one join that
+                        // is sound. The read that follows is served from the
+                        // cache, or fetches for itself if the read-ahead
+                        // failed.
+                        let hash = index.hash_at(child_index)?;
+                        if queued.contains(hash) {
+                            until_warmed(hash, &mut warming, &mut queued).await;
+                        }
+                        let next_node =
+                            while_warming(accessor.get_node(hash), &mut warming, &mut queued)
+                                .await?;
                         search_path.push((node, Some(child_index)));
                         search_path.push((next_node, None));
                     } else {
@@ -606,7 +625,7 @@ where
                         // walk the rest of the tree, making an empty lookup
                         // cost the size of the database.
                         } else if entered_range || past_end_bytes(&end_bytes, key) {
-                            return;
+                            break 'walk;
                         }
                     }
                 } else {
@@ -650,7 +669,7 @@ where
                         // range matching no stored entry walks the rest of
                         // the tree.
                         } else if entered_range || past_end_bytes(&end_bytes, key) {
-                            return;
+                            break 'walk;
                         }
                     }
                 }
@@ -666,6 +685,15 @@ where
                     }
                 }
             }
+
+            // Drive the remaining read-aheads home before finishing. They
+            // are bounded to this scan's range, so each is a block a
+            // reader of the range legitimately wants — and on a remote
+            // backend the transport may already have served it. Dropping
+            // them here would discard paid-for bytes before they reach
+            // the cache and force the next scan of the range to fetch
+            // them again.
+            while warming.next().await.is_some() {}
         }
     }
 
@@ -737,12 +765,17 @@ where
 ///
 /// The queued reads only populate the cache; nothing waits on them and their
 /// outcomes are discarded, so this changes neither what `read` resolves to nor
-/// when its caller observes it. Reads still queued when the caller is dropped
-/// are dropped with it.
-async fn while_warming<Read, Warm>(read: Read, warming: &mut FuturesUnordered<Warm>) -> Read::Output
+/// when its caller observes it. A read that completes leaves `queued`, so the
+/// walk knows it no longer has to be joined. Reads still queued when the
+/// caller is dropped are dropped with it.
+async fn while_warming<Read, Warm>(
+    read: Read,
+    warming: &mut FuturesUnordered<Warm>,
+    queued: &mut HashSet<Blake3Hash>,
+) -> Read::Output
 where
     Read: Future,
-    Warm: Future<Output = ()>,
+    Warm: Future<Output = Blake3Hash>,
 {
     let mut read = std::pin::pin!(read);
 
@@ -751,11 +784,34 @@ where
             return Poll::Ready(output);
         }
 
-        while let Poll::Ready(Some(())) = warming.poll_next_unpin(context) {}
+        while let Poll::Ready(Some(warmed)) = warming.poll_next_unpin(context) {
+            queued.remove(&warmed);
+        }
 
         Poll::Pending
     })
     .await
+}
+
+/// Drives the queued cache-warming reads until the one for `hash` completes.
+///
+/// The walk that queued a read-ahead is the only thing that polls it, so a
+/// walk about to read that node joins its own read-ahead here instead of
+/// fetching the node a second time. Every read-ahead that completes on the
+/// way leaves `queued`.
+async fn until_warmed<Warm>(
+    hash: &Blake3Hash,
+    warming: &mut FuturesUnordered<Warm>,
+    queued: &mut HashSet<Blake3Hash>,
+) where
+    Warm: Future<Output = Blake3Hash>,
+{
+    while let Some(warmed) = warming.next().await {
+        queued.remove(&warmed);
+        if warmed == *hash {
+            break;
+        }
+    }
 }
 
 /// Walks the narrow "overflow" path for [`RightNeighbor`] prefetching.
@@ -1295,6 +1351,53 @@ mod prefetch_tests {
         Ok(PersistentNode::try_from(Buffer::from(bytes))?)
     }
 
+    /// A reader that needs a node a read-ahead has claimed must not depend
+    /// on that read-ahead being driven. The read-ahead here is polled
+    /// exactly once — enough to claim the node and start its read — and
+    /// then never again, the shape of a walk parked between two yields. A
+    /// point read of a key under that node used to join the claim and wait
+    /// for an outcome only further polling of the read-ahead could produce.
+    // Native only: the bound is tokio's timer, which has no wasm runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_serves_a_claimed_node_to_a_reader_the_read_ahead_cannot_reach() -> Result<()> {
+        use std::task::{Context, Poll};
+
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+        let accessor = crate::Accessor::new(tree.node_cache(), storage.clone());
+
+        // The root's second child, and a key from its leftmost leaf.
+        let root = load(&storage, tree.root()).await?;
+        let ArchivedNodeBody::Index(index) = root.body() else {
+            anyhow::bail!("the built tree has a single leaf; nothing to warm")
+        };
+        let sibling = index.hash_at(1)?.clone();
+        let mut hash = sibling.clone();
+        let key: [u8; 4] = loop {
+            let node = load(&storage, &hash).await?;
+            match node.body() {
+                ArchivedNodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
+                ArchivedNodeBody::Segment(segment) => {
+                    break segment.first_key::<[u8; 4]>()?.as_slice().try_into()?;
+                }
+            }
+        };
+
+        let mut warm = Box::pin(accessor.warm(sibling));
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(warm.as_mut().poll(&mut context), Poll::Pending));
+
+        let read = tree.get(&key, &storage);
+        let value = tokio::time::timeout(std::time::Duration::from_secs(2), read)
+            .await
+            .expect("a reader must not wait on a read-ahead nobody drives")?;
+        assert_eq!(value, Some(value_of(u32::from_be_bytes(key))));
+        drop(warm);
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_warms_sibling_nodes_during_a_range_scan() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
@@ -1322,6 +1425,43 @@ mod prefetch_tests {
         assert!(
             backend.peak_reads_in_flight() > 1,
             "sibling reads overlap the read the scan is waiting on"
+        );
+
+        Ok(())
+    }
+
+    /// A range scan bounded within a single leaf's span (the shape of an
+    /// entity probe inside a join) must read exactly the blocks a point
+    /// lookup of the same leaf reads: the descent path, nothing beside
+    /// it. Unbounded sibling warming used to queue up to sixteen
+    /// siblings past the range's end at every level; the probe's stream then dropped them mid-flight — reads a
+    /// remote backend had already paid for, delivered to no one and
+    /// re-fetched by the next probe.
+    #[dialog_common::test]
+    async fn it_does_not_warm_siblings_past_the_range_bound() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+        let backend = storage.backend().clone();
+
+        backend.reset();
+        let found = tree.get(&100u32.to_be_bytes(), &storage).await?;
+        assert_eq!(found, Some(value_of(100)));
+        let point_path: HashSet<_> = backend.read_log().into_iter().collect();
+
+        // A fresh handle, so the scan's node cache is cold and every node
+        // it touches reaches the backend.
+        let scan_tree = Tree::from_hash(tree.root().clone());
+        backend.reset();
+        let entries: Vec<_> = scan_tree
+            .stream_range(100u32.to_be_bytes()..=103u32.to_be_bytes(), &storage)
+            .try_collect()
+            .await?;
+        assert_eq!(entries.len(), 4, "the scan yields exactly the range");
+
+        let scan_reads: HashSet<_> = backend.read_log().into_iter().collect();
+        assert_eq!(
+            scan_reads, point_path,
+            "a leaf-narrow range scan reads the descent path and nothing beside it"
         );
 
         Ok(())
@@ -1360,6 +1500,65 @@ mod prefetch_tests {
         let leaf = load(&storage, path.last().expect("a read")).await?;
         assert!(matches!(leaf.body(), ArchivedNodeBody::Segment(_)));
 
+        Ok(())
+    }
+
+    /// The first key stored beneath `hash`, down its leftmost descent.
+    async fn first_key_under(storage: &Storage, mut hash: Blake3Hash) -> Result<[u8; 4]> {
+        loop {
+            let node = load(storage, &hash).await?;
+            match node.body() {
+                ArchivedNodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
+                ArchivedNodeBody::Segment(segment) => {
+                    return Ok(segment.first_key::<[u8; 4]>()?.as_slice().try_into()?);
+                }
+            }
+        }
+    }
+
+    /// Two range scans over one tree share its node cache and, through it,
+    /// each other's read-aheads. Scan A is driven just past the root's first
+    /// child, so the read-aheads it queued are in flight, and then parked:
+    /// the shape of a consumer that reads scan B in full between two of A's
+    /// entries. B's own walk reaches nodes A has claimed and must not wait on
+    /// A's read-aheads, since only A's polling would ever finish them and A
+    /// is waiting on B.
+    // Native only: the bound is tokio's timer, which has no wasm runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_serves_one_scans_read_ahead_to_another_scan() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+
+        let root = load(&storage, tree.root()).await?;
+        let ArchivedNodeBody::Index(index) = root.body() else {
+            anyhow::bail!("the built tree has a single leaf; nothing to read ahead")
+        };
+        if index.len() < 3 {
+            anyhow::bail!("the root needs a third child for a read-ahead to be in flight")
+        }
+        let boundary = first_key_under(&storage, index.hash_at(1)?.clone()).await?;
+
+        let mut parked = std::pin::pin!(tree.stream(&storage));
+        loop {
+            let entry = parked
+                .try_next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("scan A ended before the root's second child"))?;
+            if entry.key >= boundary {
+                break;
+            }
+        }
+        assert!(
+            storage.backend().reads_in_flight() > 0,
+            "scan A holds read-aheads in flight while parked"
+        );
+
+        let scan = tree.stream(&storage).try_collect::<Vec<_>>();
+        let entries = tokio::time::timeout(std::time::Duration::from_secs(2), scan)
+            .await
+            .expect("a scan must not wait on another scan's read-ahead")?;
+        assert_eq!(entries.len() as u32, ENTRIES);
         Ok(())
     }
 }

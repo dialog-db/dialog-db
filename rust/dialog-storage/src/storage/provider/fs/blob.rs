@@ -205,6 +205,7 @@ mod tests {
 
         // Ingest: stream in, get the discovered hash back.
         let mut sink = subject()
+            .writer()
             .archive()
             .blob()
             .write()
@@ -219,6 +220,7 @@ mod tests {
 
         // Read the whole blob back by hash.
         let reader = subject()
+            .reader()
             .archive()
             .blob()
             .read(hash.clone())
@@ -229,6 +231,7 @@ mod tests {
 
         // Ranged read: 9 bytes from offset 10.
         let reader = subject()
+            .reader()
             .archive()
             .blob()
             .invoke(Read::range(hash, 10, Some(9)))
@@ -242,6 +245,7 @@ mod tests {
     async fn it_reports_missing_blobs() {
         let fs = test_space("blob-missing").await;
         let result = subject()
+            .reader()
             .archive()
             .blob()
             .read([9u8; 32])
@@ -258,6 +262,7 @@ mod tests {
 
         // Import under the correct digest succeeds.
         let mut sink = subject()
+            .writer()
             .archive()
             .blob()
             .import(digest.clone(), payload.len() as u64)
@@ -268,6 +273,7 @@ mod tests {
         assert_eq!(sink.finish().await.unwrap(), digest.clone());
 
         let reader = subject()
+            .reader()
             .archive()
             .blob()
             .read(digest)
@@ -279,6 +285,7 @@ mod tests {
         // Import claiming a wrong digest is rejected at finish.
         let wrong = Blake3Hash::from([0u8; 32]);
         let mut sink = subject()
+            .writer()
             .archive()
             .blob()
             .import(wrong, payload.len() as u64)

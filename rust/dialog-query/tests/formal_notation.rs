@@ -28,7 +28,7 @@ fn it_parses_attribute_formal_notation() {
         serde_json::from_value(json.clone()).expect("Should parse attribute");
 
     assert_eq!(attr.domain(), "io.gozala.person");
-    assert_eq!(attr.name(), "name");
+    assert_eq!(attr.name(), Some("name"));
     assert_eq!(attr.description(), "Name of the person");
     assert_eq!(
         attr.content_type(),
@@ -76,7 +76,7 @@ fn it_parses_minimal_attribute() {
     let attr: dialog_query::AttributeDescriptor =
         serde_json::from_value(json).expect("Minimal attribute should parse");
     assert_eq!(attr.domain(), "task");
-    assert_eq!(attr.name(), "status");
+    assert_eq!(attr.name(), Some("status"));
     assert_eq!(attr.cardinality(), dialog_query::Cardinality::One);
     assert_eq!(attr.content_type(), None);
 }
@@ -121,7 +121,7 @@ fn it_parses_concept_formal_notation() {
 
     let name_attr = concept.with().iter().find(|(k, _)| *k == "name").unwrap().1;
     assert_eq!(name_attr.domain(), "io.gozala.person");
-    assert_eq!(name_attr.name(), "name");
+    assert_eq!(name_attr.name(), Some("name"));
 
     let addr_attr = concept
         .with()
@@ -130,7 +130,7 @@ fn it_parses_concept_formal_notation() {
         .unwrap()
         .1;
     assert_eq!(addr_attr.domain(), "io.gozala.person");
-    assert_eq!(addr_attr.name(), "address");
+    assert_eq!(addr_attr.name(), Some("address"));
 }
 
 #[dialog_common::test]
@@ -572,7 +572,7 @@ fn it_parses_concept_premise() {
                 .unwrap()
                 .1;
             assert_eq!(attr.domain(), "diy.cook");
-            assert_eq!(attr.name(), "ingredient-name");
+            assert_eq!(attr.name(), Some("ingredient-name"));
         }
         other => panic!("Expected Concept, got {:?}", other),
     }

@@ -27,11 +27,15 @@
 //!     type Of = Storage;
 //! }
 //!
-//! // Effect: narrows ability (adds "/get"), and is invocable
+//! // Effect: invocable. Like any other link it says whether it names
+//! // itself -- `Attenuation` here, so it adds "/get"; an effect whose
+//! // chain already spells the whole command implements `Policy` instead.
 //! #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 //! struct Get { key: Vec<u8> }
-//! impl Effect for Get {
+//! impl Attenuation for Get {
 //!     type Of = Store;
+//! }
+//! impl Effect for Get {
 //!     type Output = Result<Option<Vec<u8>>, std::io::Error>;
 //! }
 //!

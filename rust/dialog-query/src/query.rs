@@ -54,6 +54,7 @@ mod tests {
             )
             .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -126,6 +127,7 @@ mod tests {
             .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -160,6 +162,7 @@ mod tests {
             .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
             .assert(the!("user/role").of(bob.clone()).is("user".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 

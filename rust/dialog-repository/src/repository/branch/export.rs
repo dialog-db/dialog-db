@@ -5,15 +5,14 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
 use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use futures_util::TryStreamExt;
 
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite, RepositoryMemoryExt,
 };
 
 /// Command struct for exporting all artifacts from a branch.
@@ -35,7 +34,7 @@ impl<E: Exporter> Export<'_, E> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -57,7 +56,7 @@ impl<E: Exporter> Export<'_, E> {
             None => RemoteFallback::None,
         };
 
-        let catalog = branch.subject().archive().index();
+        let catalog = ArchiveScope::new(branch.subject()).index();
         let store = NetworkedIndex::new(env, catalog, remote);
 
         let tree_hash = branch

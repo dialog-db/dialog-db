@@ -14,7 +14,7 @@
 //!   transactional memory cells with built-in edition tracking, plus
 //!   `.fork(&address)` variants that retarget the same commands at a
 //!   remote site.
-//! - [`RepositoryArchiveExt`] and [`LocalIndex`] — extensions and CAS
+//! - [`LocalIndex`] — CAS
 //!   adapters that bridge archive capabilities with the search tree's
 //!   `ContentAddressedStorage` trait.
 //!

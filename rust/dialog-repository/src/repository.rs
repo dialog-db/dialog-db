@@ -25,8 +25,13 @@ pub use branch::*;
 mod create;
 pub use create::*;
 
+mod ephemeral;
+pub use ephemeral::*;
+
 mod error;
 pub use error::*;
+
+mod fetch;
 
 mod load;
 pub use load::*;
@@ -42,6 +47,8 @@ pub use remote::*;
 
 mod snapshot;
 pub use snapshot::*;
+
+pub(crate) mod source;
 
 // `Revision` and `TreeReference` moved to `dialog-capability` (the
 // light crate that owns `Did`) so engine-free clients can name them
@@ -621,7 +628,8 @@ mod tests {
     mod delegation_tests {
 
         use super::*;
-        use dialog_effects::memory as fx_memory;
+        use dialog_effects::MethodExt as _;
+        use dialog_effects::memory::prelude::{MemoryExt as _, SpaceExt as _};
         use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 
         #[dialog_common::test]
@@ -643,10 +651,7 @@ mod tests {
             profile.access().save(chain).perform(&operator).await?;
 
             // Profile should be able to claim access to any memory space
-            let capability = repo
-                .subject()
-                .attenuate(fx_memory::Memory)
-                .attenuate(fx_memory::Space::new("data"));
+            let capability = repo.subject().reader().memory().space("data");
 
             let result = profile.access().claim(capability).perform(&operator).await;
             assert!(
@@ -668,10 +673,7 @@ mod tests {
                 .await?;
 
             // Repo delegates only memory/space("data") to the profile
-            let scoped_cap = repo
-                .subject()
-                .attenuate(fx_memory::Memory)
-                .attenuate(fx_memory::Space::new("data"));
+            let scoped_cap = repo.subject().reader().memory().space("data");
             let chain = repo
                 .access()
                 .claim(scoped_cap)
@@ -681,10 +683,7 @@ mod tests {
             profile.access().save(chain).perform(&operator).await?;
 
             // Claiming "data" space should succeed
-            let data_cap = repo
-                .subject()
-                .attenuate(fx_memory::Memory)
-                .attenuate(fx_memory::Space::new("data"));
+            let data_cap = repo.subject().reader().memory().space("data");
             let result = profile.access().claim(data_cap).perform(&operator).await;
             assert!(
                 result.is_ok(),
@@ -693,10 +692,7 @@ mod tests {
             );
 
             // Claiming "secret" space should fail
-            let secret_cap = repo
-                .subject()
-                .attenuate(fx_memory::Memory)
-                .attenuate(fx_memory::Space::new("secret"));
+            let secret_cap = repo.subject().reader().memory().space("secret");
             let result = profile.access().claim(secret_cap).perform(&operator).await;
             assert!(
                 result.is_err(),
@@ -716,10 +712,7 @@ mod tests {
                 .await?;
 
             // Repo delegates memory/space("data") to the profile
-            let scoped_cap = repo
-                .subject()
-                .attenuate(fx_memory::Memory)
-                .attenuate(fx_memory::Space::new("data"));
+            let scoped_cap = repo.subject().reader().memory().space("data");
             let chain = repo
                 .access()
                 .claim(scoped_cap)
@@ -729,10 +722,7 @@ mod tests {
             profile.access().save(chain).perform(&operator).await?;
 
             // Profile can re-delegate "data" space to operator
-            let data_cap = repo
-                .subject()
-                .attenuate(fx_memory::Memory)
-                .attenuate(fx_memory::Space::new("data"));
+            let data_cap = repo.subject().reader().memory().space("data");
             let result = profile
                 .access()
                 .claim(data_cap)
@@ -746,10 +736,7 @@ mod tests {
             );
 
             // Profile cannot delegate "secret" space (no chain)
-            let secret_cap = repo
-                .subject()
-                .attenuate(fx_memory::Memory)
-                .attenuate(fx_memory::Space::new("secret"));
+            let secret_cap = repo.subject().reader().memory().space("secret");
             let result = profile
                 .access()
                 .claim(secret_cap)
@@ -806,6 +793,7 @@ mod tests {
                     role: employee::Role("Designer".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -870,6 +858,7 @@ mod tests {
                     entity: NamedEntity(page_v1.clone()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -897,6 +886,7 @@ mod tests {
                     entity: NamedEntity(page_v2.clone()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -954,6 +944,7 @@ mod tests {
                     tag: Tag("blue".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1015,6 +1006,7 @@ mod tests {
                     entity: NamedEntity(page_v1.clone()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1025,6 +1017,7 @@ mod tests {
                     entity: NamedEntity(page_v1.clone()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1124,6 +1117,7 @@ mod tests {
                     role: employee::Role("Engineer".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1135,6 +1129,7 @@ mod tests {
                     role: employee::Role("Designer".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1178,6 +1173,7 @@ mod tests {
                     role: employee::Role("Engineer".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let main = repo.branch("main").load().perform(&operator).await?;
@@ -1223,6 +1219,7 @@ mod tests {
                         .is("Alice".to_string()),
                 )
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1323,6 +1320,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             // Reload so the revision cell reflects the commit.
@@ -1402,6 +1400,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1428,6 +1427,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Bob".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1472,6 +1472,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -1531,6 +1532,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -1540,6 +1542,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Bob".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -1589,6 +1592,7 @@ mod tests {
                     .transaction()
                     .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
                     .commit()
+                    .publish()
                     .perform(&operator)
                     .await?;
                 revisions.push(branch.revision().expect("branch has a revision"));
@@ -1696,8 +1700,9 @@ mod tests {
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
-            // (1) Which branch am I on?
-            let branches: Vec<schema::Branch> = branch
+            // (1) Which branches can I see? The one in scope, plus the
+            // registry, which describes itself through the overlay.
+            let mut branches: Vec<schema::Branch> = branch
                 .query()
                 .select(Query::<schema::Branch> {
                     this: Term::var("this"),
@@ -1707,8 +1712,16 @@ mod tests {
                 .perform(&operator)
                 .try_vec()
                 .await?;
+            branches.sort_by(|a, b| a.name.0.cmp(&b.name.0));
+            let names: Vec<&str> = branches.iter().map(|b| b.name.0.as_str()).collect();
+            assert_eq!(names, vec!["main", crate::REGISTRY]);
+
+            // The one in scope is the branch this session is reading.
+            let branches: Vec<schema::Branch> = branches
+                .into_iter()
+                .filter(|b| b.name.0 == "main")
+                .collect();
             assert_eq!(branches.len(), 1);
-            assert_eq!(branches[0].name.0, "main");
 
             // (2) What's my origin (subject, profile)?
             let origins: Vec<schema::Replica> = branch
@@ -1786,6 +1799,49 @@ mod tests {
             Ok(())
         }
 
+        /// The registry describes itself through the overlay, so a
+        /// listing finds `meta` without it ever having been created or
+        /// committed to. That is what keeps a branch registry from
+        /// having to exist before it can be created.
+        #[dialog_common::test]
+        async fn it_describes_the_registry_without_storing_it() -> anyhow::Result<()> {
+            use crate::schema;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let main = repo.branch("main").open().perform(&operator).await?;
+
+            let replica = schema::Replica::new(profile.did(), main.of().clone());
+            let registry = schema::Branch::new(&replica, crate::REGISTRY);
+
+            let rows: Vec<schema::Branch> = main
+                .query()
+                .select(Query::<schema::Branch> {
+                    this: registry.this.clone().into(),
+                    name: Term::var("name"),
+                    replica: Term::var("replica"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(
+                rows.len(),
+                1,
+                "the registry describes itself exactly once: {rows:?}"
+            );
+            assert_eq!(rows[0].name.0, crate::REGISTRY);
+
+            // And nothing about it was written: the branch has never
+            // been committed to, so its tree is empty.
+            assert!(
+                main.revision().is_none(),
+                "describing the registry commits nothing"
+            );
+
+            Ok(())
+        }
+
         #[dialog_common::test]
         async fn it_keeps_metadata_facts_out_of_branch_tree() -> anyhow::Result<()> {
             // The schema-shaped metadata is synthesized at query time
@@ -1804,6 +1860,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -1907,6 +1964,7 @@ mod tests {
                     nickname: cardinality_one_attr::Nickname("Bobby".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -1921,6 +1979,7 @@ mod tests {
                     nickname: cardinality_one_attr::Nickname("Rob".into()),
                 })
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -2046,6 +2105,7 @@ mod tests {
                 .transaction()
                 .assert(changes.clone())
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
@@ -2135,6 +2195,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(alice).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -2156,6 +2217,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(alice).is("Alice".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 
@@ -2208,6 +2270,7 @@ mod tests {
                 .transaction()
                 .assert(the!("item/tag").of(item).is("in-profile".to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
 

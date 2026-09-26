@@ -59,9 +59,7 @@ use crate::{Revision, schema};
 // install/uninstall a rule by plain assertion/retraction live with the
 // rule types themselves; this module re-uses them for its selectors,
 // caches, and dispatch probing.
-pub(crate) use dialog_query::rule::statement::{
-    conclusion_attr, on_attr, on_entity, reads_attr, source_attr,
-};
+pub(crate) use dialog_query::rule::statement::{conclusion_attr, on_attr, reads_attr, source_attr};
 
 /// The `dialog.concept/transient` marker attribute. A concept carrying it
 /// is a *command*: facts of it dispatched into a transaction (and heads

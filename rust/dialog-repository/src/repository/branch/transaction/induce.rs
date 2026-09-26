@@ -42,20 +42,19 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
+use dialog_query::attribute::Relation;
 use dialog_query::rule::inductive::Polarity;
+use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
-use std::sync::Arc;
 
-use crate::RemoteFallback;
-use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
+use crate::repository::source::SourceRef;
 use crate::rules::{
-    TriggerFootprint, hydrate, hydrate_inductive, on_attr, on_entity, reads_attr, source_attr,
-    transient_attr,
+    TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
-use crate::{Branch, CommitError, RemoteSite, Revision};
+use crate::{CommitError, RemoteSite, Revision};
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -67,7 +66,7 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// durable novelty into `changes`. Transients never enter `changes`;
 /// they are visible to rule bodies for exactly one round.
 pub(crate) async fn induce<Env>(
-    branch: &Branch,
+    source: SourceRef<'_>,
     changes: &mut Changes,
     transients: Changes,
     env: &Env,
@@ -77,7 +76,9 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -89,7 +90,7 @@ where
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
-    stimulus.extend(lag_delta(branch, env).await?);
+    stimulus.extend(lag_delta(source, env).await?);
     if stimulus.is_empty() {
         return Ok(());
     }
@@ -100,7 +101,7 @@ where
     // cache lookup below. The overlay slice is never head-cached; it
     // is re-scanned each round (cheap, in-memory) so rules installed
     // by this very commit — or by a rule during induction — fire.
-    let dispatch = Dispatch::resolve(branch, env).await?;
+    let dispatch = Dispatch::resolve(source, env).await?;
 
     // The identity is resolved once: it only feeds the schema-metadata
     // overlay of the round view, which does not change across rounds.
@@ -139,11 +140,15 @@ where
                 }
             }
         }
-        let mut touched: BTreeSet<Attribute> = stimulus
+        // Reach is tracked per attribute, or per keyed half of a
+        // domain for a collection: a stimulus row touches its own
+        // attribute, and a rule reading or writing a collection
+        // reaches every attribute of that half.
+        let mut touched: BTreeSet<Reach> = stimulus
             .iter()
             .map(|instruction| match instruction {
                 Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
-                    a.the.clone()
+                    Reach::Attribute(a.the.clone())
                 }
             })
             .collect();
@@ -185,7 +190,7 @@ where
             for (_, field) in body.conclusion().with().iter() {
                 // Inserted after the `direct` snapshot, so these land
                 // in the expanded set and force full evaluation.
-                touched.insert(field.descriptor().the().clone().into());
+                touched.insert(Reach::of(field.descriptor().the()));
             }
         }
 
@@ -195,11 +200,10 @@ where
         // mid-transaction query would.
         let mut view_changes = changes.clone();
         transient_overlay.clone().assert(&mut view_changes);
-        let layered = QueryLayer::from(branch)
+        let layered = QueryLayer::from(source)
             .with(view_changes)
             .overlay(&operator);
-        let tombstones = Arc::new(tombstones_from(&layered));
-        let view = QueryEnv::new(vec![branch.clone()], layered, tombstones, env);
+        let view = QueryEnv::new(vec![source.to_source()], layered, env);
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it
@@ -212,18 +216,17 @@ where
         // `dialog.rule/on` lookup (head-cached) per surviving attribute.
         // Nothing ever enumerates all rules.
         let mut candidates: BTreeSet<Entity> = BTreeSet::new();
-        for attribute in &touched {
-            let Some(on) = on_entity(attribute) else {
-                continue;
-            };
-            candidates.extend(dispatch.triggers(&on, &overlay, env).await?);
+        for reach in &touched {
+            for on in reach.probes() {
+                candidates.extend(dispatch.triggers(&on, &overlay, env).await?);
+            }
         }
         candidates.extend(installed.iter().cloned());
 
         // Attributes only reachable through the deductive closure: a
         // candidate premised on one changed *derivedly*, which a base
         // row cannot seed.
-        let expanded: BTreeSet<Attribute> = touched.difference(&direct).cloned().collect();
+        let expanded: BTreeSet<Reach> = touched.difference(&direct).cloned().collect();
 
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
@@ -242,13 +245,17 @@ where
             // seed cannot express: enabling by removal (`unless` over
             // a retracted or superseded fact) and premises that
             // changed derivedly through the deductive closure.
-            let (positive_attrs, unless_attrs) = premise_attrs(&rule);
+            let (positive, unless) = premise_reach(&rule);
             let full = installed.contains(&entity)
                 || expanded
                     .iter()
-                    .any(|a| positive_attrs.contains(a) || unless_attrs.contains(a))
-                || retract_attrs.iter().any(|a| unless_attrs.contains(a))
-                || replace_attrs.iter().any(|a| unless_attrs.contains(a));
+                    .any(|a| positive.iter().chain(unless.iter()).any(|p| p.overlaps(a)))
+                || retract_attrs
+                    .iter()
+                    .any(|a| unless.iter().any(|u| u.covers(a)))
+                || replace_attrs
+                    .iter()
+                    .any(|a| unless.iter().any(|u| u.covers(a)));
             if full {
                 fire(
                     &rule,
@@ -285,13 +292,13 @@ where
 }
 
 /// The committed side of trigger dispatch for one induction run: the
-/// branch, the head every cache entry is keyed by, and the trigger
-/// footprint (the O(1) gate). All committed lookups flow through the
-/// branch's shared [`RuleCache`](crate::RuleCache) under the
-/// established disciplines — discovery head-keyed, hydrated bodies
+/// line (branch or snapshot), the head every cache entry is keyed by,
+/// and the trigger footprint (the O(1) gate). All committed lookups
+/// flow through the line's shared [`RuleCache`](crate::RuleCache) under
+/// the established disciplines — discovery head-keyed, hydrated bodies
 /// content-addressed, the overlay never head-cached.
 struct Dispatch<'a> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     head: Option<Revision>,
     footprint: TriggerFootprint,
 }
@@ -375,38 +382,40 @@ impl<'a> Dispatch<'a> {
     /// Resolve the committed dispatch state: the branch head and the
     /// trigger footprint at it (cached per head; one range scan over
     /// each of `dialog.rule/on` and `dialog.rule/reads` on a miss).
-    async fn resolve<Env>(branch: &'a Branch, env: &Env) -> Result<Dispatch<'a>, CommitError>
+    async fn resolve<Env>(source: SourceRef<'a>, env: &Env) -> Result<Dispatch<'a>, CommitError>
     where
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        let head = branch.revision();
+        let head = source.revision();
         let Some(head) = head else {
             // A branch with no commits has no committed rules.
             return Ok(Dispatch {
-                branch,
+                source,
                 head: None,
                 footprint: TriggerFootprint::default(),
             });
         };
 
-        let cache = branch.rule_cache();
+        let cache = source.rule_cache();
         let footprint = match cache.footprint(&head) {
             Some(footprint) => footprint,
             None => {
                 let mut footprint = TriggerFootprint::default();
-                for claim in committed(branch, ArtifactSelector::new().the(on_attr()), env).await? {
+                for claim in committed(source, ArtifactSelector::new().the(on_attr()), env).await? {
                     if let Value::Entity(key) = claim.is {
                         footprint.on.insert(key);
                     }
                 }
                 for claim in
-                    committed(branch, ArtifactSelector::new().the(reads_attr()), env).await?
+                    committed(source, ArtifactSelector::new().the(reads_attr()), env).await?
                 {
                     if let Value::Entity(key) = claim.is {
                         footprint.reads.insert(key);
@@ -417,7 +426,7 @@ impl<'a> Dispatch<'a> {
             }
         };
         Ok(Dispatch {
-            branch,
+            source,
             head: Some(head),
             footprint,
         })
@@ -436,7 +445,9 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -445,14 +456,14 @@ impl<'a> Dispatch<'a> {
         if let Some(head) = &self.head
             && self.footprint.on.contains(on)
         {
-            let cache = self.branch.rule_cache();
+            let cache = self.source.rule_cache();
             let committed_entities = match cache.triggers(on, head) {
                 Some(entities) => entities,
                 None => {
                     let selector = ArtifactSelector::new()
                         .the(on_attr())
                         .is(Value::Entity(on.clone()));
-                    let entities: Vec<Entity> = committed(self.branch, selector, env)
+                    let entities: Vec<Entity> = committed(self.source, selector, env)
                         .await?
                         .into_iter()
                         .map(|claim| claim.of)
@@ -480,7 +491,7 @@ impl<'a> Dispatch<'a> {
     /// negation, an assertion of a base fact can retract a derived one.
     async fn expand_through_deduction<Env>(
         &self,
-        touched: &mut BTreeSet<Attribute>,
+        touched: &mut BTreeSet<Reach>,
         overlay: &OverlayTriggers,
         env: &Env,
     ) -> Result<(), CommitError>
@@ -488,41 +499,41 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        let cache = self.branch.rule_cache();
-        let mut frontier: Vec<Attribute> = touched.iter().cloned().collect();
-        while let Some(attribute) = frontier.pop() {
-            let Some(on) = on_entity(&attribute) else {
-                continue;
-            };
-
+        let cache = self.source.rule_cache();
+        let mut frontier: Vec<Reach> = touched.iter().cloned().collect();
+        while let Some(reach) = frontier.pop() {
             let mut readers: Vec<Entity> = Vec::new();
-            if let Some(head) = &self.head
-                && self.footprint.reads.contains(&on)
-            {
-                let committed_readers = match cache.reads(&on, head) {
-                    Some(entities) => entities,
-                    None => {
-                        let selector = ArtifactSelector::new()
-                            .the(reads_attr())
-                            .is(Value::Entity(on.clone()));
-                        let entities: Vec<Entity> = committed(self.branch, selector, env)
-                            .await?
-                            .into_iter()
-                            .map(|claim| claim.of)
-                            .collect();
-                        cache.record_reads(on.clone(), head.clone(), entities.clone());
-                        entities
-                    }
-                };
-                readers.extend(committed_readers);
-            }
-            if let Some(staged) = overlay.reads.get(&on) {
-                readers.extend(staged.iter().cloned());
+            for on in reach.probes() {
+                if let Some(head) = &self.head
+                    && self.footprint.reads.contains(&on)
+                {
+                    let committed_readers = match cache.reads(&on, head) {
+                        Some(entities) => entities,
+                        None => {
+                            let selector = ArtifactSelector::new()
+                                .the(reads_attr())
+                                .is(Value::Entity(on.clone()));
+                            let entities: Vec<Entity> = committed(self.source, selector, env)
+                                .await?
+                                .into_iter()
+                                .map(|claim| claim.of)
+                                .collect();
+                            cache.record_reads(on.clone(), head.clone(), entities.clone());
+                            entities
+                        }
+                    };
+                    readers.extend(committed_readers);
+                }
+                if let Some(staged) = overlay.reads.get(&on) {
+                    readers.extend(staged.iter().cloned());
+                }
             }
             readers.retain(|entity| !overlay.removed.contains(entity));
 
@@ -531,7 +542,7 @@ impl<'a> Dispatch<'a> {
                     continue;
                 };
                 for (_, field) in body.conclusion().with().iter() {
-                    let derived: Attribute = field.descriptor().the().clone().into();
+                    let derived = Reach::of(field.descriptor().the());
                     if touched.insert(derived.clone()) {
                         frontier.push(derived);
                     }
@@ -555,12 +566,14 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        let cache = self.branch.rule_cache();
+        let cache = self.source.rule_cache();
         if let Some(body) = cache.body(entity) {
             return Ok(Some(body));
         }
@@ -592,12 +605,14 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        let cache = self.branch.rule_cache();
+        let cache = self.source.rule_cache();
         if let Some(rule) = cache.inductive(entity) {
             return Ok(Some(rule));
         }
@@ -637,7 +652,9 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -651,14 +668,14 @@ impl<'a> Dispatch<'a> {
         let Some(head) = &self.head else {
             return Ok(false);
         };
-        let cache = self.branch.rule_cache();
+        let cache = self.source.rule_cache();
         if let Some(verdict) = cache.transient(concept, head) {
             return Ok(verdict);
         }
         let selector = ArtifactSelector::new()
             .the(transient_attr())
             .of(concept.clone());
-        let verdict = !committed(self.branch, selector, env).await?.is_empty();
+        let verdict = !committed(self.source, selector, env).await?.is_empty();
         cache.record_transient(concept.clone(), head.clone(), verdict);
         Ok(verdict)
     }
@@ -673,7 +690,9 @@ impl<'a> Dispatch<'a> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -684,7 +703,7 @@ impl<'a> Dispatch<'a> {
         let selector = ArtifactSelector::new()
             .the(source_attr())
             .of(entity.clone());
-        Ok(committed(self.branch, selector, env)
+        Ok(committed(self.source, selector, env)
             .await?
             .into_iter()
             .find_map(|claim| match claim.is {
@@ -698,7 +717,9 @@ impl<'a> Dispatch<'a> {
 /// left the branch between the induction watermark and the current
 /// head — arrivals as `Assert`, departures as `Retract`. Empty when
 /// the watermark is at the head (the steady state: the previous
-/// inducing instant advanced it).
+/// inducing instant advanced it), and always empty for a snapshot: a
+/// snapshot's head moves only through its own transactions, every one
+/// of which induces, so nothing can slip past.
 ///
 /// A `None` watermark (this replica has never induced) adopts the
 /// current head *without* catch-up: induction is fire-forward — a
@@ -708,22 +729,26 @@ impl<'a> Dispatch<'a> {
 /// records, which every commit writes) are excluded from the lag, so
 /// catching up over N commits stimulates rules with the *data* those
 /// commits changed, not their bookkeeping.
-async fn lag_delta<Env>(branch: &Branch, env: &Env) -> Result<Vec<Instruction>, CommitError>
+async fn lag_delta<Env>(source: SourceRef<'_>, env: &Env) -> Result<Vec<Instruction>, CommitError>
 where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
-    use crate::{RepositoryArchiveExt as _, RepositoryMemoryExt as _};
     use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled};
     use dialog_artifacts::{EntityKey, Key, KeyViewConstruct, State};
     use dialog_common::Blake3Hash as NodeHash;
     use dialog_search_tree::{Change as TreeChange, ContentAddressedStorage};
 
+    let SourceRef::Branch(branch) = source else {
+        return Ok(Vec::new());
+    };
     let Some(head) = branch.revision() else {
         return Ok(Vec::new());
     };
@@ -741,19 +766,7 @@ where
     // surfaces once. Reads go through the networked store exactly as a
     // select does: a pulled head's changed paths may reference
     // remote-only blocks.
-    let upstreams = branch.upstreams();
-    let remote = match upstreams.remote_name() {
-        Some(name) => {
-            let loaded = branch
-                .subject()
-                .remote(name.to_string())
-                .load()
-                .perform(env)
-                .await;
-            RemoteFallback::from_load(name, loaded)
-        }
-        None => RemoteFallback::None,
-    };
+    let remote = source.fallback(env).await;
     let store = crate::NetworkedIndex::new(env, branch.archive().index(), remote);
     let raw_store = store.clone();
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
@@ -818,10 +831,10 @@ where
     Ok(lag)
 }
 
-/// Collect the artifacts a selector matches on the branch's committed
+/// Collect the artifacts a selector matches on the line's committed
 /// tree (no overlay — the cacheable slice).
 async fn committed<Env>(
-    branch: &Branch,
+    source: SourceRef<'_>,
     selector: ArtifactSelector<Constrained>,
     env: &Env,
 ) -> Result<Vec<Artifact>, CommitError>
@@ -829,14 +842,14 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
-    let stream = branch
-        .claims()
-        .select(selector)
+    let stream = crate::Select::from_source(source, selector)
         .perform(env)
         .await
         .map_err(|error| CommitError::Induction(format!("committed probe: {error}")))?;
@@ -856,7 +869,9 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -885,7 +900,9 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -902,10 +919,10 @@ where
     emit_matches(rule, transient_head, matches, view, novelty, transients).await
 }
 
-/// The attributes a rule's concept premises name, split by polarity:
-/// positive premise attributes (seedable by an assert/replace row) and
-/// `unless` attributes (only enabled by removal — never seedable).
-fn premise_attrs(rule: &InductiveRule) -> (BTreeSet<Attribute>, BTreeSet<Attribute>) {
+/// The reach of a rule's concept premises, split by polarity:
+/// positive premises (seedable by an assert/replace row) and `unless`
+/// premises (only enabled by removal — never seedable).
+fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
     use dialog_query::{Negation, Premise, Proposition};
 
     let mut positive = BTreeSet::new();
@@ -917,7 +934,7 @@ fn premise_attrs(rule: &InductiveRule) -> (BTreeSet<Attribute>, BTreeSet<Attribu
             _ => continue,
         };
         for (_, field) in query.predicate.with().iter() {
-            target.insert(field.descriptor().the().clone().into());
+            target.insert(Reach::of(field.descriptor().the()));
         }
     }
     (positive, unless)
@@ -943,7 +960,9 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -963,8 +982,8 @@ where
             let mut seeded = false;
             let mut compatible = true;
             for (name, field) in query.predicate.with().iter() {
-                let attribute: Attribute = field.descriptor().the().clone().into();
-                if attribute != row.the {
+                let relation = field.descriptor().the();
+                if !Reach::of(relation).covers(&row.the) {
                     continue;
                 }
                 if !bind_seed(
@@ -973,6 +992,19 @@ where
                     query.terms.get(name),
                     row.is.clone(),
                 ) {
+                    compatible = false;
+                    break;
+                }
+                // A collection premise binds the entry's key too: the
+                // name half of the row's attribute.
+                if relation.attribute().is_none()
+                    && !bind_seed(
+                        &mut matched,
+                        &mut scope,
+                        query.terms.get(&Relation::key_operand(name)),
+                        Value::String(row.the.name().to_owned()),
+                    )
+                {
                     compatible = false;
                     break;
                 }
@@ -1047,7 +1079,9 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -1068,7 +1102,21 @@ where
                 // nothing.
                 continue;
             };
-            let attribute: Attribute = field.descriptor().the().clone().into();
+            // A collection head writes under `domain/key`, the key
+            // being what the body bound to the field's key operand.
+            let relation = field.descriptor().the();
+            let attribute = match relation.attribute() {
+                Some(attribute) => attribute,
+                None => {
+                    let key = Term::<Any>::var(Relation::key_operand(name));
+                    let Ok(Binding::Present(Value::String(key))) = matched.lookup(&key) else {
+                        continue;
+                    };
+                    relation.entry(&key).map_err(|error| {
+                        CommitError::Induction(format!("head field {name}: {error}"))
+                    })?
+                }
+            };
             match rule.polarity() {
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
@@ -1134,7 +1182,9 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -1179,7 +1229,9 @@ mod tests {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -1280,6 +1332,7 @@ mod tests {
                     .is(1u64),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1293,6 +1346,7 @@ mod tests {
                     .is(counter.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1361,6 +1415,7 @@ mod tests {
             .transaction()
             .assert(rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1377,6 +1432,7 @@ mod tests {
             )
             .assert(dialog_query::the!("task/done").of(task.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1394,6 +1450,7 @@ mod tests {
             .transaction()
             .retract(dialog_query::the!("task/done").of(task.clone()).is(true))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1469,6 +1526,7 @@ mod tests {
             .assert(stage)
             .assert(finish)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1483,6 +1541,7 @@ mod tests {
                     .is(target.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1558,6 +1617,7 @@ mod tests {
             .assert(ping_to_pong)
             .assert(pong_to_ping)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1570,6 +1630,7 @@ mod tests {
                     .is(1u64),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await;
         assert!(
@@ -1611,6 +1672,7 @@ mod tests {
             .assert(stamp("cmd.x/target", "result.x/target"))
             .assert(stamp("cmd.y/target", "result.y/target"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1625,6 +1687,7 @@ mod tests {
                     .is(target.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1701,6 +1764,7 @@ mod tests {
                     .is("second".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1713,6 +1777,7 @@ mod tests {
                     .is(message.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1800,6 +1865,7 @@ mod tests {
             .assert(status)
             .assert(notify)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1821,6 +1887,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1842,6 +1909,7 @@ mod tests {
                     .is("on-duty".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1887,6 +1955,7 @@ mod tests {
             .transaction()
             .assert(stamp("result.first/target"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1899,6 +1968,7 @@ mod tests {
                     .is(target.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1909,6 +1979,7 @@ mod tests {
             .transaction()
             .assert(stamp("result.second/target"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1922,6 +1993,7 @@ mod tests {
                     .is(target.clone()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1953,6 +2025,7 @@ mod tests {
             .transaction()
             .assert(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1966,6 +2039,7 @@ mod tests {
                     .is("before".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1979,6 +2053,7 @@ mod tests {
             .transaction()
             .retract(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1992,6 +2067,7 @@ mod tests {
                     .is("after".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2022,6 +2098,7 @@ mod tests {
             .transaction()
             .assert(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2036,6 +2113,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2073,6 +2151,7 @@ mod tests {
             )
             .assert(dialog_query::the!("dialog.rule/on").of(forged).is(on))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2086,6 +2165,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2117,6 +2197,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2126,6 +2207,7 @@ mod tests {
             .transaction()
             .assert(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2169,6 +2251,7 @@ mod tests {
                     .is("pending".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2177,6 +2260,7 @@ mod tests {
             .transaction()
             .assert(drain)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2227,6 +2311,7 @@ mod tests {
                     .is("on-duty".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2257,6 +2342,7 @@ mod tests {
             .transaction()
             .assert(status)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2306,6 +2392,7 @@ mod tests {
             .transaction()
             .assert(tagger())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2388,6 +2475,7 @@ mod tests {
             .transaction()
             .assert(pair)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2415,6 +2503,7 @@ mod tests {
                     .is("q".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2517,6 +2606,7 @@ mod tests {
                     .is("hello".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2529,6 +2619,7 @@ mod tests {
                     .is("doc:1".parse::<Entity>()?),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -2556,6 +2647,7 @@ mod tests {
                     .is("n".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2573,6 +2665,7 @@ mod tests {
                     .is("n".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2601,6 +2694,7 @@ mod tests {
             .transaction()
             .assert(stamp)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2608,6 +2702,254 @@ mod tests {
         assert!(
             branch.rule_cache().footprint(&head).is_none(),
             "a rule install invalidates the footprint; the next dispatch rescans"
+        );
+        Ok(())
+    }
+
+    /// The list concept: every position-named entry of `todo.list`,
+    /// valued by a member entity.
+    fn list_members() -> serde_json::Value {
+        json!({
+            "with": {
+                "member": {
+                    "the": { "domain": "todo.list", "keyed": "sequence" },
+                    "cardinality": "many",
+                    "as": "Entity"
+                }
+            }
+        })
+    }
+
+    /// The entries of `list`, in key order.
+    async fn members<Env>(branch: &Branch, env: &Env, list: &Entity) -> Result<Vec<(String, Value)>>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let selector = ArtifactSelector::new()
+            .the_starting_with("todo.list/".to_string())
+            .of(list.clone());
+        let stream = branch.claims().select(selector).perform(env).await?;
+        let artifacts: Vec<_> = stream.collect().await;
+        let mut entries: Vec<(String, Value)> = artifacts
+            .into_iter()
+            .map(|item| item.and_then(|view| view.to_owned()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|artifact| (artifact.the.name().to_owned(), artifact.is))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
+    }
+
+    /// An inductive rule derives INTO a sequence: the head's entry is
+    /// written under `todo.list/<key>`, the key being what the body
+    /// bound — here `dialog/position` deriving a first position for
+    /// the member.
+    #[dialog_common::test]
+    async fn it_induces_an_entry_into_a_sequence() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "An item joins its list",
+            "assert!": list_members(),
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "list": { "the": "todo.item/list", "as": "Entity" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "member" } },
+                        "list": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": "dialog/position",
+                    "where": {
+                        "member": { "?": { "name": "member" } },
+                        "after": "",
+                        "before": "",
+                        "is": { "?": { "name": "member/key" } }
+                    }
+                }
+            ]
+        }))?;
+        let list: Entity = "list:1".parse()?;
+        let item: Entity = "item:1".parse()?;
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("todo.item/list")
+                    .of(item.clone())
+                    .is(list.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let entries = members(&branch, &operator, &list).await?;
+        assert_eq!(entries.len(), 1, "one entry for the one item");
+        let (key, value) = &entries[0];
+        assert!(
+            key.starts_with(|c: char| c.is_ascii_uppercase()),
+            "the key is a position: {key}"
+        );
+        assert_eq!(value, &Value::Entity(item));
+        Ok(())
+    }
+
+    /// An inductive rule READING a sequence wakes for a member write:
+    /// the write's attribute probes the domain half's cover key, the
+    /// rule seeds with both the value and the key bound, and its head
+    /// records the key it saw.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_reading_a_collection() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "Record where a member sits",
+            "assert!": {
+                "with": {
+                    "key": { "the": "seen/key", "as": "Text" }
+                }
+            },
+            "when": [
+                {
+                    "assert": list_members(),
+                    "where": {
+                        "this": { "?": { "name": "list" } },
+                        "member": {
+                            "the": { "?": { "name": "key" } },
+                            "is": { "?": { "name": "this" } }
+                        }
+                    }
+                }
+            ]
+        }))?;
+        let list: Entity = "list:1".parse()?;
+        let item: Entity = "item:1".parse()?;
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let member: dialog_artifacts::Attribute = "todo.list/N5".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::The::from(member)
+                    .of(list.clone())
+                    .is(item.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            values(&branch, &operator, "seen/key", &item).await?,
+            vec![Value::String("N5".to_string())],
+            "the rule fired on the member write with the key bound"
+        );
+        Ok(())
+    }
+
+    /// A head entry whose key has the wrong shape for its collection
+    /// fails the commit rather than landing in the other half of the
+    /// domain: a dictionary keyed by an uppercase name would be a
+    /// sequence member.
+    #[dialog_common::test]
+    async fn it_refuses_a_key_of_the_wrong_shape() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "File an item under its name",
+            "assert!": {
+                "with": {
+                    "entry": {
+                        "the": { "domain": "todo.named", "keyed": "dictionary" },
+                        "cardinality": "many",
+                        "as": "Entity"
+                    }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "list": { "the": "todo.item/list", "as": "Entity" },
+                            "name": { "the": "todo.item/name", "as": "Text" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "entry" } },
+                        "list": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "entry/key" } }
+                    }
+                }
+            ]
+        }))?;
+        let list: Entity = "list:1".parse()?;
+        let item: Entity = "item:1".parse()?;
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let result = branch
+            .transaction()
+            .assert(
+                dialog_query::the!("todo.item/list")
+                    .of(item.clone())
+                    .is(list.clone()),
+            )
+            .assert(
+                dialog_query::the!("todo.item/name")
+                    .of(item.clone())
+                    .is("Milk".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(result, Err(CommitError::Induction(ref message)) if message.contains("Milk")),
+            "an uppercase key is not a dictionary key: {result:?}"
         );
         Ok(())
     }

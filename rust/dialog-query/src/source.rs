@@ -24,7 +24,7 @@ pub(crate) mod test {
     use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
     use dialog_operator::Operator as DialogOperator;
-    use dialog_repository::{Branch, NetworkedIndex, RepositoryArchiveExt as _};
+    use dialog_repository::{Branch, NetworkedIndex};
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_storage::{Blake3Hash, StorageBackend};
 
@@ -70,6 +70,31 @@ pub(crate) mod test {
     impl Provider<SelectRules> for TestEnv<'_> {
         async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
             self.rules.acquire(&input)
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<dialog_artifacts::Estimate> for TestEnv<'_> {
+        async fn execute(
+            &self,
+            input: ArtifactSelector<Constrained>,
+        ) -> Result<Option<u64>, DialogArtifactsError> {
+            self.branch
+                .claims()
+                .select(input)
+                .estimate_perform(self.operator)
+                .await
+        }
+    }
+
+    // Preload hints have no listener in the test env: refuse them so
+    // evaluation stops composing hints after the first.
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<dialog_artifacts::Preload> for TestEnv<'_> {
+        async fn execute(&self, _input: dialog_artifacts::PreloadRequest) -> bool {
+            false
         }
     }
 

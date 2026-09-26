@@ -61,12 +61,19 @@ let
   # cache miss, which fails intermittently when crates.io rate-limits CI
   # runners (HTTP 403). Crane vendors from the crate's bundled Cargo.lock and
   # the resulting artifacts substitute from cachix like everything else.
+  #
+  # The source itself comes from the crate's repository rather than
+  # crates.io for the same reason: the crate tarball is one more fixed-output
+  # fetch that crates.io answers with 403 to rate-limited runners, and it
+  # took every lint run on every branch down with it on 2026-09-16. The
+  # commit is the one that published 0.1.0 (the repository carries no tag).
   enforce-workspace-deps =
     let
-      src = pkgs.fetchCrate {
-        pname = "cargo-enforce-shared-workspace-deps";
-        version = "0.1.0";
-        sha256 = "sha256-XOdKeg9tNt/HT+WO9QKtdX3fUMUssVTlXRV0LOIMMzc=";
+      src = pkgs.fetchFromGitHub {
+        owner = "benfalk";
+        repo = "cargo-enforce-shared-workspace-deps";
+        rev = "3c192641c0e13f81ba938033fc2c08e8c2628304";
+        hash = "sha256-5WRDkvnqCZpkvsXGasuE68RxSTtTUHb9pOjvrWyp+eM=";
       };
     in
     craneLib.buildPackage {

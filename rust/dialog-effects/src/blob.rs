@@ -22,23 +22,46 @@
 //! a blob effect's *output* is a streaming transfer handle that the caller
 //! reads from ([`BlobReader`]) or writes into ([`BlobWriter`]).
 
+use crate::archive::Archive;
+use crate::method;
 use async_trait::async_trait;
+use std::marker::PhantomData;
 
 use dialog_common::{Blake3Hash, ConditionalSend};
 use serde::{Deserialize, Serialize};
 
-use crate::archive::Archive;
 pub use dialog_capability::{
     Attenuate, Attenuation, DialogCapabilityPerformError, Effect, Policy, StorageError, Subject,
     access::AuthorizeError,
 };
 
-/// Blob store domain under the archive. Adds the `/blob` ability segment.
+/// Blob store domain under the archive. Contributes no ability segment of
+/// its own: the effects name the whole command (`/use/get/archive/blob`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Blob;
+pub struct Blob<V = method::Get>(#[serde(skip)] PhantomData<V>);
 
-impl Attenuation for Blob {
-    type Of = Archive;
+impl<V> Blob<V> {
+    /// The blob resource under `V`.
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<V> Default for Blob<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: crate::Method> Attenuation for Blob<M>
+where
+    M::Of: dialog_capability::Constraint,
+{
+    type Of = Archive<M>;
+
+    fn attenuation() -> &'static str {
+        "blob"
+    }
 }
 
 /// A byte range for a ranged read: `length` bytes starting at `offset`, or to
@@ -109,8 +132,11 @@ impl Read {
     }
 }
 
+impl Policy for Read {
+    type Of = Blob<method::Get>;
+}
+
 impl Effect for Read {
-    type Of = Blob;
     type Output = Result<BlobReader, BlobError>;
 }
 
@@ -133,8 +159,11 @@ impl Default for Write {
     }
 }
 
+impl Policy for Write {
+    type Of = Blob<method::Put>;
+}
+
 impl Effect for Write {
-    type Of = Blob;
     type Output = Result<BlobWriter, BlobError>;
 }
 
@@ -164,8 +193,11 @@ impl Import {
     }
 }
 
+impl Policy for Import {
+    type Of = Blob<method::Put>;
+}
+
 impl Effect for Import {
-    type Of = Blob;
     type Output = Result<BlobWriter, BlobError>;
 }
 
@@ -179,35 +211,37 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::prelude::*;
-    use crate::archive::Archive;
+    use crate::prelude::*;
     use dialog_capability::{Subject, did};
 
     #[dialog_common::test]
     fn it_builds_blob_read_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Archive)
+            .reader()
+            .archive()
             .blob()
             .read([0u8; 32]);
         assert_eq!(claim.subject(), &did!("key:zSpace"));
-        assert_eq!(claim.ability(), "/archive/blob/read");
+        assert_eq!(claim.ability(), "/use/get/archive/blob");
     }
 
     #[dialog_common::test]
     fn it_builds_blob_write_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Archive)
+            .writer()
+            .archive()
             .blob()
             .write();
-        assert_eq!(claim.ability(), "/archive/blob/write");
+        assert_eq!(claim.ability(), "/use/put/archive/blob");
     }
 
     #[dialog_common::test]
     fn it_builds_blob_import_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Archive)
+            .writer()
+            .archive()
             .blob()
             .import([0u8; 32], 4096);
-        assert_eq!(claim.ability(), "/archive/blob/import");
+        assert_eq!(claim.ability(), "/use/put/archive/blob");
     }
 }

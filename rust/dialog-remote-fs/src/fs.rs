@@ -10,6 +10,7 @@
 mod address;
 mod authorization;
 pub mod provider;
+pub mod simulation;
 
 pub use address::FsAddress;
 pub use authorization::FsAuthorization;

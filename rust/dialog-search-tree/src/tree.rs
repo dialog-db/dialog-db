@@ -18,9 +18,13 @@ use rkyv::{
 
 use crate::{
     Accessor, Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, Key, Manifest, PersistentNode, SearchOptions, SearchResult,
-    TreeDifference, TreeWalker, Value, into_owned,
+    Distribution, Entry, Geometric, Key, Manifest, PersistentNode, Prefetch, SearchOptions,
+    SearchResult, TreeDifference, TreeWalker, Value, into_owned,
 };
+
+/// A node on a range estimate's edge path, with the range's bound on each
+/// side it cuts through (`None` where the range runs past the node's edge).
+type Cut<'a> = (Blake3Hash, Option<&'a [u8]>, Option<&'a [u8]>);
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
 /// storage.
@@ -225,6 +229,83 @@ where
         self.stream_range(.., storage)
     }
 
+    /// An advisory upper-bound estimate of how many entries fall in the key
+    /// range `[lower, upper)`, read from the range's two edge paths.
+    ///
+    /// Children the range covers whole contribute their
+    /// [`Scale`](crate::Scale) without being read; the child holding each
+    /// edge of the range is descended, so a range narrower than a child
+    /// is never rounded up to that child (a point range in one leaf counts
+    /// as one). At most two blocks per level are read, and they are the
+    /// blocks a scan of the range reads first and last anyway; a leaf is
+    /// counted exactly. Returns `None` for an empty tree.
+    ///
+    /// Interior scales are estimates, so the whole is an upper bound, not
+    /// an exact count: it answers "is this range large or small" for a
+    /// planner comparing scan sizes.
+    pub async fn range_estimate<Backend>(
+        &self,
+        lower: &[u8],
+        upper: &[u8],
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Option<u64>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        if &self.root == NULL_BLAKE3_HASH {
+            return Ok(None);
+        }
+        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        // Each pending node is bounded on the sides the range cuts through
+        // it: `None` on a side means the range runs past that side, so the
+        // node's whole extent on it counts.
+        let mut pending: Vec<Cut<'_>> = vec![(self.root.clone(), Some(lower), Some(upper))];
+        let mut total = 0u64;
+        while let Some((hash, lower, upper)) = pending.pop() {
+            let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
+            let index = match node.as_index() {
+                Ok(index) => index,
+                Err(_) => {
+                    let segment = node.as_segment()?;
+                    let mut keys = segment.keys::<Key>()?;
+                    while let Some((_, key)) = keys.next_key()? {
+                        if upper.is_some_and(|upper| key >= upper) {
+                            break;
+                        }
+                        if lower.is_none_or(|lower| key >= lower) {
+                            total += 1;
+                        }
+                    }
+                    continue;
+                }
+            };
+            let start = index.route(lower.unwrap_or(&[]))?;
+            let end = match upper {
+                Some(upper) => index.children_spanning(lower.unwrap_or(&[]), upper)?.end,
+                None => index.len(),
+            };
+            if end <= start {
+                continue;
+            }
+            // Whole children between the edges count by scale; the edge
+            // children carry the cut on their side down a level. A single
+            // spanning child carries both cuts.
+            for at in start..end {
+                let first = at == start;
+                let last = at + 1 == end;
+                let cut_lower = if first { lower } else { None };
+                let cut_upper = if last { upper } else { None };
+                if cut_lower.is_none() && cut_upper.is_none() {
+                    total = total.saturating_add(index.scale_at(at)?.estimate());
+                } else {
+                    pending.push((index.hash_at(at)?.clone(), cut_lower, cut_upper));
+                }
+            }
+        }
+        Ok(Some(total))
+    }
+
     /// Returns an async stream over entries with keys within the provided
     /// range.
     ///
@@ -323,10 +404,40 @@ where
         Value: PartialEq + ConditionalSync,
         D: ConditionalSync,
     {
+        self.differentiate_within_with(other, scope, self_storage, other_storage, Prefetch::Lazy)
+    }
+
+    /// [`differentiate_within`](Self::differentiate_within), with an
+    /// explicit [`Prefetch`] choice. [`Prefetch::Eager`] fetches each
+    /// surviving frontier level concurrently instead of node by node, at
+    /// the price of a bounded number of reads the lazy walk would skip;
+    /// it is for consumers that stream the whole difference over a
+    /// high-latency backend (see [`Prefetch`]).
+    pub fn differentiate_within_with<'a, Backend>(
+        &'a self,
+        other: &'a Self,
+        scope: &'a [core::ops::RangeInclusive<Key>],
+        self_storage: &'a ContentAddressedStorage<Backend>,
+        other_storage: &'a ContentAddressedStorage<Backend>,
+        prefetch: Prefetch,
+    ) -> impl Differential<Key, Value> + ConditionalSend + 'a
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Key: ConditionalSync,
+        Value: PartialEq + ConditionalSync,
+        D: ConditionalSync,
+    {
         async_stream::try_stream! {
-            let difference =
-                TreeDifference::compute_within(self, other, self_storage, other_storage, scope)
-                    .await?;
+            let difference = TreeDifference::compute_within_with(
+                self,
+                other,
+                self_storage,
+                other_storage,
+                scope,
+                prefetch,
+            )
+            .await?;
             for await change in difference.changes_within(scope) {
                 yield change?;
             }
@@ -544,6 +655,80 @@ mod tests {
             "scale drifted more than an order of magnitude: {estimate} vs {COUNT}"
         );
 
+        Ok(())
+    }
+
+    /// A narrow range's estimate must discriminate from a broad range's,
+    /// whatever shape the root happens to take. A root-only estimate
+    /// loses this whenever the range falls inside a single child (near a
+    /// height boundary the root routinely has few children, and then
+    /// every range reports the same whole-subtree scale — the planner's
+    /// merge-versus-fold guard saw exactly that): the estimate must
+    /// descend to the first level where the range spans siblings.
+    #[dialog_common::test]
+    async fn it_discriminates_narrow_ranges_from_broad_ones() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+
+        const COUNT: u32 = 2_000;
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+        let mut edit = tree.edit();
+        for i in 0..COUNT {
+            edit = edit
+                .insert(i.to_be_bytes(), i.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        tree = edit.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let full = tree
+            .range_estimate(&0u32.to_be_bytes(), &COUNT.to_be_bytes(), &storage)
+            .await?
+            .expect("a populated tree estimates");
+        let narrow = tree
+            .range_estimate(&1000u32.to_be_bytes(), &1020u32.to_be_bytes(), &storage)
+            .await?
+            .expect("a populated tree estimates");
+
+        assert!(
+            full >= COUNT as u64,
+            "full-range estimate is an upper bound"
+        );
+        assert!(
+            narrow >= 20,
+            "narrow-range estimate is an upper bound: {narrow}"
+        );
+        assert!(
+            narrow.saturating_mul(4) < full,
+            "a 20-entry range must not estimate like a {COUNT}-entry one: narrow={narrow} full={full}"
+        );
+
+        // A range that narrows into one leaf is counted from the leaf, not
+        // rounded up to it: one key estimates as one, none as none.
+        let point = tree
+            .range_estimate(&1000u32.to_be_bytes(), &1001u32.to_be_bytes(), &storage)
+            .await?
+            .expect("a populated tree estimates");
+        assert_eq!(point, 1, "a point range counts its one entry");
+        let absent = tree
+            .range_estimate(&COUNT.to_be_bytes(), &(COUNT + 1).to_be_bytes(), &storage)
+            .await?
+            .expect("a populated tree estimates");
+        assert_eq!(absent, 0, "an empty range in a leaf counts nothing");
+        // A range that straddles a leaf boundary is counted from both edge
+        // leaves, not rounded up to them: forty keys count as forty wherever
+        // the boundaries fall.
+        for start in (0..COUNT - 40).step_by(97) {
+            let straddling = tree
+                .range_estimate(&start.to_be_bytes(), &(start + 40).to_be_bytes(), &storage)
+                .await?
+                .expect("a populated tree estimates");
+            assert_eq!(straddling, 40, "forty keys from {start} count as forty");
+        }
         Ok(())
     }
 

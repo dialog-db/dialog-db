@@ -12,6 +12,7 @@ mod helpers;
 
 use anyhow::Result;
 use dialog_common::Blake3Hash;
+use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::*;
 use helpers::{perform, setup};
 
@@ -26,6 +27,7 @@ async fn it_returns_none_for_missing_blob() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -45,6 +47,7 @@ async fn it_writes_and_reads_back_a_blob() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -55,6 +58,7 @@ async fn it_writes_and_reads_back_a_blob() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -77,6 +81,7 @@ async fn it_writes_byte_compatibly_with_a_direct_filesystem() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -87,6 +92,7 @@ async fn it_writes_byte_compatibly_with_a_direct_filesystem() -> Result<()> {
     let loaded = env
         .subject
         .clone()
+        .reader()
         .archive()
         .catalog("index")
         .get(digest)
@@ -105,6 +111,7 @@ async fn it_reads_byte_compatibly_from_a_direct_filesystem() -> Result<()> {
 
     env.subject
         .clone()
+        .writer()
         .archive()
         .catalog("index")
         .put(content.clone())
@@ -114,6 +121,7 @@ async fn it_reads_byte_compatibly_from_a_direct_filesystem() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -133,6 +141,7 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -142,6 +151,7 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -152,6 +162,7 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -159,5 +170,107 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     )
     .await??;
     assert_eq!(result, Some(content));
+    Ok(())
+}
+
+/// Concurrent gets of one digest from one vault join a single in-flight
+/// request, and a join never crosses vaults: two vaults can disagree
+/// about holding a block, so a concurrent get from a vault that lacks it
+/// must answer `None`, not the other vault's bytes. One test, because
+/// overlap is forced through the process-global simulated link; the
+/// assertions read the digest-scoped get ledger, so concurrent tests in
+/// the same process (fetching their own digests) cannot skew them.
+/// Native-only: shaping does not exist on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
+    use dialog_remote_fs::simulation::{self, NetworkShape};
+
+    let holder = setup().await;
+    let empty = setup().await;
+    let shared = format!("joined once {}", dialog_storage::unique_name("block"));
+    let shared = shared.into_bytes();
+    let shared_digest = Blake3Hash::hash(&shared);
+    let held = format!("held by one vault {}", dialog_storage::unique_name("block"));
+    let held = held.into_bytes();
+    let held_digest = Blake3Hash::hash(&held);
+    for content in [shared.clone(), held.clone()] {
+        perform(
+            holder
+                .subject
+                .clone()
+                .writer()
+                .archive()
+                .catalog("index")
+                .put(content)
+                .fork(&holder.address),
+        )
+        .await??;
+    }
+
+    simulation::configure(Some(NetworkShape {
+        latency: std::time::Duration::from_millis(5),
+        auth_latency: std::time::Duration::ZERO,
+        bandwidth: None,
+    }));
+
+    // Same vault, same digest, concurrently: one wire request, shared.
+    let get = || {
+        perform(
+            holder
+                .subject
+                .clone()
+                .reader()
+                .archive()
+                .catalog("index")
+                .get(shared_digest.clone())
+                .fork(&holder.address),
+        )
+    };
+    let (first, second) = futures_util::future::join(get(), get()).await;
+    assert_eq!(first??, Some(shared.clone()));
+    assert_eq!(second??, Some(shared));
+    let record = simulation::get_ledger().record(&shared_digest.to_string());
+    assert_eq!(
+        (record.requests, record.empty),
+        (1, 0),
+        "concurrent identical gets share one wire request"
+    );
+
+    // Different vaults, same digest, concurrently: no join, and the vault
+    // that lacks the block answers None.
+    let (present, missing) = futures_util::future::join(
+        perform(
+            holder
+                .subject
+                .clone()
+                .reader()
+                .archive()
+                .catalog("index")
+                .get(held_digest.clone())
+                .fork(&holder.address),
+        ),
+        perform(
+            empty
+                .subject
+                .clone()
+                .reader()
+                .archive()
+                .catalog("index")
+                .get(held_digest.clone())
+                .fork(&empty.address),
+        ),
+    )
+    .await;
+    simulation::configure(None);
+
+    assert_eq!(present??, Some(held));
+    assert_eq!(missing??, None, "a vault that lacks the block answers None");
+    let record = simulation::get_ledger().record(&held_digest.to_string());
+    assert_eq!(
+        (record.requests, record.empty),
+        (2, 1),
+        "gets against different vaults never share a request"
+    );
     Ok(())
 }

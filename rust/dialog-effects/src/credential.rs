@@ -122,13 +122,19 @@ impl<T> Save<T> {
     }
 }
 
-impl Effect for Save<dialog_credentials::Credential> {
+impl Attenuation for Save<dialog_credentials::Credential> {
     type Of = Key;
+}
+
+impl Effect for Save<dialog_credentials::Credential> {
     type Output = Result<(), CredentialError>;
 }
 
-impl Effect for Save<Secret> {
+impl Attenuation for Save<Secret> {
     type Of = Site;
+}
+
+impl Effect for Save<Secret> {
     type Output = Result<(), CredentialError>;
 }
 
@@ -154,13 +160,19 @@ impl<T> Default for Load<T> {
     }
 }
 
-impl Effect for Load<dialog_credentials::Credential> {
+impl Attenuation for Load<dialog_credentials::Credential> {
     type Of = Key;
+}
+
+impl Effect for Load<dialog_credentials::Credential> {
     type Output = Result<dialog_credentials::Credential, CredentialError>;
 }
 
-impl Effect for Load<Secret> {
+impl Attenuation for Load<Secret> {
     type Of = Site;
+}
+
+impl Effect for Load<Secret> {
     type Output = Result<Secret, CredentialError>;
 }
 
@@ -190,8 +202,11 @@ impl<T> Default for Retract<T> {
     }
 }
 
-impl Effect for Retract<Secret> {
+impl Attenuation for Retract<Secret> {
     type Of = Site;
+}
+
+impl Effect for Retract<Secret> {
     type Output = Result<(), CredentialError>;
 }
 

@@ -66,13 +66,17 @@ dirs = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }
-rexie = { workspace = true }
 url = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 web-time = { workspace = true }
 web-sys = { workspace = true, features = [
   "Blob",
+  "DomException",
+  "DomStringList",
+  "ErrorEvent",
+  "Event",
+  "EventTarget",
   "File",
   "FileSystemCreateWritableOptions",
   "FileSystemDirectoryHandle",
@@ -84,6 +88,14 @@ web-sys = { workspace = true, features = [
   "FileSystemRemoveOptions",
   "FileSystemSyncAccessHandle",
   "FileSystemWritableFileStream",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbKeyRange",
+  "IdbObjectStore",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "IdbTransactionMode",
   # `LockManager::request_with_callback` needs both — web-sys gates the
   # callback's `Lock` argument separately from the manager itself.
   "Lock",

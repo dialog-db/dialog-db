@@ -15,6 +15,8 @@ use dialog_ucan_core::time::Timestamp;
 use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
 use dialog_ucan_core::{Delegation, DelegationChain, InvocationBuilder, InvocationChain};
 use dialog_varsig::AnySignature;
+use ipld_core::ipld::Ipld;
+use std::collections::BTreeMap;
 
 use super::scope::Scope;
 use super::{Ucan, UcanInvocation};
@@ -169,6 +171,7 @@ impl Proof<Ucan> for UcanProof {
             signer,
             scope: self.scope,
             duration: self.duration,
+            meta: None,
         })
     }
 }
@@ -186,6 +189,26 @@ pub struct UcanAuthorization {
     pub scope: Scope,
     /// The time range this authorization is valid for.
     pub duration: TimeRange,
+    /// Entries for the next minted delegation's signed `meta`. Set with
+    /// [`UcanAuthorization::meta`]; [`Authorization::delegate`] signs
+    /// them into the leaf.
+    pub meta: Option<BTreeMap<String, Ipld>>,
+}
+
+impl UcanAuthorization {
+    /// Entries for the minted delegation's signed `meta`.
+    ///
+    /// Meta is how a grant carries information that must travel with it
+    /// and cannot be swapped independently — a client naming the sync
+    /// endpoint the granted subject is served from, for example. It is
+    /// informational: verification ignores it. Consuming, like
+    /// [`Authorization::not_before`] and [`Authorization::expires`], so
+    /// it chains ahead of [`Authorization::delegate`].
+    #[must_use]
+    pub fn meta(mut self, meta: BTreeMap<String, Ipld>) -> Self {
+        self.meta = Some(meta);
+        self
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -228,6 +251,9 @@ impl Authorization<Ucan> for UcanAuthorization {
             .subject(self.scope.subject.clone())
             .command(self.scope.command.segments().clone())
             .policy(self.scope.policy());
+        if let Some(meta) = &self.meta {
+            builder = builder.meta(meta.clone());
+        }
 
         if let Some(exp) = self.duration.expiration
             && let Ok(ts) = Timestamp::new(UNIX_EPOCH + Duration::from_secs(exp))
@@ -394,6 +420,102 @@ mod tests {
             .try_build()
             .await
             .unwrap()
+    }
+
+    mod delegate_meta {
+        use super::*;
+        use dialog_ucan_core::command::Command;
+
+        /// A self-authorized claim over `subject`, root command, no policy.
+        fn authorization(issuer: Signer, subject: &Did) -> UcanAuthorization {
+            let scope = crate::Scope {
+                subject: UcanSubject::Specific(subject.clone()),
+                command: Command::parse("/").unwrap(),
+                parameters: Default::default(),
+            };
+            UcanProof::new(scope).claim(issuer).unwrap()
+        }
+
+        #[dialog_common::test]
+        async fn it_stamps_the_requested_meta_into_the_signed_leaf() {
+            let issuer = signer(1).await;
+            let subject = issuer.did();
+            let audience = signer(2).await.did();
+            let meta = BTreeMap::from([(
+                "home.address".to_owned(),
+                Ipld::String("https://sync.example/ucan/".to_owned()),
+            )]);
+
+            let delegation = authorization(issuer, &subject)
+                .meta(meta)
+                .delegate(audience.clone())
+                .await
+                .unwrap();
+
+            let chain = delegation.into_chain();
+            assert_eq!(*chain.audience(), audience);
+            assert_eq!(
+                chain.meta("home.address"),
+                Some(&Ipld::String("https://sync.example/ucan/".to_owned())),
+            );
+        }
+
+        /// Two hops carrying the same key: the leaf — the delegation
+        /// minted closest to the recipient — wins.
+        #[dialog_common::test]
+        async fn it_prefers_the_leaf_entry_when_hops_disagree() {
+            let root = signer(1).await;
+            let subject = root.did();
+            let middle = signer(2).await;
+            let leaf_audience = signer(3).await.did();
+
+            let first = DelegationBuilder::new()
+                .issuer(root)
+                .audience(&middle.did())
+                .subject(UcanSubject::Specific(subject.clone()))
+                .command(vec![])
+                .meta(BTreeMap::from([(
+                    "home.address".to_owned(),
+                    Ipld::String("https://root.example/ucan/".to_owned()),
+                )]))
+                .try_build()
+                .await
+                .unwrap();
+            let second = DelegationBuilder::new()
+                .issuer(middle)
+                .audience(&leaf_audience)
+                .subject(UcanSubject::Specific(subject.clone()))
+                .command(vec![])
+                .meta(BTreeMap::from([(
+                    "home.address".to_owned(),
+                    Ipld::String("https://leaf.example/ucan/".to_owned()),
+                )]))
+                .try_build()
+                .await
+                .unwrap();
+            let chain = DelegationChain::new(first).push(second).unwrap();
+
+            assert_eq!(
+                chain.meta("home.address"),
+                Some(&Ipld::String("https://leaf.example/ucan/".to_owned())),
+            );
+        }
+
+        #[dialog_common::test]
+        async fn it_leaves_meta_absent_when_none_was_requested() {
+            let issuer = signer(1).await;
+            let subject = issuer.did();
+            let audience = signer(2).await.did();
+
+            let delegation = authorization(issuer, &subject)
+                .delegate(audience)
+                .await
+                .unwrap();
+
+            let chain = delegation.into_chain();
+            assert!(chain.proofs().last().unwrap().meta().is_empty());
+            assert_eq!(chain.meta("home.address"), None);
+        }
     }
 
     // These drive a real `Certificate::verify` against a real delegation

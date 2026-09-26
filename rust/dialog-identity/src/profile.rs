@@ -250,7 +250,31 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use dialog_effects::storage::{Create, Load, StorageError};
     use dialog_storage::provider::storage::Storage;
+
+    struct FailingLoad {
+        create_called: AtomicBool,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<Load> for FailingLoad {
+        async fn execute(&self, _input: Capability<Load>) -> Result<Credential, StorageError> {
+            Err(StorageError::Storage("database unavailable".into()))
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<Create> for FailingLoad {
+        async fn execute(&self, _input: Capability<Create>) -> Result<Credential, StorageError> {
+            self.create_called.store(true, Ordering::SeqCst);
+            Err(StorageError::AlreadyExists("Profile/tonk".into()))
+        }
+    }
 
     #[dialog_common::test]
     async fn it_opens_profile() {
@@ -268,6 +292,24 @@ mod tests {
         let second = Profile::open("bob").perform(&storage).await.unwrap();
 
         assert_eq!(first.did(), second.did());
+    }
+
+    #[dialog_common::test]
+    async fn it_does_not_create_after_a_storage_load_failure() {
+        let storage = FailingLoad {
+            create_called: AtomicBool::new(false),
+        };
+
+        let result = Profile::open("tonk").perform(&storage).await;
+
+        assert!(matches!(
+            result,
+            Err(ProfileError::Storage(message)) if message.contains("database unavailable")
+        ));
+        assert!(
+            !storage.create_called.load(Ordering::SeqCst),
+            "a backend failure must not fall through to profile creation"
+        );
     }
 
     #[dialog_common::test]

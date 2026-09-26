@@ -1,6 +1,3 @@
-mod fetches;
-use fetches::{Claim, Fetches};
-
 use dialog_common::{ConditionalSend, ConditionalSync};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -16,10 +13,15 @@ const CACHE_CAPACITY: usize = 2048;
 
 /// A thread-safe cache for storing frequently accessed values.
 ///
-/// Misses are single-flighted: concurrent misses for one key perform a single
-/// fetch and share its outcome. Everything holding a clone of the same cache
-/// shares that arbitration, so readers that arrive at the same cold value from
-/// different queries pay for it once between them.
+/// A miss fetches for itself, always. Nothing here waits on a fetch that
+/// another caller is performing, because nothing here can drive that fetch:
+/// a future advances only while its owner polls it, and an owner that is
+/// parked (a range scan suspended between two yields, holding its
+/// read-aheads; a fetch whose proof reads the tree it is fetching) leaves
+/// anyone waiting on its fetch parked with it. The cost of that rule is that
+/// two callers missing one key at the same moment each read it from the
+/// backend; the value lands once, and every later reader is served from the
+/// cache.
 #[derive(Clone)]
 pub struct Cache<K, V>
 where
@@ -34,8 +36,6 @@ where
     // `Clone` but would deep-clone the cache without the wrapping `Rc`.
     #[cfg(target_arch = "wasm32")]
     cache: Rc<RefCell<SieveCache<K, V>>>,
-
-    fetches: Fetches<K, V>,
 }
 
 impl<K, V> std::fmt::Debug for Cache<K, V>
@@ -90,47 +90,27 @@ where
             cache,
             #[cfg(target_arch = "wasm32")]
             cache: Rc::new(RefCell::new(cache)),
-
-            fetches: Fetches::new(),
         }
     }
 
     /// Retrieves a value from the cache, or fetches it using the provided
     /// function.
     ///
-    /// Only one fetch per key is ever in flight through a given cache: a
-    /// caller that misses while another caller is already fetching the same
-    /// key waits for that fetch instead of issuing its own. A fetch that fails
-    /// or is dropped before it publishes leaves nothing behind, so the callers
-    /// waiting on it start over and fetch for themselves.
+    /// The fetch is the caller's own: it runs inside this future and
+    /// advances exactly when the caller polls, so the caller never depends
+    /// on anyone else's progress. A fetch that fails leaves nothing behind.
     pub async fn get_or_fetch<F, E>(&self, key: &K, fetcher: F) -> Result<Option<V>, E>
     where
         F: AsyncFnOnce(&K) -> Result<Option<V>, E>,
     {
-        let fetch = loop {
-            if let Some(value) = self.get(key) {
-                return Ok(Some(value));
-            }
+        if let Some(value) = self.get(key) {
+            return Ok(Some(value));
+        }
 
-            match self.fetches.claim(key) {
-                Claim::Ours(fetch) => break fetch,
-                Claim::InFlight(mut outcome) => match outcome.recv().await {
-                    Ok(value) => return Ok(value),
-                    // The fetch we were waiting on failed or was dropped. Its
-                    // claim is already withdrawn, so start over: either the
-                    // value landed in the cache anyway, or we fetch it.
-                    Err(_) => continue,
-                },
-            }
-        };
-
-        // A failure returns here, dropping the claim and releasing the key.
         let value = fetcher(key).await?;
-
         if let Some(value) = &value {
             self.insert(key.clone(), value.clone());
         }
-        fetch.publish(&value);
 
         Ok(value)
     }
@@ -143,6 +123,15 @@ where
         let mut cache = self.cache.borrow_mut();
 
         cache.insert(key, value)
+    }
+
+    /// The cached value for `key`, if the cache holds it, with no IO.
+    ///
+    /// Lets a caller follow a read path as far as memory already covers it,
+    /// so a read-ahead can name the node a descent would actually stop at
+    /// instead of guessing.
+    pub fn get_cached(&self, key: &K) -> Option<V> {
+        self.get(key)
     }
 
     /// Retrieves a value from the cache, if it is cached.
@@ -162,7 +151,7 @@ mod tests {
 
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use anyhow::Result;
@@ -173,8 +162,46 @@ mod tests {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    /// A reader must never wait on a fetch it cannot drive. The first fetch
+    /// here is polled exactly once and then never again, the shape of a
+    /// range scan's read-ahead once the scan is parked between two yields:
+    /// still in flight, never dropped, and advancing only if its owner is
+    /// polled. A second read of the same key must complete regardless.
+    // Native only: the bound is tokio's timer, which has no wasm runtime.
+    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
-    async fn it_clears_the_inflight_entry_when_a_fetch_fails() -> Result<()> {
+    async fn it_never_makes_a_reader_wait_on_a_fetch_nobody_drives() -> Result<()> {
+        use std::task::{Context, Poll};
+
+        let cache = Cache::<u32, u32>::new();
+        let started = AtomicBool::new(false);
+
+        let mut parked = Box::pin(cache.get_or_fetch(&7, async |_| {
+            started.store(true, Ordering::SeqCst);
+            std::future::pending::<Result<Option<u32>, ()>>().await
+        }));
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(parked.as_mut().poll(&mut context), Poll::Pending));
+        assert!(
+            started.load(Ordering::SeqCst),
+            "the parked fetch is in flight"
+        );
+
+        let read = cache.get_or_fetch(&7, async |_| Ok::<_, ()>(Some(70)));
+        let value = tokio::time::timeout(std::time::Duration::from_secs(2), read)
+            .await
+            .expect("a reader must not wait on a fetch nobody drives")
+            .unwrap();
+        assert_eq!(value, Some(70));
+
+        drop(parked);
+        assert_eq!(cache.get(&7), Some(70));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_leaves_nothing_behind_when_a_fetch_fails() -> Result<()> {
         let cache = Cache::<u8, u8>::new();
         let attempts = Arc::new(AtomicUsize::new(0));
 
@@ -187,7 +214,7 @@ mod tests {
             .await;
 
         assert!(failed.is_err());
-        assert_eq!(cache.fetches.len(), 0);
+        assert_eq!(cache.get(&1), None);
 
         let retried = cache
             .get_or_fetch(&1, async |_| {
@@ -199,20 +226,21 @@ mod tests {
 
         assert_eq!(retried, Ok(Some(7)));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert_eq!(cache.fetches.len(), 0);
 
         Ok(())
     }
 
+    /// The price of never waiting: two callers missing one key at the same
+    /// moment each fetch it. Both see the value, and it lands once.
     #[dialog_common::test]
-    async fn it_lets_waiters_retry_a_failed_fetch() -> Result<()> {
+    async fn it_lets_concurrent_misses_each_fetch() -> Result<()> {
         let cache = Cache::<u8, u8>::new();
         let attempts = Arc::new(AtomicUsize::new(0));
 
         let fetch = async |_: &u8| {
-            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            attempts.fetch_add(1, Ordering::SeqCst);
             yield_once().await;
-            if attempt == 0 { Err("no") } else { Ok(Some(7)) }
+            Ok::<Option<u8>, &str>(Some(7))
         };
 
         let (first, second) = futures_util::future::join(
@@ -221,51 +249,10 @@ mod tests {
         )
         .await;
 
-        // Whichever of the two claimed the fetch failed; the other found the
-        // claim withdrawn and fetched successfully for itself.
-        assert!(first.is_err() || second.is_err());
-        assert_eq!(first.or(second), Ok(Some(7)));
+        assert_eq!(first, Ok(Some(7)));
+        assert_eq!(second, Ok(Some(7)));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert_eq!(cache.fetches.len(), 0);
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_opens_an_outcome_channel_only_when_a_waiter_arrives() -> Result<()> {
-        let cache = Cache::<u8, u8>::new();
-
-        let lone = cache.get_or_fetch(&1, async |_| {
-            assert!(
-                !cache.fetches.awaited(&1),
-                "a fetch nobody waits on should hold a bare claim"
-            );
-            yield_once().await;
-            Ok::<Option<u8>, &str>(Some(7))
-        });
-
-        assert_eq!(lone.await, Ok(Some(7)));
-
-        let contended = cache.get_or_fetch(&2, async |_| {
-            yield_once().await;
-            assert!(
-                cache.fetches.awaited(&2),
-                "a waiter's arrival should open the outcome channel"
-            );
-            Ok::<Option<u8>, &str>(Some(9))
-        });
-
-        let (first, second) = futures_util::future::join(
-            contended,
-            cache.get_or_fetch(&2, async |_| -> Result<Option<u8>, &str> {
-                unreachable!("the waiter must share the claimed fetch, not issue its own")
-            }),
-        )
-        .await;
-
-        assert_eq!(first, Ok(Some(9)));
-        assert_eq!(second, Ok(Some(9)));
-        assert_eq!(cache.fetches.len(), 0);
+        assert_eq!(cache.get(&1), Some(7));
 
         Ok(())
     }

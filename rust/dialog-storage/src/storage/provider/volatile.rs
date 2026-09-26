@@ -16,7 +16,7 @@
 //! ```no_run
 //! use dialog_storage::provider::Volatile;
 //! use dialog_capability::{did, Did, Subject};
-//! use dialog_effects::archive::{Archive, Catalog, Get};
+//! use dialog_effects::prelude::*;
 //! use dialog_common::Blake3Hash;
 //!
 //! # async fn example() -> anyhow::Result<()> {
@@ -24,9 +24,9 @@
 //! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from(did!("key:z6Mk..."))
-//!     .attenuate(Archive)
-//!     .attenuate(Catalog::new("index"))
-//!     .invoke(Get::new(digest));
+//!     .archive()
+//!     .catalog("index")
+//!     .get(digest);
 //!
 //! let result = effect.perform(&provider).await?;
 //! # Ok(())
@@ -150,6 +150,7 @@ mod tests {
     use base58::ToBase58;
     use dialog_capability::did;
     use dialog_common::{Blake3Hash, Buffer};
+    use dialog_effects::prelude::*;
 
     #[dialog_common::test]
     fn it_creates_new_provider() {
@@ -226,7 +227,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_supports_concurrent_access() -> anyhow::Result<()> {
         use dialog_capability::Subject;
-        use dialog_effects::archive::{Archive, Catalog, Get, Put};
+
         use std::sync::Arc;
 
         let provider = Arc::new(Volatile::new());
@@ -242,17 +243,19 @@ mod tests {
 
                 subject
                     .clone()
-                    .attenuate(Archive)
-                    .attenuate(Catalog::new("index"))
-                    .invoke(Put::new(Buffer::from(content)))
+                    .writer()
+                    .archive()
+                    .catalog("index")
+                    .put(Buffer::from(content))
                     .perform(provider.as_ref())
                     .await
                     .unwrap();
 
                 let result = subject
-                    .attenuate(Archive)
-                    .attenuate(Catalog::new("index"))
-                    .invoke(Get::new(digest))
+                    .reader()
+                    .archive()
+                    .catalog("index")
+                    .get(digest)
                     .perform(provider.as_ref())
                     .await
                     .unwrap();
