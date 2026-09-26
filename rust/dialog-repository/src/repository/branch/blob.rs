@@ -64,8 +64,8 @@
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
 use crate::{
-    Branch, CommitError, Index, NetworkedIndex, RemoteFallback, RemoteSite, Revision, Snapshot,
-    TreeReference,
+    Branch, CommitError, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite, Revision,
+    Snapshot, TreeReference,
 };
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::RevisionRecord;
@@ -239,8 +239,9 @@ where
     NetworkedIndex::new(env, source.archive().index(), remote)
 }
 
-/// The size recorded for `hash` in the line's blob index, or `None` if the
-/// current tree does not reference it.
+/// The size of the content the line's current tree vouches for under `hash`,
+/// by a blob-index entry or by an asset's `dialog.asset/size` fact, or `None`
+/// when it vouches for no such content.
 async fn index_size<Env>(
     source: SourceRef<'_>,
     hash: &Blake3Hash,
@@ -259,13 +260,35 @@ where
     };
     let store = index_store(source, env).await;
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
-    Ok(tree
-        .get_blob(&store, hash.as_bytes())
-        .await?
-        .map(|r| r.size))
+    Ok(tree.content_size(&store, hash.as_bytes()).await?)
 }
 
-/// Look up a blob's size from the blob index. Created by [`Blob::size`].
+/// Whether the line's blob index itself references `hash`. An asset's fact
+/// is not an index entry: retracting it is a fact retraction, not a
+/// [`RetractBlob`].
+async fn index_references<Env>(
+    source: SourceRef<'_>,
+    hash: &Blake3Hash,
+    env: &Env,
+) -> Result<bool, CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let Some(revision) = source.revision() else {
+        return Ok(false);
+    };
+    let store = index_store(source, env).await;
+    let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+    Ok(tree.get_blob(&store, hash.as_bytes()).await?.is_some())
+}
+
+/// Look up a blob's size from the line's tree, without fetching its bytes.
+/// Created by [`Blob::size`].
 pub struct BlobSize<'a> {
     archive: BlobArchive<'a>,
     entity: Entity,
@@ -666,10 +689,7 @@ impl RetractBlob<'_> {
     {
         let branch = self.archive.branch()?;
         let hash = blob_hash(&self.entity)?;
-        if index_size(SourceRef::from(branch), &hash, env)
-            .await?
-            .is_none()
-        {
+        if !index_references(SourceRef::from(branch), &hash, env).await? {
             return Ok(());
         }
         advance_blob_index(

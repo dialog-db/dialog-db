@@ -21,6 +21,7 @@
 
 use super::induce::induce;
 use super::{Transaction, TransactionCommit, carry_footprint, touches_rules, transaction_view};
+use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
@@ -35,6 +36,7 @@ use dialog_capability::{Did, Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
+use dialog_effects::blob::{Read as BlobRead, Write as BlobWrite};
 use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
 use dialog_query::query::Application;
 use dialog_search_tree::Cache;
@@ -287,6 +289,8 @@ impl TransactionPublish<&Branch> {
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<Get>
+            + Provider<BlobWrite>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -311,6 +315,8 @@ impl TransactionPublish<TransactionBatch> {
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<Get>
+            + Provider<BlobWrite>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -352,6 +358,8 @@ impl TransactionCommit<&Branch> {
     pub async fn perform<Env>(self, env: &Env) -> Result<TransactionBatch, CommitError>
     where
         Env: Provider<Get>
+            + Provider<BlobWrite>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -449,6 +457,8 @@ impl TransactionCommit<TransactionBatch> {
     pub async fn perform<Env>(self, env: &Env) -> Result<TransactionBatch, CommitError>
     where
         Env: Provider<Get>
+            + Provider<BlobWrite>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -538,6 +548,8 @@ async fn mint_link<Env>(
 ) -> Result<Outcome, CommitError>
 where
     Env: Provider<Get>
+        + Provider<BlobWrite>
+        + Provider<BlobRead>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>
@@ -553,11 +565,13 @@ where
     induce(source, &mut changes, transients, env).await?;
     let touches = touches_rules(&changes);
     let previous = base.clone();
+    let machinery = store_assets(source, changes.take_assets(), env).await?;
     let outcome = Mint {
         source,
         base,
         changes: changes.into_stream(),
         entries: Vec::new(),
+        machinery,
         scope: WriteScope::Application,
         allow_empty,
         canonicalize,

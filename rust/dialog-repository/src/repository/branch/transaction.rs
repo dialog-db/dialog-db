@@ -5,14 +5,16 @@ pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 
 use crate::Commit;
+use crate::repository::branch::asset::store_assets;
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot};
-use dialog_artifacts::{Changes, Instruction, Statement, Update};
+use dialog_artifacts::{AssetChange, Changes, Instruction, Statement, Update};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::{Read as BlobRead, Write as BlobWrite};
 use dialog_effects::memory::{Publish, Resolve};
 
 /// A transaction on a line of the repository.
@@ -85,11 +87,18 @@ impl<Line> Transaction<Line> {
     ///
     /// Each instruction is replayed as if it had been asserted or
     /// retracted on the transaction directly — `Assert`/`Replace`
-    /// become additive entries, `Retract` becomes a retraction entry.
+    /// become additive entries, `Retract` becomes a retraction entry —
+    /// and the batch's asset changes are staged on the transaction.
     /// Useful for callers that build a [`Changes`] independently
     /// (e.g. a reactor accumulating effect outputs across rounds) and
     /// need to merge it into a running transaction.
-    pub fn integrate(mut self, changes: Changes) -> Self {
+    pub fn integrate(mut self, mut changes: Changes) -> Self {
+        for change in changes.take_assets() {
+            match change {
+                AssetChange::Import(asset) => self.changes.import(asset),
+                AssetChange::Discard(asset) => self.changes.discard(asset),
+            }
+        }
         for instruction in changes.into_instructions() {
             match instruction {
                 Instruction::Assert(a) => {
@@ -231,6 +240,8 @@ impl TransactionCommit<&Snapshot> {
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<Get>
+            + Provider<BlobWrite>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -256,8 +267,10 @@ impl TransactionCommit<&Snapshot> {
 
         let previous = snapshot.revision();
         let touches_rules = touches_rules(&changes);
+        let machinery =
+            store_assets(SourceRef::Snapshot(snapshot), changes.take_assets(), env).await?;
 
-        let mut commit = Commit::new(snapshot, changes.into_stream());
+        let mut commit = Commit::new(snapshot, changes.into_stream()).with_machinery(machinery);
         if self.allow_empty {
             commit = commit.allow_empty();
         }
@@ -327,6 +340,8 @@ impl Branch {
     pub async fn induce<Env>(&self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<Get>
+            + Provider<BlobWrite>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>

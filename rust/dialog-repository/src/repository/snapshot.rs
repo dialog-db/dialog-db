@@ -773,7 +773,7 @@ impl SnapshotExport {
                 let hydrate = &hydrate;
                 let subject = subject.clone();
                 async move {
-                    let Some(record) = tree.get_blob(index, digest.as_bytes()).await? else {
+                    let Some(size) = tree.content_size(index, digest.as_bytes()).await? else {
                         return Ok((digest, None));
                     };
                     let reader = subject
@@ -797,7 +797,6 @@ impl SnapshotExport {
                             // An attempt is the whole transfer, since
                             // the read can fail at any point.
                             let (digest, subject) = (&digest, &subject);
-                            let size = record.size;
                             remote
                                 .reach(|address| async move {
                                     let mut source = address
@@ -842,7 +841,7 @@ impl SnapshotExport {
                         (reader, _) => reader,
                     };
                     match reader {
-                        Ok(chunks) => Ok((digest, Some((record.size, chunks)))),
+                        Ok(chunks) => Ok((digest, Some((size, chunks)))),
                         Err(BlobError::NotFound(_)) => Ok((digest, None)),
                         Err(error) => Err(SnapshotError::from(error)),
                     }

@@ -26,6 +26,9 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+mod asset;
+pub use asset::*;
+
 mod blob;
 pub use blob::*;
 
