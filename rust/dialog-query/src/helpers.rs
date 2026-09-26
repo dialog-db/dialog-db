@@ -35,6 +35,7 @@ use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::{Read as BlobRead, Write as BlobWrite};
 use dialog_effects::memory::{List, Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
@@ -611,6 +612,8 @@ impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
 impl<Env> BenchEnv<Env>
 where
     Env: Provider<Get>
+        + Provider<BlobWrite>
+        + Provider<BlobRead>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>
@@ -1718,6 +1721,8 @@ mod test {
     async fn replay_log_reporting<Env>(env: BenchEnv<Env>, path: &str, limit: usize) -> Result<()>
     where
         Env: Provider<Get>
+            + Provider<BlobWrite>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -1841,6 +1846,8 @@ mod test {
     ) -> Result<()>
     where
         Env: Provider<Get>
+            + Provider<BlobWrite>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -1973,6 +1980,8 @@ mod test {
     ) -> Result<()>
     where
         Env: Provider<Get>
+            + Provider<BlobWrite>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>

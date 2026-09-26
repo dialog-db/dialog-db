@@ -8,7 +8,7 @@ use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{
     Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
 };
-use dialog_artifacts::tree::WriteScope;
+use dialog_artifacts::tree::{Stamp, WriteScope};
 use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, State};
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -16,7 +16,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
-use futures_util::Stream;
+use futures_util::{Stream, stream};
 
 /// Command that commits a stream of changes (assert/retract) to a branch
 /// or a snapshot.
@@ -31,6 +31,7 @@ pub struct Commit<'a, Changes> {
     scope: WriteScope,
     entries: Vec<(Key, State<Datum>)>,
     merge: bool,
+    machinery: Vec<Instruction>,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -43,6 +44,7 @@ impl<'a, Changes> Commit<'a, Changes> {
             scope: WriteScope::Application,
             entries: Vec::new(),
             merge: false,
+            machinery: Vec::new(),
         }
     }
 
@@ -61,6 +63,14 @@ impl<'a, Changes> Commit<'a, Changes> {
     /// stream is all no-ops.
     pub(crate) fn with_entries(mut self, entries: Vec<(Key, State<Datum>)>) -> Self {
         self.entries = entries;
+        self
+    }
+
+    /// Append facts the commit derives itself, such as an asset's
+    /// `dialog.asset/size`, applied under machinery scope after the change
+    /// stream in the same batch, so they publish in the same revision.
+    pub(crate) fn with_machinery(mut self, machinery: Vec<Instruction>) -> Self {
+        self.machinery = machinery;
         self
     }
 
@@ -246,6 +256,7 @@ where
             base: base_revision,
             changes: self.changes,
             entries: self.entries,
+            machinery: self.machinery,
             scope: self.scope,
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
@@ -340,6 +351,7 @@ where
             base: Some(base.clone()),
             changes: self.changes,
             entries: self.entries,
+            machinery: self.machinery,
             scope: self.scope,
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
@@ -416,6 +428,9 @@ pub(crate) struct Mint<'a, Changes> {
     /// Pre-built machinery entries riding the same batch. See
     /// [`Commit::with_entries`].
     pub(crate) entries: Vec<(Key, State<Datum>)>,
+    /// Facts the commit derives, applied under machinery scope after the
+    /// change stream. See [`Commit::with_machinery`].
+    pub(crate) machinery: Vec<Instruction>,
     /// Which attributes the stream may write. See [`Commit::machinery`].
     pub(crate) scope: WriteScope,
     /// Mint even when the batch changes nothing. See
@@ -579,6 +594,20 @@ where
                 )
                 .await?
             }
+        };
+        let batch = if self.machinery.is_empty() {
+            batch
+        } else {
+            // Boxed: the second pass over the write path is a large future.
+            // It writes under the version the first pass just used, so it
+            // amends that version.
+            Box::pin(batch.then_apply(
+                &store,
+                Stamp::Amend(version),
+                stream::iter(self.machinery),
+                WriteScope::Machinery,
+            ))
+            .await?
         };
         // Machinery entries count as changes: a commit carrying only a
         // blob-index edit still advances the head.

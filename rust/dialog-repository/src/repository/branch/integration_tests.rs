@@ -24,6 +24,8 @@ use dialog_artifacts::{
     Artifact, ArtifactSelector, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State,
     Value,
 };
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_artifacts::{Asset, Changes, Entity, Update as _};
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
@@ -41,7 +43,7 @@ use dialog_storage::NativeTempSpace;
 // The aborted-push rig and its closure audit are native-only, like the
 // tests that use them.
 #[cfg(not(feature = "web-integration-tests"))]
-use crate::{ConnectedReplica, RemoteSite};
+use crate::{CommitError, ConnectedReplica, RemoteSite};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_artifacts::{ShipmentRef, shipment_ref};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -506,6 +508,177 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
     }
     assert_eq!(out, payload);
 
+    Ok(())
+}
+
+/// An imported asset replicates through its fact: push ships the bytes with
+/// the revision that records the asset, and a replica that pulls reads the
+/// fact pointing at the asset and hydrates the bytes through its entity.
+// Native only, feature-gated: same reasoning as
+// `it_ships_blobs_on_push_and_hydrates_on_read` above.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()> {
+    // Site A: import content and point a fact at it in one transaction, push.
+    let storage_a = test_owned(Storage::temp()).await;
+    let profile_a = open_peer(
+        storage_a.clone(),
+        Location::profile(unique_name("asset-ship-a")),
+    )
+    .await?;
+    let operator_a = profile_a
+        .session(b"test")
+        .space(profile_a.state())
+        .allow(Subject::any())
+        .await?;
+    let repo_a = profile_a
+        .space(unique_name("asset-ship"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .secrets()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile_a)
+        .await?;
+    let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    let payload: Vec<u8> = (0..30_000u32).map(|i| (i % 211) as u8).collect();
+    let chunks: Vec<Result<Vec<u8>, BlobError>> =
+        payload.chunks(4096).map(|c| Ok(c.to_vec())).collect();
+    let asset = branch_a
+        .asset(stream::iter(chunks))
+        .import()
+        .perform(&operator_a)
+        .await?;
+    let content = asset.entity()?;
+    let attachment = "doc/attachment".parse()?;
+    let document: Entity = "doc:1".parse()?;
+    let mut facts = Changes::new();
+    facts.associate_unique(attachment, document.clone(), Value::Entity(content.clone()));
+    branch_a
+        .transaction()
+        .assert(asset.clone())
+        .assert(facts)
+        .commit()
+        .publish()
+        .perform(&operator_a)
+        .await?;
+    // Bytes imported but never recorded: they stay on this replica.
+    let unrecorded = branch_a
+        .asset(stream::iter(vec![Ok(b"never recorded".to_vec())]))
+        .import()
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // Site B: same remote subject, its own store. Pull, read the fact, and
+    // hydrate the content through the entity it names.
+    let storage_b = test_owned(Storage::temp()).await;
+    let profile_b = open_peer(
+        storage_b.clone(),
+        Location::profile(unique_name("asset-ship-b")),
+    )
+    .await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .space(profile_b.state())
+        .allow(Subject::any())
+        .await?;
+    let repo_b = profile_b
+        .space(unique_name("asset-ship-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .secrets()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile_b)
+        .await?;
+    let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+    branch_b.pull().perform(&operator_b).await?;
+
+    let facts: Vec<_> = branch_b
+        .claims()
+        .select(ArtifactSelector::new().of(document))
+        .to_owned()
+        .perform(&operator_b)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(facts.len(), 1);
+    let Value::Entity(named) = &facts[0].is else {
+        panic!("the attachment fact names an entity: {:?}", facts[0].is);
+    };
+    assert_eq!(named, &content);
+
+    // Before hydrating anything: the pulled asset is reachable by reference,
+    // so re-asserting it with a fact pointing at it commits, while a
+    // misstated size and bytes this line never recorded are refused.
+    let mut pointer = Changes::new();
+    pointer.associate_unique(
+        "doc/cover".parse()?,
+        "doc:2".parse::<Entity>()?,
+        Value::Entity(content.clone()),
+    );
+    branch_b
+        .transaction()
+        .assert(Asset::stored(*asset.hash(), asset.size()))
+        .assert(pointer)
+        .commit()
+        .publish()
+        .perform(&operator_b)
+        .await?;
+    let misstated = branch_b
+        .transaction()
+        .assert(Asset::stored(*asset.hash(), asset.size() + 1))
+        .commit()
+        .publish()
+        .perform(&operator_b)
+        .await;
+    assert!(misstated.is_err(), "a misstated size is refused");
+    let never_recorded = branch_b
+        .transaction()
+        .assert(unrecorded)
+        .commit()
+        .publish()
+        .perform(&operator_b)
+        .await;
+    assert!(
+        matches!(
+            never_recorded,
+            Err(CommitError::Blob(BlobError::NotFound(_)))
+        ),
+        "bytes this line never recorded are unreachable: {never_recorded:?}"
+    );
+
+    let mut reader = Blob::from(named.clone())
+        .read((&branch_b).into())
+        .perform(&operator_b)
+        .await?;
+    let mut out = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        out.extend(chunk);
+    }
+    assert_eq!(out, payload);
     Ok(())
 }
 
