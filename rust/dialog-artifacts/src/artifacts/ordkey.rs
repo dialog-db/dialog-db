@@ -118,6 +118,15 @@ pub fn decode_bool(bytes: &[u8]) -> Option<(bool, &[u8])> {
 /// a lone `0x00` terminates. Byte order of the encoding equals byte order of
 /// the input, and no encoding is a prefix of another with different content.
 pub fn encode_bytes(value: &[u8], out: &mut Vec<u8>) {
+    // Entity URIs, attribute names and most values hold no zero byte, so
+    // they copy through whole; only a string that has one is escaped byte
+    // by byte.
+    if !value.contains(&TERMINATOR) {
+        out.reserve(value.len() + 1);
+        out.extend_from_slice(value);
+        out.push(TERMINATOR);
+        return;
+    }
     for &byte in value {
         out.push(byte);
         if byte == TERMINATOR {

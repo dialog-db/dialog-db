@@ -186,7 +186,9 @@ impl KeyParts {
             }
         };
         let (value_type, value) = value.unwrap_or_else(|| {
-            let mut payload = Vec::new();
+            // The filler plus its terminator; the filler has no zero bytes
+            // to escape.
+            let mut payload = Vec::with_capacity(if upper { MAX_FILLER + 1 } else { 1 });
             if upper {
                 // A parseable payload dominating every real value of the
                 // maximum type: `MAX_FILLER_BYTE` exceeds every UTF-8 byte,
