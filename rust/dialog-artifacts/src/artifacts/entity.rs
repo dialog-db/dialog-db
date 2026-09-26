@@ -8,6 +8,7 @@ use std::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     ops::Deref,
     str::FromStr,
+    sync::Arc,
 };
 
 use base58::{FromBase58, ToBase58};
@@ -17,16 +18,28 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, Uri};
 
 /// An [`Entity`] is the subject part of a semantic triple. An [`Entity`] can
 /// be embodied by any valid [`Uri`].
+///
+/// An entity is immutable, and is cloned into every row, claim and key
+/// that names it, so its URI and key bytes are shared rather than copied
+/// by each clone.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(into = "String", try_from = "String")]
-pub struct Entity(Uri, [u8; ENTITY_LENGTH]);
+pub struct Entity(Arc<EntityParts>);
+
+/// What an [`Entity`] shares between its clones: its URI and the bytes it
+/// takes in an index key. Ordered and hashed URI first, then key bytes.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct EntityParts {
+    uri: Uri,
+    key: [u8; ENTITY_LENGTH],
+}
 
 /// Serializes an entity to UTF-8 format for CSV export.
 pub(crate) fn to_utf8<S>(entity: &Entity, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    entity.0.serialize(serializer)
+    entity.0.uri.serialize(serializer)
 }
 
 /// Deserializes an entity from UTF-8 format for CSV import.
@@ -49,7 +62,7 @@ impl Deref for Entity {
     type Target = Uri;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.0.uri
     }
 }
 
@@ -57,8 +70,8 @@ impl TryFrom<Uri> for Entity {
     type Error = DialogArtifactsError;
 
     fn try_from(value: Uri) -> Result<Self, Self::Error> {
-        let bytes = value.key_bytes()?;
-        Ok(Self(value, bytes))
+        let key = value.key_bytes()?;
+        Ok(Self(Arc::new(EntityParts { uri: value, key })))
     }
 }
 
@@ -129,7 +142,7 @@ impl Entity {
     /// Get the raw byte representation of the [`Entity`] as it should be
     /// formatted for use in an index key.
     pub fn key_bytes(&self) -> &[u8; ENTITY_LENGTH] {
-        &self.1
+        &self.0.key
     }
 
     /// The canonical entity reference for a stored blob:
@@ -149,7 +162,7 @@ impl Entity {
 
 impl Debug for Entity {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.write_str(&self.0.to_string())
+        f.write_str(&self.0.uri.to_string())
     }
 }
 
