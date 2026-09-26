@@ -13,6 +13,7 @@
 //! type is carried at runtime rather than in the Rust type.
 
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Environment;
@@ -56,7 +57,10 @@ pub enum Term<T: Typed> {
     Variable {
         /// Optional variable name for join across conjuncts.
         /// `None` = anonymous wildcard (blank).
-        name: Option<String>,
+        ///
+        /// Shared, not owned: a plan clones its terms for every row it
+        /// evaluates, and a name never changes once given.
+        name: Option<Arc<str>>,
         /// Type descriptor. For concrete types (e.g. `Text`) this is a ZST.
         /// For `Any` this carries a runtime `Option<Type>`.
         descriptor: <T as Typed>::Descriptor,
@@ -64,6 +68,44 @@ pub enum Term<T: Typed> {
 
     /// A concrete value. All constants are stored as [`Value`] regardless of `T`.
     Constant(Value),
+}
+
+/// Anything a variable can be named by. Names are shared
+/// ([`Arc<str>`]), so passing one a term already holds costs a reference
+/// count, while strings and string slices are copied in once.
+pub trait VariableName {
+    /// The shared name.
+    fn into_name(self) -> Arc<str>;
+}
+
+impl VariableName for Arc<str> {
+    fn into_name(self) -> Arc<str> {
+        self
+    }
+}
+
+impl VariableName for &Arc<str> {
+    fn into_name(self) -> Arc<str> {
+        self.clone()
+    }
+}
+
+impl VariableName for &str {
+    fn into_name(self) -> Arc<str> {
+        Arc::from(self)
+    }
+}
+
+impl VariableName for String {
+    fn into_name(self) -> Arc<str> {
+        Arc::from(self)
+    }
+}
+
+impl VariableName for &String {
+    fn into_name(self) -> Arc<str> {
+        Arc::from(self.as_str())
+    }
 }
 
 /// Core functionality for `Term<T>` where `T` has a known static type.
@@ -137,9 +179,9 @@ impl<T: Typed> Term<T> {
     ///
     /// The descriptor is default-constructed: for concrete types this is a
     /// ZST carrying the static type, for `Any` it is `Any(None)`.
-    pub fn var<N: Into<String>>(name: N) -> Self {
+    pub fn var<N: VariableName>(name: N) -> Self {
         Term::Variable {
-            name: Some(name.into()),
+            name: Some(name.into_name()),
             descriptor: <T as Typed>::Descriptor::default(),
         }
     }
@@ -272,7 +314,7 @@ impl<T: Typed> Term<T> {
     /// Only named variables are added; constants and blanks are ignored.
     pub fn bind(&self, env: &mut Environment) {
         if let Term::Variable { name: Some(n), .. } = self {
-            env.add(n.clone());
+            env.add(n.as_ref());
         }
     }
 
@@ -552,9 +594,9 @@ impl Term<Any> {
     /// Use `Term::<Any>::var("x")` for an untyped variable
     /// (inherited from `impl<T: Typed> Term<T>`). Use this method
     /// when you need a runtime type kind.
-    pub fn typed_var(name: impl Into<String>, kind: type_system::Type) -> Self {
+    pub fn typed_var(name: impl VariableName, kind: type_system::Type) -> Self {
         Term::Variable {
-            name: Some(name.into()),
+            name: Some(name.into_name()),
             descriptor: Any(Some(kind)),
         }
     }
@@ -690,7 +732,7 @@ impl<T: Typed> serde::Serialize for Term<T> {
                 name, descriptor, ..
             } => TermRepr::Variable {
                 var: VarInfo {
-                    name: name.clone(),
+                    name: name.as_deref().map(String::from),
                     content_type: descriptor.kind(),
                 },
             },
@@ -711,7 +753,7 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
                 let var: VarInfo =
                     serde_json::from_value(map["?"].clone()).map_err(DeserializeError::custom)?;
                 Ok(Term::Variable {
-                    name: var.name,
+                    name: var.name.map(Arc::from),
                     descriptor: <T as Typed>::Descriptor::from_kind(var.content_type),
                 })
             }

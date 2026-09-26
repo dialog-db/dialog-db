@@ -412,7 +412,7 @@ impl AttributeDescriptor {
         let of = match parameters.get("this").cloned() {
             Some(Term::Variable {
                 name: Some(name), ..
-            }) => Term::var(name),
+            }) => Term::var(name.clone()),
             Some(Term::Variable { name: None, .. }) => Term::blank(),
             Some(Term::Constant(value)) => Term::Constant(value),
             None => Term::blank(),
@@ -428,7 +428,7 @@ impl AttributeDescriptor {
         let cause = match parameters.get("cause").cloned() {
             Some(Term::Variable {
                 name: Some(name), ..
-            }) => Term::var(name),
+            }) => Term::var(name.clone()),
             Some(Term::Variable { name: None, .. }) => Term::blank(),
             Some(Term::Constant(value)) => Term::Constant(value),
             None => Term::blank(),
