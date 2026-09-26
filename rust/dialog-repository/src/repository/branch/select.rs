@@ -1,7 +1,9 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactView, DialogArtifactsError};
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, DialogArtifactsError,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -115,6 +117,42 @@ impl Select<'_> {
             + ConditionalSync
             + 's,
     {
+        let tree = self.open(&store).await?;
+        // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
+        // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
+        // scans agree on key order — that adjacency invariant is what
+        // the cardinality-one sliding window relies on.
+        Ok(tree.scan(store, self.source.spill_cache(), self.selector))
+    }
+
+    /// [`execute`](Self::execute), with the scan stream built directly in
+    /// its box. The stream is several KiB of state; returned by value it
+    /// was copied through each future and result it passed on the way to
+    /// the box a query environment keeps it in.
+    pub(crate) async fn execute_boxed<'s, S>(
+        self,
+        store: S,
+    ) -> Result<ArtifactStream<'s>, DialogSearchTreeError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's,
+    {
+        let tree = self.open(&store).await?;
+        Ok(Box::pin(tree.scan(
+            store,
+            self.source.spill_cache(),
+            self.selector,
+        )))
+    }
+
+    /// This line's tree, its root checked present.
+    async fn open<S>(&self, store: &S) -> Result<Index, DialogSearchTreeError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
         // Tree hydration is lazy (nodes load on demand during the scan),
         // but unreachable branches should fail here rather than midway
         // through the stream, so probe the root block eagerly. Through a
@@ -149,13 +187,10 @@ impl Select<'_> {
                 })?;
         }
 
-        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache);
-
-        // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
-        // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
-        // scans agree on key order — that adjacency invariant is what
-        // the cardinality-one sliding window relies on.
-        Ok(tree.scan(store, self.source.spill_cache(), self.selector))
+        Ok(Index::from_hash_with_cache(
+            NodeHash::from(tree_hash),
+            node_cache,
+        ))
     }
 
     /// Estimate this selector's range size, picking a store the same way
