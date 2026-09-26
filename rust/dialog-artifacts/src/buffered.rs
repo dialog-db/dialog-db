@@ -463,6 +463,45 @@ impl BufferedBatch {
         })
     }
 
+    /// Applies a further instruction stream to this still open batch, under
+    /// its own `scope`, with the same semantics and version as the first.
+    ///
+    /// A commit uses it to write the facts it derives itself, such as an
+    /// asset's `dialog.asset/size`, under
+    /// [`Machinery`](WriteScope::Machinery) scope in the same batch as the
+    /// application's own instructions, which stay under
+    /// [`Application`](WriteScope::Application) scope. The batch counts as
+    /// changed when either stream changed the indexes.
+    pub async fn then_apply<S, I>(
+        mut self,
+        store: &S,
+        stamp: Stamp,
+        instructions: I,
+        scope: WriteScope,
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: ArchiveReader + Clone,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
+        // Read through what the batch staged so far, as its first pass did.
+        let storage = DeltaOverlay::new(&self.staged, store);
+        let (tree, changed) = write_instructions(
+            self.tree,
+            &storage,
+            &mut self.staged,
+            stamp,
+            &self.manifest,
+            instructions,
+            scope,
+        )
+        .await?;
+        Ok(Self {
+            tree,
+            changed: self.changed || changed,
+            ..self
+        })
+    }
+
     /// Whether the applied instructions changed the indexes at all.
     ///
     /// A batch made entirely of no-ops (re-asserting values already in place,
@@ -645,8 +684,13 @@ mod tests {
     use super::{BufferedBatch, WriteScope, apply_buffered};
     use crate::history::{Edition, Origin, Version};
     use crate::key::FromKey as _;
+    use crate::tree::Stamp;
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
-    use crate::{Artifact, AttributeKey, Datum, EntityKey, Instruction, State, Value};
+    use crate::{
+        Artifact, Asset, AttributeKey, BlobChange, BlobIndexExt as _, Datum, DialogArtifactsError,
+        EntityKey, Instruction, State, Value, blob_changes,
+    };
+    use futures_util::TryStreamExt as _;
 
     fn store() -> MemoryBlocks {
         MemoryBlocks::new()
@@ -1034,6 +1078,74 @@ mod tests {
                 .is_empty(),
             "the batch's data survives alongside the record"
         );
+        Ok(())
+    }
+
+    fn asset_version() -> Version {
+        Version::new(Origin::from([3u8; 32]), Edition::new(0))
+    }
+
+    /// A commit writes the facts it derives under machinery scope after the
+    /// application's own instructions, in one batch. An asset's fact then
+    /// vouches for its content: the tree answers its size, and the
+    /// differential names its bytes for push to ship.
+    #[dialog_common::test]
+    async fn it_records_an_asset_fact_under_machinery_scope() -> Result<()> {
+        let store = store();
+        let mut delta = ArchiveDelta::zero();
+        let asset = Asset::new(b"asset bytes".to_vec());
+
+        let batch = BufferedBatch::apply(
+            &ArtifactTree::empty(),
+            &store,
+            Some(asset_version()),
+            stream::iter(vec![assert_of("user:alice", "Alice")]),
+            WriteScope::Application,
+        )
+        .await?;
+        let batch = batch
+            .then_apply(
+                &store,
+                Stamp::Amend(asset_version()),
+                stream::iter(vec![Instruction::Assert(asset.fact()?)]),
+                WriteScope::Machinery,
+            )
+            .await?;
+        assert!(batch.changed());
+        let tree = batch.seal(&store, &mut delta, false).await?;
+        delta.flush_into(&store);
+
+        assert_eq!(
+            tree.content_size(&store, asset.hash()).await?,
+            Some(asset.size())
+        );
+        assert_eq!(tree.content_size(&store, &[0u8; 32]).await?, None);
+
+        let changes: Vec<_> = blob_changes(ArtifactTree::empty(), tree, store.clone())
+            .try_collect()
+            .await?;
+        assert_eq!(changes, vec![BlobChange::Added(*asset.hash())]);
+        Ok(())
+    }
+
+    /// Application instructions cannot write an asset's fact, so its size
+    /// is always the one a commit derived from the bytes.
+    #[dialog_common::test]
+    async fn it_refuses_an_asset_fact_from_an_application() -> Result<()> {
+        let store = store();
+        let asset = Asset::new(b"asset bytes".to_vec());
+        let refused = BufferedBatch::apply(
+            &ArtifactTree::empty(),
+            &store,
+            Some(asset_version()),
+            stream::iter(vec![Instruction::Assert(asset.fact()?)]),
+            WriteScope::Application,
+        )
+        .await;
+        assert!(matches!(
+            refused,
+            Err(DialogArtifactsError::ReservedAttribute(_))
+        ));
         Ok(())
     }
 }

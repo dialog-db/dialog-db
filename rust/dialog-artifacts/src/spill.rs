@@ -12,6 +12,7 @@
 
 use crate::ArchiveReader;
 use std::collections::HashSet;
+use std::str::from_utf8;
 
 use async_stream::try_stream;
 use dialog_capability::Provider;
@@ -20,18 +21,19 @@ use dialog_search_tree::{Change, LoadBlock, TreeDifference};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
+use crate::key::varkey::{ValueRef, parse_key_ref};
 use crate::{
-    BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum, DialogArtifactsError, Key, State,
-    tree::ArtifactTree,
+    ASSET_SIZE, BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum, DialogArtifactsError,
+    ENTITY_KEY_TAG, Entity, Key, State, Value, ValueDataType, decode_value, tree::ArtifactTree,
 };
 
 /// One content-addressed block a push must ship to the remote before
 /// publishing: a blob-index change or a spilled value block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShipmentRef {
-    /// A blob newly referenced in the target tree; `size` is its index
-    /// record's byte count, carried here so shipping needs no re-read of
-    /// the record — the entry that named the blob already held it.
+    /// A blob newly referenced in the target tree, by a blob-index entry or
+    /// by an asset's `dialog.asset/size` fact; `size` is the byte count that
+    /// entry carries, so shipping needs no re-read of it.
     BlobAdded {
         /// The blob's content hash.
         hash: Blake3Hash,
@@ -83,6 +85,17 @@ pub fn shipment_ref(
         });
     }
 
+    // An asset's fact names bytes the blob store holds, exactly as a
+    // blob-index entry does. Only its entity-ordered entry is classified, so
+    // the three orderings of one fact surface the asset once.
+    if tag == ENTITY_KEY_TAG
+        && !removed
+        && matches!(value, State::Added(_))
+        && let Some(asset) = asset_ref(key)
+    {
+        return Ok(Some(asset));
+    }
+
     // Every ordering that embeds a value in its key can spill it, and each
     // spilling key names the same content-addressed block. Duplicates are
     // dropped by the `seen` set in `shipment_refs` rather than by counting
@@ -115,10 +128,33 @@ pub fn shipment_ref(
     Ok(Some(ShipmentRef::SpilledValue(reference)))
 }
 
+/// The asset an entity-ordered key records, when it is an asset's
+/// `dialog.asset/size` fact on an `asset:` entity with an integer size.
+/// Anything else, a malformed asset fact included, names no asset.
+fn asset_ref(key: &Key) -> Option<ShipmentRef> {
+    let parts = parse_key_ref(key.as_ref())?;
+    if parts.attribute.as_ref() != ASSET_SIZE.as_bytes()
+        || parts.value_type != ValueDataType::UnsignedInt
+    {
+        return None;
+    }
+    let ValueRef::Inline(payload) = parts.value else {
+        return None;
+    };
+    let (Value::UnsignedInt(size), _) = decode_value(ValueDataType::UnsignedInt, payload)? else {
+        return None;
+    };
+    let entity: Entity = from_utf8(&parts.entity).ok()?.parse().ok()?;
+    Some(ShipmentRef::BlobAdded {
+        hash: entity.blob_hash()?,
+        size: u64::try_from(size).ok()?,
+    })
+}
+
 /// Stream everything a push must ship from ONE walk of an already-computed
-/// tree differential: blob-index changes (`BLOB` tag) and newly-referenced
-/// spilled value blocks (any addition whose key carries a reference,
-/// deduplicated). Push runs the node-level differential anyway
+/// tree differential: blob-index changes (`BLOB` tag), assets' facts, and
+/// newly-referenced spilled value blocks (any addition whose key carries a
+/// reference, deduplicated). Push runs the node-level differential anyway
 /// to upload novel nodes; draining this from the same [`TreeDifference`]
 /// means the changed paths are read once instead of once per concern.
 ///
@@ -134,6 +170,7 @@ where
         let changes = difference.changes();
         tokio::pin!(changes);
         let mut seen: HashSet<Blake3Hash> = HashSet::new();
+        let mut blobs: HashSet<Blake3Hash> = HashSet::new();
         for await change in changes {
             let (entry, removed) = match change? {
                 Change::Add(entry) => (entry, false),
@@ -142,10 +179,14 @@ where
             let Some(reference) = shipment_ref(&entry.key, &entry.value, removed)? else {
                 continue;
             };
-            // A block shared by many facts surfaces once.
-            if let ShipmentRef::SpilledValue(spilled) = &reference
-                && !seen.insert(*spilled)
-            {
+            // A block shared by many facts surfaces once, and so does a blob
+            // that both a blob-index entry and an asset's fact name.
+            let first = match &reference {
+                ShipmentRef::SpilledValue(spilled) => seen.insert(*spilled),
+                ShipmentRef::BlobAdded { hash, .. } => blobs.insert(*hash),
+                ShipmentRef::BlobRemoved(_) => true,
+            };
+            if !first {
                 continue;
             }
             yield reference;

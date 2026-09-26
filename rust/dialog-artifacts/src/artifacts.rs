@@ -24,8 +24,13 @@ pub use query::{
     Speculation,
 };
 
+mod asset;
+pub use asset::*;
+
 mod update;
-pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort_key};
+pub use update::{
+    AssetChange, Change, ChangeStream, Changes, SortKey, Statement, Update, sort_key,
+};
 
 mod attribute;
 pub use attribute::*;
