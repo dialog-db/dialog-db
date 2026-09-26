@@ -60,7 +60,11 @@ impl DialogRepo<Peer<VolatileSpace, Session>> {
             Location::profile(unique_name("baseline")),
         )
         .await?;
-        let operator = profile.session(b"baseline").allow(Subject::any()).await?;
+        let operator = profile
+            .session(b"baseline")
+            .mount(profile.state())
+            .allow(Subject::any())
+            .await?;
         Self::assemble(operator, &profile).await
     }
 }
@@ -75,7 +79,11 @@ impl DialogRepo<Peer<NativeTempSpace, Session>> {
             Location::profile(unique_name("baseline")),
         )
         .await?;
-        let operator = profile.session(b"baseline").allow(Subject::any()).await?;
+        let operator = profile
+            .session(b"baseline")
+            .mount(profile.state())
+            .allow(Subject::any())
+            .await?;
         Self::assemble(operator, &profile).await
     }
 }

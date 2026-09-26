@@ -1,6 +1,6 @@
 use dialog_capability::{Did, Subject};
 
-use crate::{Cell, LoadBranch, OpenBranch, Revision, Tracking};
+use crate::{Branch, Cell, LoadBranch, OpenBranch, Revision, Tracking};
 use dialog_effects::memory::prelude::SpaceScope;
 
 /// A reference to a named branch within a repository's memory.
@@ -9,6 +9,14 @@ use dialog_effects::memory::prelude::SpaceScope;
 /// Use `.open()` or `.load()` to create a command, then `.perform(&env)`.
 #[derive(Debug, Clone)]
 pub struct BranchReference(SpaceScope);
+
+/// The branch an opened [`Branch`] is: to hand on, so whoever it is
+/// handed to opens the same branch.
+impl From<&Branch> for BranchReference {
+    fn from(branch: &Branch) -> Self {
+        branch.reference.clone()
+    }
+}
 
 impl From<SpaceScope> for BranchReference {
     fn from(space: SpaceScope) -> Self {

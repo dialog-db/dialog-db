@@ -14,7 +14,11 @@ mod tests {
             .await
             .unwrap();
 
-        let operator = profile.session(b"test").await.unwrap();
+        let operator = profile
+            .session(b"test")
+            .mount(profile.state())
+            .await
+            .unwrap();
 
         assert!(!operator.did().to_string().is_empty());
     }
@@ -25,13 +29,21 @@ mod tests {
         let profile1 = open_peer(storage1.clone(), Location::profile(unique_name("ctx1")))
             .await
             .unwrap();
-        let op1 = profile1.session(b"context-a").await.unwrap();
+        let op1 = profile1
+            .session(b"context-a")
+            .mount(profile1.state())
+            .await
+            .unwrap();
 
         let storage2 = test_storage().await;
         let profile2 = open_peer(storage2.clone(), Location::profile(unique_name("ctx2")))
             .await
             .unwrap();
-        let op2 = profile2.session(b"context-b").await.unwrap();
+        let op2 = profile2
+            .session(b"context-b")
+            .mount(profile2.state())
+            .await
+            .unwrap();
 
         assert_ne!(op1.did(), op2.did());
     }
@@ -50,7 +62,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let operator = profile.session(b"alice").await.unwrap();
+            let operator = profile
+                .session(b"alice")
+                .mount(profile.state())
+                .await
+                .unwrap();
 
             let result = profile
                 .access()
@@ -79,7 +95,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let operator = profile.session(b"alice").await.unwrap();
+            let operator = profile
+                .session(b"alice")
+                .mount(profile.state())
+                .await
+                .unwrap();
 
             let result = profile
                 .access()
@@ -105,6 +125,7 @@ mod tests {
 
             let operator = profile
                 .session(b"alice")
+                .mount(profile.state())
                 .allow(Subject::any().reader().archive().catalog("index"))
                 .await
                 .unwrap();
@@ -138,6 +159,7 @@ mod tests {
 
             let operator = profile
                 .session(b"alice")
+                .mount(profile.state())
                 .allow(Subject::any().reader().archive().catalog("index"))
                 .await
                 .unwrap();
@@ -168,6 +190,7 @@ mod tests {
             use dialog_effects::storage as fx_storage;
             let operator = profile
                 .session(b"admin")
+                .mount(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -194,7 +217,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let operator = profile.session(b"alice").await.unwrap();
+            let operator = profile
+                .session(b"alice")
+                .mount(profile.state())
+                .await
+                .unwrap();
 
             let result = profile
                 .access()
@@ -221,6 +248,7 @@ mod tests {
 
             let operator = profile
                 .session(b"alice")
+                .mount(profile.state())
                 .allow(Subject::any().reader().archive().catalog("index"))
                 .await
                 .unwrap();
@@ -270,7 +298,11 @@ mod tests {
             )
             .await
             .unwrap();
-            let operator = profile.session(b"test").await.unwrap();
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .await
+                .unwrap();
             (operator, profile)
         }
 
@@ -713,6 +745,7 @@ mod tests {
             .unwrap();
             let operator = profile
                 .session(b"test")
+                .mount(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -746,6 +779,7 @@ mod tests {
                 .unwrap();
             let operator = profile
                 .session(b"test")
+                .mount(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -788,6 +822,7 @@ mod tests {
             .unwrap();
             let operator = profile
                 .session(b"test")
+                .mount(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -840,7 +875,11 @@ mod tests {
                 Location::profile(unique_name("s3-mem-pub")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -888,7 +927,11 @@ mod tests {
                 Location::profile(unique_name("s3-mem-upd")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -945,7 +988,11 @@ mod tests {
                 Location::profile(unique_name("s3-mem-cas")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -1012,7 +1059,11 @@ mod tests {
                 Location::profile(unique_name("s3-mem-ret")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -1087,7 +1138,11 @@ mod tests {
                 Location::profile(unique_name("ucan-get-miss")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = ucan_address(&s3);
 
@@ -1112,7 +1167,11 @@ mod tests {
                 Location::profile(unique_name("ucan-put-get")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = ucan_address(&s3);
             let content = b"hello from ucan".to_vec();
@@ -1150,7 +1209,11 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-miss")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = ucan_address(&s3);
 
@@ -1176,7 +1239,11 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-pub")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = ucan_address(&s3);
             let subject = operator.home().clone();
@@ -1216,7 +1283,11 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-upd")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = ucan_address(&s3);
             let subject = operator.home().clone();
@@ -1265,7 +1336,11 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-cas")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = ucan_address(&s3);
             let subject = operator.home().clone();
@@ -1327,7 +1402,11 @@ mod tests {
                 Location::profile(unique_name("ucan-mem-ret")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = ucan_address(&s3);
             let subject = operator.home().clone();
@@ -1378,6 +1457,7 @@ mod tests {
             // Only delegate archive access, not memory
             let operator = profile
                 .session(b"test")
+                .mount(profile.state())
                 // Reading and writing are separate powers now that the
                 // verb is a level of the hierarchy, so a delegation that
                 // covers both says so twice.
@@ -1443,7 +1523,11 @@ mod tests {
                 Location::profile(unique_name("ucan-direct")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = ucan_address(&s3);
             let content = b"one request, proved and performed".to_vec();
@@ -1486,7 +1570,11 @@ mod tests {
                 Location::profile(unique_name("ucan-permits")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
 
             let address = SiteAddress::Ucan(
                 UcanAddress::new(&s3.access_service_url).with_exchange(Exchange::Permit),
@@ -1540,7 +1628,11 @@ mod tests {
                 Location::profile(unique_name("blob-route")),
             )
             .await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
             let subject = Subject::from(profile.did());
 
             let payload = b"hello blob routing".to_vec();
@@ -1628,6 +1720,7 @@ mod tests {
 
             let operator = profile
                 .session(b"test")
+                .mount(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -1655,6 +1748,7 @@ mod tests {
 
             let operator = profile
                 .session(b"test")
+                .mount(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
