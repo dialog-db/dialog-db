@@ -664,10 +664,14 @@ mod tests {
         #[dialog_common::test]
         async fn it_enforces_scoped_delegation_policy() -> Result<()> {
             let (operator, profile) = test_session_with_peer().await;
-            let repo = profile
+            // The space belongs to another account: a space delegates to
+            // the account it was created for, so its own would hold it
+            // whole whatever it is delegated here.
+            let (owner_operator, owner) = test_session_with_peer().await;
+            let repo = owner
                 .space(unique_name("home"))
                 .create()
-                .perform(&operator)
+                .perform(&owner_operator)
                 .await?;
 
             // Repo delegates only memory/space("data") to the profile
@@ -703,10 +707,14 @@ mod tests {
         #[dialog_common::test]
         async fn it_validates_delegation_against_policy() -> Result<()> {
             let (operator, profile) = test_session_with_peer().await;
-            let repo = profile
+            // The space belongs to another account: a space delegates to
+            // the account it was created for, so its own would hold it
+            // whole whatever it is delegated here.
+            let (owner_operator, owner) = test_session_with_peer().await;
+            let repo = owner
                 .space(unique_name("home"))
                 .create()
-                .perform(&operator)
+                .perform(&owner_operator)
                 .await?;
 
             // Repo delegates memory/space("data") to the profile
