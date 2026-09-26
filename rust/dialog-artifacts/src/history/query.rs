@@ -1,20 +1,51 @@
+use std::ops::Bound;
 use std::str::FromStr;
 
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
 use dialog_search_tree::ContentAddressedStorage as NodeStorage;
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
-use futures_util::TryStreamExt;
+use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use crate::Value;
 use crate::history::VersionExt as _;
 use crate::tree::ArtifactTreeExt as _;
-use crate::tree::{ArtifactTree, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache};
+use crate::tree::{
+    ArtifactTree, SPILL_LOOKAHEAD, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache,
+};
 use crate::{
-    Attribute, DialogArtifactsError, Entity, State, history_claim_range, history_key_version,
-    history_region_range,
+    Attribute, DialogArtifactsError, Entity, Key, State, history_claim_range, history_key_version,
+    history_region_range, history_version_range,
 };
 
 use super::{Claim, History, REVISION_ATTRIBUTE, Record, RevisionRecord, Version};
+
+/// Which history records a [`TreeHistory::select`] scan covers.
+///
+/// Each variant names a span of the history region that is contiguous in
+/// key order, so a scan is one range walk rather than a filtered sweep.
+/// The type is `non_exhaustive`: narrower spans (a version range, a causal
+/// span over the revision DAG) are additive here, and matching on it must
+/// stay open to them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HistorySelector {
+    /// Every record in the history region.
+    All,
+    /// Every claim recorded by the revision identified by this version.
+    At(Version),
+}
+
+impl From<Version> for HistorySelector {
+    fn from(version: Version) -> Self {
+        Self::At(version)
+    }
+}
+
+impl From<&Version> for HistorySelector {
+    fn from(version: &Version) -> Self {
+        Self::At(*version)
+    }
+}
 
 /// Read access to the history region of an artifact tree.
 ///
@@ -93,25 +124,87 @@ where
         )
     }
 
+    /// The history records the selector covers, in key order (ascending by
+    /// version; no record appears before one produced by an ancestor
+    /// revision), each paired with the version of the revision that wrote
+    /// it.
+    ///
+    /// Every selector names a contiguous span, so this is one range walk.
+    /// Records materialize as the stream is polled — a record is parsed out
+    /// of its key, and a spilled value's block fetched, only when its entry
+    /// is reached — so a caller that folds the stream never holds the whole
+    /// span at once. `try_collect()` for the eager `Vec`.
+    ///
+    /// A [`Version`] converts into a selector, so scanning one revision's
+    /// claims reads `select(version)`.
+    pub fn select(
+        &self,
+        selector: impl Into<HistorySelector>,
+    ) -> impl Stream<Item = Result<(Version, Record), DialogArtifactsError>> + '_ {
+        // Each selector's span, as bounds the tree walk takes directly. The
+        // region is inclusive on both ends (a bounded filler run tops it),
+        // while a version span is half-open (an unbounded entity encoding
+        // follows the prefix, so only the next prefix bounds it soundly) —
+        // see `history_version_range`.
+        let (min, max) = match selector.into() {
+            HistorySelector::All => {
+                let (min, max) = history_region_range();
+                (Bound::Included(min), Bound::Included(max))
+            }
+            HistorySelector::At(version) => {
+                let (min, max) = history_version_range(&version);
+                (Bound::Included(min), Bound::Excluded(max))
+            }
+        };
+        self.records_within((min, max))
+    }
+
+    /// The live records in a key span, in key order, their spilled values
+    /// fetched ahead of the record being yielded.
+    ///
+    /// A claim's value that spilled out of its key is its own block, and
+    /// over a hydrating store that block is a round trip: a device that
+    /// has just joined an account holds none of its history locally (the
+    /// operational download leaves that region by reference), so reading
+    /// one revision's claims one record at a time cost one round trip per
+    /// record, strictly in sequence. The walk runs in two stages instead:
+    /// entries come off the tree as before, and each one's spilled block
+    /// is fetched with up to [`SPILL_LOOKAHEAD`] in flight ahead of the
+    /// record being yielded, the same shape a scan of the data regions
+    /// takes. An entry whose value sits in its key costs no fetch and
+    /// passes straight through; order is preserved throughout.
+    fn records_within(
+        &self,
+        span: (Bound<Key>, Bound<Key>),
+    ) -> impl Stream<Item = Result<(Version, Record), DialogArtifactsError>> + '_ {
+        self.tree
+            .stream_range(span, &self.storage)
+            .try_filter_map(|entry| async move {
+                // A retracted history entry is not a retraction record: it
+                // is an entry erased from the region. Only live entries
+                // carry records.
+                Ok(match entry.value {
+                    State::Added(datum) => Some((entry.key, datum)),
+                    _ => None,
+                })
+            })
+            .map(move |entry| async move {
+                let (key, datum) = entry?;
+                let spilled = fetch_spilled_cached(&self.store, &self.spill, &key).await?;
+                Ok((
+                    history_key_version(&key)?,
+                    Record::try_from_key_datum_with_value(&key, datum, spilled)?,
+                ))
+            })
+            .buffered(SPILL_LOOKAHEAD)
+    }
+
     /// Every record in the history region, in key order (ascending by
     /// version; no record appears before one produced by an ancestor
     /// revision)
+    #[deprecated(note = "use `select(HistorySelector::All)`")]
     pub async fn records(&self) -> Result<Vec<(Version, Record)>, DialogArtifactsError> {
-        let (min, max) = history_region_range();
-        let stream = self.tree.stream_range(min..=max, &self.storage);
-        tokio::pin!(stream);
-
-        let mut records = Vec::new();
-        while let Some(entry) = stream.try_next().await? {
-            if let State::Added(datum) = entry.value {
-                let spilled = fetch_spilled_cached(&self.store, &self.spill, &entry.key).await?;
-                records.push((
-                    history_key_version(&entry.key)?,
-                    Record::try_from_key_datum_with_value(&entry.key, datum, spilled)?,
-                ));
-            }
-        }
-        Ok(records)
+        self.select(HistorySelector::All).try_collect().await
     }
 }
 

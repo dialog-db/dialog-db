@@ -87,6 +87,7 @@ mod tests {
                         .is("Mallory".to_string()),
                 )
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
         }
@@ -236,6 +237,7 @@ mod tests {
             .assert(alice)
             .assert(bob)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let session = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -377,6 +379,7 @@ mod tests {
             .assert(alice)
             .assert(bob)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -503,6 +506,7 @@ mod tests {
             .assert(alice)
             .assert(bob)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -736,6 +740,7 @@ mod tests {
                 title: note_like_test::Title("Goodbye World".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -835,6 +840,7 @@ mod tests {
                 title: note_not_like_test::Title("Final Report".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -930,6 +936,7 @@ mod tests {
                 name: Name("Bob".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1217,6 +1224,7 @@ mod tests {
                 .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
                 .assert(the!("person/age").of(bob.clone()).is(25u32))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
         }
@@ -1284,6 +1292,7 @@ mod tests {
                 .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
                 .assert(the!("person/age").of(bob.clone()).is(25u32))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
         }

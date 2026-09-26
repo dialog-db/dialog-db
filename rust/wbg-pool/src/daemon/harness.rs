@@ -125,3 +125,34 @@ pub fn generate(config: &RunConfig<'_>) -> Result<RunScripts> {
     };
     Ok(scripts)
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn browser_reporting_keeps_fetch_from_before_test_code_runs() {
+        let scripts = generate(&RunConfig {
+            mode: TestMode::Browser,
+            module_js: "/module.js",
+            module_wasm: "/module.wasm",
+            exports: &["__wbgt_test"],
+            include_ignored: false,
+            filtered_count: 0,
+            nocapture: false,
+        })
+        .unwrap();
+
+        let capture = scripts
+            .run_js
+            .find("const daemonFetch = globalThis.fetch.bind(globalThis);")
+            .expect("the harness should capture fetch before running tests");
+        let test_run = scripts
+            .run_js
+            .find("const ok = await cx.run")
+            .expect("the harness should run the selected tests");
+        assert!(capture < test_run);
+        assert!(scripts.run_js.contains("await daemonFetch('report'"));
+        assert!(!scripts.run_js.contains("await fetch('report'"));
+    }
+}

@@ -163,7 +163,11 @@ where
     fn push_statements(&self, this: Entity, buf: &mut Vec<AttributeStatement>) {
         let descriptor = <Self as Descriptor<AttributeDescriptor>>::descriptor();
         let expr = AttributeStatement {
-            the: descriptor.the().clone(),
+            the: descriptor
+                .the()
+                .attribute()
+                .expect("a derived attribute names one relation")
+                .into(),
             of: this,
             is: <<N as Attribute>::Type as Into<Value>>::into(
                 <Self as Attribute>::value(self).clone(),
@@ -236,7 +240,11 @@ where
         if let Some(inner) = self.as_ref() {
             let descriptor = <N as Descriptor<AttributeDescriptor>>::descriptor();
             let expr = AttributeStatement {
-                the: descriptor.the().clone(),
+                the: descriptor
+                    .the()
+                    .attribute()
+                    .expect("a derived attribute names one relation")
+                    .into(),
                 of: this,
                 is: <<N as Attribute>::Type as Into<Value>>::into(
                     <N as Attribute>::value(inner).clone(),
@@ -651,6 +659,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -719,6 +728,7 @@ mod tests {
                     .is("Hacker".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -789,6 +799,7 @@ mod tests {
             .transaction()
             .assert(alice_person.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -835,6 +846,7 @@ mod tests {
             .transaction()
             .retract(alice_person)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -897,6 +909,7 @@ mod tests {
             .transaction()
             .assert(name_relation.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -920,6 +933,7 @@ mod tests {
             .transaction()
             .retract(name_relation)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -991,6 +1005,7 @@ mod tests {
             .transaction()
             .assert(alice.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1055,6 +1070,7 @@ mod tests {
             .assert(alice)
             .assert(bob)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1107,6 +1123,7 @@ mod tests {
             .assert(alice)
             .assert(bob)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1144,6 +1161,7 @@ mod tests {
             .transaction()
             .assert(alice_with_email)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1157,6 +1175,7 @@ mod tests {
             .transaction()
             .assert(alice_with_birthday)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1224,6 +1243,7 @@ mod tests {
             .transaction()
             .assert(alice.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1231,6 +1251,7 @@ mod tests {
             .transaction()
             .retract(alice)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1347,6 +1368,7 @@ mod tests {
             .assert(org::Badge::of(mallory.clone()).is("M-3"))
             .assert(org::Manager::of(mallory.clone()).is(carol.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1433,6 +1455,7 @@ mod tests {
                     .is("555-0199".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1500,6 +1523,7 @@ mod tests {
                 job: shortcut_employee::Job("Designer".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1551,6 +1575,7 @@ mod tests {
                 job: shortcut_employee::Job("Engineer".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1629,6 +1654,7 @@ mod tests {
             .assert(helper_person::Name::of(alice).is("Alice"))
             .assert(helper_person::Name::of(bob).is("Bob"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1669,6 +1695,7 @@ mod tests {
             .assert(helper_employee::Name::of(bob.clone()).is("Bob"))
             .assert(helper_employee::Department::of(bob).is("Sales"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1704,6 +1731,7 @@ mod tests {
             .assert(helper_employee::Name::of(bob.clone()).is("Bob"))
             .assert(helper_employee::Department::of(bob.clone()).is("Sales"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1744,7 +1772,7 @@ mod tests {
     #[dialog_common::test]
     fn it_derives_attribute_name_as_kebab_case() {
         // Kind struct should derive name from struct name via kebab-case
-        assert_eq!(item::Kind::descriptor().name(), "kind");
+        assert_eq!(item::Kind::descriptor().name(), Some("kind"));
     }
 
     #[dialog_common::test]
@@ -1765,7 +1793,7 @@ mod tests {
     #[dialog_common::test]
     fn it_leaves_unrenamed_attribute_unchanged() {
         // Name without rename should behave normally
-        assert_eq!(item::Name::descriptor().name(), "name");
+        assert_eq!(item::Name::descriptor().name(), Some("name"));
         assert_eq!(item::Name::descriptor().domain(), "item");
     }
 
@@ -1801,7 +1829,7 @@ mod tests {
         );
 
         // The 'type' key should point to the item/kind attribute (attribute name is "kind")
-        assert_eq!(type_attr.unwrap().1.name(), "kind");
+        assert_eq!(type_attr.unwrap().1.name(), Some("kind"));
         assert_eq!(type_attr.unwrap().1.domain(), "item");
     }
 
@@ -1897,7 +1925,7 @@ mod tests {
     #[dialog_common::test]
     fn it_combines_concept_rename_with_attribute() {
         // Attribute name is derived from struct name (no rename on attributes)
-        assert_eq!(task::Reference::descriptor().name(), "reference");
+        assert_eq!(task::Reference::descriptor().name(), Some("reference"));
         assert_eq!(task::Reference::the().to_string(), "task/reference");
 
         // Concept descriptor should have "ref" key (concept field rename)
@@ -1906,6 +1934,6 @@ mod tests {
         let ref_attr = attrs.iter().find(|(k, _)| *k == "ref");
         assert!(ref_attr.is_some(), "Should have 'ref' key in descriptor");
         // The attribute descriptor's name is still "reference" (no attribute rename)
-        assert_eq!(ref_attr.unwrap().1.name(), "reference");
+        assert_eq!(ref_attr.unwrap().1.name(), Some("reference"));
     }
 }

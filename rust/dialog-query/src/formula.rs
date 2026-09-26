@@ -32,6 +32,8 @@ pub mod math;
 /// String manipulation formulas (concatenate, length, uppercase, lowercase, like)
 pub mod string;
 
+/// Attribute decomposition (attribute-parts)
+pub mod attribute;
 /// Index-key decomposition formulas (key-part, separator-part)
 pub mod key;
 /// Fractional-position formulas for ordered relations
@@ -39,6 +41,7 @@ pub mod position;
 /// Version-control revision record projections (revision, revision-parent)
 pub mod revision;
 
+pub use attribute::AttributeParts as AttributePartsFormula;
 pub use conversions::{ParseFloat, ParseSignedInteger, ParseUnsignedInteger, ToString};
 pub use key::{KeyPart as KeyPartFormula, SeparatorPart as SeparatorPartFormula};
 pub use logic::{And, Not, Or};

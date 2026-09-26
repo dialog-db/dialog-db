@@ -77,13 +77,13 @@ pub fn parameters_to_policy(parameters: Parameters) -> Vec<Predicate> {
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::prelude::*;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
     use dialog_capability::{Subject, did};
     use dialog_common::{Blake3Hash, Buffer};
-    use dialog_effects::archive::{Archive, Catalog, Get, Put};
 
     #[dialog_common::test]
     fn it_returns_no_parameters_for_bare_subject() {
@@ -95,8 +95,10 @@ mod tests {
     #[dialog_common::test]
     fn it_collects_parameters_from_archive_catalog_chain() {
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"));
+            .reader()
+            .archive()
+            .catalog("index")
+            .get(Blake3Hash::hash(b"any"));
         let params = parameters(&cap);
         assert_eq!(params.get("catalog"), Some(&Ipld::String("index".into())));
     }
@@ -105,9 +107,10 @@ mod tests {
     fn it_collects_parameters_from_archive_get_invocation() {
         let digest = Blake3Hash::hash(b"my-content");
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("data"))
-            .invoke(Get::new(digest));
+            .reader()
+            .archive()
+            .catalog("data")
+            .get(digest);
         let params = parameters(&cap);
         assert_eq!(params.get("catalog"), Some(&Ipld::String("data".into())));
         assert!(
@@ -125,27 +128,29 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_equality_constraints_for_each_parameter() {
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("data"));
+            .reader()
+            .archive()
+            .catalog("data")
+            .get(Blake3Hash::hash(b"any"));
         let policy = parameters_to_policy(parameters(&cap));
 
-        assert_eq!(policy.len(), 1);
-        assert_eq!(
-            policy[0],
-            Predicate::Equal(
-                Select::new(vec![Filter::Field("catalog".into())]),
-                Ipld::String("data".into())
-            )
-        );
+        // One equality per parameter the chain carries: the catalog it
+        // is scoped to, and the digest the effect names.
+        assert_eq!(policy.len(), 2);
+        assert!(policy.contains(&Predicate::Equal(
+            Select::new(vec![Filter::Field("catalog".into())]),
+            Ipld::String("data".into())
+        )));
     }
 
     #[dialog_common::test]
     fn it_produces_multiple_constraints_for_chain_with_payload() {
         let content = b"hello world";
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(content.to_vec())));
+            .writer()
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(content.to_vec()));
         let policy = parameters_to_policy(parameters(&cap));
 
         // Should have constraints for catalog, digest, and content (via checksum)

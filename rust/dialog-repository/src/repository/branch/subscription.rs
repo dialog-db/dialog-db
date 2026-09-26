@@ -67,13 +67,16 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::repository::fetch::Driven;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled, selector_range};
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Key, State};
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, AttributeKey, Entity, EntityKey, Key, Speculation, State, ValueKey,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
@@ -88,10 +91,10 @@ use dialog_storage::Blake3Hash;
 use futures_util::TryStreamExt as _;
 
 use super::session::{QueryEnv, QueryLayer};
-use crate::layer::tombstones_from;
+use crate::repository::source::Source;
 use crate::{
     Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Upstream,
+    RepositoryMemoryExt as _, Revision, Upstream,
 };
 
 /// The demand cover of one evaluation: every index key range the
@@ -307,14 +310,12 @@ pub struct Subscription<Q: Application> {
     /// The revision the retained results were evaluated at. `None`
     /// until the first poll.
     revision: Option<Revision>,
-    /// The [`Overlay`](crate::Overlay) epoch the retained results
-    /// were evaluated at. The branch's session overlay is off-tree,
-    /// so a change to it is invisible to the poll's tree-diff gate;
-    /// the epoch is the signal that re-triggers evaluation (the
-    /// overlay delta is not derivable from the tree, so an epoch
-    /// move recomputes, reporting the change as a delta against the
-    /// retained results).
-    overlay_epoch: u64,
+    /// The [`Ephemeral`](crate::Ephemeral) sequence the retained results
+    /// were evaluated at. The branch's session overlay is off-tree, so
+    /// its changes are invisible to the tree diff; the instants it
+    /// minted since this sequence are the delta instead
+    /// ([`Ephemeral::since`](crate::Ephemeral::since)).
+    overlay_sequence: u64,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -340,13 +341,14 @@ impl Branch {
     /// ([`Branch::overlay`]) like every other read path, and a poll
     /// picks up overlay changes: asserting an ephemeral fact into
     /// the overlay propagates to the branch's subscriptions as a
-    /// result delta on their next poll.
+    /// result delta on their next poll, maintained incrementally from
+    /// the overlay's instants like a tree change.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
         Subscription {
             branch: self.clone(),
             query,
             revision: None,
-            overlay_epoch: 0,
+            overlay_sequence: 0,
             demand: Demand::new(),
             results: Vec::new(),
             fixpoint: Arc::new(Mutex::new(None)),
@@ -378,6 +380,42 @@ enum Touched {
         /// Facts that stopped being readable.
         retracted: Vec<Artifact>,
     },
+}
+
+impl Touched {
+    /// Fold another verdict into this one: a rule hit on either side
+    /// dominates; fact changes union; nothing is the identity.
+    fn merge(self, other: Touched) -> Touched {
+        match (self, other) {
+            (Touched::Rules, _) | (_, Touched::Rules) => Touched::Rules,
+            (Touched::Nothing, other) | (other, Touched::Nothing) => other,
+            (
+                Touched::Facts {
+                    mut subjects,
+                    mut facts,
+                    mut asserted,
+                    mut retracted,
+                },
+                Touched::Facts {
+                    subjects: more_subjects,
+                    facts: more_facts,
+                    asserted: more_asserted,
+                    retracted: more_retracted,
+                },
+            ) => {
+                subjects.extend(more_subjects);
+                facts.extend(more_facts);
+                asserted.extend(more_asserted);
+                retracted.extend(more_retracted);
+                Touched::Facts {
+                    subjects,
+                    facts,
+                    asserted,
+                    retracted,
+                }
+            }
+        }
+    }
 }
 
 /// A boxed evaluation future. The poll chain's inner evaluations are
@@ -439,13 +477,14 @@ where
     ///
     /// Returns `Ok(None)` when the result is known unchanged: the
     /// branch is at the pinned revision with the session overlay at
-    /// the pinned epoch, or the tree moved but no change intersects
-    /// the demand cover (the pin advances silently). Returns
+    /// the pinned sequence, or the tree or the overlay moved but no
+    /// change intersects the demand cover (the pins advance
+    /// silently). Returns
     /// `Ok(Some(delta))` after a (re-)evaluation — the first poll
     /// always evaluates, reporting the initial result as `asserted`
     /// rows.
     ///
-    /// The revision and overlay epoch are snapshotted before
+    /// The revision and overlay sequence are snapshotted before
     /// evaluating; a commit or overlay mutation that lands
     /// mid-evaluation re-triggers on the next poll, so changes are
     /// never missed, at worst re-checked.
@@ -462,31 +501,39 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
         let current = self.branch.revision();
-        let epoch = self.branch.overlay().epoch();
-        // The session overlay is off-tree: an epoch move is invisible
-        // to the tree-diff gate below and its delta is not derivable
-        // from the tree, so it routes straight to a re-evaluation
-        // (reported against the retained results). The incremental
-        // path only serves polls where the tree alone moved.
-        if self.initialized && epoch == self.overlay_epoch {
-            if current == self.revision {
+        let sequence = self.branch.overlay().revision().sequence;
+        if self.initialized {
+            let head_moved = current != self.revision;
+            let overlay_moved = sequence != self.overlay_sequence;
+            if !head_moved && !overlay_moved {
                 return Ok(None);
             }
             // A head-dependent result — one that read
             // `dialog.branch/tree` & co — changes on every commit by
             // construction (the binding itself moves), and those
             // metadata facts are overlay-injected, invisible to the
-            // tree diff below. Skip the gate and re-evaluate.
-            if !self.demand.depends_on_head() {
-                match self.touched(env, &current).await? {
+            // tree diff below. Skip the gate and re-evaluate when the
+            // head moved; an overlay-only move leaves them alone.
+            if !(head_moved && self.demand.depends_on_head()) {
+                let mut touched = Touched::Nothing;
+                if head_moved {
+                    touched = touched.merge(self.touched(env, &current).await?);
+                }
+                if overlay_moved && !matches!(touched, Touched::Rules) {
+                    touched = touched.merge(self.touched_overlay(self.overlay_sequence));
+                }
+                match touched {
                     Touched::Nothing => {
                         self.revision = current;
+                        self.overlay_sequence = sequence;
                         return Ok(None);
                     }
                     Touched::Facts {
@@ -501,6 +548,7 @@ where
                         {
                             self.maintenances += 1;
                             self.revision = current;
+                            self.overlay_sequence = sequence;
                             return Ok(Some(delta));
                         }
                         // Not maintainable for this query/rule shape:
@@ -534,7 +582,7 @@ where
         self.results = results;
         self.demand = demand;
         self.revision = current;
-        self.overlay_epoch = epoch;
+        self.overlay_sequence = sequence;
         self.initialized = true;
         Ok(Some(delta))
     }
@@ -567,7 +615,9 @@ where
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -603,7 +653,11 @@ where
             }
             _ => RemoteFallback::None,
         };
-        let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), remote);
+        let store = NetworkedIndex::new(
+            env,
+            ArchiveScope::new(self.branch.subject()).index(),
+            remote,
+        );
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
@@ -675,6 +729,65 @@ where
         }
     }
 
+    /// Classify what the session overlay changed since the pinned
+    /// `sequence`, within the demand cover: the exact facts its
+    /// instants asserted and retracted, filtered by their index keys
+    /// against the cover, with no diff to compute. A change inside a
+    /// rule-discovery range, or a pin the overlay's ring no longer
+    /// reaches, is [`Touched::Rules`], which recomputes.
+    fn touched_overlay(&self, sequence: u64) -> Touched {
+        let Some(instants) = self.branch.overlay().since(sequence) else {
+            return Touched::Rules;
+        };
+        let manifest = dialog_search_tree::Manifest::default();
+        let mut subjects = BTreeSet::new();
+        let mut asserted = Vec::new();
+        let mut retracted = Vec::new();
+        let mut seen = BTreeSet::new();
+        for instant in instants {
+            for (arriving, facts) in [(true, instant.asserted), (false, instant.retracted)] {
+                for fact in facts {
+                    let keys = [
+                        EntityKey::from_artifact(&fact, &manifest).into_key(),
+                        AttributeKey::from_artifact(&fact, &manifest).into_key(),
+                        ValueKey::from_artifact(&fact, &manifest).into_key(),
+                    ];
+                    if keys.iter().any(|key| self.demand.covers_rules(key)) {
+                        return Touched::Rules;
+                    }
+                    if !keys.iter().any(|key| self.demand.covers_facts(key)) {
+                        continue;
+                    }
+                    if !seen.insert((
+                        arriving,
+                        fact.of.to_string(),
+                        fact.the.to_string(),
+                        fact.is.to_bytes(),
+                    )) {
+                        continue;
+                    }
+                    subjects.insert(fact.of.clone());
+                    if arriving {
+                        asserted.push(fact);
+                    } else {
+                        retracted.push(fact);
+                    }
+                }
+            }
+        }
+        if subjects.is_empty() {
+            Touched::Nothing
+        } else {
+            let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
+            Touched::Facts {
+                subjects,
+                facts,
+                asserted,
+                retracted,
+            }
+        }
+    }
+
     /// Maintain the retained result incrementally: for each touched
     /// entity, over-delete its retained rows and re-derive them with
     /// the query restricted to that entity (DRed's delete /
@@ -701,7 +814,9 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -726,20 +841,15 @@ where
                     .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
                 let layer = QueryLayer::from(&self.branch);
                 let overlay = layer.overlay(&operator);
-                let tombstones = tombstones_from(&overlay);
                 self.demand
                     .anchor_metadata(self.branch.metadata(&operator).branch.this);
                 // Typed with the *named* env lifetime (owned branch
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
-                let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                    vec![self.branch.clone()],
-                    overlay,
-                    Arc::new(tombstones),
-                    env,
-                )
-                .with_demand(self.demand.clone());
+                let query_env: QueryEnv<'a, Env> =
+                    QueryEnv::new(vec![Source::Branch(self.branch.clone())], overlay, env)
+                        .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
                     // Fixpoint continuation: deletions retract via DRed,
@@ -794,8 +904,15 @@ where
                     .collect();
                 // ...re-derive + insert: goal-directed re-evaluation,
                 // recording into the existing cover (the standing
-                // demand only ever grows between recomputes).
-                let after = self.evaluate(env, &self.demand.clone(), &scoped).await?;
+                // demand only ever grows between recomputes), each
+                // row put back in the open query's shape so it reads
+                // exactly like a recomputed one.
+                let after = self
+                    .evaluate(env, &self.demand.clone(), &scoped)
+                    .await?
+                    .into_iter()
+                    .map(|row| self.query.adopt(row))
+                    .collect::<Result<Vec<_>, _>>()?;
                 for row in &after {
                     if !before.contains(row) {
                         asserted.push(row.clone());
@@ -831,7 +948,9 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -843,17 +962,12 @@ where
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
             let layer = QueryLayer::from(&self.branch);
             let overlay = layer.overlay(&operator);
-            let tombstones = tombstones_from(&overlay);
             demand.anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let mut query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![self.branch.clone()],
-                overlay,
-                Arc::new(tombstones),
-                env,
-            )
-            .with_demand(demand.clone());
+            let mut query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(vec![Source::Branch(self.branch.clone())], overlay, env)
+                    .with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -861,7 +975,20 @@ where
                 query_env = query_env
                     .with_fixpoint(concept.this(), Continuation::new(self.fixpoint.clone()));
             }
-            query.clone().perform(&query_env).try_vec().await
+            // The evaluation's own stream drives the env's preload
+            // queue, so a standing query's cold poll overlaps
+            // replication with evaluation exactly as a plain query
+            // does (see `crate::repository::fetch`).
+            let queue = Provider::<Speculation>::execute(env, ()).await;
+            let results = Box::pin(query.clone().perform(&query_env));
+            Driven::new(
+                results,
+                vec![Source::Branch(self.branch.clone())],
+                env,
+                queue,
+            )
+            .try_vec()
+            .await
         })
     }
 
@@ -880,7 +1007,9 @@ where
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
@@ -896,23 +1025,29 @@ where
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
             let layer = QueryLayer::from(&self.branch);
             let overlay = layer.overlay(&operator);
-            let tombstones = tombstones_from(&overlay);
             self.demand
                 .anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![self.branch.clone()],
-                overlay,
-                Arc::new(tombstones),
+            let query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(vec![Source::Branch(self.branch.clone())], overlay, env)
+                    .with_demand(self.demand.clone())
+                    .with_fixpoint(
+                        concept.this(),
+                        Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
+                    );
+            // Driven for the same reason `evaluate` is: the
+            // continuation's reads warm through the ambient queue.
+            let queue = Provider::<Speculation>::execute(env, ()).await;
+            let results = Box::pin(self.query.clone().perform(&query_env));
+            Driven::new(
+                results,
+                vec![Source::Branch(self.branch.clone())],
                 env,
+                queue,
             )
-            .with_demand(self.demand.clone())
-            .with_fixpoint(
-                concept.this(),
-                Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
-            );
-            self.query.clone().perform(&query_env).try_vec().await
+            .try_vec()
+            .await
         })
     }
 }
@@ -925,17 +1060,25 @@ mod tests {
 
     use crate::RemoteSite;
     use crate::helpers::test_repo;
+    use dialog_artifacts::{Attribute as ArtifactsAttribute, NameShape, Symbol};
     use dialog_artifacts::{Entity, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::{ConditionalSend, ConditionalSync};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::Identify;
     use dialog_effects::memory::Resolve;
+    use dialog_operator::Operator;
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::attribute::The;
-    use dialog_query::types::Any;
+    use dialog_query::attribute::{AttributeDescriptor, Keyed, Relation};
+    use dialog_query::concept::descriptor::ConceptFieldDescriptor;
+    use dialog_query::type_system::Type as Kind;
+    use dialog_query::types::{Any, Type as ValueType};
     use dialog_query::{AttributeQuery, Claim, Term, the};
+    use dialog_query::{Cardinality, ConceptDescriptor, ConceptQuery, Output as _};
+    use dialog_storage::provider::storage::VolatileSpace;
     use std::collections::BTreeMap;
+    use std::str::FromStr;
 
     /// The head flag flips only for scans that can actually read the
     /// overlay-injected metadata: a head attribute pinned by `the`,
@@ -987,7 +1130,9 @@ mod tests {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSend
             + ConditionalSync
@@ -1016,6 +1161,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1036,6 +1182,23 @@ mod tests {
     fn names_query() -> AttributeQuery {
         AttributeQuery::from(
             Term::<The>::from(the!("person/name"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        )
+    }
+
+    /// A scan of one half of the `todo.list` domain: the attribute is
+    /// a variable refined by the domain prefix and a name shape, which
+    /// is how an ordered collection (or a dictionary) is queried.
+    fn members_query(shape: NameShape) -> AttributeQuery {
+        let kind = Kind::from(ValueType::Symbol)
+            .with_prefix("todo.list/")
+            .expect("symbol is textual")
+            .with_name_shape(shape)
+            .expect("shapes compose with prefixes");
+        AttributeQuery::from(
+            Term::<The>::var("a")
+                .with_kind(kind)
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
         )
@@ -1074,6 +1237,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1122,6 +1286,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1209,6 +1374,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1266,6 +1432,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1339,6 +1506,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(alice.clone()).is(spilled.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1411,6 +1579,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1453,6 +1622,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1468,6 +1638,7 @@ mod tests {
                     .is("unrelated".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1484,6 +1655,549 @@ mod tests {
         // The pin advanced: polling again is a revision-equality
         // no-op, not another diff.
         assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// A subscription over one half of a mixed domain demands only
+    /// that half. Positions and symbols occupy disjoint first-byte
+    /// classes, so the demand cover is the shape's contiguous
+    /// sub-range: writing the OTHER half is as irrelevant as writing
+    /// an unrelated attribute, and must not re-evaluate.
+    ///
+    /// This is what makes an ordered collection cheap to watch. A
+    /// list's members and its named fields share one domain; without
+    /// the shape narrowing, renaming the list would wake every
+    /// subscription watching its contents.
+    #[dialog_common::test]
+    async fn it_ignores_the_other_half_of_a_mixed_domain() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(members_query(NameShape::Position));
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted.len(),
+            1,
+            "the one member is the initial result"
+        );
+
+        // A symbol-named fact in the SAME domain: the dictionary half.
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "the dictionary half is outside an ordered scan's cover"
+        );
+        assert_eq!(
+            subscription.results().len(),
+            1,
+            "results retained across the gated poll"
+        );
+        Ok(())
+    }
+
+    /// The complement: a write to the half the subscription DOES
+    /// demand re-evaluates and emits the new member. Without this the
+    /// test above would pass for a subscription that had simply
+    /// stopped working.
+    #[dialog_common::test]
+    async fn it_emits_a_new_member_of_the_demanded_half() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(members_query(NameShape::Position));
+        subscription.poll(&operator).await?.expect("initial");
+
+        // A second ordered member, appended after the first.
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a member landed in the demanded half");
+        assert_eq!(delta.asserted.len(), 1, "one new member");
+        assert!(delta.retracted.is_empty(), "nothing was removed");
+        assert_eq!(
+            subscription.results().len(),
+            2,
+            "both members are now in the result"
+        );
+        Ok(())
+    }
+
+    /// A domain scan must not flip the head flag. `selects_head`
+    /// treats an attribute-unconstrained scan conservatively, and a
+    /// scan that flipped it would recompute on EVERY commit —
+    /// silently turning incremental maintenance back into polling.
+    #[dialog_common::test]
+    async fn it_does_not_trip_the_head_gate_on_a_domain_scan() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(members_query(NameShape::Position));
+        subscription.poll(&operator).await?.expect("initial");
+        let baseline = subscription.recomputes();
+
+        // A commit in an entirely unrelated domain. A head-gated
+        // subscription would recompute here; a properly covered one
+        // advances its pin and does nothing.
+        branch
+            .transaction()
+            .assert(
+                the!("misc/tag")
+                    .of(Entity::new()?)
+                    .is("unrelated".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "an unrelated commit must not re-evaluate a domain scan"
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            baseline,
+            "and must not force a recompute"
+        );
+        Ok(())
+    }
+
+    /// A concept whose field is a keyed collection: one field, many
+    /// facts, one per ordered member. This is the end-to-end shape —
+    /// the descriptor holds a `Relation::Collection`, its `term()`
+    /// lowers to a domain scan refined by name shape, and the query
+    /// comes back with one conclusion per member, each carrying the
+    /// entry as `(key, value)`: the wire form `member: {?key: ?member}`.
+    fn ordered_query() -> ConceptQuery {
+        serde_json::from_value(serde_json::json!({
+            "assert": ordered_members(),
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "member": {"the": {"?": {"name": "key"}}, "is": {"?": {"name": "member"}}}
+            }
+        }))
+        .expect("the entry form parses")
+    }
+
+    /// The `(key, value)` entries a frame holds, in key order — which
+    /// for positions is list order.
+    fn entries(rows: &[dialog_query::ConceptConclusion]) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String>("member/key").expect("the key is bound"),
+                    row.get::<String>("member").expect("the member is bound"),
+                )
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    fn ordered_members() -> ConceptDescriptor {
+        ConceptDescriptor::try_from(vec![(
+            "member".to_owned(),
+            ConceptFieldDescriptor::required(AttributeDescriptor::over(
+                Relation::collection(
+                    Symbol::from_str("todo.list").expect("a valid domain"),
+                    Keyed::Sequence,
+                ),
+                "the list's members, in order",
+                Cardinality::Many,
+                Some(ValueType::String),
+            )),
+        )])
+        .expect("a collection field builds a concept")
+    }
+
+    /// Assert one member, and the concept query returns it — the
+    /// whole path from a stored fact under a position-named attribute
+    /// to a bound conclusion field.
+    #[dialog_common::test]
+    async fn it_queries_a_concept_over_a_collection() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            // A named field in the same domain: the dictionary half,
+            // which an ordered field must not pick up.
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let rows = branch
+            .query()
+            .select(ordered_query())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+
+        assert_eq!(
+            entries(&rows),
+            vec![
+                ("N".to_string(), "Milk".to_string()),
+                ("N5".to_string(), "Bread".to_string()),
+            ],
+            "both ordered members bind with their keys, in list order, \
+             and the dictionary entry does not"
+        );
+        Ok(())
+    }
+
+    /// A subscription over a collection-field concept maintains
+    /// incrementally: appending a member emits it as a delta, and a
+    /// write to the domain's other half does not wake the
+    /// subscription at all.
+    #[dialog_common::test]
+    async fn it_maintains_a_collection_subscription() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(ordered_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted.len(), 1, "the one member");
+        let baseline = subscription.recomputes();
+
+        // Appending a member is inside the cover: it must arrive.
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("a new member");
+        assert_eq!(delta.asserted.len(), 1, "the appended member");
+        assert!(delta.retracted.is_empty(), "nothing was removed");
+        assert_eq!(subscription.results().len(), 2, "both members retained");
+
+        // The dictionary half of the same domain is outside the
+        // cover: an ordered subscription must not wake for it.
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "the other half of the domain is not this subscription's demand"
+        );
+        assert_eq!(
+            subscription.results().len(),
+            2,
+            "results retained across the gated poll"
+        );
+        let _ = baseline;
+        Ok(())
+    }
+
+    /// Retracting a member removes it from a live subscription: the
+    /// collection scan maintains in both directions, not just on
+    /// append.
+    #[dialog_common::test]
+    async fn it_retracts_a_member_from_a_collection_subscription() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .assert(second.clone().of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(ordered_query());
+        assert_eq!(
+            subscription
+                .poll(&operator)
+                .await?
+                .expect("initial")
+                .asserted
+                .len(),
+            2
+        );
+
+        branch
+            .transaction()
+            .retract(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("a retraction");
+        assert_eq!(delta.retracted.len(), 1, "the removed member");
+        assert_eq!(subscription.results().len(), 1, "one member remains");
+        Ok(())
+    }
+
+    /// A literal key selects one entry: `member: {N5: ?member}` binds
+    /// only the member stored under `todo.list/N5`.
+    #[dialog_common::test]
+    async fn it_selects_one_entry_by_literal_key() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        branch
+            .transaction()
+            .assert(first.of(list.clone()).is("Milk".to_string()))
+            .assert(second.of(list.clone()).is("Bread".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+            "assert": ordered_members(),
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "member": {"the": "N5", "is": {"?": {"name": "member"}}}
+            }
+        }))?;
+        let rows = branch
+            .query()
+            .select(query)
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            entries(&rows),
+            vec![("N5".to_string(), "Bread".to_string())],
+            "a literal key matches exactly one entry"
+        );
+        Ok(())
+    }
+
+    /// A dictionary field selects the symbol-named half of the same
+    /// domain, keyed by name, and leaves the ordered members alone.
+    #[dialog_common::test]
+    async fn it_queries_a_dictionary_field() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .assert(
+                the!("todo.list/owner")
+                    .of(list.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(member.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let fields = ConceptDescriptor::try_from(vec![(
+            "field".to_owned(),
+            ConceptFieldDescriptor::required(AttributeDescriptor::over(
+                Relation::collection(
+                    Symbol::from_str("todo.list").expect("a valid domain"),
+                    Keyed::Dictionary,
+                ),
+                "the list's named fields",
+                Cardinality::Many,
+                Some(ValueType::String),
+            )),
+        )])?;
+        let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+            "assert": fields,
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "field": {"the": {"?": {"name": "name"}}, "is": {"?": {"name": "value"}}}
+            }
+        }))?;
+        let rows = branch
+            .query()
+            .select(query)
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let mut named: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String>("field/key").expect("the name is bound"),
+                    row.get::<String>("field").expect("the value is bound"),
+                )
+            })
+            .collect();
+        named.sort();
+        assert_eq!(
+            named,
+            vec![
+                ("owner".to_string(), "Alice".to_string()),
+                ("title".to_string(), "Groceries".to_string()),
+            ],
+            "the dictionary half, by name, without the ordered member"
+        );
+        Ok(())
+    }
+
+    /// Two collection fields on one concept scan independently: each
+    /// has its own attribute variable, so their entries cross rather
+    /// than unify on a shared name.
+    #[dialog_common::test]
+    async fn it_scans_two_collection_fields_independently() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .assert(member.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let collection = |keyed: Keyed, description: &str| {
+            ConceptFieldDescriptor::required(AttributeDescriptor::over(
+                Relation::collection(
+                    Symbol::from_str("todo.list").expect("a valid domain"),
+                    keyed,
+                ),
+                description,
+                Cardinality::Many,
+                Some(ValueType::String),
+            ))
+        };
+        let both = ConceptDescriptor::try_from(vec![
+            ("member".to_owned(), collection(Keyed::Sequence, "members")),
+            ("field".to_owned(), collection(Keyed::Dictionary, "fields")),
+        ])?;
+        let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+            "assert": both,
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "member": {"the": {"?": {"name": "position"}}, "is": {"?": {"name": "member"}}},
+                "field": {"the": {"?": {"name": "name"}}, "is": {"?": {"name": "value"}}}
+            }
+        }))?;
+        let rows = branch
+            .query()
+            .select(query)
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "one member crossed with one field");
+        let row = &rows[0];
+        assert_eq!(row.get::<String>("member/key")?, "N");
+        assert_eq!(row.get::<String>("member")?, "Milk");
+        assert_eq!(row.get::<String>("field/key")?, "title");
+        assert_eq!(row.get::<String>("field")?, "Groceries");
         Ok(())
     }
 
@@ -1504,6 +2218,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1515,6 +2230,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1536,6 +2252,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1569,6 +2286,7 @@ mod tests {
             .transaction()
             .assert(the!("misc/tag").of(Entity::new()?).is("seed".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1589,6 +2307,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1621,6 +2340,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1634,6 +2354,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1657,6 +2378,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1697,6 +2419,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1708,6 +2431,7 @@ mod tests {
             .transaction()
             .retract(the!("person/name").of(alice.clone()).is("Ali".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1749,6 +2473,7 @@ mod tests {
             )
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1759,6 +2484,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(bob.clone()).is("Bobby".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2018,9 +2744,9 @@ mod tests {
     /// durably — a rule is a [`Statement`](dialog_artifacts::Statement),
     /// so installing it is asserting it.
     fn with_rule<'t>(
-        transaction: crate::Transaction<'t>,
+        transaction: crate::Transaction<&'t crate::Branch>,
         rule: &dialog_query::DeductiveRule,
-    ) -> crate::Transaction<'t> {
+    ) -> crate::Transaction<&'t crate::Branch> {
         transaction.assert(rule)
     }
 
@@ -2103,6 +2829,7 @@ mod tests {
             .transaction()
             .assert(Badge::of(alice.clone()).is("A-1"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2122,6 +2849,7 @@ mod tests {
             .transaction()
             .assert(Badge::of(bob.clone()).is("B-2"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2167,6 +2895,7 @@ mod tests {
             .assert(Name::of(mallory.clone()).is("Mallory"))
             .assert(Manager::of(mallory.clone()).is(carol.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2188,6 +2917,7 @@ mod tests {
             .transaction()
             .assert(Badge::of(carol.clone()).is("C-3"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2216,6 +2946,7 @@ mod tests {
             .transaction()
             .retract(Badge::of(carol.clone()).is("C-3"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2271,6 +3002,7 @@ mod tests {
             .assert(Phone::of(bob.clone()).is("555-0100"));
         with_rule(transaction, &email_rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2285,6 +3017,7 @@ mod tests {
         // range: recompute.
         with_rule(branch.transaction(), &phone_rule)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2305,6 +3038,7 @@ mod tests {
             .transaction()
             .assert(Email::of(bob.clone()).is("bob@mail"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2370,6 +3104,7 @@ mod tests {
             .assert(Parent::of(b.clone()).is(a.clone()));
         with_rule(with_rule(transaction, &base), &step)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2388,6 +3123,7 @@ mod tests {
             .transaction()
             .assert(Parent::of(c.clone()).is(b.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         assert_eq!(subscription.recomputes(), 1);
@@ -2420,6 +3156,7 @@ mod tests {
             .transaction()
             .assert(Parent::of(d.clone()).is(c.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -2439,6 +3176,7 @@ mod tests {
             .transaction()
             .retract(Parent::of(c.clone()).is(b.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("cone shrinks");
@@ -2462,6 +3200,7 @@ mod tests {
             .transaction()
             .assert(Parent::of(e.clone()).is(d.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("extends again");
@@ -2515,6 +3254,7 @@ mod tests {
             .assert(Title::of(frank.clone()).is("Frank"))
             .assert(Deputy::of(frank.clone()).is(mallory.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2531,6 +3271,7 @@ mod tests {
             .transaction()
             .assert(Badge::of(carol.clone()).is("C-3"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2558,6 +3299,7 @@ mod tests {
             .transaction()
             .retract(Badge::of(carol.clone()).is("C-3"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("retraction");
@@ -2621,6 +3363,7 @@ mod tests {
                 salary: Salary(100),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2640,6 +3383,7 @@ mod tests {
                 salary: Salary(50),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("covered write");
@@ -2660,6 +3404,7 @@ mod tests {
                 salary: Salary(70),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("new group");
@@ -2714,6 +3459,7 @@ mod tests {
             .assert(bob_row.clone())
             .assert(carol_row.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2729,6 +3475,7 @@ mod tests {
             .transaction()
             .retract(bob_row)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -2744,6 +3491,7 @@ mod tests {
             .transaction()
             .retract(carol_row)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("group emptied");
@@ -2779,6 +3527,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2808,6 +3557,7 @@ mod tests {
             .transaction()
             .assert(the!("person/name").of(Entity::new()?).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2858,6 +3608,7 @@ mod tests {
                 bonus: None,
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2878,6 +3629,7 @@ mod tests {
             .transaction()
             .assert(Bonus::of(alice.clone()).is(25u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("bonus arrived");
@@ -2903,6 +3655,7 @@ mod tests {
             .transaction()
             .retract(Bonus::of(alice.clone()).is(25u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -2954,6 +3707,7 @@ mod tests {
                 salary: Salary(100),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2977,6 +3731,7 @@ mod tests {
                 salary: Salary(50),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("base change");
@@ -3046,6 +3801,7 @@ mod tests {
             .assert(Parent::of(dept_b.clone()).is(dept_a.clone()));
         with_rule(with_rule(transaction, &dept_total_rule()), &step)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -3068,6 +3824,7 @@ mod tests {
                 salary: Salary(50),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("growth");
@@ -3090,6 +3847,7 @@ mod tests {
                 salary: Salary(100),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("shrinkage");
@@ -3108,6 +3866,649 @@ mod tests {
                 total: Total(50),
             }),
             "the retained table carries the recursively derived row"
+        );
+        Ok(())
+    }
+
+    /// What a fresh one-shot read of `names_query` returns now, sorted:
+    /// the result a maintained subscription must agree with.
+    async fn fresh_names(
+        branch: &crate::Branch,
+        operator: &Operator<VolatileSpace>,
+    ) -> anyhow::Result<Vec<(Entity, String)>> {
+        use dialog_query::query::Output as _;
+        let claims: Vec<Claim> = branch
+            .select(names_query())
+            .perform(operator)
+            .try_vec()
+            .await?;
+        let mut rows = names(&claims);
+        rows.sort();
+        Ok(rows)
+    }
+
+    /// The subscription's retained result, sorted.
+    fn retained_names(subscription: &super::Subscription<AttributeQuery>) -> Vec<(Entity, String)> {
+        let mut rows = names(subscription.results());
+        rows.sort();
+        rows
+    }
+
+    /// A session write inside the cover is maintained from the store's
+    /// instants, per touched entity, with no recompute and no tree
+    /// diff; one outside the cover advances the pin for free.
+    #[dialog_common::test]
+    async fn it_maintains_session_changes_incrementally() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(subscription.recomputes(), 1);
+
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a covered session write propagates");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+        assert_eq!(subscription.recomputes(), 1, "maintained, not recomputed");
+        assert_eq!(subscription.maintenances(), 1);
+        assert_eq!(
+            retained_names(&subscription),
+            fresh_names(&branch, &operator).await?
+        );
+
+        // Outside the cover: the pin advances silently.
+        branch.overlay().assert(
+            the!("misc/tag")
+                .of(Entity::new()?)
+                .is("unrelated".to_string()),
+        );
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "an uncovered session write is free"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+        assert_eq!(subscription.recomputes(), 1);
+
+        // A session retract of a session fact: maintained the same way.
+        branch
+            .overlay()
+            .retract(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("retract propagates");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(names(&delta.retracted), vec![(bob, "Bob".to_string())]);
+        assert_eq!(subscription.maintenances(), 2);
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(
+            retained_names(&subscription),
+            vec![(alice, "Alice".to_string())]
+        );
+        Ok(())
+    }
+
+    /// A pin the store's ring no longer reaches falls back to a full
+    /// recompute and still lands on the right result.
+    #[dialog_common::test]
+    async fn it_recomputes_when_the_session_ring_is_exhausted() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+        // Push the ring past its capacity with unrelated instants.
+        for index in 0..2048u32 {
+            branch.overlay().assert(
+                the!("misc/tag")
+                    .of(Entity::new()?)
+                    .is(format!("tag-{index}")),
+            );
+        }
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the change is reported even though the ring lost it");
+        assert_eq!(names(&delta.asserted), vec![(bob, "Bob".to_string())]);
+        assert_eq!(subscription.recomputes(), 2, "fell back to a recompute");
+        assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// A cardinality-one replace in the session supersedes the prior
+    /// session value: the maintained delta retracts the old row and
+    /// asserts the new one, without a recompute.
+    #[dialog_common::test]
+    async fn it_maintains_a_session_replace() -> anyhow::Result<()> {
+        use dialog_artifacts::{Changes, Update as _};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let here = Entity::new()?;
+        let status = |value: &str| {
+            let mut changes = Changes::new();
+            changes.associate_unique(
+                "person/name".parse().expect("attribute"),
+                here.clone(),
+                Value::String(value.into()),
+            );
+            changes
+        };
+        branch.overlay().assert(status("pending"));
+
+        let mut subscription = branch.subscribe(names_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            names(&initial.asserted),
+            vec![(here.clone(), "pending".to_string())]
+        );
+
+        branch.overlay().assert(status("settled"));
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the replace propagates");
+        assert_eq!(
+            names(&delta.retracted),
+            vec![(here.clone(), "pending".to_string())]
+        );
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(here.clone(), "settled".to_string())]
+        );
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 1);
+        assert_eq!(
+            retained_names(&subscription),
+            fresh_names(&branch, &operator).await?
+        );
+        Ok(())
+    }
+
+    /// Clearing the overlay is one instant retracting every session
+    /// fact and lifting every tombstone: maintained, not recomputed,
+    /// and the tree fact a tombstone hid comes back.
+    #[dialog_common::test]
+    async fn it_maintains_a_session_clear() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .retract(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            );
+
+        let mut subscription = branch.subscribe(names_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            names(&initial.asserted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+
+        branch.overlay().clear();
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("clear propagates");
+        assert_eq!(names(&delta.retracted), vec![(bob, "Bob".to_string())]);
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(alice.clone(), "Alice".to_string())]
+        );
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 1);
+        assert_eq!(
+            retained_names(&subscription),
+            vec![(alice, "Alice".to_string())]
+        );
+        Ok(())
+    }
+
+    /// A commit and a session write landing between two polls are
+    /// maintained together: the tree diff and the overlay's instants
+    /// merge into one verdict.
+    #[dialog_common::test]
+    async fn it_maintains_a_commit_and_a_session_write_together() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+
+        let delta = subscription.poll(&operator).await?.expect("both propagate");
+        let mut asserted = names(&delta.asserted);
+        asserted.sort();
+        let mut expected = vec![(alice, "Alice".to_string()), (bob, "Bob".to_string())];
+        expected.sort();
+        assert_eq!(asserted, expected);
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 1);
+        assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// A recursive subscription maintained from session instants must
+    /// agree with a fresh evaluation. Lifting a tombstone reports the
+    /// hidden fact as asserted even when nothing beneath held it, so
+    /// the fixpoint continuation must not take instants as facts that
+    /// are readable.
+    #[dialog_common::test]
+    async fn it_does_not_derive_from_a_lifted_tombstone_of_an_absent_fact() -> anyhow::Result<()> {
+        use concepts::{HasAncestor, HasParent, Parent};
+        use dialog_query::Query;
+        use dialog_query::query::Output as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let ancestor = HasAncestor::descriptor().clone();
+        let parent = HasParent::descriptor().clone();
+        let base = concept_rule(
+            &ancestor,
+            vec![concept_premise(
+                &parent,
+                &[("this", "this"), ("parent", "ancestor")],
+            )],
+        );
+        let step = concept_rule(
+            &ancestor,
+            vec![
+                concept_premise(&parent, &[("this", "this"), ("parent", "p")]),
+                concept_premise(&ancestor, &[("this", "p"), ("ancestor", "ancestor")]),
+            ],
+        );
+
+        let a = Entity::new()?;
+        let b = Entity::new()?;
+        let c = Entity::new()?;
+        let transaction = branch
+            .transaction()
+            .assert(Parent::of(b.clone()).is(a.clone()));
+        with_rule(with_rule(transaction, &base), &step)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // Hide an edge that was never there, then lift the tombstone:
+        // nothing readable changed at all.
+        branch
+            .overlay()
+            .retract(Parent::of(c.clone()).is(b.clone()));
+        let mut subscription = branch.subscribe(Query::<HasAncestor>::default());
+        subscription.poll(&operator).await?.expect("initial");
+        branch.overlay().clear();
+        subscription.poll(&operator).await?;
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 1),
+            "the lifted tombstone reached the fixpoint continuation"
+        );
+
+        let sorted = |rows: &[HasAncestor]| {
+            let mut rows = rows.to_vec();
+            rows.sort_by_key(|row| format!("{row:?}"));
+            rows
+        };
+        let fresh: Vec<HasAncestor> = branch
+            .select(Query::<HasAncestor>::default())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            sorted(subscription.results()),
+            sorted(&fresh),
+            "no ancestor row derives from an edge nobody can read"
+        );
+        Ok(())
+    }
+
+    /// The regression this port fixes: every overlay write used to bump
+    /// an epoch that sent every subscription on the branch into a full
+    /// recompute, even ones that never read the written facts. A
+    /// session status flipping on one entity, and per-client stamps
+    /// being written and garbage-collected, must leave subscriptions
+    /// over other facts, and head-dependent ones, untouched.
+    #[dialog_common::test]
+    async fn it_does_not_recompute_on_unrelated_overlay_writes() -> anyhow::Result<()> {
+        use crate::schema;
+        use dialog_artifacts::{Changes, Update as _};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut names = branch.subscribe(names_query());
+        let replica = schema::Replica::new(profile.did(), branch.of().clone());
+        let branch_concept = schema::Branch::new(&replica, "main");
+        let mut revision = branch.subscribe(Query::<schema::BranchRevision> {
+            this: branch_concept.this.clone().into(),
+            tree: Term::var("tree"),
+            edition: Term::var("edition"),
+            revision: Term::var("revision"),
+        });
+        names.poll(&operator).await?.expect("initial");
+        revision.poll(&operator).await?.expect("initial");
+        assert!(revision.demand().depends_on_head());
+
+        let here = Entity::new()?;
+        for status in ["pending", "settled", "pending", "settled"] {
+            let mut changes = Changes::new();
+            changes.associate_unique(
+                "sync/status".parse()?,
+                here.clone(),
+                Value::String(status.into()),
+            );
+            branch.overlay().assert(changes);
+            let site = Entity::new()?;
+            branch
+                .overlay()
+                .assert(the!("site/path").of(site.clone()).is("/".to_string()));
+            branch.overlay().retain_entities(|entity| *entity != site);
+
+            assert!(
+                names.poll(&operator).await?.is_none(),
+                "an overlay write the query never reads changes nothing"
+            );
+            assert!(
+                revision.poll(&operator).await?.is_none(),
+                "an overlay-only move leaves a head-dependent result alone"
+            );
+        }
+        assert_eq!(names.recomputes(), 1, "no recompute for unrelated writes");
+        assert_eq!(names.maintenances(), 0, "and no per-entity work either");
+        assert_eq!(revision.recomputes(), 1);
+        assert_eq!(revision.maintenances(), 0);
+
+        // The head-dependent subscription still re-fires on a commit.
+        branch
+            .transaction()
+            .assert(the!("person/name").of(Entity::new()?).is("Bob".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        revision
+            .poll(&operator)
+            .await?
+            .expect("a commit moves the head");
+        assert_eq!(revision.recomputes(), 2);
+        Ok(())
+    }
+
+    /// Every maintained step agrees with a fresh evaluation, across the
+    /// whole overlay vocabulary interleaved with commits: session
+    /// asserts, idempotent re-asserts, cardinality-one replaces,
+    /// tombstones over committed facts, a session copy of a tombstoned
+    /// fact, retracts of session facts, entity garbage collection, and
+    /// clear. None of it recomputes.
+    #[dialog_common::test]
+    async fn it_agrees_with_a_fresh_evaluation_through_overlay_churn() -> anyhow::Result<()> {
+        use dialog_artifacts::{Changes, Update as _};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let carol = Entity::new()?;
+        let dave = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        let name = |of: &Entity, is: &str| the!("person/name").of(of.clone()).is(is.to_string());
+        let rename = |of: &Entity, is: &str| {
+            let mut changes = Changes::new();
+            changes.associate_unique(
+                "person/name".parse().expect("attribute"),
+                of.clone(),
+                Value::String(is.into()),
+            );
+            changes
+        };
+
+        let mut step = 0;
+        let mut check = async |subscription: &mut super::Subscription<AttributeQuery>,
+                               label: &str|
+               -> anyhow::Result<()> {
+            step += 1;
+            subscription.poll(&operator).await?;
+            assert_eq!(
+                retained_names(subscription),
+                fresh_names(&branch, &operator).await?,
+                "step {step} ({label}): the maintained result drifted from a fresh evaluation"
+            );
+            Ok(())
+        };
+
+        branch.overlay().assert(name(&carol, "Carol"));
+        check(&mut subscription, "session assert").await?;
+        branch.overlay().assert(name(&carol, "Carol"));
+        check(&mut subscription, "idempotent re-assert").await?;
+        branch.overlay().assert(rename(&carol, "Caroline"));
+        check(&mut subscription, "session replace").await?;
+        branch.overlay().retract(name(&alice, "Alice"));
+        check(&mut subscription, "tombstone over a committed fact").await?;
+        branch.overlay().assert(name(&alice, "Alice"));
+        check(&mut subscription, "session copy of a tombstoned fact").await?;
+        branch.overlay().retract(name(&alice, "Alice"));
+        check(&mut subscription, "retract the session copy").await?;
+        branch
+            .transaction()
+            .assert(name(&dave, "Dave"))
+            .retract(name(&bob, "Bob"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.overlay().assert(name(&bob, "Robert"));
+        check(&mut subscription, "commit and session write together").await?;
+        branch.overlay().retain_entities(|entity| *entity != carol);
+        check(&mut subscription, "garbage-collect an entity").await?;
+        branch.overlay().clear();
+        check(&mut subscription, "clear").await?;
+
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "every step was maintained, none recomputed"
+        );
+        Ok(())
+    }
+
+    /// A concept query over `person/name` with `this` and `name` both
+    /// left as variables: the shape a UI subscribes with.
+    fn people_query() -> ConceptQuery {
+        serde_json::from_value(serde_json::json!({
+            "assert": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+            "where": {
+                "this": {"?": {"name": "this"}},
+                "name": {"?": {"name": "name"}}
+            }
+        }))
+        .expect("the people query parses")
+    }
+
+    /// Every variable a row's match binds for the query's operands,
+    /// sorted: what a consumer reading `source()` sees. A row whose
+    /// match lacks a binding the query names shows it as `None`.
+    fn bindings(rows: &[dialog_query::ConceptConclusion]) -> Vec<Vec<(String, Option<Value>)>> {
+        let mut rows: Vec<Vec<(String, Option<Value>)>> = rows
+            .iter()
+            .map(|row| {
+                ["this", "name"]
+                    .into_iter()
+                    .map(|variable| {
+                        let value = match row.source().lookup(&Term::<Any>::var(variable)) {
+                            Ok(dialog_query::Binding::Present(value)) => Some(value),
+                            _ => None,
+                        };
+                        (variable.to_string(), value)
+                    })
+                    .collect()
+            })
+            .collect();
+        rows.sort_by_key(|row| format!("{row:?}"));
+        rows
+    }
+
+    /// A row re-derived for one entity must have the shape a full
+    /// evaluation gives it, not just compare equal to it. Maintenance
+    /// narrows the query by pinning `this` to the entity, and a row
+    /// realized through that narrowed query has no `this` binding in
+    /// its match; consumers reading `source()` then see maintained and
+    /// recomputed rows disagree.
+    #[dialog_common::test]
+    async fn it_maintains_rows_in_the_shape_a_recompute_gives_them() -> anyhow::Result<()> {
+        use dialog_query::query::Output as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(people_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("covered write");
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 1),
+            "the new row came from per-entity maintenance"
+        );
+
+        let fresh: Vec<dialog_query::ConceptConclusion> = branch
+            .select(people_query())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            bindings(&delta.asserted),
+            vec![vec![
+                ("this".to_string(), Some(Value::Entity(bob))),
+                ("name".to_string(), Some(Value::String("Bob".into()))),
+            ]],
+            "the maintained row binds every variable the query names"
+        );
+        assert_eq!(
+            bindings(subscription.results()),
+            bindings(&fresh),
+            "maintained rows read exactly like recomputed ones"
         );
         Ok(())
     }

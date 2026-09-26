@@ -426,7 +426,7 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 + ::dialog_common::ConditionalSend
                 + ::dialog_common::ConditionalSync
                 + 'static,
-            <Fx as ::dialog_capability::Effect>::Of: ::dialog_capability::Constraint<
+            <Fx as ::dialog_capability::Policy>::Of: ::dialog_capability::Constraint<
                 Capability: ::dialog_common::ConditionalSend
                     + ::dialog_common::ConditionalSync,
             >,
@@ -464,7 +464,7 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 + ::dialog_common::ConditionalSend
                 + ::dialog_common::ConditionalSync
                 + 'static,
-            <Fx as ::dialog_capability::Effect>::Of: ::dialog_capability::Constraint<
+            <Fx as ::dialog_capability::Policy>::Of: ::dialog_capability::Constraint<
                 Capability: ::dialog_common::ConditionalSend
                     + ::dialog_common::ConditionalSync,
             >,

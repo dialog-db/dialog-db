@@ -64,6 +64,13 @@ fn location_key(location: &Location) -> String {
     format!("{:?}/{}", location.directory, location.name)
 }
 
+fn credential_load_error(error: credential::CredentialError) -> StorageError {
+    match error {
+        credential::CredentialError::NotFound(detail) => StorageError::NotFound(detail),
+        error => StorageError::Storage(error.to_string()),
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S> Provider<storage::Load> for Loader<S>
@@ -86,15 +93,19 @@ where
                 .load()
                 .perform(&store)
                 .await
-                .map_err(|e| StorageError::NotFound(e.to_string()));
+                .map_err(credential_load_error);
         }
 
         // `load`, not `open`: a `storage::Load` of a space that was never
         // created must fail without materializing its backing store (an
         // `open` here would, on IndexedDB, create the database into being).
-        let store = S::load(location)
-            .await
-            .map_err(|e| StorageError::NotFound(e.to_string()))?;
+        let store = S::load(location).await.map_err(|error| {
+            if S::is_not_found(&error) {
+                StorageError::NotFound(error.to_string())
+            } else {
+                StorageError::Storage(error.to_string())
+            }
+        })?;
 
         let cred: Credential = did!("local:storage")
             .credential()
@@ -102,7 +113,7 @@ where
             .load()
             .perform(&store)
             .await
-            .map_err(|e| StorageError::NotFound(e.to_string()))?;
+            .map_err(credential_load_error)?;
 
         let did = cred.did();
         self.register(did, key, store);

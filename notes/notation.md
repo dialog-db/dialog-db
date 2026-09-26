@@ -46,7 +46,15 @@ org.example.hr
 
 ### Name
 
-The name component of an attribute uses lowercase kebab-case.
+The name component of an attribute takes one of two forms, distinguished by
+the case of its first byte. The two are disjoint and exhaustive, which is what
+lets a single scan of one domain serve both and lets a query narrow to either
+half as a contiguous key range.
+
+#### Symbol names
+
+A named predicate, in lowercase kebab-case. This is the ordinary case: the
+named fields of an entity.
 
 **Rules:**
 
@@ -66,6 +74,34 @@ recipe-step
 ```
 ^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$
 ```
+
+#### Position names
+
+A fractional position, beginning with an uppercase letter. A position name
+marks its fact as a member of an ordered relation rather than a named field,
+and positions sort lexicographically — so members of one collection come back
+from a single range scan already in order, with no per-element join and no
+order state held outside the facts themselves.
+
+```
+N
+N5
+Zk3
+```
+
+Because the two forms differ in the case of the first byte, one domain can
+carry both at once — an entity's named fields and its ordered members
+together:
+
+```
+todo.list/title     a symbol name: the list's title
+todo.list/owner     a symbol name
+todo.list/N         a position name: a member
+todo.list/N5        a position name: a later member
+```
+
+A query selects one half with `name.case` (see [Variables](#variables)), or
+omits the constraint to take both and split them downstream.
 
 ### References
 
@@ -122,6 +158,15 @@ as: Text
         "description": "Cardinality of the attribute. Defaults to 'one' when omitted.",
         "default": "one"
       },
+      "optional": {
+        "type": "boolean",
+        "default": false,
+        "description": "Whether the field is set-widened: a missing claim yields a row with the field bound to absent rather than dropping the row."
+      },
+      "conforms": {
+        "type": "string",
+        "description": "A concept the field's target entity must satisfy, as its 'concept:{hash}' URI. Entity-valued attributes only; mutually exclusive with 'optional'."
+      },
       "as": {
         "description": "Value type of the attribute. If omitted, any type is allowed.",
         "type": "string",
@@ -147,33 +192,19 @@ The `as` field declares what kind of value the attribute admits. Scalar types fr
 | `UnsignedInteger` | Unsigned integer            |
 | `SignedInteger`   | Signed integer              |
 | `Float`           | IEEE 754 floating point     |
+| `Record`          | Structured data, opaque to the query layer |
 | `Symbol`          | Symbolic identifier         |
+
+A concept can additionally require an entity-valued field's target to satisfy
+a concept — see [Concept-typed fields](#concept-typed-fields). That constraint
+lives on the field inside a concept's `with`, not on the attribute itself: an
+attribute is reusable across concepts, and conformance is a demand one concept
+makes of its own field.
 
 #### Future Attribute Extensions
 
-An attribute will also be able to reference a concept as its value type, or constrain values to a fixed set of symbols (neither is yet supported):
-
-```json
-{
-  "description": "Ingredient used in the recipe",
-  "the": "diy.cook/ingredient",
-  "as": {
-    "description": "An ingredient",
-    "with": {
-      "name": {
-        "description": "Ingredient name",
-        "the": "diy.cook/ingredient-name",
-        "as": "Text"
-      },
-      "quantity": {
-        "description": "Amount needed",
-        "the": "diy.cook/quantity",
-        "as": "UnsignedInteger"
-      }
-    }
-  }
-}
-```
+**Not yet supported.** An attribute will be able to constrain values to a
+fixed set of symbols:
 
 ```json
 {
@@ -255,9 +286,6 @@ with:
         },
         "minProperties": 1
       },
-      "maybe": {
-        "description": "[Future extension, not yet supported] Optional fields. The entity may or may not have these attributes."
-      }
     },
     "required": ["with"]
   }
@@ -269,9 +297,12 @@ Fields under `with` are required; an entity must have claims satisfying all thos
 
 #### Optional attributes
 
-> ⚠️ Optional attributes are not currently supported. For now `maybe` field can be used as metadata which is ignored by the query engine.
+An attribute marked `"optional": true` may or may not have a claim. The entity
+still matches the concept as long as every *required* attribute is satisfied,
+and the optional value is included in the conclusion when present.
 
-Fields under `maybe` define attributes that the entity may or may not have related claims for. The entity will still match the concept as long as all required attributes (defined in `with`) are satisfied. Optional attribute values will be included in the conclusion when present.
+Optionality is carried **per attribute, inside `with`** — there is no separate
+block. A concept must still declare at least one required attribute.
 
 ```json
 {
@@ -281,24 +312,102 @@ Fields under `maybe` define attributes that the entity may or may not have relat
       "description": "What to do in this step",
       "the": "diy.cook.recipe-step/instruction",
       "as": "Text"
-    }
-  },
-  "maybe": {
+    },
     "after": {
       "description": "Step that must be completed before this one",
       "the": "diy.cook.recipe-step/after",
-      "as": "Entity"
+      "as": "Entity",
+      "optional": true
     },
     "duration": {
       "description": "Time in minutes this step takes",
       "the": "diy.cook.recipe-step/duration",
-      "as": "UnsignedInteger"
+      "as": "UnsignedInteger",
+      "optional": true
     }
   }
 }
 ```
 
-An entity matches this concept if it has a claim for `diy.cook.recipe-step/instruction`. Claims for `diy.cook.recipe-step/after` and `diy.cook.recipe-step/duration` are included in the conclusion when present but are not required for the entity to match.
+An entity matches this concept if it has a claim for
+`diy.cook.recipe-step/instruction`. Claims for `diy.cook.recipe-step/after` and
+`diy.cook.recipe-step/duration` are included when present but are not required
+for the entity to match.
+
+An optional attribute is **set-widened** rather than filtered: a missing claim
+yields a row with the field bound to *absent*, instead of dropping the row. So
+the field's type admits absence — the `option` member of a variable's type set
+(see [Constraining a variable](#constraining-a-variable)) — and a consuming
+rule sees that an absent binding can arrive through this boundary.
+
+Marking an attribute optional changes the concept's identity: a required
+attribute hashes as an empty map, an optional one as `{"optional": true}`.
+
+#### Keyed collections
+
+A field may select *every entry of a domain* rather than one attribute. Its
+`the` names a domain and which half of it (see [Name](#name)): the
+symbol-named half is a **dictionary**, the position-named half a
+**sequence**. `as` is the type of each entry's value.
+
+```json
+{
+  "with": {
+    "title": { "the": "todo.list/title", "as": "Text" },
+    "member": {
+      "description": "The list's members, in order",
+      "the": { "domain": "todo.list", "keyed": "sequence" },
+      "cardinality": "many",
+      "as": "Text"
+    }
+  }
+}
+```
+
+The facts behind such a field are ordinary claims whose attribute's name half
+is the entry's key: `todo.list/N` and `todo.list/N5` are two members. A
+collection field is therefore *many facts* by construction; `cardinality` is
+per entry (whether one key may hold two values), not about the collection.
+
+A collection field cannot be optional: it is zero-or-more already, and an
+entity with no entries simply yields no rows.
+
+Because a dictionary takes every symbol-named fact in its domain, a dictionary
+field's domain must be its own — a scalar attribute declared in the same
+domain would read as one more entry. A sequence shares a domain with scalars
+safely, since positions and symbols are disjoint by first byte.
+
+**Querying.** Each matched entry is one row binding the field to the entry's
+value and the field's **key** to the entry's key, the name half as text (`N5`,
+`title`). In a `where`, a collection field is bound as an **entry**, a mini
+fact in the slots an attribute query uses: `the` for the key, `is` for the
+value.
+
+```json
+{ "member": { "the": { "?": { "name": "key" } }, "is": { "?": { "name": "member" } } } }
+```
+
+A constant `the` selects one entry (`{"the": "N5", "is": …}`); a bare term
+under the field (`"member": {"?": {"name": "m"}}`) binds every entry with the
+key unconstrained. The key joins, filters, and feeds formulas like any other
+term; for a sequence it is what `dialog/position` reads to derive a neighbour's
+position. In a conclusion the pair is the field's operand and its key operand,
+`<field>/key`, which the entry form spells on the wire.
+
+Internally the concept's rule scans the domain with the attribute slot refined
+by `domain` and `name.case`, and projects the key with `dialog/attribute-parts`
+(`of` → `domain`, `name`).
+
+**Deriving.** A rule head may be a collection field. A deductive head yields
+`(key, value)` rows like the concept itself; an inductive head writes the
+entry under `<domain>/<key>`, so the body must bind the key operand, and a
+key of the wrong shape for the collection (an uppercase name for a
+dictionary, a lowercase one for a sequence) fails the commit rather than
+landing in the other half of the domain. The trigger index files a
+collection premise under the half's cover key (`on:<domain>/_position` or
+`on:<domain>/_symbol`), which every write in that half probes alongside its
+own attribute's key, so a rule reading a collection wakes for any member
+write.
 
 ### Deductive Rules
 
@@ -402,6 +511,91 @@ In the formal notation, a named variable is `{ "?": { "name": "x" } }` and a bla
 ```
 
 In the abbreviated notation, `?person` is shorthand for `{ "?": { "name": "person" } }` and `_` is shorthand for `{ "?": {} }`.
+
+##### Constraining a variable
+
+A variable may carry a `where` record narrowing what it admits. Every slot is
+optional and all present slots are conjoined; a variable with no `where` is
+unconstrained.
+
+```json
+{ "?": { "name": "count", "where": { "type": { "uint": {} }, ">=": 1 } } }
+```
+
+Two container conventions run through the format, and they are not
+interchangeable:
+
+- An **object is a union** where its entries are alternatives of one kind. The
+  `type` set is the case: a value matching any present key is admitted, and
+  intersecting two sets keeps the keys they share.
+- An **array is an intersection** where its entries are independent
+  obligations. Conformance (`as`) is the case: every listed concept must be
+  satisfied.
+- A **record of fixed named slots** is neither. `where` itself is one: each
+  slot appears at most once, and two constraints on one slot merge rather than
+  accumulate.
+
+**`type`** — the set of admissible types. Ten members, each mapping to a value
+type except `option`, which is the row-level absence atom: present alongside
+others it marks the variable optional.
+
+```json
+{ "type": { "text": {} } }
+{ "type": { "text": {}, "symbol": {} } }
+{ "type": { "text": {}, "option": {} } }
+```
+
+| key | admits |
+| --- | --- |
+| `bytes` | a byte buffer |
+| `entity` | an entity reference |
+| `boolean` | a boolean |
+| `text` | a UTF-8 string |
+| `uint` | an unsigned integer |
+| `int` | a signed integer |
+| `float` | a floating-point number |
+| `record` | structured data, opaque to the query layer |
+| `symbol` | a symbol — the type attributes carry |
+| `option` | absence (an optional value) |
+
+Each value is a per-variant parameter record, empty today; it is where a
+future parameter such as an integer width would go.
+
+**`domain`** and **`name`** — constrain the two halves of an attribute
+structurally. Symbol-typed values only.
+
+```json
+{ "domain": { "is": "todo.list" }, "name": { "case": "position" } }
+```
+
+The domain is written **without** a trailing slash; the separator is an
+encoding detail supplied on the way in. `name.case` is `position` or `symbol`
+(see [Name](#name)); omitting it admits either half.
+
+**`starts-with`** — a lexical prefix. Applies to types with a lexical form
+(text, symbol, entity). For attributes prefer `domain`/`name`, which say the
+same thing structurally and cannot be written in a way that silently degrades
+the scan.
+
+**`as`** — concepts the value's entity must conform to. An array, and so an
+intersection: all listed concepts must be satisfied. Entity-typed values only.
+Enforced structurally — the target concept's premises are conjoined into the
+query — rather than as a per-row test.
+
+```json
+{ "as": [{ "concept:bafy...": {} }] }
+```
+
+**`>=`, `>`, `<=`, `<`** — order bounds. Comparable types only.
+
+```json
+{ "type": { "uint": {} }, ">=": 1, "<": 100 }
+```
+
+Every slot other than `type` narrows the admissible type set as a side effect:
+a prefix implies a textual type, conformance implies `entity`, an order bound
+implies a comparable type. A constraint whose narrowing would empty the set is
+rejected rather than silently yielding a variable that matches nothing.
 
 The variable `this` (`?this` in abbreviated notation) is implicit in every rule and refers to the entity of the asserted concept. It must not be declared in the concept's `with` (because it is not an attribute); it must be used in the `when` premises to bind the entity of the conclusion.
 
@@ -603,6 +797,80 @@ Because disjunction is expressed by separate rules, a new rule deriving an exist
 ```
 
 If the `unless` pattern can be satisfied, the result is excluded. This reflects the closed-world assumption: if something cannot be derived from what is known, it is treated as absent.
+
+#### Aggregation
+
+A deductive rule may carry a `reduce` clause beside `when` and `unless`. Each
+entry names a head field and the fold that defines it; the head stays an
+ordinary concept, so a reducing rule's conclusion composes like any other.
+
+```json
+{
+  "deduce": {
+    "with": {
+      "dept":  { "the": "org.employee/dept",  "as": "Entity" },
+      "total": { "the": "org.employee/total", "as": "UnsignedInteger" }
+    }
+  },
+  "when": [
+    {
+      "assert": {
+        "with": {
+          "dept":   { "the": "org.employee/dept",   "as": "Entity" },
+          "salary": { "the": "org.employee/salary", "as": "UnsignedInteger" }
+        }
+      },
+      "where": {
+        "dept":   { "?": { "name": "dept" } },
+        "salary": { "?": { "name": "salary" } }
+      }
+    }
+  ],
+  "reduce": {
+    "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
+  }
+}
+```
+
+Evaluation is a pipeline: evaluate `when`/`unless` as usual, group the
+resulting rows by the head fields that are **not** reduced, fold each group,
+and emit one row per group.
+
+The grouping set is **derived**, never declared — it is exactly the head fields
+absent from `reduce`. That is what makes the classic aggregation hazard
+unwriteable: a field cannot be both grouped and reduced, because a key is
+either present in `reduce` or it isn't. In this example `dept` groups because
+`reduce` does not mention it, and `total` is folded because it does.
+
+**Aggregators**
+
+| `apply` | folds to |
+| --- | --- |
+| `count` | number of present bindings |
+| `count-distinct` | number of distinct present values |
+| `sum` | sum of the group's values; identity `0` |
+| `min` | least present value |
+| `max` | greatest present value |
+| `avg` | mean of the present numeric values |
+
+**Absent inputs are skipped**, SQL-NULL style: a fold consumes only present
+bindings, and `count` counts present bindings. Coalesce first if you want
+other behaviour.
+
+Whether a reduced field may be required depends on its fold having an
+identity. `count` and `sum` always produce a value, so their head field can be
+required. `min`, `max`, and `avg` have no identity, so over an input that
+admits absence they may produce nothing — and their head field must then be
+declared optional.
+
+`min` and `max` require comparable values; `sum` and `avg` require numeric
+ones. Mixing the integer band with floats inside one group is an error rather
+than a silent promotion.
+
+**Stratification.** A fold reads a complete relation, so every concept premise
+of a reducing rule contributes an aggregating edge to the dependency graph,
+treated like negation: aggregation through recursion is rejected, exactly as
+negation through recursion is.
 
 #### Constraints
 
@@ -1350,21 +1618,39 @@ as: UnsignedInteger
 
 The name `quantity` comes from the label, but the domain is overridden to `io.gozala.person`.
 
-#### Future attribute extensions
+#### Concept-typed fields
 
-**Not yet supported.** Concept references use dot-prefix notation, and symbol enumerations use array syntax:
+An entity-valued field can require its target to satisfy a concept, written
+with dot-prefix notation:
 
 ```yaml
 diy.cook:
   ingredient:
     description: An ingredient in a recipe
     as: .Ingredient
+```
+
+`.Ingredient` resolves to `diy.cook/Ingredient` within the current domain. The
+constraint is enforced structurally: the target concept's premises are
+conjoined onto the field, so only entities that actually satisfy it match.
+
+Only entity-valued attributes can conform, and a conforming field cannot also
+be optional — the left join over "edge exists AND target conforms" is absence
+over a derived predicate, which stratification has to own first.
+
+#### Future attribute extensions
+
+**Not yet supported.** Symbol enumerations use array syntax:
+
+```yaml
+diy.cook:
   unit:
     description: The unit of measurement
     as: [:tsp, :mls]
 ```
 
-`.Ingredient` resolves to `diy.cook/Ingredient` within the current domain. `[:tsp, :mls]` means the value must be one of the symbols `diy.cook/tsp` or `diy.cook/mls`.
+`[:tsp, :mls]` means the value must be one of the symbols `diy.cook/tsp` or
+`diy.cook/mls`.
 
 ### Concept
 
@@ -1477,9 +1763,10 @@ Expands to:
 
 `name` defined inline inside `io.gozala/Person` lives at `io.gozala.person/name` and can be referenced from anywhere by that path.
 
-#### Future concept extensions
+#### Optional fields
 
-**Not yet supported.** Optional fields use the `maybe` key:
+An optional field carries `optional: true` alongside its other keys, inside
+`with`:
 
 ```yaml
 diy.cook:
@@ -1487,10 +1774,10 @@ diy.cook:
     description: A cooking step
     with:
       instruction: .
-    maybe:
       after:
         description: Step to perform this after
         as: .RecipeStep
+        optional: true
 ```
 
 ### Deductive Rules

@@ -23,6 +23,17 @@ pub trait Resource<Address>: Sized {
     /// if absent. This is the open-or-create path.
     async fn open(address: &Address) -> Result<Self, Self::Error>;
 
+    /// Whether an error from [`load`](Resource::load) means that the
+    /// resource is absent, rather than that its backing store failed.
+    ///
+    /// Callers that implement open-or-create behavior must only create
+    /// after this returns `true`; treating every load error as absence can
+    /// overwrite or collide with a store that is present but temporarily
+    /// unusable.
+    fn is_not_found(_error: &Self::Error) -> bool {
+        false
+    }
+
     /// Open an *existing* resource at the given address, failing if it
     /// does not already exist. Unlike [`open`](Resource::open) this must
     /// never bring the backing store into being.

@@ -1,16 +1,24 @@
+use dialog_effects::archive::prelude::CatalogExt as _;
+use dialog_effects::archive::prelude::GetBlockExt as _;
+use std::sync::Arc;
+
 use crate::RemoteSite;
 use async_trait::async_trait;
 use dialog_capability::Fork;
-use dialog_capability::{Capability, Provider};
-use dialog_common::{Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
-use dialog_effects::archive::{Catalog, Get, Put};
+use dialog_capability::Provider;
+use dialog_common::{Buffer, ConditionalSync, Priority};
+use dialog_effects::archive::prelude::ArchiveExt;
+use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::{Debug, Display};
 
+pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
+
 use super::local::LocalIndex;
 use crate::RemoteRepository;
+use dialog_effects::MethodExt as _;
+use dialog_effects::archive::prelude::CatalogScope;
 
 /// The remote half of a [`NetworkedIndex`]: what a local read miss means.
 ///
@@ -18,7 +26,7 @@ use crate::RemoteRepository;
 /// regions hydrate on demand through the tracked remote. That makes the
 /// *unavailability* of the tracked remote a load-bearing fact: a caller
 /// that swallows a failed remote load and quietly falls back to
-/// local-only turns every by-reference read into a bare "Blob not found"
+/// local-only turns every by-reference read into a bare "Block not found"
 /// with the actual cause (the remote could not be loaded, and why)
 /// erased. [`Unavailable`](RemoteFallback::Unavailable) keeps that cause
 /// attached: reads that the local archive can satisfy still succeed, and
@@ -87,6 +95,7 @@ impl From<RemoteRepository> for RemoteFallback {
 pub struct NetworkedIndex<'a, Env> {
     local: LocalIndex<'a, Env>,
     remote: RemoteFallback,
+    priority: Priority,
 }
 
 impl<Env> Clone for NetworkedIndex<'_, Env> {
@@ -94,6 +103,7 @@ impl<Env> Clone for NetworkedIndex<'_, Env> {
         Self {
             local: self.local.clone(),
             remote: self.remote.clone(),
+            priority: self.priority,
         }
     }
 }
@@ -102,15 +112,24 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
     /// Create a networked index. With [`RemoteFallback::Remote`] (or a
     /// `Some(remote)`), reads that miss locally fall back to the remote
     /// and cache the result; see [`RemoteFallback`] for the other modes.
-    pub fn new(
-        env: &'a Env,
-        index: Capability<Catalog>,
-        remote: impl Into<RemoteFallback>,
-    ) -> Self {
+    pub fn new(env: &'a Env, index: CatalogScope, remote: impl Into<RemoteFallback>) -> Self {
         Self {
             local: LocalIndex::new(env, index),
             remote: remote.into(),
+            priority: Priority::Demand,
         }
+    }
+
+    /// Rank this index's hydrations as `priority` at the remote site.
+    ///
+    /// An index is [`Priority::Demand`] unless told otherwise: its reads
+    /// are what some evaluation is blocked on. A speculative walker (the
+    /// preload queue's jobs) reads through an index ranked at its hint's
+    /// likelihood, so its warming never goes before a demand read of
+    /// the same site.
+    pub fn with_priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
+        self
     }
 }
 
@@ -122,8 +141,7 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> StorageBackend for NetworkedIndex<'_, Env>
 where
-    Env:
-        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+    Env: Provider<Get> + Provider<Put> + Provider<Hydrate> + ConditionalSync + 'static,
 {
     type Key = Blake3Hash;
     type Value = Vec<u8>;
@@ -144,7 +162,7 @@ where
             // The block is not local and the tracked remote — the only
             // place it could hydrate from — could not be loaded. Failing
             // here, with the cause, is the contract: silently returning
-            // `None` would surface downstream as a bare "Blob not found"
+            // `None` would surface downstream as a bare "Block not found"
             // that reads like data loss instead of what it is.
             RemoteFallback::Unavailable { remote, reason } => {
                 let key = dialog_common::Blake3Hash::from(*key);
@@ -156,31 +174,89 @@ where
             }
         };
 
-        let address = remote.address();
-        let remote_catalog = address.subject.clone().archive().catalog("index");
+        // The routing is resolved here; the fetch, the re-check that
+        // guards it, the local write-back, and any sharing of the work
+        // with concurrent readers of the same digest are the env's own
+        // effect (see [`Hydrate`]).
+        let route = remote.address();
+        let request = HydrationRequest {
+            address: route.address,
+            subject: route.subject,
+            catalog: self.local.catalog().clone(),
+            digest: dialog_common::Blake3Hash::from(*key),
+            priority: self.priority,
+        };
+        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
+        Ok(hydrated.map(|bytes| bytes.as_ref().clone()))
+    }
+}
 
-        let env = self.local.env();
-        let remote_result = remote_catalog
-            .clone()
-            .get(*key)
-            .fork(&address.address)
-            .perform(env)
-            .await
-            .map_err(DialogStorageError::from)?;
+/// Fetch one block from the tracked remote and write it back into the
+/// local archive before returning it — hydration is part of the read, so
+/// a caller that observes the bytes can rely on the next local read
+/// hitting. This is the whole substance of a [`Hydrate`] perform;
+/// providers wrap it in whatever sharing they own.
+///
+/// The local re-check comes first: between a caller's miss and this
+/// point, a concurrent reader of the same block may have completed its
+/// fetch, hydrated, and moved on — a window in which a naive fetch
+/// re-downloads bytes the archive already holds. Inside a shared flight
+/// the re-check runs once for every set of joiners, so the window is
+/// closed rather than narrowed.
+pub async fn hydrate<Env>(
+    env: &Env,
+    request: HydrationRequest,
+) -> Result<Option<Arc<Vec<u8>>>, ArchiveError>
+where
+    Env:
+        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+{
+    let HydrationRequest {
+        address,
+        subject,
+        catalog,
+        digest,
+        priority: _,
+    } = request;
 
-        match remote_result {
-            Some(bytes) => {
-                // Cache locally
-                let cache = self
-                    .local
-                    .catalog()
-                    .clone()
-                    .put(Buffer::from(bytes.as_slice()));
-                let _: Result<(), _> = cache.perform(self.local.env()).await;
-                Ok(Some(bytes))
+    if let Some(bytes) = catalog.clone().get(digest.clone()).perform(env).await? {
+        return Ok(Some(Arc::new(bytes)));
+    }
+
+    let remote_catalog = subject.reader().archive().catalog("index");
+    let remote_result = remote_catalog
+        .get(digest.clone())
+        .fork(&address)
+        .perform(env)
+        .await?;
+
+    match remote_result {
+        Some(bytes) => {
+            // Every hydration is one remote round trip (two, behind a
+            // UCAN remote whose permit was not cached); this event is
+            // what lets a slow first read be attributed to on-demand
+            // replication rather than local work.
+            tracing::debug!(
+                target: "dialog::sync::hydrate",
+                block = %digest,
+                bytes = bytes.len(),
+                "hydrated block from remote"
+            );
+            let cache = catalog.put(Buffer::from(bytes.as_slice()));
+            // A failed write-back is not a failed read, but it silently
+            // turns every future read of this block into another remote
+            // round trip — worth a trace, never worth failing the read.
+            if let Err(error) = cache.perform(env).await {
+                tracing::debug!(
+                    target: "dialog::sync::hydrate",
+                    block = %digest,
+                    %error,
+                    "failed to cache hydrated block locally"
+                );
             }
-            None => Ok(None),
+            Ok(Some(Arc::new(bytes)))
         }
+        None => Ok(None),
     }
 }
 
@@ -215,21 +291,113 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use std::sync::Arc;
+
     use anyhow::Result;
-    use dialog_common::Buffer;
+    use dialog_capability::{Command, Provider};
+    use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Priority};
+    use dialog_effects::archive::{Get, Put};
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_storage::StorageBackend as _;
+    use parking_lot::Mutex;
 
-    use super::{NetworkedIndex, RemoteFallback};
-    use crate::RepositoryArchiveExt as _;
+    use super::{Hydrate, HydrationRequest, NetworkedIndex, RemoteFallback};
     use crate::helpers::test_repo;
+
+    /// An env that answers every hydration with "not found" and keeps the
+    /// priority each request carried.
+    struct Recording<P> {
+        inner: P,
+        priorities: Arc<Mutex<Vec<Priority>>>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl<P> Provider<Get> for Recording<P>
+    where
+        P: Provider<Get> + ConditionalSync,
+    {
+        async fn execute(&self, input: <Get as Command>::Input) -> <Get as Command>::Output {
+            Provider::<Get>::execute(&self.inner, input).await
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl<P> Provider<Put> for Recording<P>
+    where
+        P: Provider<Put> + ConditionalSync,
+    {
+        async fn execute(&self, input: <Put as Command>::Input) -> <Put as Command>::Output {
+            Provider::<Put>::execute(&self.inner, input).await
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl<P> Provider<Hydrate> for Recording<P>
+    where
+        P: ConditionalSend + ConditionalSync,
+    {
+        async fn execute(&self, request: HydrationRequest) -> <Hydrate as Command>::Output {
+            self.priorities.lock().push(request.priority);
+            Ok(None)
+        }
+    }
+
+    /// The priority an index is built with reaches the env's hydration
+    /// request, which is where the scheduler reads it: an index is a
+    /// demand reader unless told otherwise, and a speculative walker's
+    /// index carries its hint's likelihood so its warming never takes a
+    /// site's slot from a read someone is waiting on.
+    #[dialog_common::test]
+    async fn it_ranks_its_hydrations_at_its_priority() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let site = dialog_remote_s3::Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()?;
+        let origin = repo
+            .remote("origin")
+            .create(site)
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let env = Recording {
+            inner: operator,
+            priorities: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let absent = *Buffer::from(&b"never stored"[..]).blake3_hash().as_bytes();
+        let demand = NetworkedIndex::new(
+            &env,
+            branch.archive().index(),
+            RemoteFallback::Remote(origin.clone()),
+        );
+        assert_eq!(demand.get(&absent).await?, None);
+        let speculative = NetworkedIndex::new(
+            &env,
+            branch.archive().index(),
+            RemoteFallback::Remote(origin),
+        )
+        .with_priority(Priority::Maybe);
+        assert_eq!(speculative.get(&absent).await?, None);
+
+        assert_eq!(
+            env.priorities.lock().clone(),
+            [Priority::Demand, Priority::Maybe],
+            "each index hydrates at its own priority, demand by default"
+        );
+        Ok(())
+    }
 
     /// A tracked remote that failed to load must not silently degrade the
     /// index to local-only. A read the local archive satisfies still
     /// succeeds — a full replica keeps working offline — but a miss is
     /// the exact case that needed the remote, and it must fail carrying
     /// the load failure as its cause, not surface downstream as a bare
-    /// "Blob not found" with the cause erased.
+    /// "Block not found" with the cause erased.
     #[dialog_common::test]
     async fn it_fails_a_miss_loudly_when_the_tracked_remote_is_unavailable() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;

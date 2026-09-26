@@ -231,6 +231,17 @@ pub enum CommitError {
     /// Evaluating or loading an inductive rule during commit failed.
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
+
+    /// A write was attempted through a reference to a snapshot.
+    ///
+    /// A snapshot holds its revision by value, so nothing reached
+    /// through `&Snapshot` can advance it. Blob writes and retractions
+    /// through [`Snapshot::blobs`](crate::Snapshot::blobs) land here;
+    /// advance the snapshot by consuming it instead, through
+    /// [`Snapshot::transaction`](crate::Snapshot::transaction) or
+    /// [`Snapshot::commit`](crate::Snapshot::commit).
+    #[error("A snapshot cannot be advanced through a reference; transact it instead")]
+    Detached,
 }
 
 /// Errors specific to a pull operation.
@@ -464,6 +475,55 @@ pub enum PublishError {
     /// Failed to encode the value before publishing.
     #[error("Encode error: {0}")]
     Encode(String),
+}
+
+/// Errors returned by cell retract operations.
+#[derive(Error, Debug)]
+pub enum RetractError {
+    /// Nothing was observed to retract.
+    ///
+    /// Retraction names the version it expects to remove, so a caller
+    /// that has not resolved the cell has nothing to name. Resolve it
+    /// first, or retract through
+    /// [`expecting`](crate::Retract::expecting) with a version held
+    /// from elsewhere.
+    #[error("Cannot retract a cell whose version has not been observed")]
+    Unobserved,
+
+    /// CAS edition mismatch -- the cell moved under us.
+    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    VersionMismatch {
+        /// The edition we expected to remove.
+        expected: Option<Version>,
+        /// The edition the backing store actually had.
+        actual: Option<Version>,
+    },
+
+    /// Storage backend failure.
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    /// The request was not authorized.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
+
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
+}
+
+impl From<MemoryError> for RetractError {
+    fn from(error: MemoryError) -> Self {
+        match error {
+            MemoryError::VersionMismatch { expected, actual } => {
+                Self::VersionMismatch { expected, actual }
+            }
+            MemoryError::Storage(message) => Self::Storage(message),
+            MemoryError::Rejected(error) => Self::Rejected(error),
+            MemoryError::Authorization(error) => Self::Authorization(error),
+        }
+    }
 }
 
 impl From<MemoryError> for PublishError {

@@ -45,7 +45,8 @@ fn read_rejection(status: u16, body: &[u8]) -> S3Error {
     })
 }
 
-use crate::permit_cache::PermitCache;
+use crate::permit_cache::{PermitCache, PermitKey};
+use dialog_remote_s3::flight::Flight;
 
 // Re-export UCAN types for convenience.
 pub use dialog_ucan::{Ucan, UcanInvocation};
@@ -58,6 +59,11 @@ pub use dialog_ucan::{Ucan, UcanInvocation};
 pub struct UcanAuthorization(UcanInvocation);
 
 impl UcanAuthorization {
+    /// The signed invocation this authorization presents.
+    pub fn invocation(&self) -> &UcanInvocation {
+        &self.0
+    }
+
     /// Redeem this authorization at the access service for a presigned URL permit.
     pub async fn redeem(&self, address: &UcanAddress) -> Result<Permit, S3Error> {
         let body = self
@@ -214,15 +220,33 @@ fn now_s() -> u64 {
 /// this site (one `Network`, hence one `Operator`) and are dropped with
 /// it; another operator in the same process has its own site and can
 /// never be served a permit this one redeemed. Clones share the cache.
+///
+/// The site also owns the in-flight redeem [`Flight`]: concurrent
+/// requests for one cacheable object share a single redeem round-trip
+/// instead of each POSTing an invocation for the same permit. Scoped to
+/// the site for the same reason the cache is — a redeem carries this
+/// operator's authorization, and nobody else may ride it.
 #[derive(Debug, Clone, Default)]
 pub struct UcanSite {
     permits: Arc<PermitCache>,
+    redeems: Arc<Flight<PermitKey, Result<Permit, S3Error>>>,
 }
 
 impl UcanSite {
     /// The cache of redeemed GET permits shared by clones of this site.
     pub(crate) fn permits(&self) -> &PermitCache {
         &self.permits
+    }
+
+    /// The permit cache as an owned handle, for futures that outlive
+    /// any one borrow of the site.
+    pub(crate) fn permits_shared(&self) -> Arc<PermitCache> {
+        self.permits.clone()
+    }
+
+    /// The in-flight redeems shared by clones of this site.
+    pub(crate) fn redeems(&self) -> &Flight<PermitKey, Result<Permit, S3Error>> {
+        &self.redeems
     }
 }
 
@@ -250,6 +274,7 @@ mod tests {
     use dialog_capability::Principal;
     #[cfg(not(target_arch = "wasm32"))]
     use dialog_credentials::Ed25519Signer;
+    use dialog_effects::MethodExt as _;
     #[cfg(not(target_arch = "wasm32"))]
     use dialog_ucan_core::subject::Subject as DelegatedSubject;
     #[cfg(not(target_arch = "wasm32"))]
@@ -315,6 +340,7 @@ mod tests {
 
         let before = now_s();
         let fork = Subject::from(profile)
+            .reader()
             .archive()
             .catalog("data")
             .get(dialog_common::Blake3Hash::hash(b"block"))

@@ -50,16 +50,31 @@ where
 
         let cached = key.as_ref().and_then(|key| cache.lookup(key, now));
         let from_cache = cached.is_some();
-        let permit = match cached {
-            Some(permit) => permit,
-            None => {
-                let permit = invocation.authorization.redeem(&invocation.address).await?;
-                if let Some(key) = key.clone() {
-                    cache.store(key, &permit, now);
-                }
-                permit
+        let permit = match (cached, &key) {
+            (Some(permit), _) => permit,
+            // A cacheable miss joins the site's in-flight redeems:
+            // concurrent requests for one object share a single redeem
+            // round-trip, and whoever completes it stores the permit —
+            // exactly once — for the TTL window that follows. The shared
+            // future owns clones of everything it touches, so any joiner
+            // can drive it; a shared failure is returned to everyone in
+            // flight and cached for nobody.
+            (None, Some(key)) => {
+                let authorization = invocation.authorization.clone();
+                let address = invocation.address.clone();
+                let permits = self.permits_shared();
+                let key = key.clone();
+                self.redeems()
+                    .join(key.clone(), move || async move {
+                        let permit = authorization.redeem(&address).await?;
+                        permits.store(key, &permit, time::now());
+                        Ok(permit)
+                    })
+                    .await?
             }
+            (None, None) => invocation.authorization.redeem(&invocation.address).await?,
         };
+        let redeemed = time::now();
 
         // A retry presents the capability a second time, so it is
         // cloned only when a cached permit makes a retry possible.
@@ -67,9 +82,35 @@ where
         let presented = key.map(|key| (key, permit.clone()));
         let outcome = permit.invoke(invocation.capability).perform(&S3).await;
 
+        // The two halves of every remote effect, separately attributed:
+        // a slow sync can be blamed on the redeem (access service, one
+        // HTTP round trip unless cached) or on storage (S3, always one)
+        // without guessing. `debug` because this fires once per block on
+        // a cold replica.
+        tracing::debug!(
+            target: "dialog::remote::ucan",
+            command = std::any::type_name::<Fx>(),
+            permit_cache_hit = from_cache,
+            redeem_ms = redeemed
+                .duration_since(now)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or_default(),
+            storage_ms = time::now()
+                .duration_since(redeemed)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or_default(),
+            ok = outcome.is_ok(),
+            "remote effect"
+        );
+
         match (outcome, presented) {
             (Err(error), Some((key, permit))) if error.is_permit_rejection() => {
                 cache.invalidate(&key, &permit);
+                tracing::debug!(
+                    target: "dialog::remote::ucan",
+                    command = std::any::type_name::<Fx>(),
+                    "cached permit rejected; re-redeeming"
+                );
                 match retry {
                     Some(capability) => {
                         let fresh = invocation.authorization.redeem(&invocation.address).await?;
@@ -88,12 +129,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::prelude::*;
     use std::collections::HashMap;
 
     use super::*;
     use dialog_capability::{Principal, Subject, did};
     use dialog_credentials::Ed25519Signer;
-    use dialog_effects::archive::{Archive, ArchiveError, Catalog, Get};
+
+    use dialog_effects::archive::ArchiveError;
     use dialog_remote_s3::Permit;
     use dialog_ucan::UcanInvocation;
     use dialog_ucan_core::{InvocationBuilder, InvocationChain};
@@ -146,9 +189,10 @@ mod tests {
     async fn it_retains_the_permit_after_a_transport_error() {
         let signer = Ed25519Signer::import(&[9u8; 32]).await.unwrap();
         let capability = Subject::from(did!("key:zPermitCacheTransportTest"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("blobs"))
-            .invoke(Get::new([0u8; 32]));
+            .reader()
+            .archive()
+            .catalog("blobs")
+            .get([0u8; 32]);
 
         let site = UcanSite::default();
         let address = UcanAddress::new("http://127.0.0.1:1/redeem");
@@ -181,9 +225,10 @@ mod tests {
     #[dialog_common::test]
     fn it_scopes_cached_permits_to_the_site() {
         let capability = Subject::from(did!("key:zPermitCacheScopeTest"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("blobs"))
-            .invoke(Get::new([0u8; 32]));
+            .reader()
+            .archive()
+            .catalog("blobs")
+            .get([0u8; 32]);
         let address = UcanAddress::new("http://127.0.0.1:1/redeem");
         let key = PermitKey::cacheable(&address, capability.to_request())
             .expect("a GET request is cacheable");
@@ -208,8 +253,91 @@ mod tests {
         use super::*;
         use dialog_common::Blake3Hash;
         use dialog_effects::blob::BlobError;
-        use dialog_effects::blob::prelude::{ArchiveBlobExt, BlobExt};
         use dialog_remote_s3::helpers::LocalS3;
+
+        /// A one-shot access service: answers every POST with the given
+        /// permit, counting how many redeems arrived.
+        async fn counting_redeemer(
+            permit: Permit,
+        ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let count = Arc::new(AtomicUsize::new(0));
+            let counted = count.clone();
+            let body = serde_ipld_dagcbor::to_vec(&permit).unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    let mut buffer = [0u8; 8192];
+                    let _ = stream.read(&mut buffer).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/cbor\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                }
+            });
+            (endpoint, count)
+        }
+
+        /// Concurrent requests for one cacheable object share a single
+        /// redeem round-trip: the second joins the first's in-flight
+        /// redeem instead of POSTing its own invocation.
+        #[dialog_common::test]
+        async fn it_shares_one_redeem_between_concurrent_requests() {
+            let (endpoint, redeems) = counting_redeemer(unreachable_permit()).await;
+
+            let signer = Ed25519Signer::import(&[11u8; 32]).await.unwrap();
+            let capability = || {
+                Subject::from(did!("key:zSharedRedeemTest"))
+                    .reader()
+                    .archive()
+                    .catalog("blocks")
+                    .get([3u8; 32])
+            };
+
+            let site = UcanSite::default();
+            let address = UcanAddress::new(endpoint);
+            let authorization = self_authorization(&signer).await;
+
+            type Read = Result<Option<Vec<u8>>, ArchiveError>;
+            let first = site.execute(ForkInvocation::new(
+                capability(),
+                address.clone(),
+                authorization.clone(),
+            ));
+            let second = site.execute(ForkInvocation::new(
+                capability(),
+                address.clone(),
+                authorization,
+            ));
+            let (first, second): (Read, Read) = tokio::join!(first, second);
+
+            // The permit points nowhere, so the S3 leg fails for both —
+            // past the redeem, which is the leg under test.
+            assert!(first.is_err() && second.is_err());
+            assert_eq!(
+                redeems.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "concurrent requests for one object must share one redeem"
+            );
+
+            let key = PermitKey::cacheable(&address, capability().to_request())
+                .expect("a GET request is cacheable");
+            assert!(
+                site.permits().lookup(&key, time::now()).is_some(),
+                "the shared redeem stores the permit once for the TTL window"
+            );
+        }
 
         /// The pin for the presence-probe finding: a GET that comes
         /// back 404 is a semantic outcome, not a permit failure. The
@@ -225,7 +353,8 @@ mod tests {
             let signer = Ed25519Signer::import(&[7u8; 32]).await.unwrap();
             let digest = Blake3Hash::hash(b"not uploaded yet");
             let capability = Subject::from(did!("key:zPermitCacheProbeTest"))
-                .attenuate(Archive)
+                .reader()
+                .archive()
                 .blob()
                 .read(digest);
 
@@ -274,9 +403,10 @@ mod tests {
 
             let signer = Ed25519Signer::import(&[8u8; 32]).await.unwrap();
             let capability = Subject::from(did!("key:zPermitCacheRejectTest"))
-                .attenuate(Archive)
-                .attenuate(Catalog::new("blocks"))
-                .invoke(Get::new([2u8; 32]));
+                .reader()
+                .archive()
+                .catalog("blocks")
+                .get([2u8; 32]);
 
             let site = UcanSite::default();
             let address = UcanAddress::new("http://127.0.0.1:1/redeem");

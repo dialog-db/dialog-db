@@ -434,6 +434,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -473,6 +474,7 @@ mod tests {
             .assert(the!("team/manager").of(alice.clone()).is(bob.clone()))
             .assert(the!("team/mentor").of(alice.clone()).is(bob.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 

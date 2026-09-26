@@ -16,6 +16,7 @@ use crate::time::Timestamp;
 use dialog_varsig::AnySignature;
 use dialog_varsig::Did;
 use ipld_core::cid::Cid;
+use ipld_core::ipld::Ipld;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -101,6 +102,21 @@ impl DelegationChain {
     /// Get the CIDs for use in invocation proofs field.
     pub fn proof_cids(&self) -> &[Cid] {
         &self.proof_cids
+    }
+
+    /// The value the chain carries for `key` in its delegations' signed
+    /// meta, scanned leaf-to-root: the delegation minted closest to the
+    /// recipient is the one minted at handoff time, so its entry wins.
+    ///
+    /// Meta is informational — verification ignores it — so nothing
+    /// authority-bearing belongs behind this.
+    #[must_use]
+    pub fn meta(&self, key: &str) -> Option<&Ipld> {
+        self.proof_cids
+            .iter()
+            .rev()
+            .filter_map(|cid| self.delegations.get(cid))
+            .find_map(|delegation| delegation.meta().get(key))
     }
 
     /// Iterate the chain's delegations in root-to-leaf order.

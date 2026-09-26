@@ -206,6 +206,46 @@ pub fn history_claim_range(version: &Version, of: &Entity, the: &Attribute) -> (
     (Key::from(min), Key::from(max))
 }
 
+/// The half-open bounds of the key range covering every history record
+/// produced by the revision identified by `version`.
+///
+/// The version prefix leads the key (after the tag), so one revision's
+/// records form a contiguous span and this is an exact prefix range.
+///
+/// Unlike [`history_claim_range`] the bounds are half-open, and that is
+/// load-bearing rather than a stylistic choice: what follows the version
+/// prefix here is the entity, whose encoding is UNBOUNDED in length. A
+/// filler-run upper bound (the trick [`history_claim_range`] and
+/// [`history_region_range`] use, where only a bounded value tail follows)
+/// would silently drop every record whose entity encodes longer than the
+/// run. Incrementing the prefix instead bounds the span exactly, whatever
+/// the entities in it.
+///
+/// The upper bound is the successor of the tagged version prefix. When the
+/// version is all `0xFF` the carry reaches the tag itself, and the bound
+/// becomes the next region's tag — correct, since that version's span runs
+/// to the end of this region.
+pub fn history_version_range(version: &Version) -> (Key, Key) {
+    let mut min = vec![HISTORY_KEY_TAG];
+    min.extend_from_slice(&version_prefix(version));
+
+    // Increment the prefix to the next distinct version span: strip the
+    // trailing `0xFF` run, then bump the last byte below it. Everything
+    // under `min` sorts below this and nothing at the next version does.
+    let mut max = min.clone();
+    while let Some(&last) = max.last() {
+        if last == u8::MAX {
+            max.pop();
+        } else {
+            let at = max.len() - 1;
+            max[at] += 1;
+            break;
+        }
+    }
+
+    (Key::from(min), Key::from(max))
+}
+
 /// The inclusive bounds of the key range covering the entire history region.
 ///
 /// The upper bound needs a full filler run, not a single `0xFF`: a history
@@ -324,6 +364,87 @@ mod tests {
         let (min, max) = history_region_range();
         assert!(key >= min, "high-origin key sorts above the region minimum");
         assert!(key <= max, "high-origin key sorts below the region maximum");
+        Ok(())
+    }
+
+    /// A version range brackets its own revision's keys and excludes the
+    /// neighbouring versions on either side — including the origin-mate at
+    /// the adjacent edition, which is the nearest key in the region.
+    #[test]
+    fn it_brackets_one_version() -> anyhow::Result<()> {
+        let of = Entity::from_str("test:entity")?;
+        let the = Attribute::from_str("test/attribute")?;
+        let key = |version: &Version| {
+            history_key(
+                version,
+                &of,
+                &the,
+                &crate::Value::String("value".into()),
+                &Manifest::default(),
+            )
+        };
+
+        let subject = version(4, 8);
+        let (min, max) = history_version_range(&subject);
+        let mine = key(&subject);
+        assert!(mine >= min && mine < max, "own key falls inside the range");
+
+        // The adjacent editions under the same origin, and another origin
+        // entirely, all fall outside.
+        for other in [version(3, 8), version(5, 8), version(4, 7), version(4, 9)] {
+            let key = key(&other);
+            assert!(
+                key < min || key >= max,
+                "{other} must fall outside the range of {subject}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The upper bound must not be a fixed filler run: an entity long
+    /// enough to outrun one would sort above it and drop out of the scan.
+    /// Incrementing the version prefix bounds the span whatever follows it.
+    #[test]
+    fn it_brackets_keys_with_long_entities() -> anyhow::Result<()> {
+        let subject = version(4, 8);
+        let (min, max) = history_version_range(&subject);
+        let the = Attribute::from_str("test/attribute")?;
+        for length in [1usize, 64, 512, 4096] {
+            let of = Entity::from_str(&format!("test:{}", "e".repeat(length)))?;
+            let key = history_key(
+                &subject,
+                &of,
+                &the,
+                &crate::Value::String("value".into()),
+                &Manifest::default(),
+            );
+            assert!(
+                key >= min && key < max,
+                "a {length}-byte entity must stay inside its version's range"
+            );
+        }
+        Ok(())
+    }
+
+    /// An all-`0xFF` version carries the increment into the tag itself. The
+    /// bound must still sit above that version's keys — it marks the end of
+    /// the history region, which is exactly where its span ends.
+    #[test]
+    fn it_bounds_the_highest_version() -> anyhow::Result<()> {
+        let of = Entity::from_str("test:entity")?;
+        let the = Attribute::from_str("test/attribute")?;
+        use crate::history::{Edition, Origin};
+        let highest = Version::new(Origin::from([0xFF; 32]), Edition::from_key_bytes([0xFF; 8]));
+        let (min, max) = history_version_range(&highest);
+        let key = history_key(
+            &highest,
+            &of,
+            &the,
+            &crate::Value::String("value".into()),
+            &Manifest::default(),
+        );
+        assert!(key >= min, "highest-version key sorts above its minimum");
+        assert!(key < max, "highest-version key sorts below its bound");
         Ok(())
     }
 

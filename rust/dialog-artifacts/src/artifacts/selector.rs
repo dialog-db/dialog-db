@@ -2,8 +2,8 @@
 
 //! Domain module for the [`ArtifactSelector`]
 
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-
 use std::str::FromStr as _;
 
 use crate::{Attribute, Entity, Name, NameShape, Symbol, Value};
@@ -111,6 +111,72 @@ where
 impl Default for ArtifactSelector<Unconstrained> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A selector's constraints in a form that can be compared and hashed: a
+/// [`Value`] has no equality or hash of its own (floats), so values are
+/// taken by their order-preserving key encoding, which is also exactly
+/// what decides the key range the selector scans.
+#[derive(PartialEq, Eq, Hash)]
+struct SelectorIdentity<'a> {
+    entity: Option<&'a Entity>,
+    attribute: Option<&'a Attribute>,
+    value: Option<Vec<u8>>,
+    entity_prefix: Option<&'a str>,
+    attribute_prefix: Option<&'a str>,
+    attribute_name: Option<&'a Name>,
+    name_shape: Option<NameShape>,
+    value_prefix: Option<&'a str>,
+    value_lower: Option<(Vec<u8>, bool)>,
+    value_upper: Option<(Vec<u8>, bool)>,
+}
+
+impl<State> ArtifactSelector<State>
+where
+    State: ArtifactSelectorState,
+{
+    fn identity(&self) -> SelectorIdentity<'_> {
+        let bound = |bound: &Option<ValueBound>| {
+            bound
+                .as_ref()
+                .map(|bound| (crate::encode_value_owned(&bound.value), bound.inclusive))
+        };
+        SelectorIdentity {
+            entity: self.entity.as_ref(),
+            attribute: self.attribute.as_ref(),
+            value: self.value.as_ref().map(crate::encode_value_owned),
+            entity_prefix: self.entity_prefix.as_deref(),
+            attribute_prefix: self.attribute_prefix.as_deref(),
+            attribute_name: self.attribute_name.as_ref(),
+            name_shape: self.name_shape,
+            value_prefix: self.value_prefix.as_deref(),
+            value_lower: bound(&self.value_lower),
+            value_upper: bound(&self.value_upper),
+        }
+    }
+}
+
+/// Two selectors are equal when they select the same artifacts: every
+/// constraint agrees, values compared by their key encoding. This is what
+/// lets a queue of speculative preloads hold one entry per range.
+impl<State> PartialEq for ArtifactSelector<State>
+where
+    State: ArtifactSelectorState,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+}
+
+impl<State> Eq for ArtifactSelector<State> where State: ArtifactSelectorState {}
+
+impl<State> Hash for ArtifactSelector<State>
+where
+    State: ArtifactSelectorState,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.identity().hash(state);
     }
 }
 

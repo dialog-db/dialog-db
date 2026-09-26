@@ -227,13 +227,13 @@ impl FromCapability for Scope {
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::prelude::*;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
     use dialog_capability::{Subject, did};
     use dialog_common::Blake3Hash;
-    use dialog_effects::archive::{Archive, Catalog, Get};
 
     #[dialog_common::test]
     fn it_builds_scope_from_subject() {
@@ -257,21 +257,26 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_scope_from_archive_catalog() {
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"));
+            .reader()
+            .archive()
+            .catalog("index")
+            .get(Blake3Hash::hash(b"any"));
         let scope = Scope::from(&cap);
 
-        assert_eq!(scope.command, Command::parse("/archive").unwrap());
+        // The catalog name scopes the capability through the policy and
+        // args, never through the command: the command names the kind of
+        // thing reached, not which one.
+        assert_eq!(
+            scope.command,
+            Command::parse("/use/get/archive/block").unwrap()
+        );
 
         let policy = scope.policy();
-        assert_eq!(policy.len(), 1);
-        assert_eq!(
-            policy[0],
-            Predicate::Equal(
+        assert!(policy.iter().any(|p| p
+            == &Predicate::Equal(
                 Select::new(vec![Filter::Field("catalog".into())]),
                 Ipld::String("index".into())
-            )
-        );
+            )));
 
         let args = scope.args();
         assert_eq!(args.get("catalog"), Some(&Promised::String("index".into())));
@@ -281,12 +286,16 @@ mod tests {
     fn it_builds_scope_from_archive_get() {
         let digest = Blake3Hash::hash(b"hello");
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new(digest.clone()));
+            .reader()
+            .archive()
+            .catalog("index")
+            .get(digest.clone());
         let scope = Scope::from(&cap);
 
-        assert_eq!(scope.command, Command::parse("/archive/get").unwrap());
+        assert_eq!(
+            scope.command,
+            Command::parse("/use/get/archive/block").unwrap()
+        );
 
         let policy = scope.policy();
         assert!(

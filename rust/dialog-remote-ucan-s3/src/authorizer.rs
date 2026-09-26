@@ -69,7 +69,8 @@ use serde::de::DeserializeOwned;
 
 // Generic deserialization from UCAN args
 
-type Args = BTreeMap<String, Promised>;
+/// The arguments an invocation carries, by name.
+pub type Args = BTreeMap<String, Promised>;
 
 /// Deserialize a typed struct from UCAN args via IPLD round-trip.
 ///
@@ -92,50 +93,73 @@ fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, S3Error>
         .map_err(|e| S3Error::Serialization(format!("Failed to deserialize: {}", e)))
 }
 
-/// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Attenuation`.
-fn memory_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
+/// Build a memory capability from UCAN args:
+/// `Subject -> Use -> V -> Memory -> Space -> Cell -> Attenuation`.
+///
+/// `V` is the verb the claim sits under, which the leaf's own `Of`
+/// fixes: a claim reconstructed here lands under the same method the
+/// client invoked it through, so the ability matched against the
+/// delegation is the one that was granted.
+fn memory_claim_from_args<V, C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
-    C: Policy<Of = memory::Cell> + DeserializeOwned,
+    V: dialog_effects::Method,
+    V::Of: Constraint,
+    dialog_capability::Subject: dialog_effects::Chain<V>,
+    C: Policy<Of = memory::Cell<V>> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
 {
-    let space: memory::Space = deserialize_from_args(args)?;
-    let cell: memory::Cell = deserialize_from_args(args)?;
+    let space: memory::Space<V> = deserialize_from_args(args)?;
+    let cell: memory::Cell<V> = deserialize_from_args(args)?;
     let claim: C = deserialize_from_args(args)?;
-    Ok(dialog_capability::Subject::from(subject.clone())
-        .attenuate(memory::Memory)
-        .attenuate(space)
-        .attenuate(cell)
-        .attenuate(claim))
+    Ok(
+        dialog_effects::Chain::<V>::under(dialog_capability::Subject::from(subject.clone()))
+            .attenuate(memory::Memory::<V>::new())
+            .attenuate(space)
+            .attenuate(cell)
+            .attenuate(claim),
+    )
 }
 
-/// Build an archive capability from UCAN args: `Subject -> Archive -> Catalog -> Attenuation`.
-fn archive_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
+/// Build an archive capability from UCAN args:
+/// `Subject -> Use -> V -> Archive -> Catalog -> Block -> Attenuation`.
+fn archive_claim_from_args<V, C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
-    C: Policy<Of = archive::Catalog> + DeserializeOwned,
+    V: dialog_effects::Method,
+    V::Of: Constraint,
+    dialog_capability::Subject: dialog_effects::Chain<V>,
+    C: Policy<Of = archive::Block<V>> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
 {
-    let catalog: archive::Catalog = deserialize_from_args(args)?;
+    let catalog: archive::Catalog<V> = deserialize_from_args(args)?;
     let claim: C = deserialize_from_args(args)?;
-    Ok(dialog_capability::Subject::from(subject.clone())
-        .attenuate(archive::Archive)
-        .attenuate(catalog)
-        .attenuate(claim))
+    Ok(
+        dialog_effects::Chain::<V>::under(dialog_capability::Subject::from(subject.clone()))
+            .attenuate(archive::Archive::<V>::new())
+            .attenuate(catalog)
+            .attenuate(archive::Block::<V>::new())
+            .attenuate(claim),
+    )
 }
 
 /// Build a blob capability from UCAN args: `Subject -> Archive -> Blob -> Attenuation`.
 ///
 /// `Blob` is a unit ability segment (no arguments), so only the leaf
 /// attenuation is deserialized from the args map.
-fn blob_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
+fn blob_claim_from_args<V, C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
-    C: Policy<Of = blob::Blob> + DeserializeOwned,
+    V: dialog_effects::Method,
+    V::Of: Constraint,
+    dialog_capability::Subject: dialog_effects::Chain<V>,
+    C: Policy<Of = blob::Blob<V>> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
 {
     let claim: C = deserialize_from_args(args)?;
-    Ok(dialog_capability::Subject::from(subject.clone())
-        .attenuate(archive::Archive)
-        .attenuate(blob::Blob)
-        .attenuate(claim))
+    Ok(
+        dialog_effects::Chain::<V>::under(dialog_capability::Subject::from(subject.clone()))
+            .attenuate(archive::Archive::<V>::new())
+            .attenuate(blob::Blob::<V>::new())
+            .attenuate(claim),
+    )
 }
 
 /// Maps an execution effect type to its attenuation type that can be
@@ -143,7 +167,9 @@ where
 ///
 /// The `Attenuation` associated type is the delegation-safe representation
 /// whose `Capability<Attenuation>` produces an `S3Request`.
-trait FromUcanArgs {
+/// How an effect reads its capability back out of an invocation's
+/// subject and arguments, once the invocation has verified.
+pub trait FromUcanArgs {
     /// The attenuation type for this effect (either Self or a generated
     /// `{Name}Attenuation`).
     type Attenuation: Constraint;
@@ -161,13 +187,18 @@ impl FromUcanArgs for memory::Resolve {
         subject: &Did,
         args: &Args,
     ) -> Result<Capability<Self::Attenuation>, S3Error> {
-        let space: memory::Space = deserialize_from_args(args)?;
-        let cell: memory::Cell = deserialize_from_args(args)?;
-        Ok(dialog_capability::Subject::from(subject.clone())
-            .attenuate(memory::Memory)
-            .attenuate(space)
-            .attenuate(cell)
-            .attenuate(memory::Resolve))
+        // `Resolve` is a unit struct: it carries no arguments, so it is
+        // constructed rather than deserialized. Reading it out of the
+        // args map fails, since a map does not deserialize into a unit.
+        let space: memory::Space<dialog_effects::method::Get> = deserialize_from_args(args)?;
+        let cell: memory::Cell<dialog_effects::method::Get> = deserialize_from_args(args)?;
+        Ok(dialog_effects::Chain::<dialog_effects::method::Get>::under(
+            dialog_capability::Subject::from(subject.clone()),
+        )
+        .attenuate(memory::Memory::<dialog_effects::method::Get>::new())
+        .attenuate(space)
+        .attenuate(cell)
+        .attenuate(memory::Resolve))
     }
 }
 impl FromUcanArgs for memory::Publish {
@@ -255,7 +286,8 @@ macro_rules! dispatch {
 /// nothing. Only the two cases that are about a promise or an
 /// impossible window have no access-decision counterpart, and they stay
 /// descriptive.
-fn check_failed_to_authorize_error(reason: CheckFailed) -> AuthorizeError {
+/// The [`AuthorizeError`] a failed chain check reports.
+pub fn check_failed_to_authorize_error(reason: CheckFailed) -> AuthorizeError {
     match reason {
         CheckFailed::UnauthorizedSubject {
             claimed,
@@ -311,6 +343,54 @@ fn check_failed_to_authorize_error(reason: CheckFailed) -> AuthorizeError {
 /// Named so an embedder can spell out an authorizer that keeps the
 /// default resolver while supplying its own revocation checker, without
 /// taking a dependency on `dialog-did-web` just to write the type down.
+/// Verify the invocation a container carries: its chain's signatures,
+/// audiences, subjects and time bounds, the revocation status of every
+/// link, and the policy the chain admits. Answers with the chain, from
+/// which the invocation's subject, command and arguments are read.
+///
+/// The one verification every UCAN access service runs, whether it then
+/// answers with a permit or performs the operation itself.
+///
+/// Resolution runs through `resolver` by performing a `Resolve` per
+/// issuer DID: `did:key` resolves locally, `did:web` fetches the DID
+/// document. Revocation is `revocations`' to answer, per link and per
+/// entitled revoker, inside the chain walk. Two different failures come
+/// back as different reasons: their material not verifying, and the
+/// check itself being impossible to make (an unreachable `did:web`
+/// host), since only the first is a statement about their request.
+pub async fn verify_invocation<Resolver, Revocations>(
+    container: dialog_ucan_core::Container,
+    resolver: &Resolver,
+    revocations: &Revocations,
+) -> Result<InvocationChain<dialog_varsig::AnySignature>, AuthorizeError>
+where
+    Resolver: dialog_capability::Provider<Resolve> + dialog_common::ConditionalSync,
+    Revocations: dialog_ucan_core::revocation::RevocationChecker + dialog_common::ConditionalSync,
+{
+    let chain = InvocationChain::try_from(container).map_err(|e| AuthorizeError::Malformed {
+        detail: e.to_string(),
+    })?;
+    let resolver = PerformingResolver::new(resolver);
+    let environment = Environment::new(chain.proof_store(), resolver, revocations);
+    let context = VerificationContext::new(&environment);
+    chain.verify(&context).await.map_err(|e| match e {
+        ContainerError::InvalidDelegationSignature { issuer, .. } => {
+            AuthorizeError::InvalidSignature { issuer }
+        }
+        ContainerError::Revoked { .. } => AuthorizeError::Revoked {
+            subject: chain.subject().clone(),
+        },
+        ContainerError::Unauthorized(reason) => check_failed_to_authorize_error(reason),
+        ContainerError::Invocation(detail) => AuthorizeError::Malformed {
+            detail: format!("invocation chain did not verify: {detail}"),
+        },
+        ContainerError::Configuration(detail) => AuthorizeError::Unavailable {
+            detail: format!("could not verify the invocation chain: {detail}"),
+        },
+    })?;
+    Ok(chain)
+}
+
 pub type DefaultResolver = CachingResolver<WebResolver>;
 
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
@@ -444,56 +524,15 @@ where
     /// 2. Checks command prefix authorization at each delegation
     /// 3. Validates policy predicates on each delegation
     pub async fn authorize(&self, container: &[u8]) -> Result<Permit, S3Error> {
-        // Parse and verify the invocation chain
-        let chain = InvocationChain::try_from(container).map_err(|e| {
+        let container = dialog_ucan_core::Container::from_bytes(container).map_err(|e| {
             S3Error::Authorization(AuthorizeError::Malformed {
                 detail: e.to_string(),
             })
         })?;
-        // Resolution runs through the configured provider by performing a
-        // `Resolve` capability per issuer DID. did:key resolves locally; did:web
-        // fetches the DID document; a cache sits in front. The chain verify path
-        // only sees a varsig resolver.
-        let resolver = PerformingResolver::new(self.resolver.as_ref());
-        // Revocation is the embedder's to supply: the default checker looks
-        // nothing up and is named for that, while `with_revocations` puts a
-        // real index behind it. Either way the question is asked inside the
-        // chain walk, per link and per entitled revoker.
-        let environment = Environment::new(chain.proof_store(), resolver, &*self.revocations);
-        let context = VerificationContext::new(&environment);
-        chain.verify(&context).await.map_err(|e| {
-            // Two different failures arrive here: their material not
-            // verifying, and our own setup being unable to check it (for
-            // example, an unreachable did:web host). Only the first is a
-            // statement about their request, so only the first may read as one.
-            S3Error::Authorization(match e {
-                // A proof whose signature is not its claimed issuer's is a
-                // forged chain, not merely malformed input: name the issuer
-                // so the caller learns exactly which link did not hold.
-                ContainerError::InvalidDelegationSignature { issuer, .. } => {
-                    AuthorizeError::InvalidSignature { issuer }
-                }
-                // The authority was withdrawn rather than never held or
-                // forged, so retrying with the same proof is pointless.
-                ContainerError::Revoked { .. } => AuthorizeError::Revoked {
-                    subject: chain.subject().clone(),
-                },
-                // The chain was read and judged, so the refusal can say
-                // which question it failed. `Malformed` is reserved for
-                // input we could not read at all, and answering an
-                // expired proof with it would tell a caller to fix its
-                // encoding when it needs to fetch a fresh delegation.
-                ContainerError::Unauthorized(reason) => check_failed_to_authorize_error(reason),
-                ContainerError::Invocation(detail) => AuthorizeError::Malformed {
-                    detail: format!("invocation chain did not verify: {detail}"),
-                },
-                ContainerError::Configuration(detail) => AuthorizeError::Unavailable {
-                    detail: format!("could not verify the invocation chain: {detail}"),
-                },
-            })
-        })?;
+        let chain = verify_invocation(container, self.resolver.as_ref(), &*self.revocations)
+            .await
+            .map_err(S3Error::Authorization)?;
 
-        // Extract command path and arguments
         let command = chain.command();
         let args = chain.arguments();
 
@@ -503,6 +542,17 @@ where
         let command_segments: Vec<&str> = command.0.iter().map(|s| s.as_str()).collect();
 
         dispatch!(self, subject_did, args, command_segments.as_slice(), {
+            ["use", "get", "memory", "cell"]     => dialog_effects::memory::Resolve,
+            ["use", "put", "memory", "cell"]     => dialog_effects::memory::Publish,
+            ["use", "delete", "memory", "cell"]  => dialog_effects::memory::Retract,
+            ["use", "get", "archive", "block"]   => dialog_effects::archive::Get,
+            ["use", "put", "archive", "block"]   => dialog_effects::archive::Put,
+            ["use", "get", "archive", "blob"]    => dialog_effects::blob::Read,
+            ["use", "put", "archive", "blob"]    => dialog_effects::blob::Import,
+            // The spellings before the `use` prefix. Clients minted
+            // against an earlier release still invoke these; their chains
+            // are `/`, which covers both. Dropped once no such client is
+            // deployed.
             ["memory", "resolve"]  => dialog_effects::memory::Resolve,
             ["memory", "publish"]  => dialog_effects::memory::Publish,
             ["memory", "retract"]  => dialog_effects::memory::Retract,

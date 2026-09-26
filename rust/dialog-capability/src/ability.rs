@@ -54,7 +54,14 @@ where
     fn ability(&self) -> String {
         let ability = self.capability.ability();
         if let Some(segment) = C::attenuation() {
-            let kebab = segment.to_case(Case::Kebab);
+            // A segment may be a path of its own (`use/query/memory/cell`);
+            // each component is kebab-cased on its own so the separators
+            // survive.
+            let kebab = segment
+                .split('/')
+                .map(|component| component.to_case(Case::Kebab))
+                .collect::<Vec<_>>()
+                .join("/");
             if ability == "/" {
                 format!("/{}", kebab)
             } else {

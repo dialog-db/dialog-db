@@ -38,7 +38,7 @@ pub use container::invocation::InvocationChain;
 pub use container::revocation::{
     Denial, MalformedRevocationChain, RevocationChain, RevocationError,
 };
-pub use container::{Container, ContainerError};
+pub use container::{Container, ContainerError, Tag};
 pub use delegation::{
     Delegation,
     builder::{BuildError as DelegationBuildError, DelegationBuilder},

@@ -114,6 +114,28 @@ impl DynamicAttributeQuery {
         }
     }
 
+    /// The [`ArtifactSelector`] this scan would issue against a store *given*
+    /// the bindings in `source`, resolving each term to a constant where the
+    /// row binds it. This is the same selector the scan's own evaluation
+    /// builds per row; exposed so a planner can estimate the scan's range
+    /// size without evaluating it. Returns an error only when nothing
+    /// constrains the selector (which cannot happen for a well-formed
+    /// attribute scan).
+    pub fn resolved_selector(
+        &self,
+        source: &Match,
+    ) -> Result<ArtifactSelector<Constrained>, EvaluationError> {
+        let the = self.the().resolve(source);
+        let of = self.of().resolve(source);
+        let is = match source.lookup(self.is()).and_then(|b| b.content()) {
+            Ok(value) => Term::Constant(value),
+            Err(_) => self.is().clone(),
+        };
+        let cause = self.cause().resolve(source);
+        let resolved = AttributeQueryAll::new(the, of, is, cause);
+        ArtifactSelector::try_from(&resolved)
+    }
+
     /// Get the source term (internal claim handle).
     pub fn source(&self) -> &Term<Record> {
         match self {
@@ -309,6 +331,7 @@ mod tests {
                 .transaction()
                 .assert($the.clone().of($of.clone()).is($is))
                 .commit()
+                .publish()
                 .perform($operator)
                 .await
                 .unwrap();
@@ -328,6 +351,7 @@ mod tests {
             .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -374,6 +398,7 @@ mod tests {
             .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -381,6 +406,7 @@ mod tests {
             .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alicia".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -607,6 +633,11 @@ mod tests {
             .collect();
         assert_eq!(eav_name_results.len(), 1);
         let eav_winner = eav_name_results[0].is().clone();
+        assert_eq!(
+            eav_winner,
+            Value::String("Alicia".into()),
+            "one writer's later revision wins outright"
+        );
 
         let aev_query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -642,6 +673,7 @@ mod tests {
             .transaction()
             .assert(name_attr.of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -678,6 +710,7 @@ mod tests {
             .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -718,6 +751,7 @@ mod tests {
             .transaction()
             .assert(alice_name.clone())
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -740,6 +774,7 @@ mod tests {
             .transaction()
             .retract(alice_name)
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -771,6 +806,7 @@ mod tests {
             .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -808,6 +844,7 @@ mod tests {
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -847,6 +884,7 @@ mod tests {
             .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -881,6 +919,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -923,6 +962,7 @@ mod tests {
             .transaction()
             .assert(person::Name::of(alice.clone()).is("Alice"))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1024,6 +1064,7 @@ mod tests {
             .assert(the!("misc/tag").of(alice.clone()).is("blue".to_string()))
             .assert(the!("misc/tag").of(alice.clone()).is(7u32))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());

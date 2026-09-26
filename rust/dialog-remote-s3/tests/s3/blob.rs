@@ -32,6 +32,7 @@ async fn it_imports_then_reads_a_blob() -> anyhow::Result<()> {
     // Import: stream the bytes in, get the verified digest back.
     let mut sink = env
         .subject()
+        .writer()
         .archive()
         .blob()
         .import(digest.clone(), payload.len() as u64)
@@ -46,6 +47,7 @@ async fn it_imports_then_reads_a_blob() -> anyhow::Result<()> {
     // Whole read.
     let reader = env
         .subject()
+        .reader()
         .archive()
         .blob()
         .read(digest.clone())
@@ -57,6 +59,7 @@ async fn it_imports_then_reads_a_blob() -> anyhow::Result<()> {
     // Ranged read: 9 bytes from offset 10.
     let reader = env
         .subject()
+        .reader()
         .archive()
         .blob()
         .invoke(Read::range(digest, 10, Some(9)))
@@ -76,6 +79,7 @@ async fn it_reports_missing_blobs() -> anyhow::Result<()> {
 
     let missing = env
         .subject()
+        .reader()
         .archive()
         .blob()
         .read(digest)

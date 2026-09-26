@@ -226,6 +226,10 @@ where
 {
     type Error = StorageError;
 
+    fn is_not_found(error: &Self::Error) -> bool {
+        matches!(error, StorageError::NotFound(_))
+    }
+
     async fn open(location: &Location) -> Result<Self, StorageError> {
         Ok(Space {
             archive: A::open(location)
@@ -250,19 +254,31 @@ where
         Ok(Space {
             archive: A::load(location)
                 .await
-                .map_err(|e| StorageError::Storage(e.to_string()))?,
+                .map_err(|e| resource_load_error::<A>(e))?,
             memory: M::load(location)
                 .await
-                .map_err(|e| StorageError::Storage(e.to_string()))?,
+                .map_err(|e| resource_load_error::<M>(e))?,
             credential: C::load(location)
                 .await
-                .map_err(|e| StorageError::Storage(e.to_string()))?,
+                .map_err(|e| resource_load_error::<C>(e))?,
             certificate: P::load(location)
                 .await
-                .map_err(|e| StorageError::Storage(e.to_string()))?,
+                .map_err(|e| resource_load_error::<P>(e))?,
             blob: B::load(location)
                 .await
-                .map_err(|e| StorageError::Storage(e.to_string()))?,
+                .map_err(|e| resource_load_error::<B>(e))?,
         })
+    }
+}
+
+fn resource_load_error<R>(error: R::Error) -> StorageError
+where
+    R: Resource<Location>,
+    R::Error: Display,
+{
+    if R::is_not_found(&error) {
+        StorageError::NotFound(error.to_string())
+    } else {
+        StorageError::Storage(error.to_string())
     }
 }

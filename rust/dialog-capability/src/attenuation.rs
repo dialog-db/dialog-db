@@ -1,6 +1,20 @@
 use crate::settings::Caveat;
-use crate::{Constraint, Effect, Policy};
+use crate::{Constraint, Policy};
 use std::any::type_name;
+
+/// The last path component of a type name, without generics: what a type
+/// contributes to an ability path when it says nothing else.
+pub(crate) fn type_segment<T>() -> &'static str {
+    let full = type_name::<T>();
+    let without_generics = match full.find('<') {
+        Some(pos) => &full[..pos],
+        None => full,
+    };
+    without_generics
+        .rsplit("::")
+        .next()
+        .unwrap_or(without_generics)
+}
 
 /// Trait for constraints that narrow the ability path.
 ///
@@ -37,22 +51,14 @@ pub trait Attenuation: Sized + Caveat {
     /// Must implement [`Constraint`] so the blanket [`Policy`] impl works.
     type Of: Constraint;
 
-    /// Returns the path segment this attenuation adds to the ability path.
+    /// The path segment this attenuation adds to the ability path.
     ///
-    /// By default, derives the segment from the struct name (lowercased).
-    /// Override this method to use a custom segment.
+    /// Defaults to the struct name (lowercased). Override to use a
+    /// different segment. A link that scopes a capability without
+    /// naming itself implements [`Policy`] directly instead -- that is
+    /// the difference between the two traits.
     fn attenuation() -> &'static str {
-        let full = type_name::<Self>();
-        // Strip generic parameters first, then take the last path segment.
-        // e.g., "crate::credential::Retrieve<alloc::string::String>" → "Retrieve"
-        let without_generics = match full.find('<') {
-            Some(pos) => &full[..pos],
-            None => full,
-        };
-        without_generics
-            .rsplit("::")
-            .next()
-            .unwrap_or(without_generics)
+        type_segment::<Self>()
     }
 }
 
@@ -63,9 +69,4 @@ impl<T: Attenuation> Policy for T {
     fn attenuation() -> Option<&'static str> {
         Some(<T as Attenuation>::attenuation())
     }
-}
-
-// Effect implies Attenuation
-impl<T: Effect> Attenuation for T {
-    type Of = <T as Effect>::Of;
 }

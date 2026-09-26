@@ -11,7 +11,7 @@
 //! engine through `Provider<Select> for Changes` — no in-memory tree
 //! materialization. Asserts/Replaces surface as positive facts unioned
 //! with the branch's stream; Retracts lift into tombstones (via
-//! [`tombstones_from`]) that filter matching branch facts via
+//! [`tombstones_from`](crate::layer::tombstones_from)) that filter matching branch facts via
 //! [`filter_tombstones`] before the merge, so a `tx.retract(x)` shadows
 //! `x` in the underlying branch view without modifying the branch's
 //! persistent tree.
@@ -56,30 +56,30 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
-use std::sync::Arc;
 
-use crate::layer::tombstones_from;
+use crate::RemoteSite;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
-use crate::{Branch, RemoteSite};
+use crate::repository::source::SourceRef;
 
 /// A non-composable query handle returned by
-/// [`Transaction::query`](crate::repository::branch::Transaction::query).
+/// [`Transaction::query`](crate::repository::branch::Transaction::query)
+/// and [`SnapshotTransaction::query`](crate::SnapshotTransaction::query).
 ///
 /// Holds an immutable snapshot of the transaction's pending changes
-/// plus a reference to the branch. The transaction itself remains
-/// open and committable.
+/// plus a reference to the line (branch or snapshot) it runs on. The
+/// transaction itself remains open and committable.
 ///
 /// See module docs for tombstone semantics.
 pub struct TransactionQuery<'a> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     changes: Changes,
 }
 
 impl<'a> TransactionQuery<'a> {
-    pub(crate) fn new(branch: &'a Branch, changes: &Changes) -> Self {
+    pub(crate) fn new(source: impl Into<SourceRef<'a>>, changes: &Changes) -> Self {
         Self {
-            branch,
+            source: source.into(),
             changes: changes.clone(),
         }
     }
@@ -88,7 +88,7 @@ impl<'a> TransactionQuery<'a> {
     /// [`perform`](TransactionSelectQuery::perform) to execute.
     pub fn select<Q: Application>(self, query: Q) -> TransactionSelectQuery<'a, Q> {
         TransactionSelectQuery {
-            branch: self.branch,
+            source: self.source,
             changes: self.changes,
             query,
         }
@@ -97,7 +97,7 @@ impl<'a> TransactionQuery<'a> {
 
 /// A staged query on a [`TransactionQuery`].
 pub struct TransactionSelectQuery<'a, Q> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     changes: Changes,
     query: Q,
 }
@@ -120,13 +120,15 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
         let TransactionSelectQuery {
-            branch,
+            source,
             changes,
             query,
         } = self;
@@ -143,19 +145,23 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // `with(changes)` preserves Assert/Replace/Retract
             // polarity via `Statement for Changes`, so the user's
             // retracts stay retracts and lift into tombstones below.
-            let overlay = QueryLayer::from(branch)
+            let overlay = QueryLayer::from(source)
                 .with(changes)
                 .overlay(&operator);
-            let tombstones = tombstones_from(&overlay);
 
-            // A transaction query is just a single-branch `QueryEnv`.
+            // A transaction query is just a single-line `QueryEnv`.
             // Constructing the *same* env type the branch-session path
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let query_env = QueryEnv::new(vec![branch.clone()], overlay, Arc::new(tombstones), env);
+            let sources = vec![source.to_source()];
+            let query_env = QueryEnv::new(sources.clone(), overlay, env);
             let results = Box::pin(query.perform(&query_env));
-            for await result in results {
+            // Mid-transaction queries drive the ambient preload queue
+            // like any other evaluation (see `crate::repository::fetch`).
+            let queue = Provider::<dialog_artifacts::Speculation>::execute(env, ()).await;
+            let driven = crate::repository::fetch::Driven::new(results, sources, env, queue);
+            for await result in driven {
                 yield result?;
             }
         }
@@ -221,6 +227,7 @@ mod tests {
                 name: people::Name("Alice".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -327,6 +334,7 @@ mod tests {
                 name: people::Name("Bob".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -364,6 +372,7 @@ mod tests {
                 name: people::Name("Alice".into()),
             })
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -455,7 +464,7 @@ mod tests {
             .try_vec()
             .await?;
         assert_eq!(seen.len(), 1, "txn-query must see Session");
-        tx.commit().perform(&operator).await?;
+        tx.commit().publish().perform(&operator).await?;
 
         // After commit, the branch tree must not contain any
         // `dialog.session/*` facts — those are auto-materialized at
@@ -538,6 +547,7 @@ mod tests {
                 .transaction()
                 .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
                 .commit()
+                .publish()
                 .perform(&operator)
                 .await?;
             revisions.push(branch.revision().expect("branch has a revision"));

@@ -1,9 +1,9 @@
+use crate::storage::idb::{Database, TransactionMode};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_common::Blake3Hash;
 use futures_util::{Stream, TryStreamExt};
 use js_sys::Uint8Array;
-use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::{marker::PhantomData, rc::Rc};
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -34,7 +34,7 @@ where
     Key: AsRef<[u8]>,
     Value: AsRef<[u8]> + From<Vec<u8>>,
 {
-    db: Rc<Rexie>,
+    db: Rc<Database>,
     key_type: PhantomData<Key>,
     value_type: PhantomData<Value>,
 }
@@ -50,13 +50,13 @@ where
     /// - `"index"`: for `StorageBackend` operations (base58-encoded keys)
     /// - `"memory"`: for `TransactionalMemoryBackend` operations (UTF-8 string keys)
     pub async fn new(db_name: &str) -> Result<Self, DialogStorageError> {
-        let db = RexieBuilder::new(db_name)
-            .version(INDEXEDDB_STORAGE_VERSION)
-            .add_object_store(ObjectStore::new(INDEX_STORE).auto_increment(false))
-            .add_object_store(ObjectStore::new(MEMORY_STORE).auto_increment(false))
-            .build()
-            .await
-            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
+        let db = Database::open(
+            db_name,
+            Some(INDEXEDDB_STORAGE_VERSION),
+            &[INDEX_STORE, MEMORY_STORE],
+        )
+        .await
+        .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         Ok(IndexedDbStorageBackend {
             db: Rc::new(db),
@@ -84,8 +84,6 @@ where
         let store = tx
             .store(INDEX_STORE)
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
 
         // Base58 encode key for better DevTools readability
         let key = JsValue::from_str(&key.as_ref().to_base58());
@@ -96,8 +94,7 @@ where
             .await
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
@@ -112,8 +109,6 @@ where
         let store = tx
             .store(INDEX_STORE)
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
 
         // Base58 encode key for lookup
         let key = JsValue::from_str(&key.as_ref().to_base58());
@@ -135,8 +130,7 @@ where
                 ))
             })?
             .to_vec();
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
@@ -186,7 +180,6 @@ where
         // A read needs no settle; arming still installs the terminal
         // handlers so the drop-linger keeps them alive for any trailing
         // event. See `crate::storage::settle`.
-        let _armed = crate::storage::settle::arm(tx);
 
         // Treat address as UTF-8 string for DevTools readability
         let key = address_to_string(address)?;
@@ -221,8 +214,6 @@ where
         let store = tx
             .store(MEMORY_STORE)
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
 
         // Treat address as UTF-8 string for DevTools readability
         let key = address_to_string(address)?;
@@ -268,8 +259,7 @@ where
                     .await
                     .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
-                armed
-                    .settle()
+                tx.settle()
                     .await
                     .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
@@ -293,8 +283,7 @@ where
                     .await
                     .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
-                armed
-                    .settle()
+                tx.settle()
                     .await
                     .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
@@ -332,8 +321,6 @@ where
         let store = tx
             .store(INDEX_STORE)
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
 
         tokio::pin!(stream);
 
@@ -352,8 +339,7 @@ where
             ))
         })?;
 
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 

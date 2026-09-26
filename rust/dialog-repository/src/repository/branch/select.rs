@@ -2,44 +2,48 @@ use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactView, DialogArtifactsError};
-use dialog_capability::{Capability, Fork, Provider};
+use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
-use dialog_effects::archive::{Catalog, Get, Put};
+use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
 use dialog_search_tree::{Buffer, DialogSearchTreeError};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
-use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt,
-};
+use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
 
-/// Command struct for selecting artifacts from a branch.
+use crate::repository::source::SourceRef;
+use crate::{Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite};
+
+/// Command struct for selecting artifacts from a branch or a snapshot.
 pub struct Select<'a> {
-    branch: &'a Branch,
+    source: SourceRef<'a>,
     selector: ArtifactSelector<Constrained>,
 }
 
 impl<'a> Select<'a> {
     /// Create a select command for the given branch and artifact selector.
     pub fn new(branch: &'a Branch, selector: ArtifactSelector<Constrained>) -> Self {
-        Self { branch, selector }
+        Self::from_source(SourceRef::from(branch), selector)
+    }
+
+    /// Create a select command for the given line (branch or snapshot)
+    /// and artifact selector.
+    pub(crate) fn from_source(
+        source: SourceRef<'a>,
+        selector: ArtifactSelector<Constrained>,
+    ) -> Self {
+        Self { source, selector }
     }
 
     fn tree_hash(&self) -> Blake3Hash {
-        self.branch
-            .revision()
-            .as_ref()
-            .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPTY_TREE_HASH)
+        self.source.root()
     }
 
-    /// The catalog (archive index) scoped to this branch's subject.
-    pub fn catalog(&self) -> Capability<Catalog> {
-        self.branch.subject().archive().index()
+    /// The catalog (archive index) scoped to this line's subject.
+    pub fn catalog(&self) -> CatalogScope {
+        ArchiveScope::new(self.source.subject()).index()
     }
 }
 
@@ -60,8 +64,8 @@ impl<'a> Select<'a> {
 }
 
 impl Select<'_> {
-    /// Execute the select, using fallback to remote if the branch has
-    /// a remote upstream.
+    /// Execute the select, using fallback to remote if the line is a
+    /// branch with a remote upstream.
     ///
     /// Rows stream as borrowed-access [`ArtifactView`]s; chain
     /// [`to_owned`](Self::to_owned) before this call for owned
@@ -77,32 +81,18 @@ impl Select<'_> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        // Load a remote if the branch tracks one so the networked
-        // index can fall back to it for blocks missing locally. A
-        // failed load (e.g. no credentials) is carried into the
-        // fallback rather than swallowed: the local archive alone may
-        // still satisfy the query, but a read that misses fails with
-        // the load failure as its cause instead of a bare not-found.
-        let upstreams = self.branch.upstreams();
-        let remote = match upstreams.remote_name() {
-            Some(name) => {
-                let loaded = self
-                    .branch
-                    .subject()
-                    .remote(name.to_string())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            None => RemoteFallback::None,
-        };
-
+        // Load a remote if the line tracks one so the networked index
+        // can fall back to it for blocks missing locally. A failed load
+        // (e.g. no credentials) is carried into the fallback rather
+        // than swallowed: the local archive alone may still satisfy the
+        // query, but a read that misses fails with the load failure as
+        // its cause instead of a bare not-found.
+        let remote = self.source.fallback(env).await;
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.execute(store).await
     }
@@ -140,7 +130,7 @@ impl Select<'_> {
         // still fetching (and, through `NetworkedIndex`, replicating) on a
         // genuine miss and failing fast when the root is truly absent.
         let tree_hash = self.tree_hash();
-        let node_cache = self.branch.node_cache();
+        let node_cache = self.source.node_cache();
         if tree_hash != EMPTY_TREE_HASH {
             node_cache
                 .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
@@ -152,7 +142,7 @@ impl Select<'_> {
                 .await?
                 .ok_or_else(|| {
                     DialogSearchTreeError::Node(format!(
-                        "Blob not found in storage: {}",
+                        "Block not found in storage: {}",
                         tree_hash.to_base58(),
                     ))
                 })?;
@@ -164,7 +154,48 @@ impl Select<'_> {
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
         // scans agree on key order — that adjacency invariant is what
         // the cardinality-one sliding window relies on.
-        Ok(tree.scan(store, self.branch.spill_cache(), self.selector))
+        Ok(tree.scan(store, self.source.spill_cache(), self.selector))
+    }
+
+    /// Estimate this selector's range size, picking a store the same way
+    /// [`perform`](Self::perform) does. See [`estimate`](Self::estimate).
+    pub async fn estimate_perform<Env>(self, env: &Env) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let remote = self.source.fallback(env).await;
+        let store = NetworkedIndex::new(env, self.catalog(), remote);
+        self.estimate(store).await
+    }
+
+    /// An advisory upper-bound estimate of how many artifacts this selector's
+    /// range spans, read from the range's edge paths (see
+    /// [`ArtifactTreeExt::estimate`](dialog_artifacts::tree::ArtifactTreeExt::estimate)).
+    ///
+    /// A couple of blocks per level rather than a scan, for a planner
+    /// comparing scan sizes.
+    /// This estimates against the line's tree only; it ignores any pending
+    /// `Changes` overlay, whose in-memory edits are small relative to the tree
+    /// and do not change the order-of-magnitude answer a strategy choice
+    /// needs. Returns `None` for an empty tree.
+    pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let tree_hash = self.tree_hash();
+        if tree_hash == EMPTY_TREE_HASH {
+            return Ok(None);
+        }
+        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), self.source.node_cache());
+        tree.estimate(store, self.selector).await
     }
 
     /// [`execute`](Self::execute) materializing every row from the scan's
@@ -186,7 +217,7 @@ impl Select<'_> {
     {
         // The same eager root probe as `execute`; see the comment there.
         let tree_hash = self.tree_hash();
-        let node_cache = self.branch.node_cache();
+        let node_cache = self.source.node_cache();
         if tree_hash != EMPTY_TREE_HASH {
             node_cache
                 .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
@@ -198,14 +229,14 @@ impl Select<'_> {
                 .await?
                 .ok_or_else(|| {
                     DialogSearchTreeError::Node(format!(
-                        "Blob not found in storage: {}",
+                        "Block not found in storage: {}",
                         tree_hash.to_base58(),
                     ))
                 })?;
         }
 
         let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache);
-        Ok(tree.scan_owned(store, self.branch.spill_cache(), self.selector))
+        Ok(tree.scan_owned(store, self.source.spill_cache(), self.selector))
     }
 }
 
@@ -221,8 +252,8 @@ impl Select<'_> {
 pub struct SelectOwned<'a>(Select<'a>);
 
 impl SelectOwned<'_> {
-    /// The catalog (archive index) scoped to this branch's subject.
-    pub fn catalog(&self) -> Capability<Catalog> {
+    /// The catalog (archive index) scoped to this line's subject.
+    pub fn catalog(&self) -> CatalogScope {
         self.0.catalog()
     }
 
@@ -236,29 +267,14 @@ impl SelectOwned<'_> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
+            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
         // The same remote fallback as `Select::perform`; see the comment
         // there.
-        let upstreams = self.0.branch.upstreams();
-        let remote = match upstreams.remote_name() {
-            Some(name) => {
-                let loaded = self
-                    .0
-                    .branch
-                    .subject()
-                    .remote(name.to_string())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            None => RemoteFallback::None,
-        };
-
+        let remote = self.0.source.fallback(env).await;
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.execute(store).await
     }

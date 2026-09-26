@@ -265,10 +265,9 @@ fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, row: &Row) ->
 /// resolved to `Absent` (or never bound) are omitted.
 pub(crate) fn project(descriptor: &ConceptDescriptor, matched: &Match) -> Row {
     let mut row = Row::new();
-    let operands = iter::once("this").chain(descriptor.with().keys());
-    for operand in operands {
-        if let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(operand)) {
-            row.insert(operand.to_string(), value);
+    for operand in descriptor.operands() {
+        if let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(&operand)) {
+            row.insert(operand, value);
         }
     }
     row
@@ -1414,6 +1413,7 @@ mod tests {
             .assert(the!("family/parent").of(carol.clone()).is(bob.clone()))
             .assert(the!("family/parent").of(bob.clone()).is(alice.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1455,6 +1455,7 @@ mod tests {
             .assert(the!("family/parent").of(b.clone()).is(a.clone()))
             .assert(the!("family/parent").of(c.clone()).is(a.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1505,6 +1506,7 @@ mod tests {
             .assert(the!("family/parent").of(b.clone()).is(a.clone()))
             .assert(the!("family/parent").of(c.clone()).is(a.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1609,6 +1611,7 @@ mod tests {
             .assert(the!("shop/item").of(x.clone()).is(item_b.clone()))
             .assert(the!("shop/franchise").of(y.clone()).is(x.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1733,6 +1736,7 @@ mod tests {
             .assert(the!("family/parent").of(carol.clone()).is(bob.clone()))
             .assert(the!("family/parent").of(bob.clone()).is(alice.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -1791,7 +1795,7 @@ mod tests {
                     .is(pair[1].clone()),
             );
         }
-        transaction.commit().perform(&operator).await?;
+        transaction.commit().publish().perform(&operator).await?;
 
         let concept = ancestor_concept();
         let mut registry = RuleRegistry::new();
@@ -1863,7 +1867,7 @@ mod tests {
                     .is((*parent).clone()),
             );
         }
-        transaction.commit().perform(&operator).await?;
+        transaction.commit().publish().perform(&operator).await?;
 
         let concept = ancestor_concept();
         let mut registry = RuleRegistry::new();
@@ -1922,6 +1926,7 @@ mod tests {
             .assert(the!("meta/name").of(n2.clone()).is("b".to_string()))
             .assert(the!("meta/name").of(n3.clone()).is("c".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2099,6 +2104,7 @@ mod tests {
             .assert(the!("meta/name").of(y.clone()).is("b".to_string()))
             .assert(the!("meta/name").of(z.clone()).is("c".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2186,6 +2192,7 @@ mod tests {
             .transaction()
             .assert(the!("meta/name").of(x.clone()).is("a".to_string()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2266,6 +2273,7 @@ mod tests {
             .assert(the!("family/father").of(lisa.clone()).is(homer.clone()))
             .assert(the!("family/father").of(homer.clone()).is(abe.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2553,6 +2561,7 @@ mod derived_edge_tests {
             .assert(the!("family/parent").of(carol.clone()).is(bob.clone()))
             .assert(the!("family/parent").of(bob.clone()).is(alice.clone()))
             .commit()
+            .publish()
             .perform(&operator)
             .await?;
 

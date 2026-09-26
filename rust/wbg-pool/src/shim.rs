@@ -154,8 +154,16 @@ fn ensure_daemon() -> Result<String> {
         {
             Ok(mut lock) => {
                 let _ = write!(lock, "{}", std::process::id());
-                let result = spawn_daemon(&dir)
-                    .and_then(|_| wait_for_daemon(&state_path, Duration::from_secs(30)));
+                // A loaded daemon can miss the shim's 500 ms health probe
+                // while several test tabs start together. Do not orphan its
+                // browser by replacing a still-live process after one miss;
+                // give that process the normal readiness window instead.
+                let result = if daemon_process_alive(&state_path) {
+                    wait_for_daemon(&state_path, Duration::from_secs(30))
+                } else {
+                    spawn_daemon(&dir)
+                        .and_then(|_| wait_for_daemon(&state_path, Duration::from_secs(30)))
+                };
                 let _ = std::fs::remove_file(&lock_path);
                 return result;
             }
@@ -192,6 +200,25 @@ fn healthy_daemon(state_path: &Path) -> Option<String> {
     } else {
         None
     }
+}
+
+fn daemon_process_alive(state_path: &Path) -> bool {
+    let raw = match std::fs::read_to_string(state_path) {
+        Ok(raw) => raw,
+        Err(_) => return false,
+    };
+    let state: DaemonState = match serde_json::from_str(&raw) {
+        Ok(state) => state,
+        Err(_) => return false,
+    };
+    let Ok(pid) = libc::pid_t::try_from(state.pid) else {
+        return false;
+    };
+    if pid == 0 {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn wait_for_daemon(state_path: &Path, timeout: Duration) -> Result<String> {
@@ -235,4 +262,28 @@ fn spawn_daemon(state_dir: &PathBuf) -> Result<()> {
         .spawn()
         .context("failed to spawn the wbg-pool daemon")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn it_recognizes_a_recorded_live_daemon_process() {
+        let state_path = std::env::temp_dir().join(format!(
+            "wbg-pool-live-daemon-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let state = DaemonState {
+            url: "http://127.0.0.1:1".to_string(),
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        assert!(daemon_process_alive(&state_path));
+
+        std::fs::remove_file(state_path).unwrap();
+    }
 }

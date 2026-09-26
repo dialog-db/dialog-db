@@ -1,25 +1,23 @@
 use super::memory::Cell;
 use crate::rules::SharedRuleCache;
-use crate::{ResolveError, Revision};
+use crate::{Ephemeral, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
-use crate::{NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
+use crate::NetworkedIndex;
+use crate::repository::source::{Caches, SourceRef};
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::Entity;
 use dialog_artifacts::history::Origin;
 use dialog_artifacts::history::{
-    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
+    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
 };
 use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
-use dialog_capability::Fork;
-use dialog_capability::{Capability, Did, Subject};
+use dialog_capability::{Did, Subject};
 use dialog_common::Blake3Hash;
-use dialog_effects::archive::Archive;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_query::query::Application;
 use dialog_search_tree::{Buffer, Cache};
@@ -57,9 +55,6 @@ mod metadata;
 mod open;
 pub use open::*;
 
-mod overlay;
-pub use overlay::*;
-
 mod pull;
 pub use pull::*;
 
@@ -76,6 +71,7 @@ mod select;
 pub use select::*;
 
 mod session;
+use dialog_effects::archive::prelude::ArchiveScope;
 pub use session::*;
 
 mod subscription;
@@ -143,11 +139,11 @@ pub struct Branch {
     /// every query's durable rule resolution, so the `dialog.rule/*` scan is
     /// paid once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
-    /// Transient session overlay: ephemeral facts folded into every
-    /// read of this branch, never committed. Shared across clones
-    /// like the caches; mutations bump an epoch subscriptions gate
-    /// on. See [`Overlay`].
-    overlay: Overlay,
+    /// The branch's ephemeral line: session facts folded into every
+    /// read of this branch, never committed. Shared across clones like
+    /// the caches; every change mints an instant subscriptions
+    /// maintain from. See [`Ephemeral`].
+    overlay: Ephemeral,
     /// Shared plan cache for the deductive rules resolved on this branch,
     /// keyed by content-addressed `(rule, adornment)`. Handed to each
     /// per-query `ConceptRules` assembly so a re-assembled rule set reuses
@@ -208,6 +204,13 @@ impl Branch {
         self.reference.name()
     }
 
+    /// The branch's ephemeral line: assert or retract session facts
+    /// that every read of this branch observes but no commit
+    /// persists. See [`Ephemeral`].
+    pub fn overlay(&self) -> &Ephemeral {
+        &self.overlay
+    }
+
     /// Returns the current revision of this branch, or `None` if the branch
     /// has no commits yet (equivalent to an orphan branch in git).
     pub fn revision(&self) -> Option<Revision> {
@@ -259,8 +262,8 @@ impl Branch {
     }
 
     /// Archive capability for this branch's subject.
-    pub fn archive(&self) -> Capability<Archive> {
-        self.subject().archive()
+    pub fn archive(&self) -> ArchiveScope {
+        ArchiveScope::new(self.subject())
     }
 
     /// The recorded claim lineage at this branch's current revision, which
@@ -268,24 +271,21 @@ impl Branch {
     /// [`dialog_artifacts::history::causality`]).
     ///
     /// History records live in the same tree as the data, so this reads the
-    /// history region of the current revision's tree. Reads that miss
-    /// locally are not fetched from a remote — traversal over unreplicated
-    /// history surfaces as `IncompleteHistory`.
-    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    /// history region of the current revision's tree. A read that misses
+    /// locally hydrates from the branch's tracked remote exactly as a fact
+    /// read does, so a replica that materialized only the operational
+    /// regions fetches the history it turns out to need. A branch tracking
+    /// no remote reads purely locally.
+    pub async fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
-            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + Provider<memory::Resolve>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        let store = NetworkedIndex::new(env, self.archive().index(), None);
-        let root = self
-            .revision()
-            .map(|revision| *revision.tree.hash())
-            .unwrap_or(crate::EMPTY_TREE_HASH);
-        TreeHistory::from_root_with_cache(&root, store, self.node_cache())
-            .with_record_cache(self.records())
+        SourceRef::from(self).history(env).await
     }
 
     /// The branch's committed history, newest first — at most `limit`
@@ -302,14 +302,12 @@ impl Branch {
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
-            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + Provider<memory::Resolve>
+            + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        let Some(head) = self.revision() else {
-            return Ok(Vec::new());
-        };
-        log(&head.version(), &self.history(env), limit).await
+        SourceRef::from(self).log(env, limit).await
     }
 
     /// Export all artifacts from this branch to the given exporter.
@@ -332,6 +330,23 @@ impl Branch {
     /// A shared handle to this branch's node cache, for seeding a read tree.
     pub(crate) fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
         self.node_cache.clone()
+    }
+
+    /// Shared handles to every cache this branch carries, for a
+    /// [`Snapshot`](crate::Snapshot) minted from it to read and commit
+    /// through. All content- or version-addressed, so sharing them
+    /// never serves a stale entry.
+    pub(crate) fn caches(&self) -> Caches {
+        Caches {
+            nodes: self.node_cache.clone(),
+            spills: self.spill_cache.clone(),
+            rules: self.rule_cache.clone(),
+            plans: self.plan_cache.clone(),
+            causality: self.causality_cache.clone(),
+            contexts: self.context_cache.clone(),
+            records: self.record_cache.clone(),
+            spine: self.spine.clone(),
+        }
     }
 
     /// The live-spine slot this branch's commits reuse.

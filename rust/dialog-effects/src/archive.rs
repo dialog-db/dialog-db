@@ -13,9 +13,13 @@
 //!               └── Import { blocks } → Effect → Result<(), ArchiveError>
 //! ```
 
+use crate::Method;
+use crate::method;
 use std::error::Error;
+use std::marker::PhantomData;
 
 use crate::Rejection;
+pub use dialog_capability::Constraint;
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, DialogCapabilityPerformError, Effect, Policy, StorageError,
     Subject, access::AuthorizeError,
@@ -27,36 +31,94 @@ use serde::de::Error as DeserializationError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-/// Archive ability - restricts to archive operations.
+/// The archive namespace, under a verb: `/use/get/archive/...`.
 ///
-/// Attaches to Subject and provides the `/archive` ability path segment.
+/// Generic over the verb above it, because the same namespace is
+/// reached by reading and by writing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Archive;
+pub struct Archive<V = method::Get>(#[serde(skip)] PhantomData<V>);
 
-impl Attenuation for Archive {
-    type Of = Subject;
+impl<V> Archive<V> {
+    /// The archive namespace under `V`.
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<V> Default for Archive<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: Method> Attenuation for Archive<M>
+where
+    M::Of: Constraint,
+{
+    type Of = M;
+
+    fn attenuation() -> &'static str {
+        "archive"
+    }
 }
 
 /// Catalog policy that scopes operations to a named catalog.
 ///
 /// Does not add to ability path but constrains invocation arguments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Catalog {
+pub struct Catalog<V = method::Get> {
     /// The catalog name (e.g., "index", "blobs").
     pub catalog: String,
+    /// The verb this policy hangs from. A type-level marker: it holds
+    /// no data and never reaches the wire.
+    #[serde(skip)]
+    pub verb: PhantomData<V>,
 }
 
-impl Catalog {
+impl<V> Catalog<V> {
     /// Create a new Catalog policy.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             catalog: name.into(),
+            verb: PhantomData,
         }
     }
 }
 
-impl Policy for Catalog {
-    type Of = Archive;
+impl<M: Method> Policy for Catalog<M>
+where
+    M::Of: Constraint,
+{
+    type Of = Archive<M>;
+}
+
+/// The block resource: the unit an archive stores, named by content
+/// hash. Completes the command `/use/get/archive/block`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Block<V = method::Get>(#[serde(skip)] PhantomData<V>);
+
+impl<V> Block<V> {
+    /// The block resource under `V`.
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<V> Default for Block<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: Method> Attenuation for Block<M>
+where
+    M::Of: Constraint,
+{
+    type Of = Catalog<M>;
+
+    fn attenuation() -> &'static str {
+        "block"
+    }
 }
 
 /// Get operation - retrieves content by digest.
@@ -78,8 +140,11 @@ impl Get {
     }
 }
 
+impl Policy for Get {
+    type Of = Block<method::Get>;
+}
+
 impl Effect for Get {
-    type Of = Catalog;
     type Output = Result<Option<Vec<u8>>, ArchiveError>;
 }
 
@@ -172,8 +237,11 @@ impl Put {
     }
 }
 
+impl Policy for Put {
+    type Of = Block<method::Put>;
+}
+
 impl Effect for Put {
-    type Of = Catalog;
     type Output = Result<(), ArchiveError>;
 }
 
@@ -223,8 +291,11 @@ impl Import {
     }
 }
 
+impl Policy for Import {
+    type Of = Block<method::Put>;
+}
+
 impl Effect for Import {
-    type Of = Catalog;
     type Output = Result<(), ArchiveError>;
 }
 
@@ -274,45 +345,46 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::prelude::*;
     use dialog_capability::did;
 
-    #[test]
-    fn it_builds_archive_claim_path() {
-        let claim = Subject::from(did!("key:zSpace")).attenuate(Archive);
-
-        assert_eq!(claim.subject(), &did!("key:zSpace"));
-        assert_eq!(claim.ability(), "/archive");
-    }
-
-    #[test]
-    fn it_builds_catalog_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"));
-
-        assert_eq!(claim.subject(), &did!("key:zSpace"));
-        // Catalog is Policy, not Ability, so it doesn't add to path
-        assert_eq!(claim.ability(), "/archive");
-    }
-
-    #[test]
+    #[dialog_common::test]
     fn it_builds_get_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Get::new([0u8; 32]));
+            .reader()
+            .archive()
+            .catalog("index")
+            .get([0u8; 32]);
 
-        assert_eq!(claim.ability(), "/archive/get");
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
+        assert_eq!(claim.ability(), "/use/get/archive/block");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_put_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(Buffer::from(Vec::new())));
+            .writer()
+            .archive()
+            .catalog("index")
+            .put(Buffer::from(Vec::new()));
 
-        assert_eq!(claim.ability(), "/archive/put");
+        assert_eq!(claim.ability(), "/use/put/archive/block");
+    }
+
+    /// The catalog name scopes the capability without appearing in the
+    /// path.
+    #[dialog_common::test]
+    fn it_scopes_by_catalog_without_changing_the_path() {
+        let subject = Subject::from(did!("key:zSpace"));
+        let index = subject
+            .clone()
+            .reader()
+            .archive()
+            .catalog("index")
+            .get([0u8; 32]);
+        let other = subject.reader().archive().catalog("other").get([0u8; 32]);
+
+        assert_eq!(index.ability(), other.ability());
     }
 
     #[dialog_common::test]

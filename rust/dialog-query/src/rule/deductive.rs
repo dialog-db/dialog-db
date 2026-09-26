@@ -1,10 +1,13 @@
 /// Serializable rule descriptor matching the formal notation.
 pub mod descriptor;
 
+use crate::Formula;
 use crate::artifact::Entity;
+use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
+use crate::formula::attribute::AttributeParts;
 use crate::negation::Negation;
 use crate::optional::OptionalAttributeQuery;
 pub use crate::planner::Plan;
@@ -132,11 +135,11 @@ impl DeductiveRule {
 
     /// Returns an iterator over the required operand names of this
     /// rule's conclusion.
-    pub fn required_operands(&self) -> impl Iterator<Item = &str> {
+    pub fn required_operands(&self) -> impl Iterator<Item = String> + '_ {
         self.conclusion().required_operands()
     }
     /// Returns the names of the parameters for this rule.
-    pub fn parameters(&self) -> impl Iterator<Item = &str> {
+    pub fn parameters(&self) -> impl Iterator<Item = String> + '_ {
         self.conclusion().required_operands()
     }
 
@@ -338,7 +341,7 @@ fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
 
         let premise: Premise = if field.is_optional() {
             OptionalAttributeQuery::new(
-                Term::Constant(Value::from(field.the().clone())),
+                field.the().term(name),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
@@ -347,7 +350,7 @@ fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
             .into()
         } else {
             AttributeQuery::new(
-                Term::Constant(Value::from(field.the().clone())),
+                field.the().term(name),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
@@ -356,6 +359,25 @@ fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
             .into()
         };
         premises.push(premise);
+
+        // A keyed collection's scan binds the whole attribute
+        // (`domain/key`) to an internal variable; the author-facing
+        // key is its name half, projected onto the field's key
+        // operand. One entry, one row, `(key, value)` bound flat.
+        if let Relation::Collection { .. } = field.the() {
+            let mut parts = Parameters::new();
+            parts.insert(
+                "of".to_string(),
+                Term::var(Relation::attribute_variable(name)),
+            );
+            parts.insert("domain".to_string(), Term::blank());
+            parts.insert("name".to_string(), Term::var(Relation::key_operand(name)));
+            premises.push(
+                AttributeParts::apply(parts)
+                    .expect("attribute-parts operands are well-formed by construction")
+                    .into(),
+            );
+        }
 
         // Conformance is "facts exist", not a property of the
         // scalar, so it desugars to the target concept applied

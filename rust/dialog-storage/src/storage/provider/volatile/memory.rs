@@ -146,7 +146,9 @@ impl Provider<Retract> for Volatile {
 mod tests {
     use super::*;
     use crate::helpers::unique_subject;
-    use dialog_effects::memory::{Cell, Memory, Space, Version};
+
+    use dialog_effects::memory::Version;
+    use dialog_effects::prelude::*;
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
@@ -154,10 +156,11 @@ mod tests {
         let subject = unique_subject("memory-resolve-none");
 
         let effect = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("missing"))
-            .invoke(Resolve);
+            .reader()
+            .memory()
+            .space("local")
+            .cell("missing")
+            .resolve();
 
         let result = effect.perform(&provider).await?;
         assert!(result.is_none());
@@ -174,10 +177,11 @@ mod tests {
         // Publish new content (when = None means expect empty)
         let edition = subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
@@ -185,10 +189,11 @@ mod tests {
 
         // Resolve to verify
         let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+            .reader()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -207,20 +212,22 @@ mod tests {
         // Create initial content
         let edition1 = subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
         // Update with correct edition
         let edition2 = subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"updated", Some(edition1.clone())))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"updated", Some(edition1.clone()))
             .perform(&provider)
             .await?;
 
@@ -228,10 +235,11 @@ mod tests {
 
         // Verify update
         let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+            .reader()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -249,20 +257,22 @@ mod tests {
         // Create initial content
         subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
         // Try to update with wrong edition
         let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"updated", Some(wrong_edition)))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"updated", Some(wrong_edition))
             .perform(&provider)
             .await;
 
@@ -279,19 +289,21 @@ mod tests {
         // Create initial content
         subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
         // Try to create again (when = None means expect empty)
         let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"new", None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"new", None)
             .perform(&provider)
             .await;
 
@@ -308,29 +320,33 @@ mod tests {
         // Create content
         let edition = subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"to be deleted", None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"to be deleted", None)
             .perform(&provider)
             .await?;
 
         // Retract with correct edition
         subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Retract::new(edition))
+            .user()
+            .delete()
+            .memory()
+            .space("local")
+            .cell("test")
+            .retract(edition)
             .perform(&provider)
             .await?;
 
         // Verify deleted
         let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+            .reader()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -347,20 +363,23 @@ mod tests {
         // Create content
         subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"content", None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"content", None)
             .perform(&provider)
             .await?;
 
         // Try to retract with wrong edition
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Retract::new(wrong_version))
+            .user()
+            .delete()
+            .memory()
+            .space("local")
+            .cell("test")
+            .retract(wrong_version)
             .perform(&provider)
             .await;
 
@@ -377,39 +396,43 @@ mod tests {
         // Publish to different spaces
         subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("space1"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Publish::new(b"content1", None))
+            .writer()
+            .memory()
+            .space("space1")
+            .cell("cell")
+            .publish(b"content1", None)
             .perform(&provider)
             .await?;
 
         subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("space2"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Publish::new(b"content2", None))
+            .writer()
+            .memory()
+            .space("space2")
+            .cell("cell")
+            .publish(b"content2", None)
             .perform(&provider)
             .await?;
 
         // Resolve from space1
         let result1 = subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("space1"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Resolve)
+            .reader()
+            .memory()
+            .space("space1")
+            .cell("cell")
+            .resolve()
             .perform(&provider)
             .await?;
         assert_eq!(result1.unwrap().content, b"content1".to_vec());
 
         // Resolve from space2
         let result2 = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("space2"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Resolve)
+            .reader()
+            .memory()
+            .space("space2")
+            .cell("cell")
+            .resolve()
             .perform(&provider)
             .await?;
         assert_eq!(result2.unwrap().content, b"content2".to_vec());
@@ -426,20 +449,22 @@ mod tests {
         // Create initial content
         subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         // Try to publish same content with wrong edition - should succeed
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), Some(wrong_version)))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(content.clone(), Some(wrong_version))
             .perform(&provider)
             .await;
 
@@ -458,19 +483,21 @@ mod tests {
         // Create value at cell1
         let edition1 = subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("cell1"))
-            .invoke(Publish::new(content.clone(), None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("cell1")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         // Create same value at cell2
         let edition2 = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("cell2"))
-            .invoke(Publish::new(content, None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("cell2")
+            .publish(content, None)
             .perform(&provider)
             .await?;
 
@@ -488,10 +515,12 @@ mod tests {
         // Try to retract non-existent cell - should succeed
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("nonexistent"))
-            .invoke(Retract::new(wrong_version))
+            .user()
+            .delete()
+            .memory()
+            .space("local")
+            .cell("nonexistent")
+            .retract(wrong_version)
             .perform(&provider)
             .await;
 
@@ -509,10 +538,11 @@ mod tests {
         // Publish to nested space path
         let edition = subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("parent/child/grandchild"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Publish::new(content.clone(), None))
+            .writer()
+            .memory()
+            .space("parent/child/grandchild")
+            .cell("cell")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
@@ -520,10 +550,11 @@ mod tests {
 
         // Resolve to verify
         let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("parent/child/grandchild"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Resolve)
+            .reader()
+            .memory()
+            .space("parent/child/grandchild")
+            .cell("cell")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -541,20 +572,22 @@ mod tests {
 
         let edition = subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("empty"))
-            .invoke(Publish::new(content.clone(), None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("empty")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
 
         let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("empty"))
-            .invoke(Resolve)
+            .reader()
+            .memory()
+            .space("local")
+            .cell("empty")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -573,20 +606,22 @@ mod tests {
 
         let edition = subject
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("large"))
-            .invoke(Publish::new(content.clone(), None))
+            .writer()
+            .memory()
+            .space("local")
+            .cell("large")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
 
         let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("large"))
-            .invoke(Resolve)
+            .reader()
+            .memory()
+            .space("local")
+            .cell("large")
+            .resolve()
             .perform(&provider)
             .await?;
 

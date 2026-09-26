@@ -1,0 +1,315 @@
+{
+  "scenario": "join",
+  "network": "none",
+  "latency_ms": 0.0,
+  "auth_ms": 0.0,
+  "bandwidth_mbps": 0.0,
+  "fanout_n": 8,
+  "max_segment": 65536,
+  "entities": 4000,
+  "facts": 24011,
+  "commits": 33,
+  "vault_files": 392,
+  "vault_bytes": 19309950,
+  "phases": [
+    {
+      "name": "pull",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 0,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "memory.resolve",
+            1,
+            330
+          ]
+        ],
+        "requests": 1,
+        "bytes": 330
+      }
+    },
+    {
+      "name": "probe",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 3,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            3,
+            140784
+          ]
+        ],
+        "requests": 3,
+        "bytes": 140784
+      }
+    },
+    {
+      "name": "roster",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 1,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            1,
+            7864
+          ]
+        ],
+        "requests": 1,
+        "bytes": 7864
+      }
+    },
+    {
+      "name": "claim",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 1,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            1,
+            100248
+          ],
+          [
+            "archive.put",
+            4,
+            200088
+          ],
+          [
+            "memory.resolve",
+            1,
+            330
+          ],
+          [
+            "memory.publish",
+            1,
+            372
+          ]
+        ],
+        "requests": 7,
+        "bytes": 301038
+      }
+    },
+    {
+      "name": "render",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 11,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            11,
+            672096
+          ]
+        ],
+        "requests": 11,
+        "bytes": 672096
+      }
+    },
+    {
+      "name": "entity",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 1,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            1,
+            93576
+          ]
+        ],
+        "requests": 1,
+        "bytes": 93576
+      }
+    },
+    {
+      "name": "requery",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 0,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [],
+        "requests": 0,
+        "bytes": 0
+      }
+    },
+    {
+      "name": "concept",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 71,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            71,
+            3144180
+          ]
+        ],
+        "requests": 71,
+        "bytes": 3144180
+      }
+    },
+    {
+      "name": "filtered",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 152,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            152,
+            7700964
+          ]
+        ],
+        "requests": 152,
+        "bytes": 7700964
+      }
+    },
+    {
+      "name": "subscribe",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 71,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            71,
+            3144180
+          ]
+        ],
+        "requests": 71,
+        "bytes": 3144180
+      }
+    },
+    {
+      "name": "overlap",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 71,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            71,
+            3144180
+          ]
+        ],
+        "requests": 71,
+        "bytes": 3144180
+      }
+    },
+    {
+      "name": "rule",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 113,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            113,
+            6066444
+          ]
+        ],
+        "requests": 113,
+        "bytes": 6066444
+      }
+    },
+    {
+      "name": "download",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 390,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            390,
+            19312988
+          ],
+          [
+            "memory.resolve",
+            1,
+            372
+          ]
+        ],
+        "requests": 391,
+        "bytes": 19313360
+      }
+    },
+    {
+      "name": "seeded",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "unique_blocks": 62,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            62,
+            3587012
+          ],
+          [
+            "memory.resolve",
+            1,
+            372
+          ]
+        ],
+        "requests": 63,
+        "bytes": 3587384
+      }
+    }
+  ]
+}

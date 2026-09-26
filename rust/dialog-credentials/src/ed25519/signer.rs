@@ -6,32 +6,65 @@ use super::{
 use crate::key::KeyExport;
 use dialog_varsig::{Did, Principal, Signer, eddsa::Ed25519Signature};
 use serde::Serialize;
+use std::marker::PhantomData;
+
+use crate::key::ExtractableKey;
 
 // Re-import WebCrypto types on WASM
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use super::web;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-use crate::key::{ExtractableKey, WebCryptoError};
+use crate::key::WebCryptoError;
+
+/// A signer whose key material cannot be read out. The default.
+///
+/// In the browser this is physical: a non-extractable `CryptoKey` has no seed
+/// to give. On native `ed25519_dalek` holds the seed whatever the type says,
+/// so there it is an API boundary rather than a guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sealed;
+
+/// A signer whose key material can be exported.
+///
+/// Derived through
+/// [`SecretExtractableDerive`](crate::secret::SecretExtractableDerive), whose
+/// fully-qualified call is the deliberate act that produces one. A consumer
+/// that needs raw bytes asks for this one:
+/// `fn peer_key(signer: &Ed25519Signer<Extractable>)`, so a sealed key cannot
+/// reach it and `export` on one yields opaque handles rather than a seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Extractable;
 
 /// An `Ed25519` `did:key` signer.
 ///
 /// This is the unified signer that works on both native and WASM platforms.
 /// On native platforms, it wraps an `ed25519_dalek::SigningKey`.
 /// On WASM, it can also wrap a `WebCrypto` `CryptoKey` for non-extractable key support.
+///
+/// `E` records whether the key material can be read back: [`Sealed`] by
+/// default, or [`Extractable`].
 #[derive(Debug, Clone)]
-pub struct Ed25519Signer {
+pub struct Ed25519Signer<E = Sealed> {
     did: Ed25519Verifier,
     signer: Ed25519SigningKey,
+    /// `fn() -> E` rather than `E`: the marker names a state without the
+    /// struct inheriting that type's auto traits, so a signer stays `Send`
+    /// and `Sync` whatever `E` is.
+    extractability: PhantomData<fn() -> E>,
 }
 
-impl From<Ed25519SigningKey> for Ed25519Signer {
+impl<E> From<Ed25519SigningKey> for Ed25519Signer<E> {
     fn from(signer: Ed25519SigningKey) -> Self {
         let did = Ed25519Verifier::from(signer.verifying_key());
-        Self { did, signer }
+        Self {
+            did,
+            signer,
+            extractability: PhantomData,
+        }
     }
 }
 
-impl Ed25519Signer {
+impl Ed25519Signer<Sealed> {
     /// Generate a new Ed25519 keypair.
     ///
     /// On WASM, uses the `WebCrypto` API (non-extractable key by default).
@@ -56,8 +89,15 @@ impl Ed25519Signer {
         let signing_key = Ed25519SigningKey::import(key).await?;
         Ok(signing_key.into())
     }
+}
 
+impl<E> Ed25519Signer<E> {
     /// Export the key material.
+    ///
+    /// What comes back follows the key: an [`Extractable`] one yields its
+    /// seed, a [`Sealed`] one in the browser yields opaque `CryptoKey`
+    /// handles, which carry no material and restore to a key that still
+    /// cannot give its seed back. On native there is only the seed.
     ///
     /// # Errors
     ///
@@ -101,43 +141,55 @@ impl From<web::SigningKey> for Ed25519Signer {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-impl ExtractableKey for Ed25519Signer {
-    async fn generate() -> Result<Self, WebCryptoError> {
-        let key = <web::SigningKey as ExtractableKey>::generate().await?;
-        Ok(Ed25519SigningKey::from(key).into())
-    }
+impl ExtractableKey for Ed25519Signer<Extractable> {
+    type Error = Ed25519SignerError;
 
-    async fn import(key: impl Into<KeyExport>) -> Result<Self, WebCryptoError> {
-        let key = <web::SigningKey as ExtractableKey>::import(key).await?;
-        Ok(Ed25519SigningKey::from(key).into())
-    }
-
-    async fn export(&self) -> Result<KeyExport, WebCryptoError> {
-        match &self.signer {
-            Ed25519SigningKey::WebCrypto(key) => {
-                <web::SigningKey as ExtractableKey>::export(key).await
-            }
-            Ed25519SigningKey::Native(key) => Ok(KeyExport::Extractable(key.to_bytes().to_vec())),
+    async fn generate() -> Result<Self, Self::Error> {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let key = <web::SigningKey as ExtractableKey>::generate().await?;
+            Ok(Ed25519SigningKey::from(key).into())
         }
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Ok(Ed25519SigningKey::generate().await?.into())
+        }
+    }
+
+    async fn import(key: impl Into<KeyExport>) -> Result<Self, Self::Error> {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let key = <web::SigningKey as ExtractableKey>::import(key).await?;
+            Ok(Ed25519SigningKey::from(key).into())
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Ok(Ed25519SigningKey::import(key).await?.into())
+        }
+    }
+
+    async fn export(&self) -> Result<KeyExport, Self::Error> {
+        Ok(self.signer.export().await?)
     }
 }
 
-impl std::fmt::Display for Ed25519Signer {
+impl<E> std::fmt::Display for Ed25519Signer<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.did)
     }
 }
 
 // Signer impl for Ed25519Signer
-impl Signer<Ed25519Signature> for Ed25519Signer {
+impl<E> Signer<Ed25519Signature> for Ed25519Signer<E> {
     async fn sign(&self, msg: &[u8]) -> Result<Ed25519Signature, signature::Error> {
         self.signer.sign_bytes(msg).await
     }
 }
 
 // Principal impl for Ed25519Signer
-impl Principal for Ed25519Signer {
+impl<E> Principal for Ed25519Signer<E> {
     fn did(&self) -> Did {
         self.did.did()
     }
@@ -146,11 +198,11 @@ impl Principal for Ed25519Signer {
 // Issuer impl — combines Principal + Signer into a single trait
 use dialog_capability::Issuer;
 
-impl Issuer for Ed25519Signer {
+impl<E> Issuer for Ed25519Signer<E> {
     type Signature = Ed25519Signature;
 }
 
-impl Serialize for Ed25519Signer {
+impl<E> Serialize for Ed25519Signer<E> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -424,12 +476,13 @@ mod web_tests {
 
     #[dialog_common::test]
     async fn generate_extractable_key() {
-        let signer = <Ed25519Signer as ExtractableKey>::generate().await;
+        let signer = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await;
         assert!(signer.is_ok(), "Should be able to generate extractable key");
 
         let signer = signer.unwrap();
         let msg = b"test";
-        let sig = <Ed25519Signer as Signer<Ed25519Signature>>::sign(&signer, msg).await;
+        let sig =
+            <Ed25519Signer<Extractable> as Signer<Ed25519Signature>>::sign(&signer, msg).await;
         assert!(sig.is_ok());
     }
 
@@ -437,7 +490,7 @@ mod web_tests {
     async fn import_extractable_key() {
         let seed = [42u8; 32];
 
-        let signer = <Ed25519Signer as ExtractableKey>::import(&seed).await;
+        let signer = <Ed25519Signer<Extractable> as ExtractableKey>::import(&seed).await;
         assert!(
             signer.is_ok(),
             "Should be able to import extractable key: {:?}",
@@ -446,7 +499,8 @@ mod web_tests {
 
         let signer = signer.unwrap();
         let msg = b"test";
-        let sig = <Ed25519Signer as Signer<Ed25519Signature>>::sign(&signer, msg).await;
+        let sig =
+            <Ed25519Signer<Extractable> as Signer<Ed25519Signature>>::sign(&signer, msg).await;
         assert!(sig.is_ok());
     }
 
@@ -481,11 +535,11 @@ mod web_tests {
     #[dialog_common::test]
     async fn extractable_export_import_roundtrip_preserves_seed() {
         let seed = [42u8; 32];
-        let signer = <Ed25519Signer as ExtractableKey>::import(&seed)
+        let signer = <Ed25519Signer<Extractable> as ExtractableKey>::import(&seed)
             .await
             .unwrap();
 
-        let exported = <Ed25519Signer as ExtractableKey>::export(&signer)
+        let exported = <Ed25519Signer<Extractable> as ExtractableKey>::export(&signer)
             .await
             .unwrap();
         match &exported {
@@ -509,12 +563,12 @@ mod web_tests {
     #[dialog_common::test]
     async fn extractable_export_import_roundtrip_signs_correctly() {
         let seed = [99u8; 32];
-        let signer = <Ed25519Signer as ExtractableKey>::import(&seed)
+        let signer = <Ed25519Signer<Extractable> as ExtractableKey>::import(&seed)
             .await
             .unwrap();
         let msg = b"extractable roundtrip signing test";
 
-        let exported = <Ed25519Signer as ExtractableKey>::export(&signer)
+        let exported = <Ed25519Signer<Extractable> as ExtractableKey>::export(&signer)
             .await
             .unwrap();
         let restored = Ed25519Signer::import(exported).await.unwrap();

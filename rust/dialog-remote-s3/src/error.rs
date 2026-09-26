@@ -8,7 +8,11 @@ use dialog_effects::memory::MemoryError;
 use thiserror::Error;
 
 /// Error type for S3 operations.
-#[derive(Debug, Error)]
+///
+/// `Clone` so a single-flight outcome (see [`crate::flight`]) can be
+/// shared with every joined caller; each variant already carries only
+/// clonable data.
+#[derive(Debug, Error, Clone)]
 pub enum S3Error {
     /// The request was not authorized.
     ///
