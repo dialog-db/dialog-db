@@ -18,8 +18,8 @@ pub use dialog_identity::*;
 
 mod peer;
 pub use peer::{
-    Allowance, Local, Mode, OpenFuture, OpenPeer, Peer, PeerBuilder, PeerError, PeerKey, PeerSpace,
-    Runtime, Session, Unset,
+    Allowance, BranchPeerExt, Local, Mode, OpenFuture, OpenPeer, Peer, PeerBuilder, PeerError,
+    PeerKey, PeerSpace, Runtime, Session, Unset, With,
 };
 
 /// Test helpers: unique names, peers over volatile storage, sample data.

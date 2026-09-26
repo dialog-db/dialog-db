@@ -18,7 +18,7 @@ let storage = Storage::default();
 
 // Open (load-or-create) the peer at its location.
 let alice = Peer::new()
-    .storage(storage)
+    .with(storage)
     .open(Location::profile("alice"))
     .await?;
 

@@ -1592,7 +1592,11 @@ where
 impl BenchEnv<Peer<VolatileSpace, Session>> {
     async fn with_storage(storage: Storage<VolatileSpace>) -> Result<Self> {
         let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
-        let operator = profile.session(b"bench").allow(Subject::any()).await?;
+        let operator = profile
+            .session(b"bench")
+            .mount(profile.state())
+            .allow(Subject::any())
+            .await?;
         Self::assemble(operator, &profile).await
     }
 }
@@ -1601,7 +1605,11 @@ impl BenchEnv<Peer<VolatileSpace, Session>> {
 impl BenchEnv<Peer<NativeTempSpace, Session>> {
     async fn with_storage(storage: Storage<NativeTempSpace>) -> Result<Self> {
         let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
-        let operator = profile.session(b"bench").allow(Subject::any()).await?;
+        let operator = profile
+            .session(b"bench")
+            .mount(profile.state())
+            .allow(Subject::any())
+            .await?;
         Self::assemble(operator, &profile).await
     }
 }
@@ -1612,7 +1620,11 @@ impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
         storage: Storage<::dialog_storage::provider::storage::WebSpace>,
     ) -> Result<Self> {
         let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
-        let operator = profile.session(b"bench").allow(Subject::any()).await?;
+        let operator = profile
+            .session(b"bench")
+            .mount(profile.state())
+            .allow(Subject::any())
+            .await?;
         Self::assemble(operator, &profile).await
     }
 }
