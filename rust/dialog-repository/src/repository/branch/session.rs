@@ -457,7 +457,8 @@ impl<Env> Clone for QueryEnv<'_, Env> {
 /// stream borrows nothing but the env. The setup runs here rather than
 /// inside the stream so the stream boxed per scan holds only the scan,
 /// not the setup's futures alongside it (together they came to 16 KiB,
-/// allocated and copied for every scan a query ran).
+/// allocated and copied for every scan a query ran), and the scan is
+/// built in its box ([`Select::execute_boxed`](crate::Select)).
 pub(crate) async fn select_from_source<'a, Env>(
     source: SourceRef<'_>,
     env: &'a Env,
@@ -478,7 +479,7 @@ where
     // the env's own `Hydrate` flight (see `crate::Hydrate`), with
     // every other evaluation in the process.
     let store = NetworkedIndex::new(env, select.catalog(), remote);
-    Ok(Box::pin(select.execute(store).await?))
+    Ok(select.execute_boxed(store).await?)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
