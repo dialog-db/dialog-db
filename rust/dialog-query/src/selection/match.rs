@@ -1,5 +1,6 @@
 use futures_util::stream::once;
 use std::sync::Arc;
+use std::{iter, mem};
 
 use crate::Claim;
 use crate::artifact::Value;
@@ -203,8 +204,8 @@ impl Match {
             return;
         }
         let frame = Frame {
-            bindings: std::mem::take(&mut self.bindings),
-            claims: std::mem::take(&mut self.claims),
+            bindings: mem::take(&mut self.bindings),
+            claims: mem::take(&mut self.claims),
             parent: self.frame.take(),
         };
         self.frame = Some(Arc::new(frame));
@@ -212,7 +213,7 @@ impl Match {
 
     /// The frames this row extends, innermost first.
     fn frames(&self) -> impl Iterator<Item = &Frame> {
-        std::iter::successors(self.frame.as_deref(), |frame| frame.parent.as_deref())
+        iter::successors(self.frame.as_deref(), |frame| frame.parent.as_deref())
     }
 
     /// Every binding of this row, its own and its frames'. A name is
