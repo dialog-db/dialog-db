@@ -241,7 +241,7 @@ impl Application for DynamicAttributeQuery {
             } if [self.the().name(), self.is().name(), self.cause().name()]
                 .into_iter()
                 .flatten()
-                .any(|other| other == name) =>
+                .any(|other| other == &**name) =>
             {
                 // `of` joins another slot through a shared variable
                 // name; pinning it would sever the join.

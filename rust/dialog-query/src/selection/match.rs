@@ -309,13 +309,9 @@ impl Match {
         } = term
         {
             let claim = Arc::new(claim);
-            match self
-                .claims
-                .iter_mut()
-                .find(|(held, _)| held.as_ref() == name.as_str())
-            {
+            match self.claims.iter_mut().find(|(held, _)| **held == **name) {
                 Some((_, slot)) => *slot = claim,
-                None => self.claims.push((name.as_str().into(), claim)),
+                None => self.claims.push((name.clone(), claim)),
             }
         }
     }
@@ -535,7 +531,7 @@ impl Match {
                     Ok(binding.clone())
                 } else {
                     Err(EvaluationError::UnboundVariable {
-                        variable_name: key.clone(),
+                        variable_name: key.to_string(),
                     })
                 }
             }
