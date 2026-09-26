@@ -1526,6 +1526,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     mod blob_tests {
         use super::*;
+        use crate::helpers::test_owned;
         use dialog_capability::Subject;
         use dialog_effects::MethodExt as _;
         use dialog_effects::archive::prelude::*;
@@ -1533,7 +1534,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_routes_blob_effects_to_the_space() -> anyhow::Result<()> {
-            let storage = Storage::temp();
+            let storage = test_owned(Storage::temp()).await;
             let profile = open_peer(
                 storage.clone(),
                 Location::profile(unique_name("blob-route")),
