@@ -483,6 +483,7 @@ mod tests {
 
         let operator = profile
             .session(b"test")
+            .mount(profile.state())
             .allow(dialog_capability::Subject::any())
             .await?;
 

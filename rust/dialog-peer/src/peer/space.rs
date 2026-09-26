@@ -116,14 +116,12 @@ where
     Self: RegistryEnv,
 {
     /// The repository this peer recorded under `name`, and where it is
-    /// stored, if it recorded one. An ephemeral peer records nothing.
+    /// stored, if it recorded one.
     async fn recorded_space(
         &self,
         name: &str,
     ) -> Result<Option<(Did, storage_fx::Location)>, storage_fx::StorageError> {
-        let Some(state) = self.state_opt() else {
-            return Ok(None);
-        };
+        let state = self.state();
         let failed = |error: String| storage_fx::StorageError::Storage(error);
         state
             .refresh(self)
@@ -142,15 +140,12 @@ where
     }
 
     /// Where this peer recorded the repository `repository` is stored,
-    /// under any name. An ephemeral peer records nothing.
+    /// under any name.
     async fn located(
         &self,
         repository: &Did,
     ) -> Result<Option<storage_fx::Location>, storage_fx::StorageError> {
-        let Some(state) = self.state_opt() else {
-            return Ok(None);
-        };
-        let found = spaces::locate(state, repository, self)
+        let found = spaces::locate(self.state(), repository, self)
             .await
             .map_err(|error| storage_fx::StorageError::Storage(error.to_string()))?;
         Ok(found.into_iter().next().map(|(_, location)| location))
@@ -163,25 +158,19 @@ where
     /// left unrecorded is found in the base directory and recorded the
     /// next time it is loaded.
     async fn record_space(&self, repository: &Did, name: &str, location: &storage_fx::Location) {
-        if let Some(state) = self.state_opt() {
-            let _ = spaces::record(state, repository, name, location, self).await;
-        }
+        let _ = spaces::record(self.state(), repository, name, location, self).await;
     }
 
     /// Keep the sealed key of the repository `repository` in this peer's
-    /// state, as it keeps the space's name and location: a peer keeping
-    /// its state only in memory keeps the sealed key as long as it does.
+    /// state, as it keeps the space's name and location.
     async fn seal_space(
         &self,
         repository: &Did,
         sealed: Vec<u8>,
     ) -> Result<(), storage_fx::StorageError> {
-        match self.state_opt() {
-            Some(state) => spaces::seal(state, repository, sealed, self)
-                .await
-                .map_err(failed),
-            None => Ok(()),
-        }
+        spaces::seal(self.state(), repository, sealed, self)
+            .await
+            .map_err(failed)
     }
 }
 
@@ -421,7 +410,7 @@ mod tests {
     use dialog_effects::credential::{self as credential_fx, prelude::*};
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
     use dialog_identity::OpenCredential;
-    use dialog_repository::{RepositoryExt as _, spaces};
+    use dialog_repository::{Repository, RepositoryExt as _, spaces};
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan::{Parameters, Scope, Ucan};
     use dialog_ucan_core::command::Command as UcanCommand;
@@ -436,7 +425,8 @@ mod tests {
         base: &str,
     ) -> anyhow::Result<Peer<VolatileSpace>> {
         Ok(Peer::new(credential.clone())
-            .storage(storage.clone())
+            .with(storage.clone())
+            .mount(Repository::from(credential.did()).branch("main"))
             .grant(test_grant().await)
             .base(Directory::At(base.into()))
             .await?)
@@ -472,7 +462,10 @@ mod tests {
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
-        let built = Peer::new(credential).storage(storage).await;
+        let built = Peer::new(credential.clone())
+            .with(storage)
+            .mount(Repository::from(credential.did()).branch("main"))
+            .await;
         assert!(
             built.is_err(),
             "a peer was built over a storage nobody granted it"
@@ -497,6 +490,7 @@ mod tests {
         let elsewhere = Ed25519Signer::generate().await?;
         let scoped = peer
             .session(b"scoped")
+            .mount(peer.state())
             .allow(Subject::from(elsewhere.did()).claim(peer.credential()))
             .await?;
         let refused = peer.space(name.clone()).load().perform(&scoped).await;
@@ -507,6 +501,7 @@ mod tests {
 
         let trusted = peer
             .session(b"trusted")
+            .mount(peer.state())
             .allow(Subject::any().claim(peer.credential()))
             .await?;
         let loaded = peer.space(name).load().perform(&trusted).await?;
@@ -586,7 +581,7 @@ mod tests {
             .perform(&peer)
             .await?;
 
-        let sealed = spaces::sealed(peer.state()?, &created.did(), &peer)
+        let sealed = spaces::sealed(peer.state(), &created.did(), &peer)
             .await?
             .expect("the space's key is kept sealed");
         // Other algorithms are features; without them this always holds.
@@ -640,7 +635,7 @@ mod tests {
             "the space still holds its signing key"
         );
         assert!(
-            spaces::sealed(peer.state()?, &repository.did(), &peer)
+            spaces::sealed(peer.state(), &repository.did(), &peer)
                 .await?
                 .is_some(),
             "the space's key was not sealed"
@@ -680,7 +675,7 @@ mod tests {
             .perform(&storage)
             .await?;
 
-        let state = peer.state()?;
+        let state = peer.state();
         assert!(spaces::find(state, &name, &peer).await?.is_empty());
         let loaded = peer.space(name.clone()).load().perform(&peer).await?;
         assert_eq!(loaded.did(), repository.did());
@@ -712,7 +707,8 @@ mod tests {
             .perform(&first)
             .await?;
         let peer = Peer::new(credential.clone())
-            .storage(first)
+            .with(first)
+            .mount(Repository::from(credential.did()).branch("main"))
             .grant(test_grant().await)
             .base(base.clone())
             .await?;
@@ -723,8 +719,9 @@ mod tests {
             .at(base.clone())
             .perform(&second)
             .await?;
-        let restarted = Peer::new(credential)
-            .storage(second)
+        let restarted = Peer::new(credential.clone())
+            .with(second)
+            .mount(Repository::from(credential.did()).branch("main"))
             .grant(test_grant().await)
             .base(base)
             .await?;

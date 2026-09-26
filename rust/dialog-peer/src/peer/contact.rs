@@ -31,9 +31,7 @@ where
     /// The state branch contacts live in, re-read so what other handles
     /// wrote is seen.
     async fn contacts(&self) -> Result<&Branch, PeerError> {
-        let state = self.state().map_err(|error| PeerError::Stateless {
-            reason: error.to_string(),
-        })?;
+        let state = self.state();
         state
             .refresh(self)
             .await

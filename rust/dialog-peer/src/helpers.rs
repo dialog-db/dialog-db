@@ -7,8 +7,9 @@ use dialog_artifacts::{Artifact, Attribute, Entity, Value};
 use dialog_capability::Subject;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Location;
+use dialog_repository::{ACCESS_BRANCH, BranchReference, Repository};
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
-use dialog_varsig::Principal as _;
+use dialog_varsig::{Did, Principal as _};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -66,6 +67,12 @@ pub async fn test_grant() -> Allowance {
     Allowance::storage(&test_system().await)
 }
 
+/// The `main` branch of the repository `home`: the state branch a peer
+/// whose home is `home` keeps by default.
+pub fn test_state(home: &Did) -> BranchReference {
+    Repository::from(home.clone()).branch(ACCESS_BRANCH)
+}
+
 /// Open a root peer whose credential lives at `location` in `storage`,
 /// granted the storage by the [test system](test_system).
 pub async fn open_peer<S: PeerSpace>(
@@ -95,6 +102,7 @@ pub async fn test_session_with_peer() -> (Peer<VolatileSpace, Session>, Peer<Vol
     let peer = test_peer().await;
     let worker = peer
         .session(b"test")
+        .mount(peer.state())
         .allow(Subject::any())
         .await
         .expect("test_session: failed to build worker");
