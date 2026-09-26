@@ -9387,10 +9387,12 @@ mod buffer_edit_interaction_tests {
         let mut observed: ContentAddressedStorage<crate::helpers::ObservingBackend> =
             ContentAddressedStorage::new(observing.clone());
         let manifest = paced_manifest();
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_with_manifest(manifest, Default::default());
         let mut delta = Delta::zero();
         for i in (0..2400u32).step_by(2) {
-            base = TransientTree::with_manifest(base.root().clone(), base.node_cache(), manifest)
+            base = base
+                .edit_with_manifest(&observed)
+                .await?
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
                 .await?
                 .persist(&mut delta)?;
@@ -9493,11 +9495,7 @@ mod buffer_edit_interaction_tests {
             frame_ceiling_factor: 0,
             ..crate::Manifest::default()
         };
-        let mut base = TransientTree::with_manifest(
-            Tree::empty().root().clone(),
-            Default::default(),
-            manifest,
-        );
+        let mut base = TransientTree::empty_with_manifest(Default::default(), manifest);
         for i in (0..24_000u32).step_by(2) {
             base = base
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
@@ -9568,10 +9566,12 @@ mod buffer_edit_interaction_tests {
         let mut observed: ContentAddressedStorage<crate::helpers::ObservingBackend> =
             ContentAddressedStorage::new(observing.clone());
         let manifest = paced_manifest();
-        let mut base = Tree::empty();
+        let mut base = Tree::empty_with_manifest(manifest, Default::default());
         let mut delta = Delta::zero();
         for i in (0..1200u32).step_by(2) {
-            base = TransientTree::with_manifest(base.root().clone(), base.node_cache(), manifest)
+            base = base
+                .edit_with_manifest(&observed)
+                .await?
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
                 .await?
                 .persist(&mut delta)?;

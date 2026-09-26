@@ -391,17 +391,16 @@ mod tests {
             frame_ceiling_factor: 0,
             ..crate::Manifest::default()
         };
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree =
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_with_manifest(manifest, Default::default());
         let mut delta = Delta::zero();
         for i in keys {
-            tree = crate::TransientTree::with_manifest(
-                tree.root().clone(),
-                tree.node_cache(),
-                manifest,
-            )
-            .insert(i.to_be_bytes(), vec![i as u8], storage)
-            .await?
-            .persist(&mut delta)?;
+            tree = tree
+                .edit_with_manifest(storage)
+                .await?
+                .insert(i.to_be_bytes(), vec![i as u8], storage)
+                .await?
+                .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
                 storage
                     .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
