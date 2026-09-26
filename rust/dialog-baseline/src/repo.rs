@@ -54,13 +54,17 @@ impl DialogRepo<Peer<VolatileSpace, Session>> {
     /// Open a fresh volatile (in-memory) repository — the CPU-isolation
     /// signal, like `dialog_mem`.
     pub async fn volatile() -> Result<Self> {
-        let storage = Storage::volatile();
+        let storage = dialog_peer::helpers::test_storage().await;
         let profile = dialog_peer::helpers::open_peer(
             storage.clone(),
             Location::profile(unique_name("baseline")),
         )
         .await?;
-        let operator = profile.session(b"baseline").allow(Subject::any()).await?;
+        let operator = profile
+            .session(b"baseline")
+            .mount(profile.state())
+            .allow(Subject::any())
+            .await?;
         Self::assemble(operator, &profile).await
     }
 }
@@ -69,13 +73,17 @@ impl DialogRepo<Peer<NativeTempSpace, Session>> {
     /// Open a fresh repository rooted in the platform temp directory — the
     /// real-latency signal, like `dialog_disk`.
     pub async fn temp() -> Result<Self> {
-        let storage = Storage::temp();
+        let storage = dialog_peer::helpers::test_owned(Storage::temp()).await;
         let profile = dialog_peer::helpers::open_peer(
             storage.clone(),
             Location::profile(unique_name("baseline")),
         )
         .await?;
-        let operator = profile.session(b"baseline").allow(Subject::any()).await?;
+        let operator = profile
+            .session(b"baseline")
+            .mount(profile.state())
+            .allow(Subject::any())
+            .await?;
         Self::assemble(operator, &profile).await
     }
 }

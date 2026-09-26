@@ -52,6 +52,11 @@ pub struct Storage<S: Clone> {
         credential::Retract<Secret>
     )]
     router: Router<S>,
+
+    /// The principal whose authority mounting a space in this storage
+    /// takes: a peer opens a space only if it can prove the system's
+    /// grant. Only its DID is kept: the storage cannot grant anything.
+    system: Option<Did>,
 }
 
 /// Cloning yields a second handle onto the *same* spaces, not a second
@@ -68,6 +73,7 @@ impl<S: Clone> Clone for Storage<S> {
         Self {
             loader: self.loader.clone(),
             router: self.router.clone(),
+            system: self.system.clone(),
         }
     }
 }
@@ -145,7 +151,21 @@ impl<S: Clone> Storage<S> {
         Self {
             loader: Loader::new(Arc::clone(&spaces)),
             router: Router::new(spaces),
+            system: None,
         }
+    }
+
+    /// This storage, owned by `system`: mounting a space in it takes a
+    /// grant from `system`, which whoever holds its key issues.
+    pub fn owned_by(mut self, system: Did) -> Self {
+        self.system = Some(system);
+        self
+    }
+
+    /// The system this storage belongs to, when it has one: the
+    /// principal a peer proves its authority to mount spaces from.
+    pub fn system(&self) -> Option<&Did> {
+        self.system.as_ref()
     }
 
     /// Check if a DID is mounted.

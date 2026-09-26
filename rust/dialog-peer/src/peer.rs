@@ -2,15 +2,16 @@
 //! storage and a network, acted on with one key.
 //!
 //! Every handle represents a peer: the owner of the replicas it opens and
-//! commits to, with its own state in a branch of the repository its key
-//! names. What differs is the key a handle acts with, which its mode
+//! commits to, with its own state in the branch it is given, whose
+//! repository is its home. What differs is the key a handle acts with, which its mode
 //! records ([`Local`] or [`Session`]):
 //!
 //! - [`Peer::new`] builds a [`Local`] handle acting with the peer's own
 //!   key. It can do anything the peer can, including granting and opening
 //!   sessions.
-//! - [`Peer::session`], or [`operator`](PeerBuilder::operator) on the
-//!   builder, builds a [`Session`]: the same peer, acting with a separate
+//! - [`Peer::session`], [`Peer::operator`], or
+//!   [`operator`](PeerBuilder::operator) on the builder, builds a
+//!   [`Session`]: the same peer, acting with a separate
 //!   key within what the peer granted it. It keeps no copy of the peer's
 //!   key, so it cannot sign as the peer. Every session commits under its
 //!   own origin, so sessions of one peer never collide.
@@ -18,17 +19,34 @@
 //! Either is the environment every `perform` takes. See
 //! `notes/peer-and-session.md`.
 //!
+//! A storage belongs to a system, and a peer opens spaces in it only
+//! under the system's grant, which whoever holds the system's key gives.
+//! Where a peer keeps its state is given too, never assumed:
+//!
 //! ```no_run
 //! # use dialog_capability::Subject;
+//! # use dialog_credentials::{Ed25519Signer, SignerCredential};
 //! # use dialog_identity::OpenCredential;
-//! # use dialog_peer::Peer;
+//! # use dialog_peer::{Allowance, Peer};
+//! # use dialog_repository::Repository;
 //! # use dialog_storage::provider::storage::{Storage, VolatileSpace};
+//! # use dialog_varsig::Principal as _;
 //! # async fn example() -> anyhow::Result<()> {
-//! let storage = Storage::<VolatileSpace>::volatile();
+//! let system = SignerCredential::from(Ed25519Signer::generate().await?);
+//! let storage = Storage::<VolatileSpace>::volatile().owned_by(system.did());
 //! let credential = OpenCredential::open("alice").perform(&storage).await?;
-//! let alice = Peer::new(credential).storage(storage).await?;
+//! let alice = Peer::new(credential.clone())
+//!     .mount(Repository::from(credential.did()).branch("main"))
+//!     .with(storage)
+//!     .grant(Allowance::storage(&system))
+//!     .build()
+//!     .await?;
 //!
-//! let job = alice.session(b"refactor").allow(Subject::any()).await?;
+//! let job = alice
+//!     .session(b"refactor")
+//!     .mount(alice.state())
+//!     .allow(Subject::any())
+//!     .await?;
 //! # let _ = job;
 //! # Ok(())
 //! # }
@@ -48,7 +66,9 @@ mod space;
 #[cfg(test)]
 mod test;
 
-pub use builder::{Allowance, OpenFuture, PeerBuilder, PeerError, PeerKey, Unset};
+pub use builder::{
+    Allowance, BranchPeerExt, OpenFuture, PeerBuilder, PeerError, PeerKey, Unset, With,
+};
 pub use mode::{Local, Mode, Session};
 pub use open::OpenPeer;
 pub use runtime::Runtime;
@@ -60,7 +80,6 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
-use dialog_capability::access::AuthorizeError;
 use dialog_capability::identity::Entity;
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
@@ -166,8 +185,8 @@ pub(crate) struct Grant {
 ///
 /// Cheap to clone: every clone is a handle onto the same storage, runtime,
 /// state branch and connections. Build one with [`Peer::new`]; open a
-/// session of it with [`Peer::session`], or of a peer known only by its
-/// DID with [`Peer::session_of`].
+/// session of it with [`Peer::session`], or of a peer whose key is not at
+/// hand with [`Peer::operator`].
 #[derive(Provider, Clone)]
 pub struct Peer<S: Clone, M: Mode = Local> {
     #[provide(Identify, Attest)]
@@ -208,9 +227,16 @@ pub struct Peer<S: Clone, M: Mode = Local> {
 pub(crate) struct Inner {
     /// The key this peer acts with.
     credential: SignerCredential,
+    /// The system owning the storage: mounting a space in it takes a
+    /// proof of the system's authority.
+    system: Did,
+    /// Certificates addressed to a principal above this peer in its
+    /// chain: a session holds its peer's storage grant, which its own
+    /// grant from the peer extends.
+    held: Vec<Grant>,
     /// The repository holding this peer's own state, and the replica
-    /// identity every entity it writes derives from. The peer's own DID
-    /// for a peer acting as itself; the peer's for its session.
+    /// identity every entity it writes derives from: the repository of
+    /// the state branch the peer was given.
     home: Did,
     /// Base directory for resolving space names, until the registry
     /// resolves them by fact.
@@ -219,12 +245,10 @@ pub(crate) struct Inner {
     network: Network,
     /// The shared runtime: hydration scheduler and speculation queue.
     runtime: Runtime,
-    /// The branch of the home repository that holds this peer's state,
-    /// or none for an ephemeral peer that keeps its grants in memory only.
-    branch: Option<String>,
-    /// That branch, opened. Proofs resolve from its `dialog.ucan/*` facts
-    /// and retained delegations commit into it.
-    state: OnceLock<Branch>,
+    /// The branch that holds this peer's state, opened. Proofs resolve
+    /// from its `dialog.ucan/*` facts and retained delegations commit
+    /// into it.
+    state: Branch,
     /// Resolved-chain cache: its keys carry the principal, and its epoch
     /// is the registry head.
     chains: Mutex<ChainCache>,
@@ -249,7 +273,7 @@ impl<S: Clone, M: Mode> fmt::Debug for Peer<S, M> {
         f.debug_struct("Peer")
             .field("did", &self.did())
             .field("home", &self.inner.home)
-            .field("branch", &self.inner.branch)
+            .field("state", &self.inner.state.name())
             .field("grants", &self.inner.grants.len())
             .finish_non_exhaustive()
     }
@@ -257,16 +281,17 @@ impl<S: Clone, M: Mode> fmt::Debug for Peer<S, M> {
 
 impl Peer<Unset> {
     /// Start building the peer `credential` is the key of, acting with
-    /// that key. Its home is the repository the key names. Give it an
+    /// that key. Its home is the repository of the
+    /// [state](PeerBuilder::mount) branch it is given. Give it an
     /// [`operator`](PeerBuilder::operator) or a
     /// [`session`](PeerBuilder::session) to act with a separate key
     /// instead.
-    // The builder is how a peer is made: `Peer::new(credential)` names
+    // The builder is how a peer is made: `Peer::new(credential.clone())` names
     // what is being built, and awaiting the builder opens it.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(credential: impl Into<SignerCredential>) -> PeerBuilder<PeerKey> {
         let credential = credential.into();
-        PeerBuilder::<Unset, Unset, Local>::new(credential.did())
+        PeerBuilder::<Unset, Unset, Local>::new()
             .issuer(credential.clone())
             .credential(credential)
     }
@@ -283,11 +308,12 @@ impl Peer<Unset> {
         contact(peer).connect()
     }
 
-    /// Start building a session of the peer `peer`, when its key is not
-    /// at hand: an [`operator`](PeerBuilder::operator) key acting under
-    /// grants the peer issued, given as pre-minted certificates.
-    pub fn session_of(peer: impl Into<Did>) -> PeerBuilder<Unset, Unset, Session> {
-        PeerBuilder::new(peer.into())
+    /// Start building a session acting with `operator`, when the key of
+    /// the peer it acts for is not at hand: it acts under grants the
+    /// peer issued, given as pre-minted certificates, for the peer whose
+    /// [state](PeerBuilder::mount) branch it is given.
+    pub fn operator(operator: impl Into<PeerKey>) -> PeerBuilder<PeerKey, Unset, Session> {
+        PeerBuilder::new().operator(operator)
     }
 }
 
@@ -379,11 +405,6 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         &self.inner.runtime
     }
 
-    /// The name of the state branch, or none for an ephemeral peer.
-    pub fn branch(&self) -> Option<&str> {
-        self.inner.branch.as_deref()
-    }
-
     /// The scheduler every remote block read of this peer goes through:
     /// where a site's window is set (`set_window`) and its traffic is read
     /// back (`tally`).
@@ -397,24 +418,14 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         contact(by)
     }
 
-    /// The state branch, or an error for an ephemeral peer.
-    pub fn state(&self) -> Result<&Branch, AuthorizeError> {
-        self.inner
-            .state
-            .get()
-            .ok_or_else(|| AuthorizeError::Malformed {
-                detail: "the peer holds no state branch".to_string(),
-            })
-    }
-
-    /// The state branch when there is one.
-    pub(crate) fn state_opt(&self) -> Option<&Branch> {
-        self.inner.state.get()
+    /// The branch holding this peer's state.
+    pub fn state(&self) -> &Branch {
+        &self.inner.state
     }
 
     /// The state branch this peer serves proofs from and retains into.
-    pub(crate) fn delegations(&self) -> Result<&Branch, AuthorizeError> {
-        self.state()
+    pub(crate) fn delegations(&self) -> &Branch {
+        &self.inner.state
     }
 
     pub(crate) fn directory(&self) -> &Directory {
@@ -436,6 +447,22 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     /// The grants this peer holds: the in-memory delegations to its key.
     pub(crate) fn grants(&self) -> &[Grant] {
         &self.inner.grants
+    }
+
+    /// Certificates held for principals above this peer in its chain.
+    pub(crate) fn inner_held(&self) -> &[Grant] {
+        &self.inner.held
+    }
+
+    /// The system owning this peer's storage.
+    pub(crate) fn system(&self) -> &Did {
+        &self.inner.system
+    }
+
+    /// The account this peer acts for: the principal a space created on
+    /// it delegates to. The peer's home, until an account is given.
+    pub fn account(&self) -> &Did {
+        &self.inner.home
     }
 
     pub(crate) fn authority(&self) -> &Authority {
@@ -537,14 +564,6 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
 
         peer
     }
-
-    /// Wire the opened state branch. Called once by the builder.
-    pub(crate) fn attach_state(&self, branch: Branch) {
-        self.inner
-            .state
-            .set(branch)
-            .unwrap_or_else(|_| unreachable!("a freshly built peer has no state branch yet"));
-    }
 }
 
 impl<S: Clone, M: Mode> Holds for Peer<S, M> {
@@ -569,7 +588,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::helpers::{open_peer, test_session_with_peer, unique_name};
+    use crate::helpers::{
+        open_peer, test_grant, test_session_with_peer, test_storage, test_system, unique_name,
+    };
     use crate::{ClaimExt as _, OpenCredential};
     use anyhow::Result;
     use dialog_capability::Subject;
@@ -579,7 +600,9 @@ mod tests {
     use dialog_credentials::{Credential, SignerCredential};
     use dialog_effects::credential::{self as credential_fx, prelude::*};
     use dialog_effects::storage::Location;
-    use dialog_repository::{OpenReplicaBranchError, RepositoryAtExt as _, RepositoryExt as _};
+    use dialog_repository::{
+        OpenReplicaBranchError, Repository, RepositoryAtExt as _, RepositoryExt as _,
+    };
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_ucan::{Parameters, Scope, Ucan, UcanCertificate, UcanDelegation};
     use dialog_ucan_core::command::Command as UcanCommand;
@@ -615,9 +638,32 @@ mod tests {
             .unwrap();
     }
 
+    /// Assert in `peer`'s state the test system's grant of the storage
+    /// to it: what a session with no handle on the peer proves the
+    /// storage through, since a peer holds its own grant in memory only.
+    async fn assert_storage_grant(peer: &Peer<VolatileSpace>) {
+        let system = test_system().await;
+        let delegation = DelegationBuilder::new()
+            .issuer(system.signer().clone())
+            .audience(&peer.did())
+            .subject(UcanSubject::Specific(system.did()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await
+            .unwrap();
+        Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+                DelegationChain::new(delegation),
+            )))
+            .perform(peer)
+            .await
+            .unwrap();
+    }
+
     #[dialog_common::test]
     async fn it_opens_the_same_peer_twice() -> Result<()> {
-        let storage = Storage::<VolatileSpace>::volatile();
+        let storage = test_storage().await;
         let location = Location::temp(unique_name("peer"));
 
         let first = open_peer(storage.clone(), location.clone()).await?;
@@ -632,7 +678,7 @@ mod tests {
     /// it after, and open the peer over whichever was found.
     #[dialog_common::test]
     async fn it_opens_over_a_separately_loaded_credential() -> Result<()> {
-        let storage = Storage::<VolatileSpace>::volatile();
+        let storage = test_storage().await;
         let location = Location::temp(unique_name("created"));
 
         let created = OpenCredential::create(location.name.clone())
@@ -645,8 +691,10 @@ mod tests {
             .await?;
         assert_eq!(created.did(), loaded.did());
 
-        let peer = Peer::new(loaded)
-            .storage(storage.clone())
+        let peer = Peer::new(loaded.clone())
+            .with(storage.clone())
+            .mount(Repository::from(loaded.did()).branch("main"))
+            .grant(test_grant().await)
             .at(location.clone())
             .await?;
         assert_eq!(peer.did(), created.did());
@@ -657,7 +705,7 @@ mod tests {
     /// The home named by the builder must be the space at `at`.
     #[dialog_common::test]
     async fn it_refuses_a_home_that_is_not_at_the_location() -> Result<()> {
-        let storage = Storage::<VolatileSpace>::volatile();
+        let storage = test_storage().await;
         let location = Location::temp(unique_name("elsewhere"));
         let credential = OpenCredential::open(location.name.clone())
             .at(location.directory.clone())
@@ -665,9 +713,9 @@ mod tests {
             .await?;
         let other = Ed25519Signer::generate().await?;
 
-        let result = Peer::session_of(other.did())
-            .operator(credential)
-            .storage(storage)
+        let result = Peer::operator(credential)
+            .mount(Repository::from(other.did()).branch("main"))
+            .with(storage)
             .at(location)
             .await;
         assert!(matches!(result, Err(PeerError::Home(_))));
@@ -678,15 +726,11 @@ mod tests {
     /// Their own keys differ per context and are stable per context.
     #[dialog_common::test]
     async fn it_derives_workers_deterministically_per_context() -> Result<()> {
-        let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
-            Location::temp(unique_name("workers")),
-        )
-        .await?;
+        let peer = open_peer(test_storage().await, Location::temp(unique_name("workers"))).await?;
 
-        let a = peer.session(b"a").await?;
-        let again = peer.session(b"a").await?;
-        let b = peer.session(b"b").await?;
+        let a = peer.session(b"a").mount(peer.state()).await?;
+        let again = peer.session(b"a").mount(peer.state()).await?;
+        let b = peer.session(b"b").mount(peer.state()).await?;
 
         assert_eq!(a.did(), again.did());
         assert_ne!(a.did(), b.did());
@@ -697,20 +741,20 @@ mod tests {
     }
 
     /// A worker is built without a handle on its parent: the parent's
-    /// credential derives the key and claims the grant, and the builder
-    /// takes the rest.
+    /// credential derives the key and claims the grant, and the worker
+    /// proves the storage through the delegation asserted in the state it
+    /// is given.
     #[dialog_common::test]
     async fn it_builds_a_worker_from_the_credential_alone() -> Result<()> {
-        let storage = Storage::<VolatileSpace>::volatile();
+        let storage = test_storage().await;
         let location = Location::temp(unique_name("standalone"));
-        let credential = OpenCredential::open(location.name.clone())
-            .at(location.directory.clone())
-            .perform(&storage)
-            .await?;
+        let peer = open_peer(storage.clone(), location).await?;
+        assert_storage_grant(&peer).await;
+        let credential = peer.credential().clone();
 
-        let worker = Peer::session_of(credential.did())
-            .operator(credential.derive(b"worker").await?)
-            .storage(storage)
+        let worker = Peer::operator(credential.derive(b"worker").await?)
+            .mount(Repository::from(credential.did()).branch("main"))
+            .with(storage)
             .allow(Subject::any().claim(&credential))
             .await?;
 
@@ -734,15 +778,16 @@ mod tests {
     #[dialog_common::test]
     async fn it_builds_a_worker_over_a_supplied_signer() -> Result<()> {
         let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
+            test_storage().await,
             Location::temp(unique_name("supplied")),
         )
         .await?;
+        assert_storage_grant(&peer).await;
         let agent = Ed25519Signer::generate().await?;
 
-        let worker = Peer::session_of(peer.home().clone())
-            .operator(agent.clone())
-            .storage(peer.storage().clone())
+        let worker = Peer::operator(agent.clone())
+            .mount(Repository::from(peer.home().clone()).branch("main"))
+            .with(peer.storage().clone())
             .allow(Subject::any().claim(peer.credential()))
             .await?;
 
@@ -761,14 +806,11 @@ mod tests {
     /// a bare capability with no issuer to claim it is refused too.
     #[dialog_common::test]
     async fn it_refuses_an_unbounded_grant_and_an_unclaimed_one() -> Result<()> {
-        let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
-            Location::temp(unique_name("bounds")),
-        )
-        .await?;
+        let peer = open_peer(test_storage().await, Location::temp(unique_name("bounds"))).await?;
 
         let unbounded = peer
             .session(b"unbounded")
+            .mount(peer.state())
             .grant(Subject::any().claim(peer.credential()))
             .await;
         assert!(matches!(unbounded, Err(PeerError::Unbounded(_))));
@@ -776,13 +818,14 @@ mod tests {
         let expiration = Timestamp::new(SystemTime::now() + Duration::from_secs(3600))?;
         let bounded = peer
             .session(b"bounded")
+            .mount(peer.state())
             .grant(Subject::any().claim(peer.credential()).expires(expiration))
             .await;
         assert!(bounded.is_ok());
 
-        let unclaimed = Peer::session_of(peer.home().clone())
-            .operator(peer.credential().derive(b"unclaimed").await?)
-            .storage(peer.storage().clone())
+        let unclaimed = Peer::operator(peer.credential().derive(b"unclaimed").await?)
+            .mount(Repository::from(peer.home().clone()).branch("main"))
+            .with(peer.storage().clone())
             .allow(Subject::any())
             .await;
         assert!(matches!(unclaimed, Err(PeerError::Issuer(_))));
@@ -793,11 +836,7 @@ mod tests {
     /// repositories and proves for itself with no grants.
     #[dialog_common::test]
     async fn it_performs_as_the_root_peer() -> Result<()> {
-        let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
-            Location::temp(unique_name("self")),
-        )
-        .await?;
+        let peer = open_peer(test_storage().await, Location::temp(unique_name("self"))).await?;
 
         let repo = peer
             .space(unique_name("repo"))
@@ -822,17 +861,21 @@ mod tests {
     /// retains into it, and a second worker sees what the first retained.
     #[dialog_common::test]
     async fn it_shares_the_state_branch_across_workers() -> Result<()> {
-        let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
-            Location::temp(unique_name("shared")),
-        )
-        .await?;
+        let peer = open_peer(test_storage().await, Location::temp(unique_name("shared"))).await?;
         let space = Ed25519Signer::generate().await?;
 
-        let first = peer.session(b"first").allow(Subject::any()).await?;
+        let first = peer
+            .session(b"first")
+            .mount(peer.state())
+            .allow(Subject::any())
+            .await?;
         retain(&first, &peer.did(), &space).await;
 
-        let second = peer.session(b"second").allow(Subject::any()).await?;
+        let second = peer
+            .session(b"second")
+            .mount(peer.state())
+            .allow(Subject::any())
+            .await?;
         let proof = Subject::from(peer.did())
             .attenuate(Access)
             .invoke(Prove::<Ucan>::new(
@@ -845,12 +888,13 @@ mod tests {
         Ok(())
     }
 
-    /// An ephemeral worker proves from its grants and self-issued
-    /// authority alone: it retains nothing and reads no branch.
+    /// A session keeps its state in the branch it is given, not its
+    /// peer's: given another branch, it proves from its grants and what
+    /// that branch holds, and reads nothing the peer retained.
     #[dialog_common::test]
-    async fn it_keeps_an_ephemeral_worker_in_memory() -> Result<()> {
+    async fn it_keeps_a_session_to_the_branch_it_is_given() -> Result<()> {
         let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
+            test_storage().await,
             Location::temp(unique_name("ephemeral")),
         )
         .await?;
@@ -858,11 +902,11 @@ mod tests {
         retain(&peer, &peer.did(), &space).await;
 
         let worker = peer
-            .session(b"ephemeral")
-            .ephemeral()
+            .session(b"elsewhere")
+            .mount(Repository::from(peer.home().clone()).branch("elsewhere"))
             .allow(Subject::any())
             .await?;
-        assert!(worker.state().is_err());
+        assert_eq!(worker.state().name(), "elsewhere");
 
         // Its own subject through the grant: no branch needed.
         let own = Subject::from(peer.did())
@@ -889,15 +933,17 @@ mod tests {
     /// from and retains into that branch, and `main` holds nothing.
     #[dialog_common::test]
     async fn it_proves_from_the_named_branch() -> Result<()> {
-        let storage = Storage::<VolatileSpace>::volatile();
+        let storage = test_storage().await;
         let location = Location::temp(unique_name("named-branch"));
         let credential = OpenCredential::open(location.name.clone())
             .at(location.directory.clone())
             .perform(&storage)
             .await?;
         let peer = Peer::new(credential.clone())
-            .storage(storage.clone())
-            .branch("account/test")
+            .with(storage.clone())
+            .mount(Repository::from(credential.did()).branch("main"))
+            .grant(test_grant().await)
+            .mount(Repository::from(credential.did()).branch("account/test"))
             .await?;
         let space = Ed25519Signer::generate().await?;
         retain(&peer, &peer.did(), &space).await;
@@ -909,8 +955,12 @@ mod tests {
             .await?;
         assert_eq!(proof.proofs().len(), 1);
 
-        let on_main = Peer::new(credential).storage(storage).await?;
-        assert!(on_main.state()?.revision().is_none(), "main holds nothing");
+        let on_main = Peer::new(credential.clone())
+            .with(storage)
+            .mount(Repository::from(credential.did()).branch("main"))
+            .grant(test_grant().await)
+            .await?;
+        assert!(on_main.state().revision().is_none(), "main holds nothing");
         let refused = Subject::from(on_main.did())
             .attenuate(Access)
             .invoke(Prove::<Ucan>::new(
@@ -993,25 +1043,32 @@ mod tests {
     /// peer gives the same key.
     #[dialog_common::test]
     async fn it_builds_a_peer_and_its_sessions() -> Result<()> {
-        let storage = Storage::<VolatileSpace>::volatile();
+        let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
             .perform(&storage)
             .await?;
 
         let alice = Peer::new(credential.clone())
-            .storage(storage.clone())
+            .with(storage.clone())
+            .mount(Repository::from(credential.did()).branch("main"))
+            .grant(test_grant().await)
             .await?;
         assert_eq!(alice.did(), credential.did());
         assert_eq!(*alice.home(), credential.did());
 
-        let session: Peer<VolatileSpace, Session> =
-            alice.session(b"worker").allow(Subject::any()).await?;
+        let session: Peer<VolatileSpace, Session> = alice
+            .session(b"worker")
+            .mount(alice.state())
+            .allow(Subject::any())
+            .await?;
         assert_ne!(session.did(), credential.did());
         assert_eq!(*session.home(), credential.did());
 
+        assert_storage_grant(&alice).await;
         let built: Peer<VolatileSpace, Session> = Peer::new(credential.clone())
             .session(b"worker")
-            .storage(storage)
+            .with(storage)
+            .mount(alice.state())
             .allow(Subject::any())
             .await?;
         assert_eq!(built.did(), session.did());
@@ -1048,7 +1105,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_refuses_a_certificate_issued_to_another_key() -> Result<()> {
         let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
+            test_storage().await,
             Location::temp(unique_name("audience")),
         )
         .await?;
@@ -1056,9 +1113,9 @@ mod tests {
         let other = Ed25519Signer::generate().await?;
 
         let granted = certificate(peer.credential(), &other.did(), in_an_hour()).await;
-        let session = Peer::session_of(peer.home().clone())
-            .operator(agent)
-            .storage(peer.storage().clone())
+        let session = Peer::operator(agent)
+            .mount(Repository::from(peer.home().clone()).branch("main"))
+            .with(peer.storage().clone())
             .grant(granted)
             .await;
         assert!(session.is_err(), "the certificate is another key's");
@@ -1069,18 +1126,14 @@ mod tests {
     /// refused when the session is built.
     #[dialog_common::test]
     async fn it_refuses_an_expired_certificate() -> Result<()> {
-        let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
-            Location::temp(unique_name("expired")),
-        )
-        .await?;
+        let peer = open_peer(test_storage().await, Location::temp(unique_name("expired"))).await?;
         let agent = Ed25519Signer::generate().await?;
 
         let expired = Timestamp::new(SystemTime::now() - Duration::from_secs(60))?;
         let granted = certificate(peer.credential(), &agent.did(), expired).await;
-        let session = Peer::session_of(peer.home().clone())
-            .operator(agent)
-            .storage(peer.storage().clone())
+        let session = Peer::operator(agent)
+            .mount(Repository::from(peer.home().clone()).branch("main"))
+            .with(peer.storage().clone())
             .grant(granted)
             .await;
         assert!(session.is_err(), "the certificate expired");
@@ -1092,15 +1145,12 @@ mod tests {
     /// first does not cover the claim, whatever its command.
     #[dialog_common::test]
     async fn it_proves_by_the_grant_that_covers_the_subject() -> Result<()> {
-        let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
-            Location::temp(unique_name("grants")),
-        )
-        .await?;
+        let peer = open_peer(test_storage().await, Location::temp(unique_name("grants"))).await?;
         let elsewhere = Ed25519Signer::generate().await?;
 
         let session = peer
             .session(b"grants")
+            .mount(peer.state())
             .allow(Subject::from(elsewhere.did()).claim(peer.credential()))
             .allow(Subject::any().claim(peer.credential()))
             .await?;
@@ -1127,13 +1177,10 @@ mod tests {
     /// writes the repository under its grants, never as the repository.
     #[dialog_common::test]
     async fn it_withholds_keys_from_a_session() -> Result<()> {
-        let peer = open_peer(
-            Storage::<VolatileSpace>::volatile(),
-            Location::temp(unique_name("keys")),
-        )
-        .await?;
+        let peer = open_peer(test_storage().await, Location::temp(unique_name("keys"))).await?;
         let session = peer
             .session(b"keys")
+            .mount(peer.state())
             .allow(Subject::any().claim(peer.credential()))
             .await?;
 

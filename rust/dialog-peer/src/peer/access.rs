@@ -259,7 +259,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     /// duration, and still unlapsed. `None` on a miss or when the cached
     /// chain rejects this particular claim.
     fn cached(&self, key: &(Did, Did, String), claim: &Prove<Ucan>) -> Option<UcanProof> {
-        let branch = self.state_opt()?;
+        let branch = self.state();
         let epoch = branch.revision().map(|revision| revision.version());
         let cache = self.chains().lock();
         if cache.epoch != epoch {
@@ -317,17 +317,36 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         cache.chains.insert(key, proof.proofs().to_vec());
     }
 
+    /// A certificate held for `principal` covering `claim`.
+    fn held_for(&self, principal: &Did, claim: &Prove<Ucan>) -> Option<Grant> {
+        self.inner_held()
+            .iter()
+            .find(|grant| {
+                grant.certificate.0.audience() == principal
+                    && Self::covers_subject(&grant.certificate, claim)
+                    && grant
+                        .certificate
+                        .verify(&claim.access)
+                        .is_ok_and(|range| range.covers(&claim.duration))
+            })
+            .cloned()
+    }
+
+    /// Whether `certificate` is over the subject `claim` is about.
+    fn covers_subject(certificate: &UcanCertificate, claim: &Prove<Ucan>) -> bool {
+        match certificate.0.subject() {
+            UcanSubject::Any => true,
+            UcanSubject::Specific(did) => {
+                claim.access.subject == UcanSubject::Specific(did.clone())
+            }
+        }
+    }
+
     /// The grants covering `claim`: its subject, its command and policy,
     /// and its duration.
     fn session_grants<'a>(&'a self, claim: &'a Prove<Ucan>) -> impl Iterator<Item = &'a Grant> {
         self.grants().iter().filter(|grant| {
-            let subject = match grant.certificate.0.subject() {
-                UcanSubject::Any => true,
-                UcanSubject::Specific(did) => {
-                    claim.access.subject == UcanSubject::Specific(did.clone())
-                }
-            };
-            subject
+            Self::covers_subject(&grant.certificate, claim)
                 && grant
                     .certificate
                     .verify(&claim.access)
@@ -346,10 +365,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         Self: LocalEnv,
         S: ConditionalSend + ConditionalSync + 'static,
     {
-        let Ok(branch) = self.delegations() else {
-            return;
-        };
-        if let Err(error) = branch.refresh(self).await {
+        if let Err(error) = self.delegations().refresh(self).await {
             tracing::warn!(%error, "failed to refresh the access branch head");
         }
     }
@@ -371,10 +387,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         }
         // Captured before the walk: the facts the walk reads are at most
         // this fresh, so the record must not claim a later head.
-        let epoch = self
-            .state_opt()
-            .and_then(|branch| branch.revision())
-            .map(|revision| revision.version());
+        let epoch = self.state().revision().map(|revision| revision.version());
 
         let proof = if claim.principal == self.did() {
             self.prove_as_operator(&claim).await?
@@ -445,8 +458,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     /// The tree walk over the state branch's delegation records.
     ///
     /// A principal's authority over its own subject is self-issued: the
-    /// empty chain, resolved without a state branch, so an ephemeral peer
-    /// and a peer still opening its branch prove it alike.
+    /// empty chain, resolved without reading the state branch.
     async fn walk(&self, principal: Did, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
     where
         Self: LocalEnv,
@@ -457,11 +469,17 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         {
             return Ok(UcanProof::new(claim.access.clone()));
         }
+        // A certificate this peer holds for the principal -- a session
+        // holding its peer's storage grant -- proves the principal's
+        // authority wherever it covers the claim.
+        if let Some(held) = self.held_for(&principal, claim) {
+            return Box::pin(self.prove_by(held, claim)).await;
+        }
         let env = AccessEnv {
             operator: self.clone(),
         };
         Box::pin(
-            self.delegations()?
+            self.delegations()
                 .delegations()
                 .prove(principal, claim.access.clone())
                 .during(claim.duration)
@@ -503,7 +521,7 @@ where
         let env = AccessEnv {
             operator: self.clone(),
         };
-        let branch = self.delegations()?;
+        let branch = self.delegations();
         let mut attempt = 0;
         loop {
             // The access branch is the profile repository's main branch,
@@ -597,11 +615,13 @@ mod tests {
     use crate::{Mode, Peer, Session};
     use dialog_effects::storage::Location;
 
-    use crate::helpers::{open_peer, unique_name};
+    use crate::PeerError;
+    use crate::helpers::{open_peer, test_grant, test_storage, unique_name};
     use anyhow::Result;
     use dialog_common::time;
     use dialog_credentials::Ed25519Signer;
-    use dialog_storage::provider::storage::{Storage, VolatileSpace};
+    use dialog_repository::Repository;
+    use dialog_storage::provider::storage::VolatileSpace;
     use dialog_ucan::{Parameters, Scope, UcanDelegation};
     use dialog_ucan_core::DelegationBuilder;
     use dialog_ucan_core::DelegationChain;
@@ -614,11 +634,15 @@ mod tests {
     }
 
     async fn operator(name: &str) -> (Peer<VolatileSpace, Session>, Peer<VolatileSpace>) {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(storage.clone(), Location::profile(unique(name)))
             .await
             .unwrap();
-        let operator = profile.session(b"test").await.unwrap();
+        let operator = profile
+            .session(b"test")
+            .mount(profile.state())
+            .await
+            .unwrap();
         (operator, profile)
     }
 
@@ -670,10 +694,13 @@ mod tests {
     async fn it_keeps_proofs_on_the_configured_access_branch() -> Result<()> {
         use dialog_repository::ACCESS_BRANCH;
 
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile =
             open_peer(storage.clone(), Location::profile(unique("access-branch"))).await?;
-        let operator = profile.session(b"test").branch("account/test").await?;
+        let operator = profile
+            .session(b"test")
+            .mount(Repository::from(profile.home().clone()).branch("account/test"))
+            .await?;
 
         let space = Ed25519Signer::generate().await?;
         let holder = Ed25519Signer::generate().await?;
@@ -981,8 +1008,7 @@ mod tests {
         // The epoch a hypothetical walk would have started under.
         let stale = operator
             .delegations()
-            .ok()
-            .and_then(|branch| branch.revision())
+            .revision()
             .map(|revision| revision.version());
         let proof = operator.resolve(claim(&holder, &space)).await?;
 
@@ -1008,12 +1034,13 @@ mod tests {
     #[dialog_common::test]
     async fn it_leaves_no_session_residue() -> Result<()> {
         let (operator, profile) = {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(storage.clone(), Location::profile(unique("no-residue")))
                 .await
                 .unwrap();
             let operator = profile
                 .session(b"test")
+                .mount(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -1027,10 +1054,10 @@ mod tests {
             .await?;
         assert!(exported.is_empty(), "the legacy store must stay empty");
 
-        let head = operator.delegations()?.revision();
+        let head = operator.delegations().revision();
         assert!(
             head.is_none(),
-            "building an operator commits nothing to the access branch"
+            "opening a peer and building an operator commit nothing to the access branch"
         );
 
         // And yet the operator authorizes: the session link is the chain.
@@ -1064,12 +1091,13 @@ mod tests {
     #[dialog_common::test]
     async fn it_composes_the_session_link_over_a_retained_chain() -> Result<()> {
         let (operator, profile) = {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(storage.clone(), Location::profile(unique("compose")))
                 .await
                 .unwrap();
             let operator = profile
                 .session(b"test")
+                .mount(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -1103,7 +1131,7 @@ mod tests {
     async fn retained_count(operator: &Peer<VolatileSpace, impl Mode>) -> Result<usize> {
         use futures_util::TryStreamExt as _;
         let rows: Vec<_> = operator
-            .delegations()?
+            .delegations()
             .claims()
             .select(dialog_artifacts::ArtifactSelector::new().the("dialog.ucan/audience".parse()?))
             .perform(operator)
@@ -1113,15 +1141,48 @@ mod tests {
         Ok(rows.len())
     }
 
+    /// A peer's grant of the storage is held in memory, like every grant
+    /// it is given: opening it again and again, as a heartbeat would,
+    /// records nothing in its state.
+    #[dialog_common::test]
+    async fn it_records_no_storage_grant_however_often_it_opens() -> Result<()> {
+        let storage = test_storage().await;
+        let location = Location::profile(unique("storage-grant"));
+        for _ in 0..3 {
+            let peer = open_peer(storage.clone(), location.clone()).await?;
+            assert_eq!(retained_count(&peer).await?, 0);
+            assert!(peer.state().revision().is_none());
+        }
+        Ok(())
+    }
+
+    /// A peer keeps its state where it is told: one given no branch is
+    /// refused rather than given its own repository's.
+    #[dialog_common::test]
+    async fn it_refuses_a_peer_given_no_state() -> Result<()> {
+        let storage = test_storage().await;
+        let location = Location::profile(unique("stateless"));
+        let credential = open_peer(storage.clone(), location)
+            .await?
+            .credential()
+            .clone();
+        let built = Peer::new(credential)
+            .with(storage)
+            .grant(test_grant().await)
+            .await;
+        assert!(matches!(built, Err(PeerError::State(_))), "{built:?}");
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_bounds_in_memory_sessions_without_retaining_them() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique("bounded-session")),
         )
         .await?;
-        let setup = profile.session(b"setup").await?;
+        let setup = profile.session(b"setup").mount(profile.state()).await?;
         let space = Ed25519Signer::generate().await?;
         let now = now_s();
         let upstream_end = now + 7200;
@@ -1138,8 +1199,9 @@ mod tests {
             .save(UcanDelegation::new(DelegationChain::new(delegation)))
             .perform(&setup)
             .await?;
-        let revision = setup.delegations()?.revision();
-        assert_eq!(retained_count(&setup).await?, 1);
+        let revision = setup.delegations().revision();
+        let retained = retained_count(&setup).await?;
+        assert_eq!(retained, 1);
         let exported = Subject::from(profile.did())
             .attenuate(Access)
             .invoke(Export::<Ucan>::new())
@@ -1148,6 +1210,7 @@ mod tests {
         for session_end in [now + 3600, now + 10800, now - 60] {
             let operator = profile
                 .session(session_end.to_le_bytes())
+                .mount(profile.state())
                 .allow(
                     profile
                         .access()
@@ -1155,7 +1218,7 @@ mod tests {
                         .expires(Timestamp::try_from(session_end as i128)?),
                 )
                 .await?;
-            assert_eq!(operator.delegations()?.revision(), revision);
+            assert_eq!(operator.delegations().revision(), revision);
             let end = session_end.min(upstream_end);
             let mut claim = Prove::<Ucan>::new(operator.did(), storage_scope(&space));
             claim.duration = TimeRange {
@@ -1184,20 +1247,20 @@ mod tests {
                 expiration: Some(end + 1),
             };
             assert!(operator.resolve(claim).await.is_err());
-            assert_eq!(operator.delegations()?.revision(), revision);
+            assert_eq!(operator.delegations().revision(), revision);
             let after = Subject::from(profile.did())
                 .attenuate(Access)
                 .invoke(Export::<Ucan>::new())
                 .perform(&operator)
                 .await?;
             assert_eq!(after.len(), exported.len());
-            assert_eq!(retained_count(&operator).await?, 1);
+            assert_eq!(retained_count(&operator).await?, retained);
         }
         Ok(())
     }
     #[dialog_common::test]
     async fn it_selects_a_session_grant_covering_the_requested_window() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique("session-windows")),
@@ -1206,6 +1269,7 @@ mod tests {
         let now = now_s();
         let operator = profile
             .session(b"test")
+            .mount(profile.state())
             .allow(
                 profile
                     .access()
