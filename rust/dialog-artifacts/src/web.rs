@@ -291,7 +291,9 @@ impl ArtifactsBinding {
         match revision {
             // No argument: adopt whatever the durable head says.
             None => self.artifacts.write().await.reload().await?,
-            Some(revision) if revision.is_empty() => {
+            // Empty, or the all-zero value earlier versions returned for a
+            // store with no revision.
+            Some(revision) if revision.is_empty() || revision == [0u8; HASH_SIZE] => {
                 self.artifacts.write().await.reset(None).await?
             }
             Some(revision) => {

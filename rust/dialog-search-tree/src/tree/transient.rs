@@ -188,6 +188,11 @@ where
         cache: Cache<Blake3Hash, Buffer>,
         manifest: Manifest,
     ) -> Self {
+        // A root stored by a version that recorded the empty tree as the
+        // all-zero hash (see `LEGACY_EMPTY_ROOT`) opens as the empty tree.
+        if root.as_bytes() == &crate::LEGACY_EMPTY_ROOT {
+            return Self::empty_with_manifest(cache, manifest);
+        }
         Self {
             root: TransientRoot::Unloaded(root),
             cache,

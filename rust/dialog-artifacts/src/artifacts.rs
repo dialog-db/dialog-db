@@ -134,6 +134,18 @@ where
     spine: SpineSlot,
 }
 
+/// The head pointer's value for a store with no revision: the all-zero
+/// value, which names no revision block. It is what every version before
+/// the sentinel-free empty tree wrote and expects to read, so it is still
+/// written; the API reports it as `None`.
+const NO_REVISION: [u8; HASH_SIZE] = [0u8; HASH_SIZE];
+
+/// Whether a stored head pointer value means "no revision": the all-zero
+/// value, or the empty value an intermediate format wrote.
+fn is_no_revision(bytes: &[u8]) -> bool {
+    bytes.is_empty() || bytes == NO_REVISION
+}
+
 impl<Backend> Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -299,11 +311,14 @@ where
         };
 
         // The head pointer's value is the revision hash; "no revision" is
-        // recorded as an empty value, not a sentinel hash.
+        // recorded as the all-zero value every version reads (see
+        // `NO_REVISION`).
         self.storage
             .set(
                 make_reference(self.identifier.as_bytes()),
-                revision.map(|hash| hash.to_vec()).unwrap_or_default(),
+                revision
+                    .map(|hash| hash.to_vec())
+                    .unwrap_or_else(|| NO_REVISION.to_vec()),
             )
             .await?;
 
@@ -336,7 +351,7 @@ where
         let block = storage.get(&make_reference(identifier.as_bytes())).await?;
         let index_version = match block {
             None => None,
-            Some(bytes) if bytes.is_empty() => None,
+            Some(bytes) if is_no_revision(&bytes) => None,
             Some(bytes) => {
                 let hash = Blake3Hash::try_from(bytes).map_err(|bytes| {
                     DialogArtifactsError::InvalidRevision(format!(
@@ -591,6 +606,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::NO_REVISION;
     use std::{collections::BTreeSet, iter::once, str::FromStr, sync::Arc};
     use tokio::io::{BufReader, BufWriter};
 
@@ -2817,7 +2833,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_records_no_revision_as_an_empty_pointer() -> Result<()> {
+    async fn it_records_no_revision_as_the_zero_pointer() -> Result<()> {
         // Use memory storage backend to avoid file system errors
         let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 
@@ -2827,18 +2843,41 @@ mod tests {
         // Reset to the empty, no-revision state
         artifacts.reset(None).await?;
 
-        // The head pointer records "no revision" as an empty value, not a
-        // sentinel hash.
+        // The head pointer records "no revision" as the all-zero value
+        // earlier versions write and read.
         let reference_key = make_reference(artifacts.identifier().as_bytes());
         let stored_value = artifacts.storage.get(&reference_key).await?;
 
         assert_eq!(
             stored_value,
-            Some(Vec::new()),
-            "no revision is an empty pointer value"
+            Some(NO_REVISION.to_vec()),
+            "no revision is the zero pointer value"
         );
         assert_eq!(artifacts.revision().await?, None);
 
+        Ok(())
+    }
+
+    /// Stores written by earlier versions record "no revision" as the
+    /// all-zero pointer, and one intermediate format as an empty value;
+    /// both open and reload as the empty store.
+    #[dialog_common::test]
+    async fn it_opens_both_no_revision_pointers_as_empty() -> Result<()> {
+        for stored in [NO_REVISION.to_vec(), Vec::new()] {
+            let mut backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
+            let identifier = "legacy".to_string();
+            backend
+                .set(make_reference(identifier.as_bytes()), stored.clone())
+                .await?;
+            let mut artifacts = Artifacts::open(identifier, backend).await?;
+            assert_eq!(artifacts.revision().await?, None, "{stored:?} opens empty");
+            artifacts.reload().await?;
+            assert_eq!(
+                artifacts.revision().await?,
+                None,
+                "{stored:?} reloads empty"
+            );
+        }
         Ok(())
     }
 

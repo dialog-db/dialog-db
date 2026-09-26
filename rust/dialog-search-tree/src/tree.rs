@@ -89,6 +89,15 @@ enum TreeRoot {
     },
 }
 
+/// How trees written before the empty tree became a node recorded "empty":
+/// the all-zero hash, which names no block.
+///
+/// Stores written by those versions still hold it wherever a tree root was
+/// recorded for an empty tree, so constructors that restore a tree from a
+/// stored hash read it as the empty tree under the default [`Manifest`] —
+/// the only format such trees were ever built under. Nothing writes it.
+pub const LEGACY_EMPTY_ROOT: [u8; 32] = [0u8; 32];
+
 // Manual impl: a derived `Clone` would demand `D: Clone`, but the
 // distribution is a pure type-level strategy that is never instantiated.
 impl<Key, Value, D> Clone for PersistentTree<Key, Value, D>
@@ -219,14 +228,11 @@ where
     /// This constructor is used to restore a tree to a previously persisted
     /// version. The tree will lazily load nodes from storage as they are
     /// accessed during operations.
+    ///
+    /// The all-zero hash is read as the empty tree under the default
+    /// [`Manifest`] (see [`LEGACY_EMPTY_ROOT`]).
     pub fn from_hash(root: Blake3Hash) -> Self {
-        Self {
-            key: PhantomData,
-            value: PhantomData,
-            distribution: PhantomData,
-            root: TreeRoot::Node(root),
-            node_cache: Cache::new(),
-        }
+        Self::from_hash_with_cache(root, Cache::new())
     }
 
     /// Creates a [`PersistentTree`] from a known root hash, reusing an existing
@@ -238,6 +244,9 @@ where
     /// successive reconstructions of a tree from a moving root (e.g. a branch
     /// that reuses one cache across every read).
     pub fn from_hash_with_cache(root: Blake3Hash, node_cache: Cache<Blake3Hash, Buffer>) -> Self {
+        if root.as_bytes() == &LEGACY_EMPTY_ROOT {
+            return Self::empty_with_cache(node_cache);
+        }
         Self::seal(root, node_cache)
     }
 
@@ -1316,6 +1325,54 @@ mod tests {
         assert_eq!(tree.root(), &empty_root_hash()?);
         assert!(tree.stored_root().is_none());
 
+        Ok(())
+    }
+
+    /// A root stored by a version that recorded the empty tree as the
+    /// all-zero hash opens as the empty tree under the default manifest:
+    /// it reads as empty, builds the same tree a fresh empty tree builds,
+    /// and diffs as identical to the empty node.
+    #[dialog_common::test]
+    async fn it_reads_the_legacy_zero_root_as_the_empty_tree() -> Result<()> {
+        use crate::{LEGACY_EMPTY_ROOT, TransientTree, TreeDifference};
+        use dialog_common::Blake3Hash;
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let legacy =
+            PersistentTree::<[u8; 4], Vec<u8>>::from_hash(Blake3Hash::from(LEGACY_EMPTY_ROOT));
+        assert!(legacy.stored_root().is_none());
+        assert_eq!(legacy.root(), &empty_root_hash()?);
+        assert_eq!(legacy.get(&[0, 0, 0, 1], &storage).await?, None);
+        assert_eq!(legacy.manifest(&storage).await?, crate::Manifest::default());
+
+        let mut delta = Delta::zero();
+        let from_legacy = legacy
+            .edit()
+            .insert([0, 0, 0, 1], vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        let from_fresh = PersistentTree::<[u8; 4], Vec<u8>>::empty()
+            .edit()
+            .insert([0, 0, 0, 1], vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        assert_eq!(from_legacy.root(), from_fresh.root());
+
+        let edit = TransientTree::<[u8; 4], Vec<u8>>::new(
+            Blake3Hash::from(LEGACY_EMPTY_ROOT),
+            Default::default(),
+        );
+        let emptied = edit.persist(&mut delta)?;
+        assert_eq!(emptied.root(), &empty_root_hash()?);
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let difference = TreeDifference::compute(&legacy, &emptied, &storage, &storage).await?;
+        assert_eq!(difference.changes().count().await, 0);
         Ok(())
     }
 
