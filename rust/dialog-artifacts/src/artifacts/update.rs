@@ -2,16 +2,18 @@ use crate::artifacts::query::Select;
 use crate::key::value_tail_bytes;
 use crate::selector::Constrained;
 use crate::{
-    Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Entity,
+    Artifact, ArtifactSelector, ArtifactStream, Asset, Attribute, DialogArtifactsError, Entity,
     Instruction, Value,
 };
 use async_trait::async_trait;
 use dialog_capability::Provider;
 use dialog_search_tree::Manifest;
+use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 use futures_util::stream;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::{BTreeMap, HashMap};
+use std::mem::take;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::vec::IntoIter;
@@ -45,6 +47,20 @@ pub trait Update {
 
     /// Retract that the `attribute` of `entity` is `value`.
     fn dissociate(&mut self, the: Attribute, of: Entity, is: Value);
+
+    /// Store `asset` when this batch commits.
+    ///
+    /// The commit writes the asset's bytes through the blob store and
+    /// records `asset:<hash> dialog.asset/size <size>` in the same revision
+    /// as the batch's facts, so facts may point at [`Asset::entity`] in the
+    /// same batch. Staging the same asset twice stages it once.
+    fn import(&mut self, asset: Asset);
+
+    /// Drop this line's reference to `asset` when this batch commits: the
+    /// commit retracts its `dialog.asset/size` fact, leaving its bytes to be
+    /// collected. The later of an import and a discard of the same asset in
+    /// one batch wins.
+    fn discard(&mut self, asset: Asset);
 }
 
 /// A domain-level write operation that can be asserted or retracted.
@@ -59,13 +75,103 @@ pub trait Statement: Sized {
     fn retract(self, update: &mut impl Update);
 }
 
-/// A batch of pending writes, organized by entity and attribute.
+/// The facts of a [`Changes`] batch, by entity and attribute.
+type Facts = HashMap<Entity, HashMap<Attribute, Vec<Change>>>;
+
+/// A change a batch makes to the assets its line stores.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssetChange {
+    /// Store the asset. See [`Update::import`].
+    Import(Asset),
+    /// Drop the line's reference to the asset. See [`Update::discard`].
+    Discard(Asset),
+}
+
+impl AssetChange {
+    /// The asset this change concerns.
+    pub fn asset(&self) -> &Asset {
+        match self {
+            AssetChange::Import(asset) | AssetChange::Discard(asset) => asset,
+        }
+    }
+}
+
+/// A batch of pending writes: fact changes organized by entity and
+/// attribute, plus the changes the batch makes to the assets its line
+/// stores (see [`Update::import`] and [`Update::discard`]).
 ///
-/// Serializes as that same nesting, so a batch round-trips through any serde
-/// format without losing retractions or cardinality-one replacements.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+/// Serializes as the fact nesting alone when no asset changes, so such a
+/// batch keeps the shape every earlier reader understands, and as
+/// `{ facts, assets }` otherwise. Either shape round-trips through any serde
+/// format without losing retractions, cardinality-one replacements, or
+/// asset bytes.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Changes {
+    facts: Facts,
+    assets: BTreeMap<Blake3Hash, AssetChange>,
+}
+
+/// The serialized shape of a [`Changes`] batch that changes assets.
+#[derive(Serialize, Deserialize)]
+struct ChangesWithAssets {
+    facts: Facts,
+    assets: Vec<AssetChange>,
+}
+
+/// The serialized shape of a [`Changes`] batch that changes no asset.
+#[derive(Serialize)]
 #[serde(transparent)]
-pub struct Changes(HashMap<Entity, HashMap<Attribute, Vec<Change>>>);
+struct FactsOnly<'a>(&'a Facts);
+
+/// Either serialized shape, for decoding.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ChangesShape {
+    WithAssets(ChangesWithAssets),
+    FactsOnly(Facts),
+}
+
+impl Serialize for Changes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.assets.is_empty() {
+            FactsOnly(&self.facts).serialize(serializer)
+        } else {
+            ChangesWithAssets {
+                facts: self.facts.clone(),
+                assets: self.assets.values().cloned().collect(),
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Changes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match ChangesShape::deserialize(deserializer)? {
+            ChangesShape::WithAssets(ChangesWithAssets { facts, assets }) => {
+                let mut changes = Changes {
+                    facts,
+                    assets: BTreeMap::new(),
+                };
+                for change in assets {
+                    changes.change_asset(change);
+                }
+                changes
+            }
+            ChangesShape::FactsOnly(facts) => Changes {
+                facts,
+                assets: BTreeMap::new(),
+            },
+        })
+    }
+}
 
 impl Changes {
     /// Create an empty changeset.
@@ -85,9 +191,51 @@ impl Changes {
         self
     }
 
-    /// Check if empty.
+    /// Whether the batch records no fact changes and changes no asset.
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.facts.is_empty() && self.assets.is_empty()
+    }
+
+    /// The asset changes this batch makes, in hash order.
+    pub fn assets(&self) -> impl Iterator<Item = &AssetChange> {
+        self.assets.values()
+    }
+
+    /// The assets this batch stores, in hash order.
+    pub fn imports(&self) -> impl Iterator<Item = &Asset> {
+        self.assets.values().filter_map(|change| match change {
+            AssetChange::Import(asset) => Some(asset),
+            AssetChange::Discard(_) => None,
+        })
+    }
+
+    /// The assets this batch drops, in hash order.
+    pub fn discards(&self) -> impl Iterator<Item = &Asset> {
+        self.assets.values().filter_map(|change| match change {
+            AssetChange::Discard(asset) => Some(asset),
+            AssetChange::Import(_) => None,
+        })
+    }
+
+    /// Remove and return this batch's asset changes, in hash order, leaving
+    /// its fact changes in place. The commit path drains them this way
+    /// before turning the facts into instructions.
+    pub fn take_assets(&mut self) -> Vec<AssetChange> {
+        take(&mut self.assets).into_values().collect()
+    }
+
+    /// Record `change`, the later change to an asset winning, except that an
+    /// import naming stored bytes never displaces an import carrying them.
+    fn change_asset(&mut self, change: AssetChange) {
+        let hash = *change.asset().hash();
+        if let (AssetChange::Import(incoming), Some(AssetChange::Import(held))) =
+            (&change, self.assets.get(&hash))
+            && incoming.content().is_none()
+            && held.content().is_some()
+        {
+            return;
+        }
+        self.assets.insert(hash, change);
     }
 
     /// Convert to an instruction stream.
@@ -103,16 +251,20 @@ impl Changes {
     /// session overlay needs to garbage-collect per-client facts
     /// without growing.
     pub fn retain_entities<F: FnMut(&Entity) -> bool>(&mut self, mut keep: F) -> bool {
-        let before = self.0.len();
-        self.0.retain(|entity, _| keep(entity));
-        self.0.len() != before
+        let before = self.facts.len();
+        self.facts.retain(|entity, _| keep(entity));
+        self.facts.len() != before
     }
 
     /// Apply every change in `other` after the ones already recorded, with
     /// the same semantics as recording them here directly: a replacement
-    /// still supersedes earlier changes to its `(entity, attribute)`.
+    /// still supersedes earlier changes to its `(entity, attribute)`, and
+    /// `other`'s asset changes follow this batch's.
     pub fn merge(&mut self, other: Changes) {
-        for (entity, attributes) in other.0 {
+        for change in other.assets.into_values() {
+            self.change_asset(change);
+        }
+        for (entity, attributes) in other.facts {
             for (attribute, changes) in attributes {
                 for change in changes {
                     match change {
@@ -136,17 +288,21 @@ impl Changes {
     /// without consuming it — e.g. to extract tombstones from
     /// retracts without cloning the whole structure.
     pub fn iter(&self) -> impl Iterator<Item = (&Entity, &Attribute, &Change)> {
-        self.0.iter().flat_map(|(entity, attrs)| {
+        self.facts.iter().flat_map(|(entity, attrs)| {
             attrs
                 .iter()
                 .flat_map(move |(attr, changes)| changes.iter().map(move |c| (entity, attr, c)))
         })
     }
 
-    /// Convert to a vec of instructions.
+    /// Convert the fact changes to a vec of instructions.
+    ///
+    /// Asset changes are not instructions and are dropped: a caller that
+    /// commits the batch drains them first with
+    /// [`take_assets`](Self::take_assets).
     pub fn into_instructions(self) -> Vec<Instruction> {
         let mut instructions = Vec::new();
-        for (entity, attributes) in self.0 {
+        for (entity, attributes) in self.facts {
             for (attribute, operations) in attributes {
                 for operation in operations {
                     let instruction = match operation {
@@ -179,7 +335,7 @@ impl Changes {
 
 impl Update for Changes {
     fn associate(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.0
+        self.facts
             .entry(of)
             .or_default()
             .entry(the)
@@ -188,19 +344,27 @@ impl Update for Changes {
     }
 
     fn associate_unique(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.0
+        self.facts
             .entry(of)
             .or_default()
             .insert(the, vec![Change::Replace(is)]);
     }
 
     fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.0
+        self.facts
             .entry(of)
             .or_default()
             .entry(the)
             .or_default()
             .push(Change::Retract(is));
+    }
+
+    fn import(&mut self, asset: Asset) {
+        self.change_asset(AssetChange::Import(asset));
+    }
+
+    fn discard(&mut self, asset: Asset) {
+        self.change_asset(AssetChange::Discard(asset));
     }
 }
 
@@ -318,15 +482,24 @@ pub fn sort_key(artifact: &Artifact, manifest: &Manifest) -> SortKey {
 }
 
 /// `Statement` for a [`Changes`] batch — replays every recorded
-/// [`Change`] into the target [`Update`].
+/// [`Change`] and asset change into the target [`Update`].
 ///
 /// Lets a `Changes` value act anywhere a single statement does: e.g.
 /// folding pre-built changes into another transaction, or asserting
 /// a changes-shaped overlay into a query session. `Assert` and
 /// `Replace` map to `associate` / `associate_unique` on the target;
 /// `Retract` maps to `dissociate`.
+///
+/// Retracting a batch inverts its asset changes as it inverts its facts:
+/// an import becomes a discard and a discard an import.
 impl Statement for Changes {
-    fn assert(self, update: &mut impl Update) {
+    fn assert(mut self, update: &mut impl Update) {
+        for change in self.take_assets() {
+            match change {
+                AssetChange::Import(asset) => update.import(asset),
+                AssetChange::Discard(asset) => update.discard(asset),
+            }
+        }
         for instruction in self.into_instructions() {
             match instruction {
                 Instruction::Assert(a) => update.associate(a.the, a.of, a.is),
@@ -336,7 +509,13 @@ impl Statement for Changes {
         }
     }
 
-    fn retract(self, update: &mut impl Update) {
+    fn retract(mut self, update: &mut impl Update) {
+        for change in self.take_assets() {
+            match change {
+                AssetChange::Import(asset) => update.discard(asset),
+                AssetChange::Discard(asset) => update.import(asset),
+            }
+        }
         // Inverse: asserts/replaces become retracts; existing
         // retracts become asserts. Symmetric so `c.assert(t);
         // c.retract(t);` round-trips when `t` is a fresh target.
@@ -402,7 +581,7 @@ impl Changes {
         // whatever the caller asserted via `.with(...)` — so scanning
         // it per query is negligible and not worth indexing.
         let mut matched: Vec<Artifact> = Vec::new();
-        for (entity, attrs) in &self.0 {
+        for (entity, attrs) in &self.facts {
             if let Some(of_target) = of
                 && entity != of_target
             {
@@ -490,6 +669,129 @@ mod tests {
             Some(Change::Replace(Value::String("admin".into()))),
             "a replacement stays a replacement"
         );
+    }
+
+    /// Staging the same asset twice stages it once, and an asset change
+    /// alone makes a batch non-empty without adding any fact.
+    #[dialog_common::test]
+    fn it_stages_each_asset_once() {
+        let mut changes = Changes::new();
+        assert!(changes.is_empty());
+
+        changes.import(Asset::new(b"one".to_vec()));
+        changes.import(Asset::new(b"one".to_vec()));
+        changes.import(Asset::new(b"two".to_vec()));
+
+        assert!(!changes.is_empty());
+        assert_eq!(changes.imports().count(), 2);
+        assert!(
+            changes.into_instructions().is_empty(),
+            "asset changes are not facts"
+        );
+    }
+
+    /// The later of an import and a discard of one asset wins, but naming
+    /// stored bytes never displaces an import that carries them.
+    #[dialog_common::test]
+    fn it_keeps_the_later_change_to_an_asset() {
+        let carried = Asset::new(b"one".to_vec());
+        let stored = Asset::stored(*carried.hash(), carried.size());
+
+        let mut changes = Changes::new();
+        changes.import(carried.clone());
+        changes.discard(carried.clone());
+        assert_eq!(changes.imports().count(), 0);
+        assert_eq!(changes.discards().count(), 1);
+
+        changes.import(carried.clone());
+        changes.import(stored);
+        let held: Vec<_> = changes.imports().collect();
+        assert_eq!(held, vec![&carried], "the carried bytes are kept");
+    }
+
+    /// Draining the asset changes leaves the fact changes in place, which is
+    /// what the commit path relies on before it turns the facts into
+    /// instructions.
+    #[dialog_common::test]
+    fn it_takes_asset_changes_and_keeps_the_facts() {
+        let mut changes = Changes::new();
+        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.import(Asset::new(b"avatar".to_vec()));
+
+        let assets = changes.take_assets();
+        assert_eq!(
+            assets,
+            vec![AssetChange::Import(Asset::new(b"avatar".to_vec()))]
+        );
+        assert_eq!(changes.assets().count(), 0);
+        assert_eq!(changes.into_instructions().len(), 1);
+    }
+
+    #[dialog_common::test]
+    fn it_merges_asset_changes() {
+        let mut left = Changes::new();
+        left.import(Asset::new(b"one".to_vec()));
+        let mut right = Changes::new();
+        right.discard(Asset::new(b"one".to_vec()));
+        right.import(Asset::new(b"two".to_vec()));
+
+        left.merge(right);
+        assert_eq!(left.discards().count(), 1, "the later discard wins");
+        assert_eq!(left.imports().count(), 1);
+    }
+
+    /// Asserting a batch into another carries its asset changes; retracting
+    /// it inverts them, as it inverts its facts.
+    #[dialog_common::test]
+    fn it_replays_asset_changes_and_inverts_them_on_retract() {
+        let mut batch = Changes::new();
+        batch.associate(name_attr(), alice(), Value::String("Alice".into()));
+        batch.import(Asset::new(b"avatar".to_vec()));
+
+        let mut asserted = Changes::new();
+        batch.clone().assert(&mut asserted);
+        assert_eq!(asserted.imports().count(), 1);
+
+        let mut retracted = Changes::new();
+        batch.retract(&mut retracted);
+        assert_eq!(retracted.imports().count(), 0);
+        assert_eq!(retracted.discards().count(), 1);
+        assert_eq!(retracted.into_instructions().len(), 1);
+    }
+
+    /// A batch that changes no asset keeps the plain fact-nesting shape, so
+    /// a reader that predates assets still decodes it.
+    #[dialog_common::test]
+    fn it_encodes_a_batch_without_assets_as_the_plain_fact_nesting() {
+        let mut changes = Changes::new();
+        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+
+        let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
+        let facts: Facts = serde_ipld_dagcbor::from_slice(&bytes).expect("decode as fact nesting");
+        assert_eq!(facts, changes.facts);
+
+        let decoded: Changes = serde_ipld_dagcbor::from_slice(&bytes).expect("decode changes");
+        assert_eq!(decoded, changes);
+    }
+
+    /// A batch with asset changes round-trips its facts and its assets,
+    /// carried and stored alike, through dag-cbor and JSON.
+    #[dialog_common::test]
+    fn it_round_trips_assets_through_dag_cbor_and_json() {
+        let mut changes = Changes::new();
+        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
+        changes.import(Asset::new(b"avatar".to_vec()));
+        changes.import(Asset::stored([4u8; 32], 1 << 20));
+        changes.discard(Asset::new(vec![0u8, 255, 7]));
+
+        let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
+        let decoded: Changes = serde_ipld_dagcbor::from_slice(&bytes).expect("decode changes");
+        assert_eq!(decoded, changes);
+
+        let json = serde_json::to_string(&changes).expect("encode changes as json");
+        let decoded: Changes = serde_json::from_str(&json).expect("decode changes from json");
+        assert_eq!(decoded, changes);
     }
 
     /// `sort_key` must reproduce the tree's EAV key byte order exactly,

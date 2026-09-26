@@ -21,9 +21,9 @@ use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use crate::{
-    BlobKey, Datum, DialogArtifactsError, State,
+    ASSET_SIZE, Attribute, BlobKey, Datum, DialogArtifactsError, Entity, State, Value,
     spill::{ShipmentRef, shipment_refs},
-    tree::ArtifactTree,
+    tree::{ArtifactTree, ArtifactTreeExt},
 };
 
 /// Current [`BlobRecord`] encoding version.
@@ -214,6 +214,20 @@ pub trait BlobIndexExt {
     where
         S: ArchiveReader + Clone;
 
+    /// The size of the content this tree vouches for under `hash`, by a
+    /// blob-index entry or by an asset's `dialog.asset/size` fact, or `None`
+    /// when it vouches for no such content.
+    ///
+    /// This is the question a blob read asks before hydrating bytes it does
+    /// not hold, and the size it declares when it does.
+    async fn content_size<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: ArchiveReader + Clone;
+
     /// Whether the index references a blob.
     async fn has_blob<S>(&self, store: &S, hash: &Blake3Hash) -> Result<bool, DialogArtifactsError>
     where
@@ -288,6 +302,30 @@ impl BlobIndexExt for ArtifactTree {
             Some(state) => BlobRecord::from_state(&state),
             None => Ok(None),
         }
+    }
+
+    async fn content_size<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: ArchiveReader + Clone,
+    {
+        if let Some(record) = self.get_blob(store, hash).await? {
+            return Ok(Some(record.size));
+        }
+        let entity = Entity::from_blob(hash)?;
+        let attribute: Attribute = ASSET_SIZE.parse()?;
+        for fact in self
+            .select_record(store.clone(), &entity, &attribute)
+            .await?
+        {
+            if let Value::UnsignedInt(size) = fact.is {
+                return Ok(u64::try_from(size).ok());
+            }
+        }
+        Ok(None)
     }
 
     fn list_blobs<'s, S>(
