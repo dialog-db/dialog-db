@@ -461,6 +461,24 @@ mod tests {
         Ok(())
     }
 
+    /// Only the system a storage belongs to grants mounting spaces in
+    /// it: a peer built over a storage it was granted nothing over is
+    /// refused rather than granted it.
+    #[dialog_common::test]
+    async fn it_refuses_to_build_a_peer_over_a_storage_it_was_not_granted() -> anyhow::Result<()> {
+        let system = SignerCredential::from(Ed25519Signer::generate().await?);
+        let storage = Storage::volatile().owned_by(system);
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&storage)
+            .await?;
+        let built = Peer::new(credential).storage(storage).await;
+        assert!(
+            built.is_err(),
+            "a peer was built over a storage nobody granted it"
+        );
+        Ok(())
+    }
+
     /// Opening a space mounts it in storage, which is the storage's to
     /// allow: a session its peer granted nothing over storage is refused,
     /// while one granted everything the peer holds opens it.
