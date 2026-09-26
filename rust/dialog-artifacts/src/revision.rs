@@ -25,13 +25,13 @@ use crate::history::{
 /// array, matching `dialog_storage::Blake3Hash`.
 type TreeHash = [u8; 32];
 
-/// A hash representing an empty (usually newly created) search tree.
-///
-/// Matches the search tree's null root sentinel
-/// (`dialog_common::NULL_BLAKE3_HASH`) byte for byte.
-pub const EMPTY_TREE_HASH: TreeHash = [0; 32];
-
 /// Reference to a search tree by its root hash.
+///
+/// Always names a real, persisted tree — the empty tree included, whose
+/// root is the zero-entry manifest-carrying node the tree layer derives
+/// for its format (see `PersistentTree::empty_root`). "No tree" is not a
+/// reference; it is the absence of one (`Option<TreeReference>`, or an
+/// absent [`Revision`]).
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TreeReference(TreeHash);
 
@@ -39,13 +39,6 @@ impl TreeReference {
     /// Returns a reference to the underlying hash.
     pub fn hash(&self) -> &TreeHash {
         &self.0
-    }
-}
-
-impl Default for TreeReference {
-    /// By default, a [`TreeReference`] points at the empty search tree.
-    fn default() -> Self {
-        Self(EMPTY_TREE_HASH)
     }
 }
 

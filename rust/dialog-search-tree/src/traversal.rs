@@ -18,7 +18,7 @@
 //! complete inventory of what is missing.
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use futures_util::stream::FuturesUnordered;
@@ -120,7 +120,7 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSend,
     {
-        traverse::<Key, Value, Backend>(self.root().clone(), storage, None)
+        traverse::<Key, Value, Backend>(self.stored_root().cloned(), storage, None)
     }
 
     fn traverse_available_within<'a, Backend>(
@@ -132,7 +132,7 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSend,
     {
-        traverse::<Key, Value, Backend>(self.root().clone(), storage, Some(scope))
+        traverse::<Key, Value, Backend>(self.stored_root().cloned(), storage, Some(scope))
     }
 }
 
@@ -161,7 +161,7 @@ fn span_intersects(
 /// [`Traversable::traverse_available_within`]; `scope` of `None` keeps
 /// every child.
 fn traverse<'a, Key, Value, Backend>(
-    root: Blake3Hash,
+    root: Option<Blake3Hash>,
     storage: &'a ContentAddressedStorage<Backend>,
     scope: Option<&'a [core::ops::RangeInclusive<Vec<u8>>]>,
 ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
@@ -178,7 +178,7 @@ where
     use futures_util::StreamExt as _;
 
     try_stream! {
-        if &root != NULL_BLAKE3_HASH {
+        if let Some(root) = root {
             // A continuation queue rather than levels: the root goes out,
             // and every node that lands queues its children behind
             // whatever is already waiting. Against a backend that reaches

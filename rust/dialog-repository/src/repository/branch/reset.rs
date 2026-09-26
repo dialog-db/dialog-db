@@ -63,7 +63,7 @@ mod tests {
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    use crate::{EMPTY_TREE_HASH, RepositoryMemoryExt, Revision, TreeReference};
+    use crate::{RepositoryMemoryExt, Revision, TreeReference};
 
     #[dialog_common::test]
     async fn it_sets_revision() -> Result<()> {
@@ -76,7 +76,7 @@ mod tests {
         let revision = Revision {
             branch: "branch:main".parse()?,
             issuer: subject.did().clone(),
-            tree: TreeReference::from(EMPTY_TREE_HASH),
+            tree: TreeReference::from([7u8; 32]),
             edition: Edition::GENESIS,
             context: None,
             signature: Vec::new(),

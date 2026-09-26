@@ -5250,7 +5250,7 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
     alice_branch.push().perform(&operator).await?;
     let ahead = alice_branch
         .upstream()
-        .map(|upstream| upstream.tree().clone())
+        .and_then(|upstream| upstream.tree().cloned())
         .expect("alice's upstream records what she published");
 
     // Bob commits on his stale base and pushes.
@@ -5347,7 +5347,7 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
     alice_branch.push().perform(&operator).await?;
     let ahead = alice_branch
         .upstream()
-        .map(|upstream| upstream.tree().clone())
+        .and_then(|upstream| upstream.tree().cloned())
         .expect("alice's upstream records what she published");
 
     bob_branch

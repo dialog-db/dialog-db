@@ -115,7 +115,10 @@ async fn replay_grouped(
                 .commit(stream::iter(std::mem::take(&mut pending)))
                 .await?;
             if scan {
-                let revision = store.revision().await?;
+                let revision = store
+                    .revision()
+                    .await?
+                    .expect("the store has commits, so it has a revision");
                 let violations = leaf_violations(&backend, &revision).await?;
                 if violations != last_violations {
                     println!("  SCAN group={group} txn={at}: {violations:?}");

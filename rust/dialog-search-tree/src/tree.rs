@@ -3,7 +3,7 @@ pub use transient::*;
 
 use std::{marker::PhantomData, ops::RangeBounds};
 
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use rkyv::{
@@ -63,8 +63,30 @@ where
     value: PhantomData<Value>,
     distribution: PhantomData<D>,
 
-    root: Blake3Hash,
+    root: TreeRoot,
     node_cache: Cache<Blake3Hash, Buffer>,
+}
+
+/// A [`PersistentTree`]'s root: either a durable node, or the empty tree
+/// that has not been persisted yet.
+///
+/// There is no null sentinel: the empty tree knows its format and carries
+/// the derived root the first persist will land on (see
+/// [`PersistentTree::empty_root`]), so [`PersistentTree::root`] always
+/// names the tree's true persisted form. What the `Empty` variant lacks is
+/// not a root but a *stored node* — read paths answer it from the manifest
+/// alone, and [`PersistentTree::stored_root`] reports it as `None`.
+#[derive(Debug, Clone)]
+enum TreeRoot {
+    /// The root node's hash, durable in storage (or in a pending delta).
+    Node(Blake3Hash),
+    /// The empty tree under `manifest`, not yet persisted. `hash` is the
+    /// derived empty root for that manifest, precomputed so `root()` can
+    /// hand out a reference.
+    Empty {
+        manifest: Manifest,
+        hash: Blake3Hash,
+    },
 }
 
 // Manual impl: a derived `Clone` would demand `D: Clone`, but the
@@ -105,8 +127,36 @@ where
     ///
     /// The root hash uniquely identifies this version of the tree and can be
     /// used to reconstruct the tree from storage or to compare tree versions.
+    /// For an empty tree that has not been persisted yet this is the derived
+    /// empty root for its format — exactly the hash the first persist lands
+    /// on — so two trees holding the same entries under the same manifest
+    /// report the same root whether or not they have touched storage.
     pub fn root(&self) -> &Blake3Hash {
-        &self.root
+        match &self.root {
+            TreeRoot::Node(hash) => hash,
+            TreeRoot::Empty { hash, .. } => hash,
+        }
+    }
+
+    /// The root node's hash if this tree has one in storage — `None` for an
+    /// empty tree that was never persisted, whose (derived) root names a
+    /// node no store holds yet. Read paths use this to answer emptiness
+    /// without a storage round trip.
+    pub fn stored_root(&self) -> Option<&Blake3Hash> {
+        match &self.root {
+            TreeRoot::Node(hash) => Some(hash),
+            TreeRoot::Empty { .. } => None,
+        }
+    }
+
+    /// The manifest an unpersisted empty tree was created under — `None`
+    /// for a tree with a stored root, whose manifest lives in the root
+    /// node (see [`manifest`](Self::manifest)).
+    pub(crate) fn empty_manifest(&self) -> Option<Manifest> {
+        match &self.root {
+            TreeRoot::Empty { manifest, .. } => Some(*manifest),
+            TreeRoot::Node(_) => None,
+        }
     }
 
     /// Returns a handle to this tree's node cache, shared by reference count.
@@ -117,17 +167,51 @@ where
         self.node_cache.clone()
     }
 
-    /// Creates a new empty [`PersistentTree`] with no entries.
+    /// Creates a new empty [`PersistentTree`] with no entries, under the
+    /// default format [`Manifest`].
     ///
-    /// The empty tree has a null root hash and an empty node cache.
+    /// The tree's root is the derived empty root for its manifest (see
+    /// [`empty_root`](Self::empty_root)) — the exact hash the first persist
+    /// lands on — but no store holds that node until a persist runs
+    /// ([`stored_root`](Self::stored_root) is `None` until then).
     pub fn empty() -> Self {
+        Self::empty_with_manifest(Manifest::default(), Cache::new())
+    }
+
+    /// Creates a new empty [`PersistentTree`] sharing an existing node
+    /// cache — [`empty`](Self::empty) for callers that keep one cache warm
+    /// across successive tree reconstructions (e.g. a branch with no
+    /// revision yet).
+    pub fn empty_with_cache(node_cache: Cache<Blake3Hash, Buffer>) -> Self {
+        Self::empty_with_manifest(Manifest::default(), node_cache)
+    }
+
+    /// Creates a new empty [`PersistentTree`] under an explicit format
+    /// `manifest`, sharing the given node cache.
+    pub fn empty_with_manifest(manifest: Manifest, node_cache: Cache<Blake3Hash, Buffer>) -> Self {
+        let hash = Self::empty_root(&manifest)
+            .expect("the zero-entry node has a fixed, infallible encoding");
         Self {
             key: PhantomData,
             value: PhantomData,
             distribution: PhantomData,
-            root: NULL_BLAKE3_HASH.clone(),
-            node_cache: Cache::new(),
+            root: TreeRoot::Empty { manifest, hash },
+            node_cache,
         }
+    }
+
+    /// The canonical root hash an empty tree persists to under `manifest`:
+    /// the hash of the zero-entry manifest-carrying node. Derived, not
+    /// read — the node has one fixed encoding per manifest, so this is a
+    /// pure function usable to name the empty tree without touching
+    /// storage.
+    pub fn empty_root(manifest: &Manifest) -> Result<Blake3Hash, DialogSearchTreeError> {
+        let mut scratch = crate::Delta::zero();
+        Ok(
+            transient::persist_empty_root::<Key, Value>(manifest, &mut scratch)?
+                .hash()
+                .clone(),
+        )
     }
 
     /// Creates a [`PersistentTree`] from a known root hash.
@@ -140,7 +224,7 @@ where
             key: PhantomData,
             value: PhantomData,
             distribution: PhantomData,
-            root,
+            root: TreeRoot::Node(root),
             node_cache: Cache::new(),
         }
     }
@@ -238,7 +322,8 @@ where
     /// is never rounded up to that child (a point range in one leaf counts
     /// as one). At most two blocks per level are read, and they are the
     /// blocks a scan of the range reads first and last anyway; a leaf is
-    /// counted exactly. Returns `None` for an empty tree.
+    /// counted exactly. Returns `None` for an empty tree that was never
+    /// persisted; a stored empty tree is its zero-entry node and counts 0.
     ///
     /// Interior scales are estimates, so the whole is an upper bound, not
     /// an exact count: it answers "is this range large or small" for a
@@ -253,14 +338,14 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        if &self.root == NULL_BLAKE3_HASH {
+        let Some(root) = self.stored_root() else {
             return Ok(None);
-        }
+        };
         let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
         // Each pending node is bounded on the sides the range cuts through
         // it: `None` on a side means the range runs past that side, so the
         // node's whole extent on it counts.
-        let mut pending: Vec<Cut<'_>> = vec![(self.root.clone(), Some(lower), Some(upper))];
+        let mut pending: Vec<Cut<'_>> = vec![(root.clone(), Some(lower), Some(upper))];
         let mut total = 0u64;
         while let Some((hash, lower, upper)) = pending.pop() {
             let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
@@ -323,7 +408,7 @@ where
     {
         let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
 
-        TreeWalker::new(self.root.clone()).stream(range, accessor)
+        TreeWalker::new(self.stored_root().cloned()).stream(range, accessor)
     }
 
     /// [`stream_range`](Self::stream_range), yielding each entry's key as a
@@ -344,7 +429,7 @@ where
     {
         let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
 
-        TreeWalker::<Key, Value>::new(self.root.clone()).stream_handles(range, accessor)
+        TreeWalker::<Key, Value>::new(self.stored_root().cloned()).stream_handles(range, accessor)
     }
 
     /// Returns a differential that produces changes to transform `self` into
@@ -453,7 +538,7 @@ where
             key: PhantomData,
             value: PhantomData,
             distribution: PhantomData,
-            root,
+            root: TreeRoot::Node(root),
             node_cache,
         }
     }
@@ -462,11 +547,9 @@ where
     ///
     /// The manifest is data, not code: it is inlined into every node, so the
     /// tree's real format constants are recovered by loading the root and
-    /// reading its header. An empty tree (a null root) has no node to read
-    /// from and therefore no format of its own yet, so it reports
-    /// [`Manifest::default`]: the format a first write would stamp into it.
-    /// This mirrors the fallback the stitch path uses when no source piece has
-    /// a manifest to inherit.
+    /// reading its header. An empty tree that was never persisted has no
+    /// node to read from, but it knows the manifest it was created under
+    /// and reports that without touching storage.
     pub async fn manifest<Backend>(
         &self,
         storage: &ContentAddressedStorage<Backend>,
@@ -475,12 +558,14 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        if &self.root == NULL_BLAKE3_HASH {
-            return Ok(Manifest::default());
+        match &self.root {
+            TreeRoot::Empty { manifest, .. } => Ok(*manifest),
+            TreeRoot::Node(hash) => {
+                let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+                let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
+                node.manifest()
+            }
         }
-        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
-        let node: PersistentNode<Key, Value> = accessor.get_node(&self.root).await?;
-        node.manifest()
     }
 
     /// Opens a batch of in-place edits over this tree, adopting the tree's own
@@ -505,12 +590,20 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        let manifest = self.manifest(storage).await?;
-        Ok(TransientTree::with_manifest(
-            self.root.clone(),
-            self.node_cache.clone(),
-            manifest,
-        ))
+        match &self.root {
+            TreeRoot::Empty { manifest, .. } => Ok(TransientTree::empty_with_manifest(
+                self.node_cache.clone(),
+                *manifest,
+            )),
+            TreeRoot::Node(hash) => {
+                let manifest = self.manifest(storage).await?;
+                Ok(TransientTree::with_manifest(
+                    hash.clone(),
+                    self.node_cache.clone(),
+                    manifest,
+                ))
+            }
+        }
     }
 
     /// Opens a batch of in-place edits over this tree under the *default*
@@ -520,15 +613,22 @@ where
     /// by the first edit that descends into it. Equivalent to
     /// [`TransientTree::from`].
     ///
-    /// Because recovering a tree's real manifest means loading its root node,
-    /// which is async, this entry cannot do it and assumes the defaults. It is
-    /// therefore only sound for a tree whose manifest IS [`Manifest::default`]
-    /// (which today is every tree, since nothing constructs another). Editing a
-    /// non-default tree through this entry rewrites the touched path under the
-    /// default format. Use [`edit_with_manifest`](Self::edit_with_manifest)
-    /// whenever the caller can await.
+    /// Because recovering a stored tree's real manifest means loading its
+    /// root node, which is async, this entry cannot do it and assumes the
+    /// defaults. It is therefore only sound for a tree whose manifest IS
+    /// [`Manifest::default`] (which today is every tree, since nothing
+    /// constructs another). Editing a non-default stored tree through this
+    /// entry rewrites the touched path under the default format. Use
+    /// [`edit_with_manifest`](Self::edit_with_manifest) whenever the caller
+    /// can await. (An unpersisted empty tree carries its manifest in
+    /// memory, so for it this entry is exact.)
     pub fn edit(&self) -> TransientTree<Key, Value, D> {
-        TransientTree::new(self.root.clone(), self.node_cache.clone())
+        match &self.root {
+            TreeRoot::Empty { manifest, .. } => {
+                TransientTree::empty_with_manifest(self.node_cache.clone(), *manifest)
+            }
+            TreeRoot::Node(hash) => TransientTree::new(hash.clone(), self.node_cache.clone()),
+        }
     }
 
     /// Searches for the leaf segment that would contain `key`, recording the
@@ -556,7 +656,7 @@ where
     {
         let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
 
-        TreeWalker::new(self.root.clone())
+        TreeWalker::new(self.stored_root().cloned())
             .search(key, accessor, options)
             .await
     }
@@ -1162,6 +1262,14 @@ mod tests {
         Ok(())
     }
 
+    /// The canonical empty-tree root hash for the default manifest: the
+    /// zero-entry manifest-carrying node every persisted empty tree lands on.
+    fn empty_root_hash() -> Result<dialog_common::Blake3Hash> {
+        Ok(PersistentTree::<[u8; 4], Vec<u8>>::empty_root(
+            &crate::Manifest::default(),
+        )?)
+    }
+
     #[dialog_common::test]
     async fn it_handles_empty_tree_operations() -> Result<()> {
         use futures_util::StreamExt;
@@ -1173,14 +1281,17 @@ mod tests {
         let value = tree.get(&1u32.to_le_bytes(), &storage).await?;
         assert_eq!(value, None);
 
-        // Delete on empty tree should be no-op
+        // Delete on empty tree should be a no-op on the entry set, and the
+        // persisted form of the (still empty) tree is the canonical
+        // manifest-carrying empty node, not the null hash the unpersisted
+        // tree starts from.
         let mut delta = Delta::zero();
         let tree_after_delete = tree
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
             .persist(&mut delta)?;
-        assert_eq!(tree_after_delete.root(), tree.root());
+        assert_eq!(tree_after_delete.root(), &empty_root_hash()?);
 
         // Stream on empty tree should yield no entries
         let stream = tree.stream(&storage);
@@ -1197,11 +1308,13 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_has_null_root_when_empty() -> Result<()> {
-        use dialog_common::NULL_BLAKE3_HASH;
-
+    async fn it_derives_the_empty_root_when_empty() -> Result<()> {
         let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
-        assert_eq!(tree.root(), &NULL_BLAKE3_HASH.clone());
+        // The empty tree's root is the derived empty root for its manifest —
+        // exactly what the first persist lands on — but nothing is stored
+        // until that persist runs.
+        assert_eq!(tree.root(), &empty_root_hash()?);
+        assert!(tree.stored_root().is_none());
 
         Ok(())
     }
@@ -1535,9 +1648,8 @@ mod tests {
         let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
-        let root_before = tree.root().clone();
-
-        // Delete from empty tree should be no-op
+        // Delete from empty tree should be a no-op on the entry set; the
+        // persisted empty tree lands on the canonical empty node.
         let mut delta = Delta::zero();
         tree = tree
             .edit()
@@ -1545,8 +1657,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
 
-        // Root should be unchanged
-        assert_eq!(tree.root(), &root_before);
+        assert_eq!(tree.root(), &empty_root_hash()?);
 
         Ok(())
     }
@@ -1740,9 +1851,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_returns_to_null_root_after_deleting_all_entries() -> Result<()> {
-        use dialog_common::NULL_BLAKE3_HASH;
-
+    async fn it_returns_to_the_empty_node_after_deleting_all_entries() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
@@ -1783,7 +1892,7 @@ mod tests {
         }
 
         // Verify tree is not empty
-        assert_ne!(tree.root(), &NULL_BLAKE3_HASH.clone());
+        assert_ne!(tree.root(), &empty_root_hash()?);
 
         // Delete all entries
         tree = tree
@@ -1819,8 +1928,10 @@ mod tests {
                 .await?;
         }
 
-        // Tree should be back to empty state with null root
-        assert_eq!(tree.root(), &NULL_BLAKE3_HASH.clone());
+        // Tree should be back to the empty state: the canonical
+        // manifest-carrying empty node, the same root a fresh empty tree
+        // persists to.
+        assert_eq!(tree.root(), &empty_root_hash()?);
 
         Ok(())
     }
@@ -2192,9 +2303,8 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_returns_to_null_root_after_sequential_deletion_of_many_entries() -> Result<()> {
-        use dialog_common::NULL_BLAKE3_HASH;
-
+    async fn it_returns_to_the_empty_node_after_sequential_deletion_of_many_entries() -> Result<()>
+    {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
@@ -2230,8 +2340,8 @@ mod tests {
 
         assert_eq!(
             tree.root(),
-            &NULL_BLAKE3_HASH.clone(),
-            "Tree should be empty after deleting all entries"
+            &empty_root_hash()?,
+            "Tree should land on the canonical empty node after deleting all entries"
         );
 
         Ok(())

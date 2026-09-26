@@ -319,7 +319,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
         count
     };
 
-    let empty = crate::Index::from_hash(dialog_common::Blake3Hash::from(crate::EMPTY_TREE_HASH));
+    let empty = crate::Index::empty();
     let difference = TreeDifference::compute(&empty, &tree, &tree_store, &tree_store).await?;
     let nodes = {
         use futures_util::StreamExt as _;

@@ -108,7 +108,10 @@ fn main() -> anyhow::Result<()> {
         }
         store.canonicalize().await?;
 
-        let revision = store.revision().await?;
+        let revision = store
+            .revision()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the store has commits, so it has a revision"))?;
         let bytes = inner
             .get(&revision)
             .await?

@@ -178,7 +178,7 @@ impl Push<'_> {
             Some(revision) => revision,
             None => return Ok(None),
         };
-        let base = upstream_state.tree().clone();
+        let base = upstream_state.tree().cloned();
 
         // Nothing new to push: the local head already equals the recorded
         // upstream sync point. Without this guard every sync tick re-publishes
@@ -186,7 +186,7 @@ impl Push<'_> {
         // PUT) and re-fetches + diffs the upstream for an empty novelty set,
         // even when no commit has landed since the last push. Short-circuit so
         // an idle branch does no push I/O.
-        if revision.tree == base {
+        if Some(&revision.tree) == base.as_ref() {
             return Ok(Some(revision));
         }
 
@@ -202,7 +202,7 @@ impl Push<'_> {
                     .perform(env)
                     .await?;
 
-                let current = target.revision().map(|r| r.tree).unwrap_or_default();
+                let current = target.revision().map(|r| r.tree);
                 if current != base {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
@@ -250,7 +250,7 @@ impl Push<'_> {
                         .map_err(dialog_artifacts::DialogArtifactsError::from)?;
                 }
 
-                let current = upstream.revision().map(|r| r.tree).unwrap_or_default();
+                let current = upstream.revision().map(|r| r.tree);
                 if current != base {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
@@ -261,7 +261,8 @@ impl Push<'_> {
 
                 // Upload tree nodes present in our current tree but not
                 // in the base, so the remote can hydrate the new tree
-                // before we publish the revision pointing at it.
+                // before we publish the revision pointing at it. A first
+                // push has no base: everything is novel.
                 //
                 // The walk reads the local archive only, and a replica
                 // legitimately holds whole subtrees by reference (a
@@ -290,7 +291,10 @@ impl Push<'_> {
 
                 let index = branch.archive().index();
                 let store = LocalIndex::new(env, index.clone());
-                let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
+                let base_tree = match &base {
+                    Some(base) => Index::from_hash(NodeHash::from(*base.hash())),
+                    None => Index::empty(),
+                };
                 let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
                 let tree_store = TreeStorage::new(TreeStorageBridge(store));
                 let difference = TreeDifference::compute_with(
@@ -486,7 +490,7 @@ impl Push<'_> {
             let mut upstreams = branch.upstreams();
             let ours_untouched = match upstreams.find(&advanced) {
                 None => true,
-                Some(entry) => *entry.tree() == base,
+                Some(entry) => entry.tree() == base.as_ref(),
             };
             if ours_untouched {
                 upstreams.upsert(advanced);
@@ -1278,7 +1282,7 @@ mod tests {
         assert!(
             upstreams.iter().any(|entry| matches!(
                 entry,
-                Upstream::Local { branch, tree } if branch == "main" && *tree == revision.tree
+                Upstream::Local { branch, tree } if branch == "main" && tree.as_ref() == Some(&revision.tree)
             )),
             "A's tracking advance for main lands despite the stale snapshot"
         );
@@ -1351,7 +1355,7 @@ mod tests {
         ));
         assert!(upstreams.iter().any(|entry| matches!(
             entry,
-            Upstream::Local { branch, tree } if branch == "backup" && *tree == revision.tree
+            Upstream::Local { branch, tree } if branch == "backup" && tree.as_ref() == Some(&revision.tree)
         )));
 
         // Pushing to the branch itself is refused.
