@@ -53,7 +53,12 @@ pub async fn test_system() -> SignerCredential {
 
 /// A volatile storage owned by the [test system](test_system).
 pub async fn test_storage() -> Storage<VolatileSpace> {
-    Storage::volatile().owned_by(test_system().await.did())
+    test_owned(Storage::volatile()).await
+}
+
+/// `storage`, owned by the [test system](test_system).
+pub async fn test_owned<S: Clone>(storage: Storage<S>) -> Storage<S> {
+    storage.owned_by(test_system().await.did())
 }
 
 /// The grant of a storage owned by the [test system](test_system).

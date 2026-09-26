@@ -311,6 +311,8 @@ mod tests {
     use dialog_effects::storage::Location;
     use dialog_peer::Peer;
 
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web-integration-tests")))]
+    use dialog_peer::helpers::test_owned;
     use dialog_peer::helpers::{open_peer, test_storage, unique_name};
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan_core::DelegationBuilder;
@@ -517,7 +519,7 @@ mod tests {
     #[cfg(all(not(target_arch = "wasm32"), not(feature = "web-integration-tests")))]
     #[dialog_common::test]
     async fn it_migrates_the_filesystem_store() -> Result<()> {
-        let storage = Storage::temp();
+        let storage = test_owned(Storage::temp()).await;
         let profile = open_peer(
             storage.clone(),
             Location::profile(unique_name("migrate-fs")),

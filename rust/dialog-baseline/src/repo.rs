@@ -69,7 +69,7 @@ impl DialogRepo<Peer<NativeTempSpace, Session>> {
     /// Open a fresh repository rooted in the platform temp directory — the
     /// real-latency signal, like `dialog_disk`.
     pub async fn temp() -> Result<Self> {
-        let storage = Storage::temp();
+        let storage = dialog_peer::helpers::test_owned(Storage::temp()).await;
         let profile = dialog_peer::helpers::open_peer(
             storage.clone(),
             Location::profile(unique_name("baseline")),
