@@ -531,8 +531,9 @@ where
         Ok((count, layout, columns))
     }
 
-    /// The buffered weight this sealed buffer carries (key bytes plus value
-    /// payload weights, retracts charged at 16), for the byte-capped flush
+    /// The raw buffered weight this sealed buffer carries (key bytes plus
+    /// value payload weights, retracts charged at 16; the per-op overhead is
+    /// added from the manifest by the caller), for the byte-capped flush
     /// trigger: computed by streaming the key columns, with no entry
     /// materialization.
     pub fn weight<Key: self::Key>(&self) -> Result<usize, DialogSearchTreeError> {
@@ -547,7 +548,6 @@ where
             .map(|value| value.payload_weight())
             .sum::<usize>();
         weight += 16 * self.polarity.iter().filter(|&&p| p == 0).count();
-        weight += crate::entry::ENTRY_ENCODING_OVERHEAD * self.count as usize;
         Ok(weight)
     }
 

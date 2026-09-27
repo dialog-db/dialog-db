@@ -48,78 +48,77 @@ use crate::{
     TransientTree, Value, link_bounds,
 };
 
-/// The default per-node novelty capacity.
+/// The per-node op-count cap a buffered tree flushes at: the tree's expected
+/// fanout (`2^fanout_n`, 256 under the default manifest), so a buffer holds
+/// about one node's worth of links in ops before it cascades.
 ///
-/// Calibrated on the on-disk bug-tracker benchmark (300 bugs, six-field concept
-/// join): 64 -> 66ms, 256 -> 57ms, 1024 -> 111ms on the all-bugs query. Too
-/// small and writes cascade constantly; too large and every read that crosses a
-/// buffered node pays to project a big buffer over the leaves beneath it.
-///
-/// Hitchhiker trees run buffers several times the fan-out so most writes touch
-/// only the upper buffers. The base fan-out here (the geometric distribution's
-/// expected children per node) is around 254; a multiple of that keeps the
-/// amortization a hitchhiker buffer is meant to provide. Tunable per tree via
-/// [`HitchhikerTree::with_op_buf_size`].
-pub const DEFAULT_OP_BUF_SIZE: usize = 256;
+/// Calibrated on the on-disk bug-tracker benchmark (300 bugs, six-field
+/// concept join): 64 -> 66ms, 256 -> 57ms, 1024 -> 111ms on the all-bugs
+/// query. Too small and writes cascade constantly; too large and every read
+/// that crosses a buffered node pays to project a big buffer over the leaves
+/// beneath it. The count is the per-commit-cost knob: a commit re-encodes and
+/// re-hashes the root frame, whose size the buffer dominates, while a smaller
+/// buffer flushes (and pushes novelty toward the leaves) proportionally more
+/// often. Overridden per tree by [`HitchhikerTree::with_op_buf_size`], or per
+/// process by `DIALOG_TREE_OP_BUF` (experiment plumbing, native only).
+fn op_buf_size(manifest: &Manifest) -> usize {
+    usize::try_from(manifest.branch_factor()).unwrap_or(usize::MAX)
+}
 
-/// The op-buffer capacity trees open under: [`DEFAULT_OP_BUF_SIZE`] unless
-/// `DIALOG_TREE_OP_BUF` overrides it (experiment plumbing, read once per
-/// process, native only). The capacity is the per-commit-cost knob: a
-/// commit re-encodes and re-hashes the root frame, whose size the buffer
-/// dominates, while a smaller buffer flushes (and pushes novelty toward
-/// the leaves) proportionally more often — so the optimum balances
-/// O(capacity) per commit against O(flush)/capacity amortized, and it is
-/// a measurement question, not a constant to guess.
-/// Default op-buffer WEIGHT cap: the buffer flushes when its buffered
-/// weight (key bytes + value payloads + per-entry encoding overhead, the
-/// calibrated byte metering) exceeds this, whatever the op count. The
-/// count cap bounds how many ops a buffer holds; this bounds their BYTES,
-/// which is what actually rides the root frame into every per-commit
+/// The per-node op-WEIGHT cap a buffered tree flushes at: the tree's node
+/// size target (`max_segment`, 64 KiB under the default manifest), so a
+/// buffer never carries more than about one node's worth of bytes. Disabled
+/// when the manifest disables byte pacing (`max_segment == 0`).
+///
+/// The count cap bounds how many ops a buffer holds; this bounds their
+/// BYTES, which is what actually rides the root frame into every per-commit
 /// rewrite and every pushed operational block — a byte-heavy workload can
-/// pack ~200 KB into 256 ops. 64 KiB (the pacing target's scale) bounds
-/// the operational root block for a measured +17% replay cost on the
-/// byte-heavy real workload; the metering's per-op overhead charge means
-/// this cap also implies a hard op-count bound, so it is the primary
-/// knob and the count cap is secondary.
-pub const DEFAULT_OP_BUF_BYTES: usize = 64 * 1024;
+/// pack ~200 KB into 256 ops. At 64 KiB it cost a measured +17% replay on the
+/// byte-heavy real workload. Buffered ops are metered with the manifest's
+/// per-entry overhead, so this cap also implies a hard op-count bound.
+/// Overridden per tree by [`HitchhikerTree::with_op_buf_bytes`], or per
+/// process by `DIALOG_TREE_OP_BUF_BYTES` (experiment plumbing, native only;
+/// explicit 0 disables the byte trigger).
+fn op_buf_bytes(manifest: &Manifest) -> usize {
+    match manifest.max_segment {
+        0 => usize::MAX,
+        target => target as usize,
+    }
+}
 
-/// The op-buffer byte cap trees open under: [`DEFAULT_OP_BUF_BYTES`]
-/// unless `DIALOG_TREE_OP_BUF_BYTES` overrides it (experiment plumbing,
-/// read once per process, native only; explicit 0 disables the byte
-/// trigger).
-fn default_op_buf_bytes() -> usize {
+/// The process-wide `DIALOG_TREE_OP_BUF_BYTES` override, read once.
+fn env_op_buf_bytes() -> Option<usize> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        static BYTES: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
         *BYTES.get_or_init(|| {
             match std::env::var("DIALOG_TREE_OP_BUF_BYTES")
                 .ok()
                 .and_then(|raw| raw.parse().ok())
             {
-                Some(0) => usize::MAX,
-                Some(bytes) => bytes,
-                None => DEFAULT_OP_BUF_BYTES,
+                Some(0) => Some(usize::MAX),
+                other => other,
             }
         })
     }
     #[cfg(target_arch = "wasm32")]
-    DEFAULT_OP_BUF_BYTES
+    None
 }
 
-fn default_op_buf_size() -> usize {
+/// The process-wide `DIALOG_TREE_OP_BUF` override, read once.
+fn env_op_buf_size() -> Option<usize> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        static SIZE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
         *SIZE.get_or_init(|| {
             std::env::var("DIALOG_TREE_OP_BUF")
                 .ok()
                 .and_then(|raw| raw.parse().ok())
                 .filter(|&size| size > 0)
-                .unwrap_or(DEFAULT_OP_BUF_SIZE)
         })
     }
     #[cfg(target_arch = "wasm32")]
-    DEFAULT_OP_BUF_SIZE
+    None
 }
 
 /// A boxed future returning an edited [`TransientNode`], the shape `enqueue`
@@ -231,8 +230,12 @@ where
 {
     root: HitchhikerRoot<Key, Value>,
     cache: Cache<Blake3Hash, Buffer>,
-    op_buf_size: usize,
-    op_buf_bytes: usize,
+    /// Explicit op-count cap; `None` derives it from the manifest (see
+    /// [`op_buf_size`]).
+    op_buf_size: Option<usize>,
+    /// Explicit op-weight cap; `None` derives it from the manifest (see
+    /// [`op_buf_bytes`]).
+    op_buf_bytes: Option<usize>,
     policy: FlushPolicy,
     trigger: FlushTrigger,
     /// The tree's format header. Known from opening for an empty tree, which
@@ -282,8 +285,8 @@ where
         Self {
             root,
             cache: tree.node_cache(),
-            op_buf_size: default_op_buf_size(),
-            op_buf_bytes: default_op_buf_bytes(),
+            op_buf_size: env_op_buf_size(),
+            op_buf_bytes: env_op_buf_bytes(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest,
@@ -296,8 +299,8 @@ where
         Self {
             root: HitchhikerRoot::Empty,
             cache: Cache::new(),
-            op_buf_size: default_op_buf_size(),
-            op_buf_bytes: default_op_buf_bytes(),
+            op_buf_size: env_op_buf_size(),
+            op_buf_bytes: env_op_buf_bytes(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest: Some(manifest),
@@ -329,17 +332,19 @@ where
         })
     }
 
-    /// Sets the per-node novelty capacity (the write-amplification knob).
+    /// Sets the per-node novelty capacity (the write-amplification knob),
+    /// in place of the one derived from the tree's manifest.
     pub fn with_op_buf_size(mut self, op_buf_size: usize) -> Self {
-        self.op_buf_size = op_buf_size.max(1);
+        self.op_buf_size = Some(op_buf_size.max(1));
         self
     }
 
-    /// Sets the per-node novelty WEIGHT cap: the buffer flushes when its
-    /// buffered weight (key bytes + value payloads) exceeds this, whatever
-    /// the op count. `usize::MAX` (the default) disables the byte trigger.
+    /// Sets the per-node novelty WEIGHT cap, in place of the one derived
+    /// from the tree's manifest: the buffer flushes when its buffered
+    /// weight exceeds this, whatever the op count. `usize::MAX` disables
+    /// the byte trigger.
     pub fn with_op_buf_bytes(mut self, op_buf_bytes: usize) -> Self {
-        self.op_buf_bytes = op_buf_bytes.max(1);
+        self.op_buf_bytes = Some(op_buf_bytes.max(1));
         self
     }
 
@@ -530,6 +535,9 @@ where
             }
         };
 
+        // The buffer caps derive from, and buffered ops are metered under,
+        // the tree's own format, known now that the root is loaded.
+        let manifest = Self::format(self.manifest)?;
         let mut deferred = Vec::new();
         let node = match loaded {
             // Immediate never buffers: every op goes straight to the canonical
@@ -543,8 +551,9 @@ where
                     node,
                     msgs,
                     EnqueueConfig {
-                        op_buf_size: self.op_buf_size,
-                        op_buf_bytes: self.op_buf_bytes,
+                        op_buf_size: self.op_buf_size.unwrap_or_else(|| op_buf_size(&manifest)),
+                        op_buf_bytes: self.op_buf_bytes.unwrap_or_else(|| op_buf_bytes(&manifest)),
+                        manifest,
                         policy: self.policy,
                         trigger: self.trigger,
                         settle,
@@ -1043,6 +1052,8 @@ where
 struct EnqueueConfig {
     op_buf_size: usize,
     op_buf_bytes: usize,
+    /// The tree's format: buffered ops are metered under it.
+    manifest: Manifest,
     policy: FlushPolicy,
     trigger: FlushTrigger,
     settle: bool,
@@ -1117,7 +1128,7 @@ where
         // and buffered weight rides every per-commit root rewrite and every
         // pushed operational block).
         let over_bytes = config.op_buf_bytes != usize::MAX
-            && index.novelty.weight::<Key>()? > config.op_buf_bytes;
+            && index.novelty.weight::<Key>(&config.manifest)? > config.op_buf_bytes;
         let per_child_threshold = match config.trigger {
             FlushTrigger::Capacity => None,
             FlushTrigger::PerChild { floor } => {
@@ -1154,9 +1165,9 @@ where
         // measured 24-26% duplicate-block share of sealed bytes; see bead
         // dialog-db-59). Provenance is the cheap, exact signal here — store
         // identity is not observable at persist time.
-        let mut measures = index.novelty.link_measures::<Key>()?;
+        let mut measures = index.novelty.link_measures::<Key>(&config.manifest)?;
         measures.sort_by_key(|&(_, weight, ops)| std::cmp::Reverse((weight, ops)));
-        let mut buffered_weight = index.novelty.weight::<Key>()?;
+        let mut buffered_weight = index.novelty.weight::<Key>(&config.manifest)?;
         let mut buffered_ops = index.novelty.len();
         let weight_target = if over_bytes {
             config.op_buf_bytes / 2

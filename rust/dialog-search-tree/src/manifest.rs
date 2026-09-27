@@ -164,6 +164,40 @@ impl Manifest {
     pub fn frame_ceiling(&self) -> usize {
         self.frame_ceiling_factor as usize * self.max_segment as usize
     }
+
+    // The per-entry and per-link overheads below shape the tree (they meter
+    // the weight byte pacing cuts by), so they are part of the format. They
+    // are fixed by the format version rather than stored per tree: version 1
+    // is the only format, and a new value means a new version.
+
+    /// Weight charged per leaf entry beyond its key bytes and its value's
+    /// payload weight: the columnar bookkeeping each entry costs in an
+    /// encoded leaf (front-coding offsets, dictionary and value-table
+    /// framing, polarity). Calibrated against measured leaf encodings on the
+    /// SE dataset: without it encoded bytes drifted to 1.85x the metered
+    /// weight at p90 (max 2.1x); with it bytes/weight is p50 1.02 / p90 1.05,
+    /// so `max_segment` and the frame ceiling denominate in effective bytes.
+    /// Buffered ops are metered the same way for the buffer byte cap.
+    pub fn entry_overhead(&self) -> usize {
+        64
+    }
+
+    /// Weight the per-key cut floor charges beyond a key's bytes, where the
+    /// value's payload is not in hand: a stand-in for the value slot and the
+    /// per-entry encoding. Lower than [`entry_overhead`](Self::entry_overhead)
+    /// plus any payload, so the floor never predicts a cut the full charge
+    /// would not make.
+    pub fn key_overhead(&self) -> usize {
+        32
+    }
+
+    /// Weight charged per index link beyond its separator bytes and the
+    /// 32-byte child hash: per-link encoding overhead (offsets, front-coding
+    /// bookkeeping). The index-level analog of
+    /// [`entry_overhead`](Self::entry_overhead).
+    pub fn link_overhead(&self) -> usize {
+        16
+    }
 }
 
 #[cfg(test)]

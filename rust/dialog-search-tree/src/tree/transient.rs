@@ -1501,9 +1501,9 @@ where
         } else {
             match follow(&mut root, &path)? {
                 TransientNode::Segment(segment) => {
-                    let weight = segment.total_weight();
+                    let weight = segment.total_weight(&manifest);
                     let weight = match &self {
-                        Edit::Upsert(entry) => weight + entry.weight(),
+                        Edit::Upsert(entry) => weight + entry.weight(&manifest),
                         Edit::Delete(_) => weight,
                     };
                     weight > manifest.frame_ceiling()
@@ -1577,9 +1577,13 @@ where
                                 segment.entries(),
                                 &manifest,
                             );
-                            !D::leaf_cut(entry.key.as_ref(), bank + entry.weight(), &manifest)
+                            !D::leaf_cut(
+                                entry.key.as_ref(),
+                                bank + entry.weight(&manifest),
+                                &manifest,
+                            )
                         } else {
-                            !D::leaf_cut(entry.key.as_ref(), entry.weight(), &manifest)
+                            !D::leaf_cut(entry.key.as_ref(), entry.weight(&manifest), &manifest)
                         }
                     }
                     _ => false,
@@ -1624,7 +1628,11 @@ where
                                 let last = entries
                                     .last()
                                     .expect("segment with a found key is non-empty");
-                                !D::leaf_cut(last.key.as_ref(), bank + last.weight(), &manifest)
+                                !D::leaf_cut(
+                                    last.key.as_ref(),
+                                    bank + last.weight(&manifest),
+                                    &manifest,
+                                )
                             } else {
                                 false
                             }
@@ -1662,9 +1670,13 @@ where
                                 )
                             {
                                 at -= 1;
-                                bank += entries[at].weight();
+                                bank += entries[at].weight(&manifest);
                             }
-                            !D::leaf_cut(entry.key.as_ref(), bank + entry.weight(), &manifest)
+                            !D::leaf_cut(
+                                entry.key.as_ref(),
+                                bank + entry.weight(&manifest),
+                                &manifest,
+                            )
                         }
                         _ => false,
                     }
@@ -2118,7 +2130,7 @@ where
     D: Distribution,
 {
     let mut at = entries.len() - 1;
-    let mut weight = entries[at].weight();
+    let mut weight = entries[at].weight(&manifest);
     while at > 0
         && D::vetoes(
             entries[at - 1].key.as_ref(),
@@ -2127,7 +2139,7 @@ where
         )
     {
         at -= 1;
-        weight += entries[at].weight();
+        weight += entries[at].weight(&manifest);
     }
     weight
 }
@@ -2158,7 +2170,7 @@ where
             entries[*cur].key.as_ref(),
             manifest,
         ) {
-            bank += entries[*prev].weight();
+            bank += entries[*prev].weight(&manifest);
         } else {
             break;
         }
@@ -2638,7 +2650,11 @@ where
                 Node::Persistent(link) => PieceSource::Fetch(link.clone()),
                 Node::Transient(TransientNode::Segment(segment)) => PieceSource::Ready(
                     segment.entries().iter().map(|e| e.key.clone()).collect(),
-                    segment.entries().iter().map(Entry::weight).collect(),
+                    segment
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.weight(&manifest))
+                        .collect(),
                 ),
                 Node::Transient(_) => return Ok(false),
             });
@@ -2669,7 +2685,7 @@ where
                 let entries = segment.entries();
                 piece_lens.push(entries.len());
                 keys.extend(entries.iter().map(|e| e.key.clone()));
-                weights.extend(entries.iter().map(Entry::weight));
+                weights.extend(entries.iter().map(|entry| entry.weight(&manifest)));
             }
         }
     }
@@ -2679,11 +2695,11 @@ where
     // piece's length adjusts directly.
     match edit {
         Edit::Upsert(entry) => match keys.binary_search(&entry.key) {
-            Ok(i) => weights[i] = entry.weight(),
+            Ok(i) => weights[i] = entry.weight(&manifest),
             Err(i) => {
                 piece_lens[run_at] += 1;
                 keys.insert(i, entry.key.clone());
-                weights.insert(i, entry.weight());
+                weights.insert(i, entry.weight(&manifest));
             }
         },
         Edit::Delete(key) => {
@@ -2802,15 +2818,15 @@ where
                 let mut weights: Vec<usize> = Vec::with_capacity(entries.len() + 1);
                 for entry in entries {
                     keys.push(entry.key.as_ref());
-                    weights.push(entry.weight());
+                    weights.push(entry.weight(&manifest));
                 }
                 match edit {
                     Edit::Upsert(entry) => {
                         match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
-                            Ok(i) => weights[i] = entry.weight(),
+                            Ok(i) => weights[i] = entry.weight(&manifest),
                             Err(i) => {
                                 keys.insert(i, entry.key.as_ref());
-                                weights.insert(i, entry.weight());
+                                weights.insert(i, entry.weight(&manifest));
                             }
                         }
                     }
@@ -2835,7 +2851,10 @@ where
                         let entries = segment.entries();
                         let keys: Vec<&[u8]> =
                             entries.iter().map(|entry| entry.key.as_ref()).collect();
-                        let weights: Vec<usize> = entries.iter().map(Entry::weight).collect();
+                        let weights: Vec<usize> = entries
+                            .iter()
+                            .map(|entry| entry.weight(&manifest))
+                            .collect();
                         pieces.push(Pending::Ready(Arc::new(PieceSummary::build::<D>(
                             &keys, &weights, manifest,
                         ))));
@@ -2861,7 +2880,10 @@ where
                 };
                 let entries = segment.entries();
                 let keys: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_ref()).collect();
-                let weights: Vec<usize> = entries.iter().map(Entry::weight).collect();
+                let weights: Vec<usize> = entries
+                    .iter()
+                    .map(|entry| entry.weight(&manifest))
+                    .collect();
                 summary::memoize(
                     &link.node,
                     manifest,
@@ -4638,7 +4660,7 @@ where
             // preceded by an accepted seam whenever this fast path can
             // apply (vetoed adjacency is rejected below), so its bank is
             // zero and the entry's own weight is the exact charge.
-            if D::leaf_cut(entry.key.as_ref(), entry.weight(), manifest) {
+            if D::leaf_cut(entry.key.as_ref(), entry.weight(&manifest), manifest) {
                 return false; // inserting a cutting coin splits the segment
             }
             let at = found.unwrap_err();
@@ -6755,7 +6777,7 @@ mod tests {
                 );
                 piece_weight = 0;
             }
-            piece_weight += distribution::cap::entry_weight(&key.0);
+            piece_weight += distribution::cap::entry_weight(&key.0, &manifest);
         }
         assert!(piece_weight <= cap, "the final piece must fit the target");
 
@@ -6890,10 +6912,11 @@ mod tests {
     ) -> Result<Vec<usize>> {
         let boundaries: HashSet<Vec<u8>> =
             leaf_boundaries(root, storage).await?.into_iter().collect();
+        let manifest = VarTree::from_hash(root.clone()).manifest(storage).await?;
         let mut weights = Vec::new();
         let mut current = 0usize;
         for key in sorted {
-            current += distribution::cap::entry_weight(&key.0);
+            current += distribution::cap::entry_weight(&key.0, &manifest);
             if boundaries.contains(&key.0) {
                 weights.push(current);
                 current = 0;
@@ -6974,7 +6997,7 @@ mod tests {
                 let ceiling = manifest.frame_ceiling();
                 let slack = sorted
                     .iter()
-                    .map(|key| distribution::cap::entry_weight(&key.0))
+                    .map(|key| distribution::cap::entry_weight(&key.0, &manifest))
                     .max()
                     .expect("keys exist");
                 for weight in leaf_weights(&sorted, tree.root(), &storage).await? {
@@ -7095,8 +7118,8 @@ mod tests {
                 let charge: usize = keys
                     .iter()
                     .map(|key| {
-                        distribution::cap::entry_weight(&key.0)
-                            + crate::entry::ENTRY_ENCODING_OVERHEAD
+                        distribution::cap::entry_weight(&key.0, &manifest)
+                            + manifest.entry_overhead()
                     })
                     .sum();
                 let last = &keys[2];
@@ -7249,9 +7272,10 @@ mod tests {
             for hash in &frontier {
                 let node: PersistentNode<VarKey, Vec<u8>> = accessor.get_node(hash).await?;
                 if let Ok(index) = node.as_index() {
+                    let manifest = node.manifest()?;
                     let mut weight = 0usize;
                     for at in 0..index.len() {
-                        weight += distribution::cap::link_weight(&index.separator(at)?);
+                        weight += distribution::cap::link_weight(&index.separator(at)?, &manifest);
                         next.push(index.hash_at(at)?.clone());
                     }
                     stats.push((depth, weight, index.len()));
@@ -7566,7 +7590,7 @@ mod tests {
             // One link of slack mirrors the leaf bound: the recursion stops
             // splitting once every piece is at or under the ceiling.
             assert!(
-                weight <= ceiling + distribution::cap::link_weight(&[0u8; 32]) + 512,
+                weight <= ceiling + distribution::cap::link_weight(&[0u8; 32], &manifest) + 512,
                 "index node at depth {depth} carries {weight} weighted link bytes \
                  across {children} children, over the {ceiling} ceiling"
             );

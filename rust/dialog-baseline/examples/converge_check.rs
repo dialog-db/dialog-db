@@ -69,9 +69,7 @@ async fn leaf_violations(
                 while let Some((at, key)) = keys.next_key()? {
                     let value: State<Datum> =
                         dialog_search_tree::into_owned(segment.value_at(at)?)?;
-                    let charge = key.len()
-                        + value.payload_weight()
-                        + dialog_search_tree::ENTRY_ENCODING_OVERHEAD;
+                    let charge = key.len() + value.payload_weight() + manifest.entry_overhead();
                     let cut = dialog_search_tree::Geometric::leaf_cut(key, charge, &manifest);
                     leaf.push((key.to_vec(), cut));
                 }
@@ -175,9 +173,7 @@ async fn replay_grouped(
                         // The production coin charge: key bytes + payload
                         // weight + per-entry encoding overhead (bank-free —
                         // the veto never fires on this workload).
-                        let charge = key.len()
-                            + value.payload_weight()
-                            + dialog_search_tree::ENTRY_ENCODING_OVERHEAD;
+                        let charge = key.len() + value.payload_weight() + manifest.entry_overhead();
                         let cut = dialog_search_tree::Geometric::leaf_cut(key, charge, &manifest);
                         coins.push((key.to_vec(), cut));
                     }
