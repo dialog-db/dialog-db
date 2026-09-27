@@ -9,6 +9,11 @@
 //! [`sort_key`](ArtifactView::sort_key) — derived straight from a scanned
 //! row's stored key bytes, with no per-row value decode or re-encode.
 //!
+//! Every helper takes the format [`Manifest`] of the trees the streams are
+//! read from. A scanned row's key already carries that format; an owned
+//! row (an overlay fact) and a retracted fact are keyed under it, so they
+//! order and match exactly as the tree's own rows do.
+//!
 //! - [`merge_grouped`] is the k-way merge that backs query-time
 //!   union of multiple sources. It preserves the "as-if merged into a
 //!   single physical tree" order via [`sort_key`](dialog_artifacts::sort_key)
@@ -23,9 +28,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use dialog_artifacts::{
-    Artifact, ArtifactStream, ArtifactView, Cause, Changes, SortKey, default_sort_key,
-};
+use dialog_artifacts::{Artifact, ArtifactStream, ArtifactView, Cause, Changes, SortKey, sort_key};
+use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
 
 /// Merge sorted artifact streams into one stream whose order matches
@@ -33,10 +37,11 @@ use futures_util::{StreamExt, stream};
 /// produce, deduplicating identical claims that appear in more than one
 /// source.
 ///
-/// Each input is assumed sorted by [`sort_key`] — true of branch
-/// scans by construction (the prolly tree stores entries in that
-/// order) and true of `Provider<Select> for Changes` by construction
-/// (it sorts its materialized vec). Implemented as a streaming k-way
+/// Each input is assumed sorted by [`sort_key`] under `manifest` — true
+/// of scans of trees written under `manifest` by construction (the
+/// prolly tree stores entries in that order), and of in-memory overlays
+/// read with that manifest ([`Changes::select`], `Ephemeral::select`),
+/// which sort their materialized rows by it. Implemented as a streaming k-way
 /// merge over per-stream head slots, each holding the front row and its
 /// sort key.
 ///
@@ -70,7 +75,10 @@ use futures_util::{StreamExt, stream};
 /// spilled tail carries the whole-value content hash), so two rows share a
 /// fingerprint iff they are the same `(the, of, is, cause)` claim — no
 /// value decode needed.
-pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
+pub(crate) fn merge_grouped<'a>(
+    streams: Vec<ArtifactStream<'a>>,
+    manifest: Manifest,
+) -> ArtifactStream<'a> {
     if streams.is_empty() {
         return Box::pin(stream::empty());
     }
@@ -98,7 +106,7 @@ pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStr
                 None => None,
                 Some(row) => {
                     let view = row?;
-                    let key = view.sort_key()?;
+                    let key = view.sort_key(&manifest)?;
                     Some((key, view))
                 }
             });
@@ -133,7 +141,7 @@ pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStr
                 None => None,
                 Some(row) => {
                     let next_view = row?;
-                    let next_key = next_view.sort_key()?;
+                    let next_key = next_view.sort_key(&manifest)?;
                     Some((next_key, next_view))
                 }
             };
@@ -159,7 +167,7 @@ pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStr
 /// Asserts and Replaces are ignored; only Retracts contribute. Used
 /// at query time to filter matching source facts out of branch
 /// streams before they reach the merge.
-pub(crate) fn tombstones_from(changes: &Changes) -> HashSet<SortKey> {
+pub(crate) fn tombstones_from(changes: &Changes, manifest: &Manifest) -> HashSet<SortKey> {
     let mut tombstones = HashSet::new();
     for (entity, attribute, change) in changes.iter() {
         if let dialog_artifacts::Change::Retract(value) = change {
@@ -169,35 +177,36 @@ pub(crate) fn tombstones_from(changes: &Changes) -> HashSet<SortKey> {
                 is: value.clone(),
                 cause: None,
             };
-            tombstones.insert(default_sort_key(&artifact));
+            tombstones.insert(sort_key(&artifact, manifest));
         }
     }
     tombstones
 }
 
 /// Wrap an artifact stream in a filter that drops any item whose
-/// [`sort_key`] is in `tombstones`. No-op when the set is empty.
+/// [`sort_key`] under `manifest` is in `tombstones` (which must be keyed
+/// under the same manifest). No-op when the set is empty.
 pub(crate) fn filter_tombstones<'a>(
     inner: ArtifactStream<'a>,
     tombstones: Arc<HashSet<SortKey>>,
+    manifest: Manifest,
 ) -> ArtifactStream<'a> {
     if tombstones.is_empty() {
         return inner;
     }
     Box::pin(stream::unfold(
         (inner, tombstones),
-        |(mut inner, tombstones)| async move {
+        move |(mut inner, tombstones)| async move {
             loop {
                 match inner.next().await {
                     None => return None,
                     Some(Err(e)) => return Some((Err::<ArtifactView, _>(e), (inner, tombstones))),
                     Some(Ok(view)) => {
-                        // The row's sort key comes straight from its stored
-                        // key bytes; the tombstone set was built with
-                        // `default_sort_key`, which agrees byte-for-byte
-                        // under the default manifest (see
-                        // `ArtifactView::sort_key`).
-                        match view.sort_key() {
+                        // A scanned row's sort key comes straight from its
+                        // stored key bytes, written under the tree's
+                        // manifest; the tombstones were keyed under that
+                        // same manifest (see `ArtifactView::sort_key`).
+                        match view.sort_key(&manifest) {
                             Err(e) => return Some((Err(e), (inner, tombstones))),
                             Ok(key) => {
                                 if tombstones.contains(&key) {
@@ -249,7 +258,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_yields_empty_stream_when_no_inputs() -> anyhow::Result<()> {
-        let merged = merge_grouped(vec![]);
+        let merged = merge_grouped(vec![], Manifest::default());
         let items = collect(merged).await?;
         assert!(items.is_empty());
         Ok(())
@@ -261,7 +270,10 @@ mod tests {
         // since branch / overlay scans are duplicate-free by
         // construction.
         let a = artifact("id:a", "test/name", "Alice");
-        let merged = merge_grouped(vec![stream_of(vec![a.clone(), a.clone()])]);
+        let merged = merge_grouped(
+            vec![stream_of(vec![a.clone(), a.clone()])],
+            Manifest::default(),
+        );
         let items = collect(merged).await?;
         assert_eq!(items.len(), 2);
         Ok(())
@@ -272,7 +284,10 @@ mod tests {
         // Same artifact from two streams collapses to one in the
         // merged output.
         let a = artifact("id:a", "test/name", "Alice");
-        let merged = merge_grouped(vec![stream_of(vec![a.clone()]), stream_of(vec![a.clone()])]);
+        let merged = merge_grouped(
+            vec![stream_of(vec![a.clone()]), stream_of(vec![a.clone()])],
+            Manifest::default(),
+        );
         let items = collect(merged).await?;
         assert_eq!(items.len(), 1);
         Ok(())
@@ -294,11 +309,11 @@ mod tests {
             Value::String("Bob".into()),
         );
 
-        let tombstones = tombstones_from(&changes);
+        let tombstones = tombstones_from(&changes, &Manifest::default());
         assert_eq!(tombstones.len(), 1, "only the retract contributes");
         // The lone tombstone matches the retracted artifact.
         let retracted = artifact("id:bob", "test/name", "Bob");
-        assert!(tombstones.contains(&default_sort_key(&retracted)));
+        assert!(tombstones.contains(&sort_key(&retracted, &Manifest::default())));
         Ok(())
     }
 
@@ -307,9 +322,13 @@ mod tests {
         let keep = artifact("id:a", "test/name", "Keep");
         let drop = artifact("id:b", "test/name", "Drop");
         let mut tombstones = HashSet::new();
-        tombstones.insert(default_sort_key(&drop));
+        tombstones.insert(sort_key(&drop, &Manifest::default()));
 
-        let filtered = filter_tombstones(stream_of(vec![keep.clone(), drop]), Arc::new(tombstones));
+        let filtered = filter_tombstones(
+            stream_of(vec![keep.clone(), drop]),
+            Arc::new(tombstones),
+            Manifest::default(),
+        );
         let items = collect(filtered).await?;
         assert_eq!(items, vec![keep]);
         Ok(())
@@ -322,6 +341,7 @@ mod tests {
         let filtered = filter_tombstones(
             stream_of(vec![a.clone(), b.clone()]),
             Arc::new(HashSet::new()),
+            Manifest::default(),
         );
         let items = collect(filtered).await?;
         assert_eq!(items, vec![a, b]);

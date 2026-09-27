@@ -21,7 +21,7 @@ use dialog_artifacts::{
 };
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_search_tree::{
-    ArchivedNodeBody, Buffer as TreeBuffer, Distribution as _, Manifest, PersistentNode, Value as _,
+    ArchivedNodeBody, Buffer as TreeBuffer, Distribution as _, PersistentNode, Value as _,
 };
 use dialog_storage::{
     Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
@@ -53,10 +53,11 @@ async fn leaf_violations(
             anyhow::bail!("reachable node missing");
         };
         let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
+        let manifest = node.manifest()?;
         match node.body() {
             ArchivedNodeBody::Index(index) => {
                 for at in (0..index.len()).rev() {
-                    if index.separator(at)?.len() > Manifest::default().max_separator as usize {
+                    if index.separator(at)?.len() > manifest.max_separator as usize {
                         forced_links += 1;
                     }
                     stack.push(*index.hash_at(at)?.as_bytes());
@@ -71,8 +72,7 @@ async fn leaf_violations(
                     let charge = key.len()
                         + value.payload_weight()
                         + dialog_search_tree::ENTRY_ENCODING_OVERHEAD;
-                    let cut =
-                        dialog_search_tree::Geometric::leaf_cut(key, charge, &Manifest::default());
+                    let cut = dialog_search_tree::Geometric::leaf_cut(key, charge, &manifest);
                     leaf.push((key.to_vec(), cut));
                 }
                 let len = leaf.len();
@@ -147,6 +147,7 @@ async fn replay_grouped(
         };
         let size = bytes.len();
         let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
+        let manifest = node.manifest()?;
         match node.body() {
             ArchivedNodeBody::Index(index) => {
                 for at in (0..index.len()).rev() {
@@ -177,11 +178,7 @@ async fn replay_grouped(
                         let charge = key.len()
                             + value.payload_weight()
                             + dialog_search_tree::ENTRY_ENCODING_OVERHEAD;
-                        let cut = dialog_search_tree::Geometric::leaf_cut(
-                            key,
-                            charge,
-                            &Manifest::default(),
-                        );
+                        let cut = dialog_search_tree::Geometric::leaf_cut(key, charge, &manifest);
                         coins.push((key.to_vec(), cut));
                     }
                     entries += 1;

@@ -26,9 +26,7 @@ mod store;
 pub use store::*;
 
 mod update;
-pub use update::{
-    Change, ChangeStream, Changes, SortKey, Statement, Update, default_sort_key, sort_key,
-};
+pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort_key};
 
 mod attribute;
 pub use attribute::*;
@@ -134,16 +132,15 @@ where
     spine: SpineSlot,
 }
 
-/// The head pointer's value for a store with no revision: the all-zero
-/// value, which names no revision block. It is what every version before
-/// the sentinel-free empty tree wrote and expects to read, so it is still
-/// written; the API reports it as `None`.
-const NO_REVISION: [u8; HASH_SIZE] = [0u8; HASH_SIZE];
+/// The head pointer value versions before the sentinel-free empty tree
+/// wrote for a store with no revision: the all-zero value, which names no
+/// revision block. Still read as "no revision", never written.
+const LEGACY_NO_REVISION: [u8; HASH_SIZE] = [0u8; HASH_SIZE];
 
-/// Whether a stored head pointer value means "no revision": the all-zero
-/// value, or the empty value an intermediate format wrote.
+/// Whether a stored head pointer value means "no revision": the empty
+/// value, or the all-zero one earlier versions wrote.
 fn is_no_revision(bytes: &[u8]) -> bool {
-    bytes.is_empty() || bytes == NO_REVISION
+    bytes.is_empty() || bytes == LEGACY_NO_REVISION
 }
 
 impl<Backend> Artifacts<Backend>
@@ -311,14 +308,11 @@ where
         };
 
         // The head pointer's value is the revision hash; "no revision" is
-        // recorded as the all-zero value every version reads (see
-        // `NO_REVISION`).
+        // recorded as an empty value, not a sentinel hash.
         self.storage
             .set(
                 make_reference(self.identifier.as_bytes()),
-                revision
-                    .map(|hash| hash.to_vec())
-                    .unwrap_or_else(|| NO_REVISION.to_vec()),
+                revision.map(|hash| hash.to_vec()).unwrap_or_default(),
             )
             .await?;
 
@@ -606,7 +600,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::NO_REVISION;
+    use super::LEGACY_NO_REVISION;
     use std::{collections::BTreeSet, iter::once, str::FromStr, sync::Arc};
     use tokio::io::{BufReader, BufWriter};
 
@@ -2833,7 +2827,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_records_no_revision_as_the_zero_pointer() -> Result<()> {
+    async fn it_records_no_revision_as_an_empty_pointer() -> Result<()> {
         // Use memory storage backend to avoid file system errors
         let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 
@@ -2843,15 +2837,15 @@ mod tests {
         // Reset to the empty, no-revision state
         artifacts.reset(None).await?;
 
-        // The head pointer records "no revision" as the all-zero value
-        // earlier versions write and read.
+        // The head pointer records "no revision" as an empty value, not a
+        // sentinel hash.
         let reference_key = make_reference(artifacts.identifier().as_bytes());
         let stored_value = artifacts.storage.get(&reference_key).await?;
 
         assert_eq!(
             stored_value,
-            Some(NO_REVISION.to_vec()),
-            "no revision is the zero pointer value"
+            Some(Vec::new()),
+            "no revision is an empty pointer value"
         );
         assert_eq!(artifacts.revision().await?, None);
 
@@ -2859,11 +2853,11 @@ mod tests {
     }
 
     /// Stores written by earlier versions record "no revision" as the
-    /// all-zero pointer, and one intermediate format as an empty value;
-    /// both open and reload as the empty store.
+    /// all-zero pointer, and current ones as an empty value; both open and
+    /// reload as the empty store.
     #[dialog_common::test]
     async fn it_opens_both_no_revision_pointers_as_empty() -> Result<()> {
-        for stored in [NO_REVISION.to_vec(), Vec::new()] {
+        for stored in [LEGACY_NO_REVISION.to_vec(), Vec::new()] {
             let mut backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
             let identifier = "legacy".to_string();
             backend
@@ -3342,7 +3336,6 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
         use crate::EntityKey;
-        use crate::key::default_manifest;
         use crate::tree::fetch_spilled;
         let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
         let value = Value::String("m".repeat(n));
@@ -3352,7 +3345,8 @@ mod tests {
             is: value.clone(),
             cause: None,
         };
-        let key = EntityKey::from_artifact(&artifact, &default_manifest()).into_key();
+        let key = EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default())
+            .into_key();
         // A store that never had the block written.
         let empty = MemoryStorageBackend::<dialog_storage::Blake3Hash, Vec<u8>>::default();
         let result = fetch_spilled(&empty, &key).await;

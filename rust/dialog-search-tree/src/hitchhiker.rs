@@ -235,13 +235,12 @@ where
     op_buf_bytes: usize,
     policy: FlushPolicy,
     trigger: FlushTrigger,
-    /// The tree's format header, captured from the root node the first time a
-    /// write or canonicalize loads it (opening is synchronous and cannot read
-    /// it). `None` until then, and forever for a tree born empty, whose first
-    /// canonical write stamps the default format. Threaded into every replay
-    /// and persist so the buffered path re-shapes and re-stamps under the
-    /// tree's own format, mirroring the guard `TransientTree::load` enforces
-    /// on the canonical edit path.
+    /// The tree's format header. Known from opening for an empty tree, which
+    /// carries it in memory; captured from the root node the first time a
+    /// write or canonicalize loads a stored root (opening is synchronous and
+    /// cannot read it), and `None` only until then. Threaded into every
+    /// replay and persist so the buffered path re-shapes and re-stamps under
+    /// the tree's own format, as the canonical edit path does.
     manifest: Option<Manifest>,
     distribution: PhantomData<D>,
 }
@@ -292,8 +291,8 @@ where
         }
     }
 
-    /// Opens an empty buffered tree.
-    pub fn empty() -> Self {
+    /// Opens a new, empty buffered tree under `manifest`.
+    pub fn empty(manifest: Manifest) -> Self {
         Self {
             root: HitchhikerRoot::Empty,
             cache: Cache::new(),
@@ -301,29 +300,33 @@ where
             op_buf_bytes: default_op_buf_bytes(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
-            manifest: None,
+            manifest: Some(manifest),
             distribution: PhantomData,
         }
     }
 
-    /// Pins the format [`Manifest`] this session writes under while the
-    /// tree is empty. A non-empty root's stored manifest still takes
-    /// precedence on first load: until adopt-on-edit exists, edits must
-    /// run under the format the nodes already carry.
+    /// Replaces the format [`Manifest`] this session writes under while the
+    /// tree is empty. A stored root's manifest takes precedence on first
+    /// load: edits always run under the format the nodes already carry.
     ///
-    /// The manifest normally travels IN the tree (every node carries it),
-    /// which leaves one gap: an EMPTY tree has no node to carry it, so a
-    /// session opened over an empty root writes under [`Manifest::default`]
-    /// — even when the tree held a different format before its last entry
-    /// was deleted. A caller that configures a non-default format must
-    /// therefore re-impose it whenever it opens over a possibly-empty
-    /// tree, or an empty-and-refill lifecycle silently reverts the store
-    /// to the default format (and two replicas that emptied at different
-    /// points diverge on identical facts). This was found by the
-    /// adversarial convergence soak's delete-to-empty pattern.
+    /// The manifest travels IN the tree (every node carries it, and an
+    /// emptied tree persists the manifest-carrying empty node), so reopening
+    /// a tree keeps its format with no help from here. This only chooses the
+    /// format of a tree that has no stored root yet.
     pub fn with_manifest(mut self, manifest: Manifest) -> Self {
         self.manifest = Some(manifest);
         self
+    }
+
+    /// The format this session writes under: known from opening for an empty
+    /// tree, and from the first root load for a stored one. Every path that
+    /// reaches a loaded or empty root has it; asking earlier is a bug here.
+    fn format(manifest: Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
+        manifest.ok_or_else(|| {
+            DialogSearchTreeError::Node(
+                "The buffered tree's manifest is read before its root was loaded".into(),
+            )
+        })
     }
 
     /// Sets the per-node novelty capacity (the write-amplification knob).
@@ -604,7 +607,7 @@ where
                     oplist.extend(deferred);
                     let edit = TransientTree::<Key, Value, D>::empty_with_manifest(
                         self.cache.clone(),
-                        self.manifest.unwrap_or_default(),
+                        Self::format(self.manifest)?,
                     )
                     .plant(oplist, storage)
                     .await?;
@@ -636,7 +639,7 @@ where
             Some(node) => TransientTree::<Key, Value, D>::from_loaded(
                 node,
                 self.cache.clone(),
-                self.manifest.unwrap_or_default(),
+                Self::format(self.manifest)?,
             ),
             None => {
                 // An empty tree replays under the SESSION's format, not the
@@ -648,7 +651,7 @@ where
                 // the same entries canonically.)
                 TransientTree::<Key, Value, D>::empty_with_manifest(
                     self.cache.clone(),
-                    self.manifest.unwrap_or_default(),
+                    Self::format(self.manifest)?,
                 )
             }
         };
@@ -693,7 +696,7 @@ where
             // canonicalizes to the manifest-carrying empty node.
             HitchhikerRoot::Empty => TransientTree::<Key, Value, D>::empty_with_manifest(
                 self.cache.clone(),
-                self.manifest.unwrap_or_default(),
+                Self::format(self.manifest)?,
             ),
             HitchhikerRoot::Unloaded(hash) => {
                 // A cold reopen of a persisted buffered tree arrives here with
@@ -703,11 +706,7 @@ where
                 // byte-identical to a canonical node's) and keeps its hash
                 // with no rewrite.
                 if !subtree_has_novelty::<Key, Value, Backend>(&hash, &accessor).await? {
-                    TransientTree::<Key, Value, D>::with_manifest(
-                        hash,
-                        self.cache.clone(),
-                        self.manifest.unwrap_or_default(),
-                    )
+                    TransientTree::<Key, Value, D>::new(hash, self.cache.clone())
                 } else {
                     let root: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
                     // The replay must re-shape and re-stamp under the tree's
@@ -732,7 +731,7 @@ where
                 let edit = TransientTree::<Key, Value, D>::from_loaded(
                     node,
                     self.cache.clone(),
-                    self.manifest.unwrap_or_default(),
+                    Self::format(self.manifest)?,
                 );
                 replay_ops(edit, ops, storage).await?
             }
@@ -975,10 +974,8 @@ where
             // The empty tree persists the manifest-carrying empty node —
             // the format must survive emptiness (see `persist_empty_root`).
             HitchhikerRoot::Empty => {
-                let node = crate::persist_empty_root::<Key, Value>(
-                    &self.manifest.unwrap_or_default(),
-                    delta,
-                )?;
+                let node =
+                    crate::persist_empty_root::<Key, Value>(&Self::format(self.manifest)?, delta)?;
                 self.cache
                     .insert(node.hash().clone(), node.buffer().clone());
                 Ok(node.hash().clone())
@@ -986,11 +983,10 @@ where
             HitchhikerRoot::Unloaded(hash) => Ok(hash),
             // Every node carries the tree's format header. A loaded root means
             // a write loaded it, and that load captured the tree's own
-            // manifest; a tree born empty in this process has no stored header
-            // yet and takes the default, which is exactly what its first
-            // canonical write would stamp.
+            // manifest; a tree born empty in this process carries the
+            // manifest it was opened under.
             HitchhikerRoot::Loaded(node) => {
-                let manifest = self.manifest.unwrap_or_default();
+                let manifest = Self::format(self.manifest)?;
                 let node = node.persist(delta, &manifest)?;
                 // Seed the shared node cache with the frame just produced:
                 // the very next read of this root (a manifest lookup, a
@@ -1020,17 +1016,15 @@ where
             // Same empty-tree rule as `persist`: the manifest-carrying
             // empty node.
             HitchhikerRoot::Empty => {
-                let node = crate::persist_empty_root::<Key, Value>(
-                    &self.manifest.unwrap_or_default(),
-                    delta,
-                )?;
+                let node =
+                    crate::persist_empty_root::<Key, Value>(&Self::format(self.manifest)?, delta)?;
                 self.cache
                     .insert(node.hash().clone(), node.buffer().clone());
                 Ok(node.hash().clone())
             }
             HitchhikerRoot::Unloaded(hash) => Ok(hash.clone()),
             HitchhikerRoot::Loaded(node) => {
-                let manifest = self.manifest.unwrap_or_default();
+                let manifest = Self::format(self.manifest)?;
                 let node = node.persist_mut(delta, &manifest)?;
                 // Same cache seeding as `persist`: the frame this commit
                 // just produced is what the next read resolves the root to.
@@ -1910,7 +1904,7 @@ mod tests {
     async fn it_canonicalizes_empty_to_the_empty_node() -> Result<()> {
         let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let mut delta = Delta::zero();
-        let canonical = TestHitchhiker::empty()
+        let canonical = TestHitchhiker::empty(Manifest::default())
             .canonicalize(&storage, &mut delta)
             .await?;
         let mut scratch = Delta::zero();
@@ -1931,7 +1925,7 @@ mod tests {
         let expected = sequential(&keys, &mut storage).await?;
 
         // A large buffer keeps every op in the root: no cascade until canonicalize.
-        let mut tree = TestHitchhiker::empty().with_op_buf_size(100_000);
+        let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(100_000);
         for &k in &keys {
             tree = tree
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -1958,7 +1952,7 @@ mod tests {
             let keys: Vec<u32> = (0..500).collect();
             let expected = sequential(&keys, &mut storage).await?;
 
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(buf);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(buf);
             for &k in &keys {
                 tree = tree
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -2065,7 +2059,7 @@ mod tests {
 
             let expected = sequential(&sorted, &mut storage).await?;
 
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(8);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(8);
             for &k in &keys {
                 tree = tree
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -2104,7 +2098,7 @@ mod tests {
                 .collect();
             let expected = sequential(&survivors, &mut storage).await?;
 
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(16);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(16);
             for &k in &keys {
                 tree = tree
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -2162,7 +2156,7 @@ mod tests {
             }
 
             // Buffered through the hitchhiker tree, with a cascading buffer.
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(8);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(8);
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
                     tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
@@ -2224,7 +2218,7 @@ mod tests {
 
             // Buffered: the same ops through a cascading hitchhiker tree, never
             // canonicalized; reads merge the live buffers over the leaves.
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(8);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(8);
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
                     tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
@@ -2285,7 +2279,7 @@ mod tests {
 
             // A small buffer forces cascades, so ops end up spread across several
             // levels of novelty and the scan has to merge all of them.
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(8);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(8);
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
                     tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
@@ -2390,7 +2384,7 @@ mod tests {
 
         // A large buffer keeps every op in the root buffer, so all collisions on
         // a key resolve purely within one node's novelty.
-        let mut tree = TestHitchhiker::empty().with_op_buf_size(100_000);
+        let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(100_000);
 
         tree = tree.insert(7u32.to_le_bytes(), vec![1], &storage).await?;
         assert_eq!(
@@ -2503,7 +2497,7 @@ mod tests {
             for policy in POLICIES {
                 // A small buffer forces cascades for Amortized and Recursive; for
                 // Immediate the buffer is never used.
-                let mut tree = TestHitchhiker::empty()
+                let mut tree = TestHitchhiker::empty(Manifest::default())
                     .with_op_buf_size(8)
                     .with_flush_policy(policy);
                 for &(is_insert, key) in &ops {
@@ -2549,7 +2543,8 @@ mod tests {
         let keys: Vec<u32> = (0..200).collect();
         let expected = sequential(&keys, &mut storage).await?;
 
-        let mut tree = TestHitchhiker::empty().with_flush_policy(FlushPolicy::Immediate);
+        let mut tree =
+            TestHitchhiker::empty(Manifest::default()).with_flush_policy(FlushPolicy::Immediate);
         for &k in &keys {
             tree = tree
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -2888,7 +2883,7 @@ mod tests {
                 FlushTrigger::PerChild { floor: 1 },
                 FlushTrigger::PerChild { floor: 16 },
             ] {
-                let mut tree = TestHitchhiker::empty()
+                let mut tree = TestHitchhiker::empty(Manifest::default())
                     .with_op_buf_size(64)
                     .with_flush_trigger(trigger);
                 for (insert, key) in &ops {
@@ -3068,8 +3063,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(far_key(), vec![9], &storage)
             .await?
             .insert(probe(), vec![2], &storage)
@@ -3108,8 +3102,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(far_key(), vec![9], &storage)
             .await?
             .delete(&probe(), &storage)
@@ -3291,7 +3284,7 @@ mod tests {
 
         // A giant buffer keeps every op (after the first) in the root buffer,
         // so the persisted tree is unambiguously non-canonical.
-        let mut tree = TestHitchhiker::empty().with_op_buf_size(100_000);
+        let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(100_000);
         for &k in &keys {
             tree = tree
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -3382,8 +3375,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(left, vec![1], &storage)
             .await?
             .insert(right, vec![9], &storage)
@@ -3500,7 +3492,7 @@ mod tests {
 
         // Fill a pinned session from empty, drain it back to empty, then
         // refill: every write into the empty tree must shape under the pin.
-        let mut tree = HitchhikerTree::<[u8; 4], Vec<u8>>::empty().with_manifest(custom);
+        let mut tree = HitchhikerTree::<[u8; 4], Vec<u8>>::empty(custom);
         for k in 0..30u32 {
             tree = tree
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3561,7 +3553,7 @@ mod tests {
         let full = edit.persist(&mut delta)?;
         flush(&mut delta, &mut storage).await?;
 
-        let mut edit = full.edit_with_manifest(&storage).await?;
+        let mut edit = full.edit();
         for k in 0..30u32 {
             edit = edit.delete(&k.to_be_bytes(), &storage).await?;
         }
@@ -3608,8 +3600,7 @@ mod tests {
         // A no-op batch over the empty node is a fixpoint.
         let mut delta = Delta::zero();
         let stable = emptied
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .delete(&99u32.to_be_bytes(), &storage)
             .await?
             .persist(&mut delta)?;
@@ -3630,7 +3621,7 @@ mod tests {
         let mut delta = Delta::zero();
         let default_full = edit.persist(&mut delta)?;
         flush(&mut delta, &mut storage).await?;
-        let mut edit = default_full.edit_with_manifest(&storage).await?;
+        let mut edit = default_full.edit();
         for k in 0..10u32 {
             edit = edit.delete(&k.to_be_bytes(), &storage).await?;
         }
@@ -3676,7 +3667,7 @@ mod tests {
         let mut delta = Delta::zero();
         let full = edit.persist(&mut delta)?;
         flush(&mut delta, &mut storage).await?;
-        let mut edit = full.edit_with_manifest(&storage).await?;
+        let mut edit = full.edit();
         for k in 0..40u32 {
             edit = edit.delete(&k.to_be_bytes(), &storage).await?;
         }
@@ -3700,7 +3691,7 @@ mod tests {
         // Second life via canonical edits, reopened with no pinning: the
         // manifest comes off the empty node.
         let reopened = PersistentTree::<[u8; 4], Vec<u8>>::from_hash(emptied.root().clone());
-        let mut edit = reopened.edit_with_manifest(&storage).await?;
+        let mut edit = reopened.edit();
         for k in 100..160u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)

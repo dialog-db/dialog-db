@@ -1,13 +1,13 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::ArtifactTreeExt as _;
+use dialog_artifacts::tree::{ArtifactTreeExt as _, TreeStorageBridge};
 use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactView, DialogArtifactsError};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
-use dialog_search_tree::{Buffer, DialogSearchTreeError};
+use dialog_search_tree::{Buffer, ContentAddressedStorage, DialogSearchTreeError, Manifest};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
@@ -45,6 +45,35 @@ impl<'a> Select<'a> {
     pub fn catalog(&self) -> CatalogScope {
         ArchiveScope::new(self.source.subject()).index()
     }
+}
+
+/// The format [`Manifest`] of a line's tree: the manifest its root node
+/// carries, or, for a line with no tree yet, the one its empty tree holds
+/// (the format its first commit creates the tree under). Rows scanned from
+/// the line are keyed under it, so anything compared against them — an
+/// overlay row, a retracted fact, a demanded range — is keyed under it too.
+pub(crate) async fn line_manifest<Env>(
+    source: SourceRef<'_>,
+    env: &Env,
+) -> Result<Manifest, DialogArtifactsError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<crate::Hydrate>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    let node_cache = source.node_cache();
+    let tree = match source.root() {
+        Some(root) => Index::from_hash_with_cache(NodeHash::from(root), node_cache),
+        None => Index::empty_with_cache(node_cache),
+    };
+    let remote = source.fallback(env).await;
+    let store = NetworkedIndex::new(env, ArchiveScope::new(source.subject()).index(), remote);
+    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    Ok(tree.manifest(&storage).await?)
 }
 
 impl<'a> Select<'a> {

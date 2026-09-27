@@ -182,7 +182,7 @@ async fn run_canonical(program: &Program, manifest: Manifest) -> Result<Vec<Blak
         let edit = if tree.stored_root().is_none() {
             TransientTree::empty_with_manifest(Default::default(), manifest)
         } else {
-            tree.edit_with_manifest(&storage).await?
+            tree.edit()
         };
         tree = match *op {
             Op::Insert(key, len) => {
@@ -416,7 +416,7 @@ async fn minimize_caught_divergence() -> Result<()> {
         let edit = if tree.stored_root().is_none() {
             TransientTree::empty_with_manifest(Default::default(), manifest)
         } else {
-            tree.edit_with_manifest(&storage).await?
+            tree.edit()
         };
         tree = match *op {
             Op::Insert(key, len) => {

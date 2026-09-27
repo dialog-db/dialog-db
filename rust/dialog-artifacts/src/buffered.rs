@@ -49,7 +49,7 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
-use crate::history::Version;
+use crate::history::{RecordEntries, Version};
 use crate::tree::{ArtifactTree, TreeStorageBridge, WriteScope, write_instructions};
 use crate::{Datum, DialogArtifactsError, Instruction, Key, State};
 
@@ -486,13 +486,19 @@ impl BufferedBatch {
     pub async fn record<S>(
         mut self,
         store: &S,
-        entries: Vec<(Key, State<Datum>)>,
+        entries: impl Into<RecordEntries>,
     ) -> Result<Self, DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
             + ConditionalSync,
     {
+        let RecordEntries { entries, spill } = entries.into();
+        // A spilled value's block is stored beside the tree, as the
+        // instruction path stores a spilling fact's.
+        if let Some((reference, bytes)) = spill {
+            store.clone().set(reference, bytes).await?;
+        }
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
         self.tree = self.tree.write_all(entries, &storage).await?;
         Ok(self)
@@ -629,7 +635,7 @@ mod tests {
 
     use super::{BufferedBatch, WriteScope, apply_buffered};
     use crate::history::{Edition, Origin, Version};
-    use crate::key::{FromKey as _, default_manifest};
+    use crate::key::FromKey as _;
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
     use crate::{Artifact, AttributeKey, Datum, EntityKey, Instruction, State, Value};
 
@@ -758,7 +764,10 @@ mod tests {
                 is: Value::String(format!("{i}")),
                 cause: None,
             };
-            let entity_key = crate::EntityKey::from_artifact(&artifact, &default_manifest());
+            let entity_key = crate::EntityKey::from_artifact(
+                &artifact,
+                &dialog_search_tree::Manifest::default(),
+            );
             let attribute_key = crate::AttributeKey::from_key(&entity_key);
             let added = crate::State::Added(crate::Datum::for_artifact(&artifact));
             tree.record(
@@ -767,7 +776,8 @@ mod tests {
                 vec![
                     (entity_key.into_key(), added.clone()),
                     (attribute_key.into_key(), added),
-                ],
+                ]
+                .into(),
             )
             .await?;
 
@@ -957,7 +967,8 @@ mod tests {
                 is: Value::String("record".to_string()),
                 cause: None,
             };
-            let entity_key = EntityKey::from_artifact(&artifact, &default_manifest());
+            let entity_key =
+                EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default());
             let attribute_key = AttributeKey::from_key(&entity_key);
             let added = State::Added(Datum::for_artifact(&artifact));
             vec![
@@ -980,7 +991,7 @@ mod tests {
             )
             .await?;
         direct
-            .record(&mut direct_store, &mut direct_delta, entries())
+            .record(&mut direct_store, &mut direct_delta, entries().into())
             .await?;
 
         // The batch surface, sealed canonical: the same fact set must land on

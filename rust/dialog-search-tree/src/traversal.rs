@@ -396,8 +396,7 @@ mod tests {
         let mut delta = Delta::zero();
         for i in keys {
             tree = tree
-                .edit_with_manifest(storage)
-                .await?
+                .edit()
                 .insert(i.to_be_bytes(), vec![i as u8], storage)
                 .await?
                 .persist(&mut delta)?;

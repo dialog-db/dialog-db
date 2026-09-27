@@ -2121,9 +2121,12 @@ mod tests {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
+                // The branch was created here, so its tree takes the format
+                // a new tree takes; the overlay is keyed under the same one.
+                let manifest = dialog_search_tree::Manifest::default();
                 Ok(items
                     .iter()
-                    .map(|view| view.sort_key())
+                    .map(|view| view.sort_key(&manifest))
                     .collect::<Result<Vec<_>, _>>()?)
             }
 

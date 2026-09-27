@@ -577,7 +577,7 @@ where
         }
     }
 
-    /// Opens a batch of in-place edits over this tree, adopting the tree's own
+    /// Opens a batch of in-place edits over this tree, under the tree's own
     /// format [`Manifest`].
     ///
     /// The returned [`TransientTree`] holds the tree's spine in transient form;
@@ -586,51 +586,12 @@ where
     /// back into a [`PersistentTree`]. A single batch and the equivalent sequence
     /// of one-operation batches each persisted in turn converge on the same root.
     ///
-    /// This reads the root node to recover the tree's manifest (see
-    /// [`manifest`](Self::manifest)), so an edit of a tree built under
-    /// non-default format constants preserves that format instead of silently
-    /// rewriting it under the defaults. Prefer this over the synchronous
-    /// [`edit`](Self::edit) wherever an `await` is available.
-    pub async fn edit_with_manifest<Backend>(
-        &self,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<TransientTree<Key, Value, D>, DialogSearchTreeError>
-    where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
-    {
-        match &self.root {
-            TreeRoot::Empty { manifest, .. } => Ok(TransientTree::empty_with_manifest(
-                self.node_cache.clone(),
-                *manifest,
-            )),
-            TreeRoot::Node(hash) => {
-                let manifest = self.manifest(storage).await?;
-                Ok(TransientTree::with_manifest(
-                    hash.clone(),
-                    self.node_cache.clone(),
-                    manifest,
-                ))
-            }
-        }
-    }
-
-    /// Opens a batch of in-place edits over this tree under the *default*
-    /// format [`Manifest`].
-    ///
     /// Opening is synchronous and touches no storage: the root is loaded lazily
-    /// by the first edit that descends into it. Equivalent to
+    /// by the first edit that descends into it, and that load adopts the
+    /// manifest the root carries, so the edit re-shapes and re-stamps under the
+    /// tree's own format. An unpersisted empty tree carries its manifest in
+    /// memory and hands it to the batch directly. Equivalent to
     /// [`TransientTree::from`].
-    ///
-    /// Because recovering a stored tree's real manifest means loading its
-    /// root node, which is async, this entry cannot do it and assumes the
-    /// defaults. It is therefore only sound for a tree whose manifest IS
-    /// [`Manifest::default`] (which today is every tree, since nothing
-    /// constructs another). Editing a non-default stored tree through this
-    /// entry rewrites the touched path under the default format. Use
-    /// [`edit_with_manifest`](Self::edit_with_manifest) whenever the caller
-    /// can await. (An unpersisted empty tree carries its manifest in
-    /// memory, so for it this entry is exact.)
     pub fn edit(&self) -> TransientTree<Key, Value, D> {
         match &self.root {
             TreeRoot::Empty { manifest, .. } => {
@@ -2320,7 +2281,12 @@ mod tests {
         let boundaries: Vec<u32> = all_keys
             .iter()
             .copied()
-            .filter(|&i| distribution::geometric::rank(&Blake3Hash::hash(&i.to_le_bytes())) > 1)
+            .filter(|&i| {
+                distribution::geometric::rank(
+                    &Blake3Hash::hash(&i.to_le_bytes()),
+                    &crate::Manifest::default(),
+                ) > 1
+            })
             .collect();
 
         for &bk in boundaries.iter().take(3) {
@@ -2630,7 +2596,12 @@ mod tests {
         // (rank > 1). If none exist, the test can't exercise the bug.
         let boundary_count = keys
             .iter()
-            .filter(|&&k| distribution::geometric::rank(&Blake3Hash::hash(&k.to_le_bytes())) > 1)
+            .filter(|&&k| {
+                distribution::geometric::rank(
+                    &Blake3Hash::hash(&k.to_le_bytes()),
+                    &crate::Manifest::default(),
+                ) > 1
+            })
             .count();
         assert!(
             boundary_count > 0,
@@ -2816,7 +2787,12 @@ mod tests {
         let boundaries: Vec<u32> = all_keys
             .iter()
             .copied()
-            .filter(|&i| distribution::geometric::rank(&Blake3Hash::hash(&i.to_le_bytes())) > 1)
+            .filter(|&i| {
+                distribution::geometric::rank(
+                    &Blake3Hash::hash(&i.to_le_bytes()),
+                    &crate::Manifest::default(),
+                ) > 1
+            })
             .collect();
         assert!(
             !boundaries.is_empty(),

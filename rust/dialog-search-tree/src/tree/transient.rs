@@ -124,12 +124,12 @@ where
     /// and read by the boundary coin during reshaping. Every node in a tree
     /// carries the same manifest.
     ///
-    /// [`PersistentTree::edit_with_manifest`] recovers the edited tree's own
-    /// manifest from its root node and passes it to
-    /// [`with_manifest`](Self::with_manifest), so an edit preserves the tree's
-    /// format. The synchronous [`new`](Self::new) cannot perform that (async)
-    /// root read and defaults it; see its documentation for when that is sound.
-    manifest: Manifest,
+    /// Known from the start for an empty or already-loaded root. A batch
+    /// opened over a stored root by hash ([`new`](Self::new)) leaves it
+    /// `None` until the first edit loads that root and adopts the manifest
+    /// the root carries, so an edit always runs under the tree's own format
+    /// and never under an assumed one.
+    manifest: Option<Manifest>,
     distribution: PhantomData<D>,
 }
 
@@ -149,18 +149,28 @@ where
     D: Distribution,
 {
     /// Creates an edit batch over the tree rooted at `root`, deferring the root
-    /// load, under the *default* format [`Manifest`].
+    /// load.
     ///
     /// The root is held as its hash and loaded lazily by the first edit
     /// that descends into it, so this is synchronous and touches no
-    /// storage. Recovering the edited tree's real manifest would mean loading
-    /// its root, which is async, so this entry cannot and defaults it: it is
-    /// sound only when the tree's manifest IS [`Manifest::default`]. Use
-    /// [`with_manifest`](Self::with_manifest), or the
-    /// [`PersistentTree::edit_with_manifest`] that feeds it, to preserve a
-    /// non-default tree's format.
+    /// storage. That load adopts the format [`Manifest`] the root carries,
+    /// so the batch edits under the tree's own format with no manifest
+    /// supplied here.
+    ///
+    /// A root stored by a version that recorded the empty tree as the
+    /// all-zero hash (see [`LEGACY_EMPTY_ROOT`](crate::LEGACY_EMPTY_ROOT))
+    /// names no node to read a format from, and opens as a new empty tree
+    /// under [`Manifest::default`].
     pub fn new(root: Blake3Hash, cache: Cache<Blake3Hash, Buffer>) -> Self {
-        Self::with_manifest(root, cache, Manifest::default())
+        if root.as_bytes() == &crate::LEGACY_EMPTY_ROOT {
+            return Self::empty_with_manifest(cache, Manifest::default());
+        }
+        Self {
+            root: TransientRoot::Unloaded(root),
+            cache,
+            manifest: None,
+            distribution: PhantomData,
+        }
     }
 
     /// Creates an edit batch over the EMPTY tree under an explicit format
@@ -171,18 +181,19 @@ where
         Self {
             root: TransientRoot::Empty,
             cache,
-            manifest,
+            manifest: Some(manifest),
             distribution: PhantomData,
         }
     }
 
-    /// Creates an edit batch over the tree rooted at `root` under an explicit
-    /// format `manifest`, deferring the root load.
+    /// Creates an edit batch over the tree rooted at `root` that expects the
+    /// tree to be written under `manifest`, deferring the root load.
     ///
-    /// The manifest must be the one the tree's existing nodes carry, or the
-    /// batch will re-shape and re-stamp the touched path under a format the
-    /// untouched siblings do not share. [`PersistentTree::edit_with_manifest`]
-    /// reads it from the root for exactly this reason.
+    /// Unlike [`new`](Self::new), which adopts whatever format the root
+    /// carries, the first edit here checks the root's manifest against the
+    /// expected one and fails on a mismatch. For a caller that already knows
+    /// the format and wants a tree written under another one refused rather
+    /// than edited.
     pub fn with_manifest(
         root: Blake3Hash,
         cache: Cache<Blake3Hash, Buffer>,
@@ -196,7 +207,7 @@ where
         Self {
             root: TransientRoot::Unloaded(root),
             cache,
-            manifest,
+            manifest: Some(manifest),
             distribution: PhantomData,
         }
     }
@@ -208,9 +219,8 @@ where
     /// The caller hands over a live transient node, not a hash, so there is no
     /// persisted root to read a format header back from here: `manifest` must
     /// be the one the spine's nodes carry, which the hitchhiker captures when
-    /// it first loads the tree's root (see
-    /// [`HitchhikerTree::persist`](crate::HitchhikerTree::persist)). A tree
-    /// born empty has no stored header and passes the default.
+    /// it first loads the tree's root, or was opened with when the tree was
+    /// empty (see [`HitchhikerTree::persist`](crate::HitchhikerTree::persist)).
     pub(crate) fn from_loaded(
         node: TransientNode<Key, Value>,
         cache: Cache<Blake3Hash, Buffer>,
@@ -219,7 +229,7 @@ where
         Self {
             root: TransientRoot::Loaded(node),
             cache,
-            manifest,
+            manifest: Some(manifest),
             distribution: PhantomData,
         }
     }
@@ -235,35 +245,53 @@ where
         }
     }
 
+    /// The format this batch edits under. Known from construction for an
+    /// empty or loaded root, and from the first [`load`](Self::load) for a
+    /// root opened by hash; asking before then is a bug in this module.
+    fn format(manifest: Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
+        manifest.ok_or_else(|| {
+            DialogSearchTreeError::Node(
+                "The edit's manifest is read before its root was loaded".into(),
+            )
+        })
+    }
+
     /// Loads the root into a transient node for editing, returning `None` for an
-    /// empty tree (there is no node to load).
+    /// empty tree (there is no node to load), together with the manifest the
+    /// edit runs under.
     ///
-    /// The root's stored header must equal the edit's manifest: editing a tree
-    /// under different format parameters would re-coin the touched spine with
-    /// the wrong branching/length-guard settings and stamp mixed headers into
-    /// one tree — silent shape divergence between replicas. Until an edit
-    /// adopts the loaded root's manifest (see the TODO on `manifest`), a
-    /// mismatch fails loudly instead. Every node of a well-formed tree carries
-    /// the root's manifest, so the root check covers the tree.
+    /// A root loaded by hash supplies the manifest: the edit adopts the header
+    /// the root carries, so it re-shapes and re-stamps the touched spine under
+    /// the tree's own format. Every node of a well-formed tree carries the
+    /// root's manifest, so the root's header speaks for the tree. When the
+    /// batch was opened expecting a format ([`with_manifest`](Self::with_manifest)),
+    /// a root written under another fails loudly instead.
     async fn load<Backend>(
         root: TransientRoot<Key, Value>,
         accessor: &Accessor<Backend>,
-        manifest: &Manifest,
-    ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
+        expected: Option<Manifest>,
+    ) -> Result<(Option<TransientNode<Key, Value>>, Manifest), DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
+        let known = || {
+            expected.ok_or_else(|| {
+                DialogSearchTreeError::Node("An edit over no stored root has no manifest".into())
+            })
+        };
         match root {
-            TransientRoot::Empty => Ok(None),
-            TransientRoot::Loaded(node) => Ok(Some(node)),
+            TransientRoot::Empty => Ok((None, known()?)),
+            TransientRoot::Loaded(node) => Ok((Some(node), known()?)),
             TransientRoot::Unloaded(hash) => {
                 let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
                 let header = node.manifest()?;
-                if header != *manifest {
+                if let Some(expected) = expected
+                    && header != expected
+                {
                     return Err(DialogSearchTreeError::Node(format!(
                         "Tree manifest mismatch: the root was written under \
-                         {header:?} but the edit runs under {manifest:?}"
+                         {header:?} but the edit expects {expected:?}"
                     )));
                 }
                 // The empty tree's node (see `persist_empty_root`) is a pure
@@ -274,11 +302,11 @@ where
                 // the first insert builds the same canonical spine it builds
                 // over a fresh tree.
                 if node.is_empty()? {
-                    return Ok(None);
+                    return Ok((None, header));
                 }
                 // The root's left edge is the tree's global leftmost seam,
                 // whose separator is the empty string (negative infinity).
-                Ok(Some(TransientNode::open(&node, Vec::new())?))
+                Ok((Some(TransientNode::open(&node, Vec::new())?), header))
             }
         }
     }
@@ -296,9 +324,10 @@ where
     {
         let entry = Entry { key, value };
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
-        let manifest = self.manifest;
+        let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest).await?;
+        self.manifest = Some(manifest);
 
-        let node = match Self::load(self.root, &accessor, &self.manifest).await? {
+        let node = match loaded {
             // The first entry of an empty tree becomes a lone segment wrapped in
             // a single-child index, matching the canonical root invariant that
             // the root is always an index.
@@ -340,9 +369,10 @@ where
             + ConditionalSync,
     {
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
-        let manifest = self.manifest;
+        let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest).await?;
+        self.manifest = Some(manifest);
 
-        let Some(root) = Self::load(self.root, &accessor, &self.manifest).await? else {
+        let Some(root) = loaded else {
             // Deleting from an empty tree is a no-op; leave it empty.
             self.root = TransientRoot::Empty;
             return Ok(self);
@@ -417,7 +447,7 @@ where
             return Ok(self);
         }
 
-        let manifest = self.manifest;
+        let manifest = Self::format(self.manifest)?;
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
         let pieces = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
         self.root = match seal_root::<Key, Value, D, _>(pieces, 0, &manifest, &accessor).await? {
@@ -630,15 +660,18 @@ where
         let root = match self.root {
             // The empty tree's persisted form: the canonical
             // manifest-carrying zero-entry node.
-            TransientRoot::Empty => persist_empty_root::<Key, Value>(&self.manifest, delta)?
-                .hash()
-                .clone(),
+            TransientRoot::Empty => {
+                persist_empty_root::<Key, Value>(&Self::format(self.manifest)?, delta)?
+                    .hash()
+                    .clone()
+            }
             // An untouched root was never loaded; its hash is already
             // durable and is returned verbatim, touching no storage.
             TransientRoot::Unloaded(hash) => hash,
-            TransientRoot::Loaded(transient) => {
-                transient.persist(delta, &self.manifest)?.hash().clone()
-            }
+            TransientRoot::Loaded(transient) => transient
+                .persist(delta, &Self::format(self.manifest)?)?
+                .hash()
+                .clone(),
         };
 
         Ok(PersistentTree::seal(root, self.cache))
@@ -1057,8 +1090,8 @@ where
         // stamped with another would mix headers and diverge silently from
         // either side's canonical shape, so a mismatch fails loudly here,
         // exactly as the edit path's `load` does. A stitch of nothing but
-        // loose entries has no source to inherit from and takes the default
-        // format.
+        // loose entries has no source to inherit from: it builds a new tree,
+        // under the format a new tree takes (`Manifest::default`).
         let mut manifest: Option<Manifest> = None;
         for piece in &pieces {
             if let Piece::Range { source, .. } = piece {
@@ -1244,7 +1277,7 @@ where
                 None => TransientRoot::Empty,
             },
             cache,
-            manifest,
+            manifest: Some(manifest),
             distribution: PhantomData,
         })
     }
@@ -4823,7 +4856,10 @@ mod tests {
 
     /// The geometric rank of a `u32` key, hashed the same way the tree hashes it.
     fn rank_of(key: u32) -> Rank {
-        distribution::geometric::rank(&Blake3Hash::hash(&key.to_le_bytes()))
+        distribution::geometric::rank(
+            &Blake3Hash::hash(&key.to_le_bytes()),
+            &crate::Manifest::default(),
+        )
     }
 
     /// The keys in `range` that act as segment boundaries (rank above the
@@ -5713,11 +5749,11 @@ mod tests {
         Ok(())
     }
 
-    /// Editing a tree whose root was written under a different manifest must
-    /// fail loudly: re-coining the touched spine under other format
-    /// parameters (and stamping mixed headers into one tree) would silently
-    /// break shape convergence between replicas. This pins the tripwire until
-    /// edits adopt the loaded root's manifest.
+    /// Editing a tree whose root was written under a different manifest than
+    /// the batch expects must fail loudly: re-coining the touched spine under
+    /// other format parameters (and stamping mixed headers into one tree)
+    /// would silently break shape convergence between replicas. A plain edit
+    /// expects nothing and adopts the root's manifest instead.
     #[dialog_common::test]
     async fn it_rejects_editing_a_tree_with_a_mismatched_manifest() -> Result<()> {
         use crate::{Manifest, PersistentNodeBody};
@@ -5738,13 +5774,31 @@ mod tests {
         storage.store(buffer.as_ref().to_vec(), root).await?;
 
         let tree = TestTree::from_hash(root.clone());
-        let result = tree
-            .edit()
-            .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
-            .await;
+        let result = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
+            root.clone(),
+            tree.node_cache(),
+            Manifest::default(),
+        )
+        .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
+        .await;
         assert!(
             result.is_err(),
             "editing under a mismatched manifest must fail, not silently re-coin"
+        );
+
+        let mut delta = Delta::zero();
+        let adopted = tree
+            .edit()
+            .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+        assert_eq!(
+            adopted.manifest(&storage).await?,
+            foreign,
+            "a plain edit adopts the root's manifest"
         );
         Ok(())
     }
@@ -6173,7 +6227,7 @@ mod tests {
 
     /// The geometric rank of a variable-length key.
     fn var_rank(key: &[u8]) -> Rank {
-        distribution::geometric::rank(&Blake3Hash::hash(key))
+        distribution::geometric::rank(&Blake3Hash::hash(key), &crate::Manifest::default())
     }
 
     /// Keys longer than `max_separator` are ranked by the coin like any
@@ -6294,7 +6348,7 @@ mod tests {
         for key in keys {
             let transient = match &tree {
                 None => TransientTree::empty_with_manifest(Cache::new(), manifest),
-                Some(tree) => tree.edit_with_manifest(storage).await?,
+                Some(tree) => tree.edit(),
             };
             let next = transient
                 .insert(key.clone(), key.0.clone(), storage)
@@ -6319,8 +6373,7 @@ mod tests {
         let mut delta = Delta::zero();
         for key in keys {
             tree = tree
-                .edit_with_manifest(storage)
-                .await?
+                .edit()
                 .delete(key, storage)
                 .await?
                 .persist(&mut delta)?;
@@ -6762,7 +6815,7 @@ mod tests {
         let mut flapping_edits = 0usize;
         let total = edits.len();
         for (insert, key) in edits {
-            let transient = tree.edit_with_manifest(&storage).await?;
+            let transient = tree.edit();
             let transient = if insert {
                 transient
                     .insert(key.clone(), key.0.clone(), &storage)
@@ -6981,7 +7034,7 @@ mod tests {
         let edits: Vec<(bool, VarKey)> = vec![(true, insert), (false, frame_b[7].clone())];
         let mut delta = Delta::zero();
         for (is_insert, key) in edits {
-            let transient = tree.edit_with_manifest(&storage).await?;
+            let transient = tree.edit();
             let transient = if is_insert {
                 transient
                     .insert(key.clone(), key.0.clone(), &storage)
@@ -7128,8 +7181,7 @@ mod tests {
         let target = sorted.get(at + 1).unwrap_or(&sorted[at]).clone();
         let mut delta = Delta::zero();
         let updated = tree
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(target.clone(), b"rewritten".to_vec(), &storage)
             .await?
             .persist(&mut delta)?;
@@ -7155,7 +7207,7 @@ mod tests {
         for key in &sorted {
             let transient = match &fresh {
                 None => TransientTree::empty_with_manifest(Cache::new(), manifest),
-                Some(tree) => tree.edit_with_manifest(&fresh_storage).await?,
+                Some(tree) => tree.edit(),
             };
             let value = if key == &target {
                 b"rewritten".to_vec()
@@ -7279,8 +7331,7 @@ mod tests {
         // frame's index pieces are untouched and must pass through.
         let mut delta = Delta::zero();
         let edited = tree
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(VarKey(b"k0301x".to_vec()), b"k0301x".to_vec(), &storage)
             .await?
             .persist(&mut delta)?;
@@ -7337,8 +7388,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let edited = tree
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(VarKey(b"k0300x".to_vec()), b"k0300x".to_vec(), &storage)
             .await?
             .persist(&mut delta)?;
@@ -7400,8 +7450,7 @@ mod tests {
                 let mut delta = Delta::zero();
                 for key in &order {
                     tree = tree
-                        .edit_with_manifest(&storage)
-                        .await?
+                        .edit()
                         .insert(key.clone(), key.0.clone(), &storage)
                         .await?
                         .persist(&mut delta)?;
@@ -7571,7 +7620,7 @@ mod tests {
                 .chain(deletes.iter().map(|key| (false, key.clone())))
                 .collect();
             for (is_insert, key) in edits {
-                let transient = tree.edit_with_manifest(&storage).await?;
+                let transient = tree.edit();
                 let transient = if is_insert {
                     transient
                         .insert(key.clone(), key.0.clone(), &storage)
@@ -7675,8 +7724,7 @@ mod tests {
             bytes.extend(format!("{n:03}").into_bytes());
             let key = VarKey(bytes);
             tree = tree
-                .edit_with_manifest(&storage)
-                .await?
+                .edit()
                 .insert(key.clone(), key.0.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
@@ -7710,8 +7758,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let tree = tree
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .delete(&sub_b_first, &storage)
             .await?
             .persist(&mut delta)?;
@@ -7870,7 +7917,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         for (insert, key) in edits {
-            let transient = tree.edit_with_manifest(&storage).await?;
+            let transient = tree.edit();
             let transient = if insert {
                 transient
                     .insert(key.clone(), key.0.clone(), &storage)
@@ -8064,7 +8111,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         for (insert, key) in edits {
-            let transient = tree.edit_with_manifest(&storage).await?;
+            let transient = tree.edit();
             let transient = if insert {
                 transient
                     .insert(key.clone(), key.0.clone(), &storage)
@@ -8097,11 +8144,10 @@ mod tests {
         Ok(())
     }
 
-    /// A tree built under a NON-default manifest keeps that manifest across an
-    /// edit opened with [`PersistentTree::edit_with_manifest`], and the format
-    /// constants a reader recovers are the tree's own, not the defaults. The
-    /// synchronous [`PersistentTree::edit`] is shown to lose them, which is
-    /// exactly the boundary its documentation draws.
+    /// A tree built under a NON-default manifest keeps that manifest across
+    /// edits opened with [`PersistentTree::edit`], which adopts the format the
+    /// root carries, and the format constants a reader recovers are the tree's
+    /// own, not the defaults. A batch that expects another format is refused.
     #[dialog_common::test]
     async fn it_preserves_a_non_default_manifest_across_an_edit() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
@@ -8143,8 +8189,7 @@ mod tests {
         for n in 1..64u32 {
             let key = key_at(n);
             tree = tree
-                .edit_with_manifest(&storage)
-                .await?
+                .edit()
                 .insert(key.clone(), key.0.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
@@ -8172,19 +8217,20 @@ mod tests {
             assert_eq!(tree.get(&key, &storage).await?, Some(key.0.clone()));
         }
 
-        // The synchronous entry cannot read the root, so it runs under the
-        // default manifest. Against a non-default tree that disagreement is
-        // now REFUSED at load rather than silently re-coining the touched path
-        // under the wrong format: the failure is loud and the tree is left
-        // intact. Pinned here rather than left implicit.
+        // A batch that expects a different format is REFUSED at load rather
+        // than silently re-coining the touched path under the wrong format:
+        // the failure is loud and the tree is left intact.
         let last = key_at(64);
-        let reformatted = tree
-            .edit()
-            .insert(last.clone(), last.0.clone(), &storage)
-            .await;
+        let reformatted = TransientTree::<VarKey, Vec<u8>>::with_manifest(
+            tree.root().clone(),
+            tree.node_cache(),
+            Manifest::default(),
+        )
+        .insert(last.clone(), last.0.clone(), &storage)
+        .await;
         assert!(
             reformatted.is_err(),
-            "the synchronous edit must refuse a non-default-manifest tree"
+            "a batch expecting another format must refuse the tree"
         );
         assert_eq!(
             tree.manifest(&storage).await?,
@@ -8261,7 +8307,10 @@ mod tests {
     /// it. The stitch tests encode keys big-endian, so their boundary/interior
     /// classification must too.
     fn rank_of_be(key: u32) -> Rank {
-        distribution::geometric::rank(&Blake3Hash::hash(&key.to_be_bytes()))
+        distribution::geometric::rank(
+            &Blake3Hash::hash(&key.to_be_bytes()),
+            &crate::Manifest::default(),
+        )
     }
 
     /// Builds a tree over big-endian `keys` in one batch and flushes it to
@@ -8685,8 +8734,8 @@ mod buffer_edit_interaction_tests {
     /// into several leaves under an index root. The buffer-fusion tests need a
     /// real boundary key between leaves; the shipped ~64 KiB default packs
     /// these key sets into a single leaf, leaving no boundary to fuse across.
-    /// Pinned into the base so every `HitchhikerTree::open` and
-    /// `edit_with_manifest` over it stays consistent, keeping the tests
+    /// Pinned into the base so every `HitchhikerTree::open` and `edit` over
+    /// it adopts it, keeping the tests
     /// default-agnostic (byte pacing off would recover the old geometric coin,
     /// but a small non-zero target keeps the leaves small without the coin's
     /// large-fanout variance).
@@ -8761,8 +8810,7 @@ mod buffer_edit_interaction_tests {
         // Canonical: delete the boundary through the edit path.
         let mut delta = Delta::zero();
         let canonical = base
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .delete(&boundary, &storage)
             .await?
             .persist(&mut delta)?;
@@ -8821,16 +8869,14 @@ mod buffer_edit_interaction_tests {
         let mut canonical = base.clone();
         let mut delta = Delta::zero();
         canonical = canonical
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .delete(&boundary, &storage)
             .await?
             .persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
         for key in &extras {
             canonical = canonical
-                .edit_with_manifest(&storage)
-                .await?
+                .edit()
                 .insert(key.to_be_bytes(), vec![9], &storage)
                 .await?
                 .persist(&mut delta)?;
@@ -9391,8 +9437,7 @@ mod buffer_edit_interaction_tests {
         let mut delta = Delta::zero();
         for i in (0..2400u32).step_by(2) {
             base = base
-                .edit_with_manifest(&observed)
-                .await?
+                .edit()
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
                 .await?
                 .persist(&mut delta)?;
@@ -9570,8 +9615,7 @@ mod buffer_edit_interaction_tests {
         let mut delta = Delta::zero();
         for i in (0..1200u32).step_by(2) {
             base = base
-                .edit_with_manifest(&observed)
-                .await?
+                .edit()
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
                 .await?
                 .persist(&mut delta)?;
@@ -9889,8 +9933,7 @@ mod buffer_edit_interaction_tests {
         // Canonical reference.
         let mut delta = Delta::zero();
         let canonical = base
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(splitter.to_be_bytes(), vec![9], &storage)
             .await?
             .persist(&mut delta)?;
@@ -9954,8 +9997,7 @@ mod buffer_edit_interaction_tests {
         // Canonical reference.
         let mut delta = Delta::zero();
         let canonical = base
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .delete(&boundary.to_be_bytes(), &storage)
             .await?
             .persist(&mut delta)?;
@@ -10138,8 +10180,7 @@ mod buffer_edit_interaction_tests {
         // root, their LCA.
         let mut delta = Delta::zero();
         let fused = parked
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .delete(&boundary, &storage)
             .await?
             .persist(&mut delta)?;

@@ -862,7 +862,7 @@ impl<'a> Pull<'a> {
         // upstream — derived at zero extra reads, in place of the
         // ancestry walk.
         let observed = Arc::new(Mutex::new(BTreeSet::new()));
-        let observed_data = merge::observe_revisions(data_changes, observed.clone());
+        let observed_data = merge::observe_revisions(data_changes, observed.clone(), store.clone());
         let screened_data = if unacquainted {
             Either::Left(observed_data)
         } else {

@@ -15,7 +15,7 @@ pub enum Upstream {
         /// Branch name.
         branch: String,
         /// Tree root at last sync point, if any sync has happened.
-        #[serde(with = "sync_base")]
+        #[serde(deserialize_with = "sync_base::deserialize")]
         tree: Option<TreeReference>,
     },
     /// A remote branch upstream.
@@ -25,36 +25,22 @@ pub enum Upstream {
         /// Branch name on the remote.
         branch: String,
         /// Tree root at last sync point, if any sync has happened.
-        #[serde(with = "sync_base")]
+        #[serde(deserialize_with = "sync_base::deserialize")]
         tree: Option<TreeReference>,
     },
 }
 
-/// The stored form of a sync base.
+/// Reads a stored sync base.
 ///
-/// Cells record "never synced" as the all-zero tree reference, the form
-/// every version before the sentinel-free empty tree wrote and reads. No
-/// real tree has that root (the empty tree persists as a manifest-carrying
-/// node), so `None` is written as zero and zero reads back as `None`,
-/// keeping the cell's bytes identical across versions in both directions.
+/// "Never synced" is written as an absent tree. Versions before the
+/// sentinel-free empty tree recorded it as the all-zero tree reference
+/// instead; no real tree has that root (the empty tree persists as a
+/// manifest-carrying node), so zero reads back as `None` too.
 mod sync_base {
     use crate::TreeReference;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer};
 
     const NEVER_SYNCED: [u8; 32] = [0u8; 32];
-
-    pub(super) fn serialize<S>(
-        tree: &Option<TreeReference>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match tree {
-            Some(tree) => tree.serialize(serializer),
-            None => TreeReference::from(NEVER_SYNCED).serialize(serializer),
-        }
-    }
 
     pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<TreeReference>, D::Error>
     where
@@ -302,10 +288,10 @@ mod tests {
         Ok(())
     }
 
-    /// "Never synced" keeps the stored form older versions write and read:
-    /// the all-zero tree reference, byte for byte, in both directions.
+    /// "Never synced" is written as an absent tree, and the all-zero tree
+    /// reference older versions wrote for it reads back as the same.
     #[dialog_common::test]
-    async fn it_stores_never_synced_as_the_zero_reference() -> Result<()> {
+    async fn it_reads_the_zero_reference_as_never_synced() -> Result<()> {
         // The cell shape older versions wrote: a bare, non-optional tree.
         #[derive(Debug, Serialize)]
         enum Stored {
@@ -328,7 +314,15 @@ mod tests {
             tree: None,
         };
         let (_, bytes) = CborEncoder.encode(&never_synced).await?;
-        assert_eq!(bytes, legacy_bytes, "None is written as the zero reference");
+        assert_ne!(
+            bytes, legacy_bytes,
+            "None is not written as a zero reference"
+        );
+        assert_eq!(
+            CborEncoder.decode::<Upstream>(&bytes).await?,
+            never_synced,
+            "None round-trips"
+        );
 
         let decoded: Upstream = CborEncoder.decode(&legacy_bytes).await?;
         assert_eq!(decoded, never_synced, "the zero reference reads as None");

@@ -2051,8 +2051,8 @@ mod tests {
         // can be skipped, which needs more than one subtree. Under the global
         // ~64 KiB default these would pack into a single leaf and the scoped
         // and full diffs would read the same nodes, making the assertion
-        // vacuous. The manifest rides into every edit below via
-        // `edit_with_manifest`, read back from the tree's own stored header.
+        // vacuous. The manifest rides into every edit below: each edit
+        // adopts it from the tree's own stored header.
         let manifest = Manifest {
             max_segment: 512,
             frame_ceiling_factor: 0,
@@ -2066,8 +2066,7 @@ mod tests {
         let mut delta = Delta::zero();
         for i in (10..12u32).chain(100..250u32) {
             target = target
-                .edit_with_manifest(&storage)
-                .await?
+                .edit()
                 .insert(i.to_le_bytes(), vec![1], &storage)
                 .await?
                 .persist(&mut delta)?;
@@ -2159,8 +2158,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let adopted = emptied
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .integrate(iter(adds.into_iter().map(Ok)), &storage)
             .await?
             .persist(&mut delta)?;
@@ -2173,8 +2171,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let cleared = populated
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .integrate(iter(removes.into_iter().map(Ok)), &storage)
             .await?
             .persist(&mut delta)?;

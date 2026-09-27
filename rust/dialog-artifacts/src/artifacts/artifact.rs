@@ -356,12 +356,14 @@ impl ArtifactView {
     /// the key carries it (type byte, value slot, spilled hash) — no value
     /// decode, no re-encode. That reproduces
     /// [`sort_key`](crate::sort_key) under the manifest the row was WRITTEN
-    /// with, which is the tree's own order by construction. An owned-backed
-    /// row derives the same key from its fields under the default manifest
-    /// ([`default_sort_key`](crate::default_sort_key)); the two agree
-    /// wherever the tree's manifest is the default — see `default_sort_key`'s
-    /// soundness note.
-    pub fn sort_key(&self) -> Result<crate::SortKey, DialogArtifactsError> {
+    /// with, which is the tree's own order by construction, and `manifest` is
+    /// not consulted. An owned-backed row has no stored key and derives the
+    /// same key from its fields under `manifest`, which must be the format of
+    /// the tree the row is ordered or matched against.
+    pub fn sort_key(
+        &self,
+        manifest: &dialog_search_tree::Manifest,
+    ) -> Result<crate::SortKey, DialogArtifactsError> {
         match &self.backing {
             Backing::Scanned { .. } => {
                 let parts = self.parts()?;
@@ -378,7 +380,7 @@ impl ArtifactView {
                     tail,
                 ))
             }
-            Backing::Owned(artifact) => Ok(crate::default_sort_key(artifact)),
+            Backing::Owned(artifact) => Ok(crate::sort_key(artifact, manifest)),
         }
     }
 

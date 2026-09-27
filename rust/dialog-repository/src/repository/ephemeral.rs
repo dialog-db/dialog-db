@@ -45,8 +45,7 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, AttributeKey, Changes, DialogArtifactsError,
-    Entity, EntityKey, Instruction, Key, Select, SortKey, Statement, Update, ValueKey,
-    default_sort_key,
+    Entity, EntityKey, Instruction, Key, Select, SortKey, Statement, Update, ValueKey, sort_key,
 };
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash;
@@ -104,9 +103,13 @@ struct State {
     /// rebuilt on change, so a read never copies the set.
     tombstones: Arc<HashSet<SortKey>>,
     shadowed: HashMap<SortKey, Artifact>,
-    /// The key format facts are keyed under. Fixed to the default
-    /// manifest, the same one every tree carries today and the one
-    /// [`Demand`](crate::Demand) ranges are built under.
+    /// The key format of this in-memory index: facts, the hidden set
+    /// and the instant hash chain are keyed under it. An overlay is an
+    /// index of its own that belongs to no tree, so it takes the format
+    /// a new tree takes ([`Manifest::default`]). Anything compared
+    /// against a tree's rows — the tombstones and the rows a query
+    /// merges — is re-keyed under that tree's manifest on the way out
+    /// (see [`Ephemeral::tombstones`] and [`Ephemeral::select`]).
     manifest: Manifest,
     sequence: u64,
     hash: Blake3Hash,
@@ -212,7 +215,7 @@ impl State {
                 // Not held here: hide it beneath. A tombstone is a
                 // change readers see (the fact disappears), so it is
                 // reported as retracted.
-                if let Entry::Vacant(slot) = self.shadowed.entry(default_sort_key(&fact)) {
+                if let Entry::Vacant(slot) = self.shadowed.entry(sort_key(&fact, &self.manifest)) {
                     slot.insert(fact.clone());
                     delta.tombstones_changed = true;
                     delta.retracted.push(fact);
@@ -238,7 +241,7 @@ impl State {
         chunks.push(self.sequence.to_be_bytes().to_vec());
         for (polarity, facts) in [(b'+', &delta.asserted), (b'-', &delta.retracted)] {
             for fact in facts {
-                let (the, of, tail) = default_sort_key(fact);
+                let (the, of, tail) = sort_key(fact, &self.manifest);
                 let mut chunk = Vec::with_capacity(1 + the.len() + of.len() + tail.len() + 2);
                 chunk.push(polarity);
                 chunk.extend(the);
@@ -409,10 +412,22 @@ impl Ephemeral {
         }
     }
 
-    /// Sort keys of every fact this line hides beneath it. Shared, so
-    /// a read never copies the set.
-    pub(crate) fn tombstones(&self) -> Arc<HashSet<SortKey>> {
-        self.state.read().tombstones.clone()
+    /// Sort keys, under `manifest`, of every fact this line hides beneath
+    /// it: the keys a scan of a tree written under `manifest` carries for
+    /// those facts. Shared when `manifest` is the overlay's own format, so
+    /// a read never copies the set; built afresh otherwise.
+    pub(crate) fn tombstones(&self, manifest: &Manifest) -> Arc<HashSet<SortKey>> {
+        let state = self.state.read();
+        if *manifest == state.manifest {
+            return state.tombstones.clone();
+        }
+        Arc::new(
+            state
+                .shadowed
+                .values()
+                .map(|fact| sort_key(fact, manifest))
+                .collect(),
+        )
     }
 
     /// Whether the store holds no facts (tombstones aside).
@@ -426,8 +441,23 @@ impl Ephemeral {
         self.state.read().facts.len() / 3
     }
 
-    /// The facts a selector matches, in the order a tree scan of the
-    /// same selector would produce them.
+    /// The facts a selector matches, in the order a scan of a tree
+    /// written under `manifest` would produce them, so they merge with
+    /// that tree's scan.
+    pub(crate) fn select(
+        &self,
+        selector: &ArtifactSelector<Constrained>,
+        manifest: &Manifest,
+    ) -> Vec<Artifact> {
+        let mut rows = self.scan(selector);
+        if *manifest != self.state.read().manifest {
+            rows.sort_by_cached_key(|fact| sort_key(fact, manifest));
+        }
+        rows
+    }
+
+    /// The facts a selector matches, in the order a scan of a tree
+    /// written under the overlay's own format would produce them.
     pub fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
         let state = self.state.read();
         state
@@ -572,8 +602,8 @@ mod tests {
             values(&source, "id:a", "person/name")
         );
         assert_eq!(
-            *target.tombstones(),
-            *source.tombstones(),
+            *target.tombstones(&Manifest::default()),
+            *source.tombstones(&Manifest::default()),
             "the tombstone hiding id:b travels too"
         );
     }
@@ -595,7 +625,7 @@ mod tests {
         assert_eq!(removed.retracted, vec![fact("id:a", "person/name", "A")]);
         assert!(line.is_empty());
         assert!(
-            line.tombstones().is_empty(),
+            line.tombstones(&Manifest::default()).is_empty(),
             "a held fact is removed, not shadowed"
         );
 
@@ -606,7 +636,7 @@ mod tests {
         );
         let shadowed = &line.since(2).expect("a tombstone is a visible change")[0];
         assert_eq!(shadowed.retracted, vec![fact("id:b", "person/name", "B")]);
-        assert_eq!(line.tombstones().len(), 1);
+        assert_eq!(line.tombstones(&Manifest::default()).len(), 1);
         line.retract(
             the!("person/name")
                 .of("id:b".parse().unwrap())
@@ -621,7 +651,7 @@ mod tests {
         line.clear();
         let lifted = &line.since(3).expect("lifting a tombstone is visible")[0];
         assert_eq!(lifted.asserted, vec![fact("id:b", "person/name", "B")]);
-        assert!(line.tombstones().is_empty());
+        assert!(line.tombstones(&Manifest::default()).is_empty());
     }
 
     #[dialog_common::test]
@@ -728,11 +758,42 @@ mod tests {
             "the doc tombstone is unrelated"
         );
         assert_eq!(line.len(), 1);
-        assert_eq!(line.tombstones().len(), 1);
+        assert_eq!(line.tombstones(&Manifest::default()).len(), 1);
         assert!(
             !line.retain_entities(|_| true),
             "keeping everything changes nothing"
         );
+    }
+
+    /// Hidden facts and matched rows leave the overlay keyed under the
+    /// format of the tree they are compared with, not the overlay's own:
+    /// under a smaller spill threshold a long value's key carries a
+    /// prefix and hash instead of the whole value, and a tombstone keyed
+    /// the other way would never match the tree's row.
+    #[dialog_common::test]
+    fn it_keys_tombstones_and_rows_under_the_reading_tree() {
+        let small = Manifest {
+            inline_n: 64,
+            ..Manifest::default()
+        };
+        let long = "x".repeat(100);
+        let line = Ephemeral::new();
+        line.retract(claim("id:hidden", "person/bio", &long));
+        line.assert(claim("id:a", "person/bio", &long));
+        line.assert(claim("id:a", "person/bio", "short"));
+
+        let hidden = fact("id:hidden", "person/bio", &long);
+        let tombstones = line.tombstones(&small);
+        assert!(tombstones.contains(&sort_key(&hidden, &small)));
+        assert!(!tombstones.contains(&sort_key(&hidden, &Manifest::default())));
+
+        let selector = ArtifactSelector::new().of("id:a".parse().expect("entity"));
+        let rows = line.select(&selector, &small);
+        let keys: Vec<_> = rows.iter().map(|row| sort_key(row, &small)).collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "rows come out in the reading tree's order");
+        assert_eq!(rows.len(), 2);
     }
 
     #[dialog_common::test]

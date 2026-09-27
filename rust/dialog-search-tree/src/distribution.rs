@@ -1222,12 +1222,12 @@ pub mod geometric {
     use super::Rank;
 
     /// Computes the rank of a node from its hash using a geometric
-    /// distribution with the default [`Manifest`](crate::Manifest)'s branch
-    /// factor — the same modulus [`Geometric`](super::Geometric) uses for a
-    /// default-manifest tree, so callers (test oracles, diagnostics)
-    /// classify boundaries exactly as the tree does.
-    pub fn rank(hash: &Blake3Hash) -> Rank {
-        compute_geometric_rank(hash, crate::Manifest::default().branch_factor())
+    /// distribution with `manifest`'s branch factor — the same modulus
+    /// [`Geometric`](super::Geometric) uses for a tree under that manifest,
+    /// so callers (test oracles, diagnostics) classify boundaries exactly as
+    /// the tree does.
+    pub fn rank(hash: &Blake3Hash, manifest: &crate::Manifest) -> Rank {
+        compute_geometric_rank(hash, manifest.branch_factor())
     }
 
     /// Compute the rank of a hash using a threshold-based geometric

@@ -2094,7 +2094,10 @@ mod tests {
 
     /// The geometric rank of a `u32` key, hashed the same way the tree hashes it.
     fn rank_of(key: u32) -> Rank {
-        distribution::geometric::rank(&Blake3Hash::hash(&key.to_le_bytes()))
+        distribution::geometric::rank(
+            &Blake3Hash::hash(&key.to_le_bytes()),
+            &crate::Manifest::default(),
+        )
     }
 
     /// One regrouped leaf segment's worth of entries.

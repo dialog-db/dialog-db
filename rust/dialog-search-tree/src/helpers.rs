@@ -1086,16 +1086,18 @@ impl TreeSpec {
             // and by child count for indexes, whose links carry only
             // separators.
             let (key_str, rank) = match node.body() {
-                ArchivedNodeBody::Segment(segment) => match segment.last_key::<SpecKey>() {
-                    Ok(upper_bound) => (
-                        String::from_utf8_lossy(&decode_key(&upper_bound)).to_string(),
-                        DistributionSimulator::rank(&upper_bound, &Manifest::default()),
-                    ),
-                    Err(_) => {
-                        output.push_str(&format!("{prefix}(malformed node {hash})\n"));
-                        return;
+                ArchivedNodeBody::Segment(segment) => {
+                    match (segment.last_key::<SpecKey>(), node.manifest()) {
+                        (Ok(upper_bound), Ok(manifest)) => (
+                            String::from_utf8_lossy(&decode_key(&upper_bound)).to_string(),
+                            DistributionSimulator::rank(&upper_bound, &manifest),
+                        ),
+                        _ => {
+                            output.push_str(&format!("{prefix}(malformed node {hash})\n"));
+                            return;
+                        }
                     }
-                },
+                }
                 ArchivedNodeBody::Index(index) => (format!("({} children)", index.len()), 0),
             };
 

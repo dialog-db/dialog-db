@@ -8,7 +8,6 @@ use dialog_storage::MemoryStorageBackend;
 use ed25519_dalek::SigningKey;
 use futures_util::TryStreamExt as _;
 
-use crate::key::default_manifest;
 use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
 use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value, encode_bytes};
 
@@ -1957,10 +1956,18 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     let mut delta = Delta::zero();
-    tree.record(&mut store, &mut delta, signed.entries(&default_manifest())?)
-        .await?;
-    tree.record(&mut store, &mut delta, forged.entries(&default_manifest())?)
-        .await?;
+    tree.record(
+        &mut store,
+        &mut delta,
+        signed.entries(&dialog_search_tree::Manifest::default())?,
+    )
+    .await?;
+    tree.record(
+        &mut store,
+        &mut delta,
+        forged.entries(&dialog_search_tree::Manifest::default())?,
+    )
+    .await?;
     for (digest, buffer) in delta.flush() {
         store.set(*digest.as_bytes(), buffer.into_vec()).await?;
     }
@@ -1977,6 +1984,91 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
             Err(DialogArtifactsError::InvalidSignature(_))
         ),
         "an unsigned record planted in the tree is refused"
+    );
+
+    Ok(())
+}
+
+/// A tree whose `inline_n` is below a revision record's size spills the
+/// record out of its key. Writing it stores the value block beside the
+/// tree, history reads the record back through that block, and the pull
+/// merge's revision observer reads its version from it too.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
+    use crate::merge::observe_revisions;
+    use crate::tree::TreeStorageBridge;
+    use base58::ToBase58 as _;
+    use dialog_search_tree::{Cache, ContentAddressedStorage, Delta, Manifest, PersistentTree};
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use ed25519_dalek::Signer as _;
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let key = signing_key(9);
+    let did_key = {
+        let mut bytes = vec![0xed, 0x01];
+        bytes.extend_from_slice(key.verifying_key().as_bytes());
+        format!("did:key:z{}", bytes.to_base58())
+    };
+    let mut record = RevisionRecord {
+        format: super::REVISION_RECORD_FORMAT,
+        branch: Entity::new()?,
+        issuer: did_key.clone(),
+        authority: did_key,
+        parents: Vec::new(),
+        skips: Vec::new(),
+        signature: Vec::new(),
+    };
+    record.signature = key.sign(&record.payload()?).to_bytes().to_vec();
+
+    let small = Manifest {
+        inline_n: 32,
+        ..Manifest::default()
+    };
+    let entries = record.entries(&small)?;
+    let Some((reference, _)) = entries.spill.clone() else {
+        panic!("a record larger than inline_n spills");
+    };
+
+    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(small, Cache::new());
+    let mut delta = Delta::zero();
+    tree.record(&mut store, &mut delta, entries).await?;
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+    assert!(
+        store.get(&reference).await?.is_some(),
+        "the spilled block is stored with the entries"
+    );
+
+    let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let observed = Arc::new(Mutex::new(BTreeSet::new()));
+    let empty: ArtifactTree = PersistentTree::empty_with_manifest(small, Cache::new());
+    let changes = observe_revisions(
+        empty.differentiate(&tree, &storage, &storage),
+        observed.clone(),
+        store.clone(),
+    );
+    let _: Vec<_> = changes.try_collect().await?;
+    assert!(
+        observed
+            .lock()
+            .expect("observer lock")
+            .contains(&record.version()),
+        "the observer reads the spilled record's version"
+    );
+
+    let history = TreeHistory::new(tree, store);
+    assert_eq!(
+        history.revision_record(&record.version()).await?,
+        Some(record),
+        "history reads the spilled record back"
     );
 
     Ok(())
