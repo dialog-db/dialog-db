@@ -251,10 +251,8 @@ where
             ArchivedNodeBody::Index(index) => &index.header,
             ArchivedNodeBody::Segment(segment) => &segment.header,
         };
-        let manifest = rkyv::deserialize::<Manifest, rkyv::rancor::Error>(header)
-            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
-        manifest.check()?;
-        Ok(manifest)
+        rkyv::deserialize::<Manifest, rkyv::rancor::Error>(header)
+            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
     }
 
     /// Whether this node is the empty tree's node: a zero-entry segment

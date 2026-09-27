@@ -29,7 +29,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::REGISTRY;
-use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::layer::{MergeKeys, filter_tombstones, merge_grouped, tombstones_from};
 use crate::repository::branch::select::line_manifest;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
@@ -350,25 +350,34 @@ pub(crate) struct QueryEnv<'a, Env> {
     env: &'a Env,
 }
 
-/// The format [`Manifest`] of the trees a [`QueryEnv`] reads, and the
-/// tombstone sets keyed under it.
+/// The format [`Manifest`]s of the trees a [`QueryEnv`] reads, and the
+/// tombstone sets keyed under them.
 ///
-/// A line's rows are keyed under its tree's manifest, and rows from
-/// several lines merge by comparing those keys, so every line of one
-/// environment must share a manifest. Overlay facts and retracts are
-/// keyed under the same one, so they order and match exactly as the
-/// trees' own rows do.
+/// A line's rows are keyed under its tree's manifest. Overlay facts and
+/// retracts are keyed under the lines' manifest too, so they order and
+/// match exactly as the trees' own rows do. Lines written under different
+/// manifests are still read together rather than refused: each line's rows
+/// are filtered with tombstones keyed under its own manifest, and the merge
+/// derives every row's key from its fields under the first line's
+/// ([`MergeKeys::Fields`]), a slower path that keeps retracts and dedup
+/// exact across formats.
 struct Format {
+    /// The manifest overlay rows and merge keys are taken under: the lines'
+    /// shared manifest, or the first line's when they differ.
     manifest: Manifest,
-    /// `sort_key`s of every retracted fact in `changes`. Each line's
-    /// session overlay stream is filtered against these before the
-    /// merge so a staged retract suppresses a session fact.
+    /// How the merge keys rows: off stored bytes when every line shares
+    /// `manifest`, from fields when they do not.
+    keys: MergeKeys,
+    /// `sort_key`s under `manifest` of every retracted fact in `changes`.
+    /// Each line's session overlay stream is filtered against these before
+    /// the merge so a staged retract suppresses a session fact.
     staged: Arc<HashSet<SortKey>>,
-    /// `staged` plus every line's session tombstones. Each line's tree
-    /// stream is filtered against these before the merge so retracts
-    /// in the per-query changes and session tombstones suppress
-    /// matching facts in the tree.
-    tombstones: Arc<HashSet<SortKey>>,
+    /// Per line, in line order: `staged` plus every line's session
+    /// tombstones, keyed under that line's manifest. Each line's tree
+    /// stream is filtered against its own set before the merge so retracts
+    /// in the per-query changes and session tombstones suppress matching
+    /// facts in the tree.
+    tombstones: Vec<(Manifest, Arc<HashSet<SortKey>>)>,
 }
 
 impl<'a, Env> QueryEnv<'a, Env> {
@@ -431,45 +440,52 @@ where
         + ConditionalSync
         + 'static,
 {
-    /// The lines' format and the tombstones keyed under it, resolved from
-    /// the lines' tree roots on first use. Lines written under different
-    /// manifests cannot be read together: their rows' keys do not compare.
+    /// The lines' formats and the tombstones keyed under them, resolved
+    /// from the lines' tree roots on first use (see [`Format`]).
     async fn format(&self) -> Result<&Format, DialogArtifactsError> {
         self.format
             .get_or_try_init(|| async {
-                let mut manifest: Option<Manifest> = None;
+                let mut lines = Vec::with_capacity(self.sources.len());
                 for source in &self.sources {
-                    let line = line_manifest(source.as_ref(), self.env).await?;
-                    match manifest {
-                        None => manifest = Some(line),
-                        Some(first) if first == line => {}
-                        Some(first) => {
-                            return Err(DialogArtifactsError::MalformedIndex(format!(
-                                "Lines written under different tree formats cannot be \
-                                 read together: {first:?} and {line:?}"
-                            )));
-                        }
-                    }
+                    lines.push(line_manifest(source.as_ref(), self.env).await?);
                 }
                 // With no line there is no tree, and the overlay is read
                 // as a new tree would order it.
-                let manifest = manifest.unwrap_or_default();
-                let staged = tombstones_from(&self.changes, &manifest);
-                // The common case, one line and nothing staged, shares the
-                // overlay's own set rather than copying it per query.
-                let tombstones = match self.sources.as_slice() {
-                    [only] if staged.is_empty() => only.as_ref().overlay().tombstones(&manifest),
-                    _ => {
-                        let mut tombstones = staged.clone();
-                        for source in &self.sources {
-                            let session = source.as_ref().overlay().tombstones(&manifest);
-                            tombstones.extend(session.iter().cloned());
-                        }
-                        Arc::new(tombstones)
-                    }
+                let manifest = lines.first().copied().unwrap_or_default();
+                let keys = if lines.iter().all(|line| *line == manifest) {
+                    MergeKeys::Stored
+                } else {
+                    MergeKeys::Fields
                 };
+                let staged = tombstones_from(&self.changes, &manifest);
+                let tombstones = lines
+                    .iter()
+                    .map(|line| {
+                        // The common case, one line and nothing staged,
+                        // shares the overlay's own set rather than copying
+                        // it per query.
+                        let set = match self.sources.as_slice() {
+                            [only] if staged.is_empty() => only.as_ref().overlay().tombstones(line),
+                            _ => {
+                                let mut set = if *line == manifest {
+                                    staged.clone()
+                                } else {
+                                    tombstones_from(&self.changes, line)
+                                };
+                                for source in &self.sources {
+                                    set.extend(
+                                        source.as_ref().overlay().tombstones(line).iter().cloned(),
+                                    );
+                                }
+                                Arc::new(set)
+                            }
+                        };
+                        (*line, set)
+                    })
+                    .collect();
                 Ok(Format {
                     manifest,
+                    keys,
                     staged: Arc::new(staged),
                     tombstones,
                 })
@@ -566,9 +582,9 @@ where
         // retract in `with(..)`) suppresses matching source facts, and
         // by the line's session tombstones. Each owns its line clone
         // and borrows only `self.env`.
-        for source in &self.sources {
+        for (source, (line, tombstones)) in self.sources.iter().zip(&format.tombstones) {
             let raw = select_from_source(source.clone(), self.env, input.clone());
-            streams.push(filter_tombstones(raw, format.tombstones.clone(), manifest));
+            streams.push(filter_tombstones(raw, tombstones.clone(), *line));
         }
 
         // Each line's session overlay, read live. Filtered by the
@@ -601,7 +617,7 @@ where
             )));
         }
 
-        Ok(merge_grouped(streams, manifest))
+        Ok(merge_grouped(streams, manifest, format.keys))
     }
 }
 

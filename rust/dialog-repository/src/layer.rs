@@ -75,9 +75,22 @@ use futures_util::{StreamExt, stream};
 /// spilled tail carries the whole-value content hash), so two rows share a
 /// fingerprint iff they are the same `(the, of, is, cause)` claim — no
 /// value decode needed.
+///
+/// # Keys
+///
+/// With [`MergeKeys::Stored`] a scanned row's key is read off its stored key
+/// bytes, which is exact when every scanned input was written under
+/// `manifest`. Inputs written under different manifests carry keys that do
+/// not compare, so [`MergeKeys::Fields`] derives every row's key from its
+/// fields under `manifest` instead: slower (each row's value is
+/// materialized), but the dedup fingerprint then identifies a claim across
+/// formats. Each input stays grouped by `(the, of)` whatever its format, so
+/// runs still merge whole; only the order of values within a run may differ
+/// from a single tree's.
 pub(crate) fn merge_grouped<'a>(
     streams: Vec<ArtifactStream<'a>>,
     manifest: Manifest,
+    keys: MergeKeys,
 ) -> ArtifactStream<'a> {
     if streams.is_empty() {
         return Box::pin(stream::empty());
@@ -106,7 +119,7 @@ pub(crate) fn merge_grouped<'a>(
                 None => None,
                 Some(row) => {
                     let view = row?;
-                    let key = view.sort_key(&manifest)?;
+                    let key = keys.of(&view, &manifest)?;
                     Some((key, view))
                 }
             });
@@ -141,7 +154,7 @@ pub(crate) fn merge_grouped<'a>(
                 None => None,
                 Some(row) => {
                     let next_view = row?;
-                    let next_key = next_view.sort_key(&manifest)?;
+                    let next_key = keys.of(&next_view, &manifest)?;
                     Some((next_key, next_view))
                 }
             };
@@ -159,6 +172,30 @@ pub(crate) fn merge_grouped<'a>(
             }
         }
     })
+}
+
+/// Where [`merge_grouped`] reads each row's [`SortKey`] from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergeKeys {
+    /// Off a scanned row's stored key bytes: every scanned input was
+    /// written under the merge's manifest.
+    Stored,
+    /// From every row's fields under the merge's manifest: the scanned
+    /// inputs were written under different manifests.
+    Fields,
+}
+
+impl MergeKeys {
+    fn of(
+        self,
+        view: &ArtifactView,
+        manifest: &Manifest,
+    ) -> Result<SortKey, dialog_artifacts::DialogArtifactsError> {
+        match self {
+            MergeKeys::Stored => view.sort_key(manifest),
+            MergeKeys::Fields => Ok(sort_key(&view.to_owned()?, manifest)),
+        }
+    }
 }
 
 /// Extract a tombstone set from a [`Changes`] overlay — one
@@ -229,7 +266,10 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_artifacts::{DialogArtifactsError, Entity, Update as _, Value};
+    use dialog_artifacts::tree::ArtifactTree;
+    use dialog_artifacts::{DialogArtifactsError, Entity, Instruction, Update as _, Value};
+    use dialog_search_tree::{Cache, Delta};
+    use dialog_storage::MemoryStorageBackend;
 
     fn artifact(of: &str, the: &str, is: &str) -> Artifact {
         Artifact {
@@ -258,7 +298,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_yields_empty_stream_when_no_inputs() -> anyhow::Result<()> {
-        let merged = merge_grouped(vec![], Manifest::default());
+        let merged = merge_grouped(vec![], Manifest::default(), MergeKeys::Stored);
         let items = collect(merged).await?;
         assert!(items.is_empty());
         Ok(())
@@ -273,6 +313,7 @@ mod tests {
         let merged = merge_grouped(
             vec![stream_of(vec![a.clone(), a.clone()])],
             Manifest::default(),
+            MergeKeys::Stored,
         );
         let items = collect(merged).await?;
         assert_eq!(items.len(), 2);
@@ -287,6 +328,7 @@ mod tests {
         let merged = merge_grouped(
             vec![stream_of(vec![a.clone()]), stream_of(vec![a.clone()])],
             Manifest::default(),
+            MergeKeys::Stored,
         );
         let items = collect(merged).await?;
         assert_eq!(items.len(), 1);
@@ -331,6 +373,97 @@ mod tests {
         );
         let items = collect(filtered).await?;
         assert_eq!(items, vec![keep]);
+        Ok(())
+    }
+
+    /// A tree holding `facts`, written under `manifest`, and its store.
+    async fn tree_under(
+        manifest: Manifest,
+        facts: Vec<Artifact>,
+    ) -> anyhow::Result<(ArtifactTree, MemoryStorageBackend<[u8; 32], Vec<u8>>)> {
+        use dialog_artifacts::tree::ArtifactTreeExt as _;
+        use dialog_storage::StorageBackend as _;
+
+        let mut store = MemoryStorageBackend::default();
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty_with_manifest(manifest, Cache::new());
+        tree.apply(
+            &mut store,
+            &mut delta,
+            stream::iter(facts.into_iter().map(Instruction::Assert)),
+        )
+        .await?;
+        for (digest, buffer) in delta.flush() {
+            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+        }
+        Ok((tree, store))
+    }
+
+    /// Lines written under different manifests carry different stored keys
+    /// for the same fact (here one spills its value, the other inlines it),
+    /// so their rows are keyed from fields: the shared fact comes out once,
+    /// and a retract keyed under a line's own manifest hides it from that
+    /// line.
+    #[dialog_common::test]
+    async fn it_merges_and_filters_lines_written_under_different_manifests() -> anyhow::Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use dialog_artifacts::tree::{ArtifactTreeExt as _, spill_cache};
+
+        let long = "x".repeat(100);
+        let shared = artifact("id:a", "test/bio", &long);
+        let other = artifact("id:b", "test/bio", "short");
+        let small = Manifest {
+            inline_n: 32,
+            ..Manifest::default()
+        };
+        let (spilling, spilling_store) = tree_under(small, vec![shared.clone()]).await?;
+        let (inlining, inlining_store) =
+            tree_under(Manifest::default(), vec![shared.clone(), other.clone()]).await?;
+        let selector = || ArtifactSelector::new().the("test/bio".parse().expect("attribute"));
+        let scans = || -> Vec<ArtifactStream<'static>> {
+            vec![
+                Box::pin(
+                    spilling
+                        .clone()
+                        .scan(spilling_store.clone(), spill_cache(), selector()),
+                ),
+                Box::pin(
+                    inlining
+                        .clone()
+                        .scan(inlining_store.clone(), spill_cache(), selector()),
+                ),
+            ]
+        };
+
+        let merged = collect(merge_grouped(scans(), small, MergeKeys::Fields)).await?;
+        assert_eq!(
+            merged,
+            vec![shared.clone(), other.clone()],
+            "the shared fact comes out once"
+        );
+
+        let stored = collect(merge_grouped(scans(), small, MergeKeys::Stored)).await?;
+        assert_eq!(
+            stored.len(),
+            3,
+            "stored keys do not match across the formats"
+        );
+
+        let mut changes = Changes::new();
+        changes.dissociate(shared.the.clone(), shared.of.clone(), shared.is.clone());
+        let hidden = filter_tombstones(
+            Box::pin(
+                spilling
+                    .clone()
+                    .scan(spilling_store.clone(), spill_cache(), selector()),
+            ),
+            Arc::new(tombstones_from(&changes, &small)),
+            small,
+        );
+        assert!(
+            collect(hidden).await?.is_empty(),
+            "a retract keyed under the line's format hides it"
+        );
         Ok(())
     }
 

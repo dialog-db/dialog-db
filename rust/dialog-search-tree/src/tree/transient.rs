@@ -249,13 +249,11 @@ where
     /// empty or loaded root, and from the first [`load`](Self::load) for a
     /// root opened by hash; asking before then is a bug in this module.
     fn format(manifest: Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
-        let manifest = manifest.ok_or_else(|| {
+        manifest.ok_or_else(|| {
             DialogSearchTreeError::Node(
                 "The edit's manifest is read before its root was loaded".into(),
             )
-        })?;
-        manifest.check()?;
-        Ok(manifest)
+        })
     }
 
     /// Loads the root into a transient node for editing, returning `None` for an
@@ -278,11 +276,9 @@ where
             + ConditionalSync,
     {
         let known = || {
-            let manifest = expected.ok_or_else(|| {
+            expected.ok_or_else(|| {
                 DialogSearchTreeError::Node("An edit over no stored root has no manifest".into())
-            })?;
-            manifest.check()?;
-            Ok::<_, DialogSearchTreeError>(manifest)
+            })
         };
         match root {
             TransientRoot::Empty => Ok((None, known()?)),
@@ -1088,37 +1084,28 @@ where
             .unwrap_or_else(Cache::new);
         let accessor = Accessor::new(cache.clone(), storage.clone());
 
-        // The stitched tree keeps its sources' format. A manifest lives in the
-        // nodes, so it is read from the source roots — and every source must
-        // AGREE: grafting subtrees written under one format into a tree
-        // stamped with another would mix headers and diverge silently from
-        // either side's canonical shape, so a mismatch fails loudly here,
-        // exactly as the edit path's `load` does. A stitch of nothing but
-        // loose entries has no source to inherit from: it builds a new tree,
-        // under the format a new tree takes (`Manifest::default`).
+        // The stitched tree keeps its sources' format, read from the first
+        // source's root (an unpersisted empty source knows the format it was
+        // created under). Sources written under different formats are
+        // stitched anyway, under the first one's: subtrees grafted from the
+        // others keep their own headers and the seams are regrouped under the
+        // first's parameters, which can leave the result shaped differently
+        // from either side's canonical form — extra work when replicas
+        // compare, never lost data — rather than failing the stitch. A
+        // stitch of nothing but loose entries has no source to inherit from:
+        // it builds a new tree, under the format a new tree takes
+        // (`Manifest::default`).
         let mut manifest: Option<Manifest> = None;
         for piece in &pieces {
             if let Piece::Range { source, .. } = piece {
-                // A stored source's manifest is read from its root node; an
-                // unpersisted empty source has no node but knows the format
-                // it was created under, and that opinion counts the same.
-                let header = match source.stored_root() {
+                manifest = Some(match source.stored_root() {
                     Some(root) => {
                         let node: PersistentNode<Key, Value> = accessor.get_node(root).await?;
                         node.manifest()?
                     }
                     None => source.manifest(storage).await?,
-                };
-                match &manifest {
-                    None => manifest = Some(header),
-                    Some(first) if *first == header => {}
-                    Some(first) => {
-                        return Err(DialogSearchTreeError::Node(format!(
-                            "Stitch manifest mismatch: one source was written under \
-                             {first:?} and another under {header:?}"
-                        )));
-                    }
-                }
+                });
+                break;
             }
         }
         let manifest = manifest.unwrap_or_default();
@@ -4048,7 +4035,6 @@ where
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
-    manifest.check()?;
     TransientNode::<Key, Value>::Segment(TransientSegment::new(Vec::new(), Vec::new()))
         .persist(delta, manifest)
 }
@@ -5772,12 +5758,14 @@ mod tests {
         Ok(())
     }
 
-    /// A manifest version this build does not know is refused wherever it
-    /// enters the tree: reading a node's header, editing a tree whose root
-    /// carries it, and persisting a new tree under it. The version fixes how
-    /// a node is laid out and metered, so nothing is assumed for it.
+    /// A manifest version this build does not know is read and edited, not
+    /// refused: the header reads back as written, an edit goes through under
+    /// this build's newest encoding parameters and keeps the tree's own
+    /// manifest, and a new tree under it persists. A newer peer's tree stays
+    /// usable by an older program; at worst its shape near the edit is not
+    /// the one its own version would give.
     #[dialog_common::test]
-    async fn it_refuses_an_unknown_manifest_version() -> Result<()> {
+    async fn it_reads_and_edits_an_unknown_manifest_version() -> Result<()> {
         use crate::{Manifest, PersistentNodeBody};
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
@@ -5785,7 +5773,11 @@ mod tests {
             version: crate::FORMAT_VERSION + 1,
             ..Manifest::default()
         };
-        assert!(unknown.check().is_err());
+        assert!(!unknown.is_known());
+        assert_eq!(
+            unknown.entry_overhead(),
+            Manifest::default().entry_overhead()
+        );
 
         let entries = vec![crate::Entry {
             key: 7u32.to_le_bytes(),
@@ -5797,24 +5789,99 @@ mod tests {
         storage.store(buffer.as_ref().to_vec(), &root).await?;
 
         let tree = TestTree::from_hash(root);
-        assert!(
-            tree.manifest(&storage).await.is_err(),
-            "reading the header refuses it"
+        assert_eq!(
+            tree.manifest(&storage).await?,
+            unknown,
+            "the header reads back"
         );
-        assert!(
-            tree.edit()
-                .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
-                .await
-                .is_err(),
-            "an edit refuses it"
-        );
+
         let mut delta = Delta::zero();
-        assert!(
-            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), unknown)
-                .persist(&mut delta)
-                .is_err(),
-            "a new tree under it is not persisted"
+        let edited = tree
+            .edit()
+            .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+        assert_eq!(
+            edited.manifest(&storage).await?,
+            unknown,
+            "the edit keeps the tree's own manifest"
         );
+        for key in [7u32, 9] {
+            assert_eq!(
+                edited.get(&key.to_le_bytes(), &storage).await?,
+                Some(key.to_le_bytes().to_vec())
+            );
+        }
+
+        let mut delta = Delta::zero();
+        TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), unknown)
+            .persist(&mut delta)?;
+        Ok(())
+    }
+
+    /// Stitching sources written under different manifests goes through
+    /// rather than failing: the result takes the first source's manifest and
+    /// holds every entry of both ranges, though its shape near the seam may
+    /// not be canonical for either format.
+    #[dialog_common::test]
+    async fn it_stitches_sources_written_under_different_manifests() -> Result<()> {
+        use crate::{Manifest, Piece};
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let narrow = Manifest {
+            fanout_n: 4,
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        let mut sources = Vec::new();
+        for (manifest, keys) in [(narrow, 0..300u32), (Manifest::default(), 300..600u32)] {
+            let mut edit =
+                TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), manifest);
+            for key in keys {
+                edit = edit
+                    .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
+                    .await?;
+            }
+            let mut delta = Delta::zero();
+            let tree = edit.persist(&mut delta)?;
+            for (hash, buffer) in delta.flush() {
+                storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            }
+            sources.push(tree);
+        }
+
+        let stitched = TransientTree::stitch(
+            vec![
+                Piece::Range {
+                    source: &sources[0],
+                    range: 0u32.to_be_bytes()..=299u32.to_be_bytes(),
+                },
+                Piece::Range {
+                    source: &sources[1],
+                    range: 300u32.to_be_bytes()..=599u32.to_be_bytes(),
+                },
+            ],
+            &storage,
+        )
+        .await?;
+        let mut delta = Delta::zero();
+        let stitched = stitched.persist(&mut delta)?;
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        assert_eq!(stitched.manifest(&storage).await?, narrow);
+        for key in 0..600u32 {
+            assert_eq!(
+                stitched.get(&key.to_be_bytes(), &storage).await?,
+                Some(key.to_be_bytes().to_vec()),
+                "key {key} survives the stitch"
+            );
+        }
         Ok(())
     }
 

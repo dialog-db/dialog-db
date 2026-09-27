@@ -17,6 +17,10 @@
 //! the version, which changes every node hash — a visible, intentional fork
 //! rather than a silent one.
 //!
+//! A version this build does not know is read and edited rather than refused,
+//! with its encoding parameters taken from this build's newest version (see
+//! [`Manifest::is_known`]).
+//!
 //! Every edit runs under the manifest of the tree it edits: an edit over a
 //! stored root adopts the header that root carries (see
 //! `TransientTree::load`), and a new tree states its manifest when it is
@@ -26,8 +30,6 @@
 //! self-delimiting and version 1 is the only shipped format.
 
 use rkyv::{Archive, Deserialize, Serialize};
-
-use crate::DialogSearchTreeError;
 
 /// The current format version. Bump when any format constant's meaning or a
 /// node encoding changes AFTER data in the prior format has shipped; format
@@ -167,27 +169,31 @@ impl Manifest {
         self.frame_ceiling_factor as usize * self.max_segment as usize
     }
 
-    /// Refuses a manifest whose `version` this build does not know.
+    /// Whether this build knows the format `version`: whether the encoding
+    /// parameters derived from it (see
+    /// [`entry_overhead`](Self::entry_overhead) and its siblings) are this
+    /// version's own.
     ///
-    /// The version fixes how the rest of a node is laid out and the
-    /// encoding parameters derived from it (see
-    /// [`entry_overhead`](Self::entry_overhead) and its siblings), so a node
-    /// written under an unknown version cannot be interpreted, and a tree
-    /// under one cannot be edited or persisted. Checked where a manifest
-    /// enters the tree: decoding a node's header, loading a root for an
-    /// edit, and persisting.
-    pub fn check(&self) -> Result<(), DialogSearchTreeError> {
-        Encoding::of(self.version).map(|_| ())
+    /// An unknown version is not refused. Its nodes still read (the manifest
+    /// is data, and a body that does not match this build's layout fails its
+    /// own decode), and a tree under it can still be edited: the parameters
+    /// fall back to this build's newest known version, so edits shape the
+    /// touched nodes as this build would. That can leave a tree shaped
+    /// differently from how its own version would shape it — extra work when
+    /// replicas compare, never lost or wrong data — which is far better than
+    /// an older program refusing a newer peer's tree.
+    pub fn is_known(&self) -> bool {
+        Encoding::known(self.version).is_some()
     }
 
-    /// The encoding parameters `version` fixes. A manifest reaching here has
-    /// passed [`check`](Self::check) at the boundary it entered through;
-    /// an unknown version here is a caller that skipped it.
+    /// The encoding parameters `version` fixes, or this build's newest known
+    /// version's for a version it does not know (see
+    /// [`is_known`](Self::is_known)).
     #[inline]
     fn encoding(&self) -> Encoding {
         match self.version {
             1 => Encoding::V1,
-            other => unchecked_version(other),
+            _ => Encoding::NEWEST,
         }
     }
 
@@ -222,18 +228,6 @@ impl Manifest {
     }
 }
 
-/// A manifest whose version skipped [`Manifest::check`] reached a weight
-/// accessor. Kept out of line so the accessors stay a plain match on the
-/// version in the shaping loops that call them per entry.
-#[cold]
-#[inline(never)]
-fn unchecked_version(version: u8) -> ! {
-    panic!(
-        "tree format version {version} reached the encoding parameters without \
-         Manifest::check; this build reads version {FORMAT_VERSION}"
-    )
-}
-
 /// The weight-metering parameters a format version fixes. They shape the
 /// tree (byte pacing cuts by the weight they meter), and they measure how
 /// that version encodes nodes, so they belong to the version rather than to
@@ -258,12 +252,13 @@ impl Encoding {
         link_overhead: 16,
     };
 
-    fn of(version: u8) -> Result<Self, DialogSearchTreeError> {
+    /// The newest version this build knows, used for a version it does not.
+    const NEWEST: Self = Self::V1;
+
+    fn known(version: u8) -> Option<Self> {
         match version {
-            1 => Ok(Self::V1),
-            other => Err(DialogSearchTreeError::Encoding(format!(
-                "Unknown tree format version {other}; this build reads version {FORMAT_VERSION}"
-            ))),
+            1 => Some(Self::V1),
+            _ => None,
         }
     }
 }
