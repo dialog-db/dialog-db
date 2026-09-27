@@ -183,10 +183,11 @@ impl Manifest {
     /// The encoding parameters `version` fixes. A manifest reaching here has
     /// passed [`check`](Self::check) at the boundary it entered through;
     /// an unknown version here is a caller that skipped it.
+    #[inline]
     fn encoding(&self) -> Encoding {
-        match Encoding::of(self.version) {
-            Ok(encoding) => encoding,
-            Err(error) => panic!("{error}"),
+        match self.version {
+            1 => Encoding::V1,
+            other => unchecked_version(other),
         }
     }
 
@@ -196,6 +197,7 @@ impl Manifest {
     /// framing, polarity). Derived from `version`, whose node encoding it
     /// measures. Buffered ops are metered the same way for the buffer byte
     /// cap.
+    #[inline]
     pub fn entry_overhead(&self) -> usize {
         self.encoding().entry_overhead
     }
@@ -205,6 +207,7 @@ impl Manifest {
     /// per-entry encoding. Derived from `version`; lower than
     /// [`entry_overhead`](Self::entry_overhead) plus any payload, so the
     /// floor never predicts a cut the full charge would not make.
+    #[inline]
     pub fn key_overhead(&self) -> usize {
         self.encoding().key_overhead
     }
@@ -213,9 +216,22 @@ impl Manifest {
     /// 32-byte child hash: per-link encoding overhead (offsets, front-coding
     /// bookkeeping). Derived from `version`; the index-level analog of
     /// [`entry_overhead`](Self::entry_overhead).
+    #[inline]
     pub fn link_overhead(&self) -> usize {
         self.encoding().link_overhead
     }
+}
+
+/// A manifest whose version skipped [`Manifest::check`] reached a weight
+/// accessor. Kept out of line so the accessors stay a plain match on the
+/// version in the shaping loops that call them per entry.
+#[cold]
+#[inline(never)]
+fn unchecked_version(version: u8) -> ! {
+    panic!(
+        "tree format version {version} reached the encoding parameters without \
+         Manifest::check; this build reads version {FORMAT_VERSION}"
+    )
 }
 
 /// The weight-metering parameters a format version fixes. They shape the
@@ -231,18 +247,20 @@ struct Encoding {
 }
 
 impl Encoding {
+    /// Version 1. The entry overhead is calibrated against measured leaf
+    /// encodings on the SE dataset: without it, encoded bytes drifted to
+    /// 1.85x the metered weight at p90 (max 2.1x); with it bytes/weight is
+    /// p50 1.02 / p90 1.05, so `max_segment` and the frame ceiling
+    /// denominate in effective bytes.
+    const V1: Self = Self {
+        entry_overhead: 64,
+        key_overhead: 32,
+        link_overhead: 16,
+    };
+
     fn of(version: u8) -> Result<Self, DialogSearchTreeError> {
         match version {
-            // Calibrated against measured leaf encodings on the SE dataset:
-            // without the entry overhead, encoded bytes drifted to 1.85x the
-            // metered weight at p90 (max 2.1x); with it bytes/weight is p50
-            // 1.02 / p90 1.05, so `max_segment` and the frame ceiling
-            // denominate in effective bytes.
-            1 => Ok(Self {
-                entry_overhead: 64,
-                key_overhead: 32,
-                link_overhead: 16,
-            }),
+            1 => Ok(Self::V1),
             other => Err(DialogSearchTreeError::Encoding(format!(
                 "Unknown tree format version {other}; this build reads version {FORMAT_VERSION}"
             ))),
