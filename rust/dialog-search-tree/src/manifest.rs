@@ -27,6 +27,8 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
+use crate::DialogSearchTreeError;
+
 /// The current format version. Bump when any format constant's meaning or a
 /// node encoding changes AFTER data in the prior format has shipped; format
 /// evolution before the first ship stays at version 1, since there is no
@@ -165,38 +167,86 @@ impl Manifest {
         self.frame_ceiling_factor as usize * self.max_segment as usize
     }
 
-    // The per-entry and per-link overheads below shape the tree (they meter
-    // the weight byte pacing cuts by), so they are part of the format. They
-    // are fixed by the format version rather than stored per tree: version 1
-    // is the only format, and a new value means a new version.
+    /// Refuses a manifest whose `version` this build does not know.
+    ///
+    /// The version fixes how the rest of a node is laid out and the
+    /// encoding parameters derived from it (see
+    /// [`entry_overhead`](Self::entry_overhead) and its siblings), so a node
+    /// written under an unknown version cannot be interpreted, and a tree
+    /// under one cannot be edited or persisted. Checked where a manifest
+    /// enters the tree: decoding a node's header, loading a root for an
+    /// edit, and persisting.
+    pub fn check(&self) -> Result<(), DialogSearchTreeError> {
+        Encoding::of(self.version).map(|_| ())
+    }
+
+    /// The encoding parameters `version` fixes. A manifest reaching here has
+    /// passed [`check`](Self::check) at the boundary it entered through;
+    /// an unknown version here is a caller that skipped it.
+    fn encoding(&self) -> Encoding {
+        match Encoding::of(self.version) {
+            Ok(encoding) => encoding,
+            Err(error) => panic!("{error}"),
+        }
+    }
 
     /// Weight charged per leaf entry beyond its key bytes and its value's
     /// payload weight: the columnar bookkeeping each entry costs in an
     /// encoded leaf (front-coding offsets, dictionary and value-table
-    /// framing, polarity). Calibrated against measured leaf encodings on the
-    /// SE dataset: without it encoded bytes drifted to 1.85x the metered
-    /// weight at p90 (max 2.1x); with it bytes/weight is p50 1.02 / p90 1.05,
-    /// so `max_segment` and the frame ceiling denominate in effective bytes.
-    /// Buffered ops are metered the same way for the buffer byte cap.
+    /// framing, polarity). Derived from `version`, whose node encoding it
+    /// measures. Buffered ops are metered the same way for the buffer byte
+    /// cap.
     pub fn entry_overhead(&self) -> usize {
-        64
+        self.encoding().entry_overhead
     }
 
     /// Weight the per-key cut floor charges beyond a key's bytes, where the
     /// value's payload is not in hand: a stand-in for the value slot and the
-    /// per-entry encoding. Lower than [`entry_overhead`](Self::entry_overhead)
-    /// plus any payload, so the floor never predicts a cut the full charge
-    /// would not make.
+    /// per-entry encoding. Derived from `version`; lower than
+    /// [`entry_overhead`](Self::entry_overhead) plus any payload, so the
+    /// floor never predicts a cut the full charge would not make.
     pub fn key_overhead(&self) -> usize {
-        32
+        self.encoding().key_overhead
     }
 
     /// Weight charged per index link beyond its separator bytes and the
     /// 32-byte child hash: per-link encoding overhead (offsets, front-coding
-    /// bookkeeping). The index-level analog of
+    /// bookkeeping). Derived from `version`; the index-level analog of
     /// [`entry_overhead`](Self::entry_overhead).
     pub fn link_overhead(&self) -> usize {
-        16
+        self.encoding().link_overhead
+    }
+}
+
+/// The weight-metering parameters a format version fixes. They shape the
+/// tree (byte pacing cuts by the weight they meter), and they measure how
+/// that version encodes nodes, so they belong to the version rather than to
+/// any tunable manifest field: a new node encoding is a new version with its
+/// own row here.
+#[derive(Debug, Clone, Copy)]
+struct Encoding {
+    entry_overhead: usize,
+    key_overhead: usize,
+    link_overhead: usize,
+}
+
+impl Encoding {
+    fn of(version: u8) -> Result<Self, DialogSearchTreeError> {
+        match version {
+            // Calibrated against measured leaf encodings on the SE dataset:
+            // without the entry overhead, encoded bytes drifted to 1.85x the
+            // metered weight at p90 (max 2.1x); with it bytes/weight is p50
+            // 1.02 / p90 1.05, so `max_segment` and the frame ceiling
+            // denominate in effective bytes.
+            1 => Ok(Self {
+                entry_overhead: 64,
+                key_overhead: 32,
+                link_overhead: 16,
+            }),
+            other => Err(DialogSearchTreeError::Encoding(format!(
+                "Unknown tree format version {other}; this build reads version {FORMAT_VERSION}"
+            ))),
+        }
     }
 }
 

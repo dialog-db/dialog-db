@@ -325,11 +325,13 @@ where
     /// tree, and from the first root load for a stored one. Every path that
     /// reaches a loaded or empty root has it; asking earlier is a bug here.
     fn format(manifest: Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
-        manifest.ok_or_else(|| {
+        let manifest = manifest.ok_or_else(|| {
             DialogSearchTreeError::Node(
                 "The buffered tree's manifest is read before its root was loaded".into(),
             )
-        })
+        })?;
+        manifest.check()?;
+        Ok(manifest)
     }
 
     /// Sets the per-node novelty capacity (the write-amplification knob),

@@ -249,11 +249,13 @@ where
     /// empty or loaded root, and from the first [`load`](Self::load) for a
     /// root opened by hash; asking before then is a bug in this module.
     fn format(manifest: Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
-        manifest.ok_or_else(|| {
+        let manifest = manifest.ok_or_else(|| {
             DialogSearchTreeError::Node(
                 "The edit's manifest is read before its root was loaded".into(),
             )
-        })
+        })?;
+        manifest.check()?;
+        Ok(manifest)
     }
 
     /// Loads the root into a transient node for editing, returning `None` for an
@@ -276,9 +278,11 @@ where
             + ConditionalSync,
     {
         let known = || {
-            expected.ok_or_else(|| {
+            let manifest = expected.ok_or_else(|| {
                 DialogSearchTreeError::Node("An edit over no stored root has no manifest".into())
-            })
+            })?;
+            manifest.check()?;
+            Ok::<_, DialogSearchTreeError>(manifest)
         };
         match root {
             TransientRoot::Empty => Ok((None, known()?)),
@@ -4044,6 +4048,7 @@ where
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
+    manifest.check()?;
     TransientNode::<Key, Value>::Segment(TransientSegment::new(Vec::new(), Vec::new()))
         .persist(delta, manifest)
 }
@@ -5763,6 +5768,52 @@ mod tests {
             tree.root(),
             scratch.root(),
             "the fully vetoed band converges under deletes"
+        );
+        Ok(())
+    }
+
+    /// A manifest version this build does not know is refused wherever it
+    /// enters the tree: reading a node's header, editing a tree whose root
+    /// carries it, and persisting a new tree under it. The version fixes how
+    /// a node is laid out and metered, so nothing is assumed for it.
+    #[dialog_common::test]
+    async fn it_refuses_an_unknown_manifest_version() -> Result<()> {
+        use crate::{Manifest, PersistentNodeBody};
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let unknown = Manifest {
+            version: crate::FORMAT_VERSION + 1,
+            ..Manifest::default()
+        };
+        assert!(unknown.check().is_err());
+
+        let entries = vec![crate::Entry {
+            key: 7u32.to_le_bytes(),
+            value: 7u32.to_le_bytes().to_vec(),
+        }];
+        let body = PersistentNodeBody::segment_from_entries(entries, unknown)?;
+        let buffer = Buffer::from(body.as_bytes()?);
+        let root = buffer.blake3_hash().clone();
+        storage.store(buffer.as_ref().to_vec(), &root).await?;
+
+        let tree = TestTree::from_hash(root);
+        assert!(
+            tree.manifest(&storage).await.is_err(),
+            "reading the header refuses it"
+        );
+        assert!(
+            tree.edit()
+                .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
+                .await
+                .is_err(),
+            "an edit refuses it"
+        );
+        let mut delta = Delta::zero();
+        assert!(
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), unknown)
+                .persist(&mut delta)
+                .is_err(),
+            "a new tree under it is not persisted"
         );
         Ok(())
     }
