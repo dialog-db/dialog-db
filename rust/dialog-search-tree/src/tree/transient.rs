@@ -2130,7 +2130,7 @@ where
     D: Distribution,
 {
     let mut at = entries.len() - 1;
-    let mut weight = entries[at].weight(&manifest);
+    let mut weight = entries[at].weight(manifest);
     while at > 0
         && D::vetoes(
             entries[at - 1].key.as_ref(),
@@ -2139,7 +2139,7 @@ where
         )
     {
         at -= 1;
-        weight += entries[at].weight(&manifest);
+        weight += entries[at].weight(manifest);
     }
     weight
 }
@@ -2170,7 +2170,7 @@ where
             entries[*cur].key.as_ref(),
             manifest,
         ) {
-            bank += entries[*prev].weight(&manifest);
+            bank += entries[*prev].weight(manifest);
         } else {
             break;
         }
@@ -2653,7 +2653,7 @@ where
                     segment
                         .entries()
                         .iter()
-                        .map(|entry| entry.weight(&manifest))
+                        .map(|entry| entry.weight(manifest))
                         .collect(),
                 ),
                 Node::Transient(_) => return Ok(false),
@@ -2685,7 +2685,7 @@ where
                 let entries = segment.entries();
                 piece_lens.push(entries.len());
                 keys.extend(entries.iter().map(|e| e.key.clone()));
-                weights.extend(entries.iter().map(|entry| entry.weight(&manifest)));
+                weights.extend(entries.iter().map(|entry| entry.weight(manifest)));
             }
         }
     }
@@ -2695,11 +2695,11 @@ where
     // piece's length adjusts directly.
     match edit {
         Edit::Upsert(entry) => match keys.binary_search(&entry.key) {
-            Ok(i) => weights[i] = entry.weight(&manifest),
+            Ok(i) => weights[i] = entry.weight(manifest),
             Err(i) => {
                 piece_lens[run_at] += 1;
                 keys.insert(i, entry.key.clone());
-                weights.insert(i, entry.weight(&manifest));
+                weights.insert(i, entry.weight(manifest));
             }
         },
         Edit::Delete(key) => {
@@ -2818,15 +2818,15 @@ where
                 let mut weights: Vec<usize> = Vec::with_capacity(entries.len() + 1);
                 for entry in entries {
                     keys.push(entry.key.as_ref());
-                    weights.push(entry.weight(&manifest));
+                    weights.push(entry.weight(manifest));
                 }
                 match edit {
                     Edit::Upsert(entry) => {
                         match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
-                            Ok(i) => weights[i] = entry.weight(&manifest),
+                            Ok(i) => weights[i] = entry.weight(manifest),
                             Err(i) => {
                                 keys.insert(i, entry.key.as_ref());
-                                weights.insert(i, entry.weight(&manifest));
+                                weights.insert(i, entry.weight(manifest));
                             }
                         }
                     }
@@ -2851,10 +2851,8 @@ where
                         let entries = segment.entries();
                         let keys: Vec<&[u8]> =
                             entries.iter().map(|entry| entry.key.as_ref()).collect();
-                        let weights: Vec<usize> = entries
-                            .iter()
-                            .map(|entry| entry.weight(&manifest))
-                            .collect();
+                        let weights: Vec<usize> =
+                            entries.iter().map(|entry| entry.weight(manifest)).collect();
                         pieces.push(Pending::Ready(Arc::new(PieceSummary::build::<D>(
                             &keys, &weights, manifest,
                         ))));
@@ -2880,10 +2878,8 @@ where
                 };
                 let entries = segment.entries();
                 let keys: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_ref()).collect();
-                let weights: Vec<usize> = entries
-                    .iter()
-                    .map(|entry| entry.weight(&manifest))
-                    .collect();
+                let weights: Vec<usize> =
+                    entries.iter().map(|entry| entry.weight(manifest)).collect();
                 summary::memoize(
                     &link.node,
                     manifest,
@@ -4660,7 +4656,7 @@ where
             // preceded by an accepted seam whenever this fast path can
             // apply (vetoed adjacency is rejected below), so its bank is
             // zero and the entry's own weight is the exact charge.
-            if D::leaf_cut(entry.key.as_ref(), entry.weight(&manifest), manifest) {
+            if D::leaf_cut(entry.key.as_ref(), entry.weight(manifest), manifest) {
                 return false; // inserting a cutting coin splits the segment
             }
             let at = found.unwrap_err();

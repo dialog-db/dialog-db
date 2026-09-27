@@ -3800,7 +3800,9 @@ mod tests {
         // shipped ~64 KiB default would pack these into one leaf, leaving no
         // sealed sibling buffers to exercise). `HitchhikerTree::open` reads
         // this manifest back from the base, so every path below stays
-        // consistent.
+        // consistent. Both buffer caps are lifted so every write stays
+        // buffered: the byte cap would otherwise derive from that small
+        // segment target and flush the buffers this test needs sealed.
         let manifest = Manifest {
             max_segment: 512,
             frame_ceiling_factor: 0,
@@ -3823,7 +3825,9 @@ mod tests {
                 flush(&mut delta, &mut storage).await?;
             }
         }
-        let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(100_000);
+        let mut buffered = HitchhikerTree::open(&base)
+            .with_op_buf_size(100_000)
+            .with_op_buf_bytes(usize::MAX);
         for k in (500..560u32).step_by(3) {
             buffered = buffered
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -3839,7 +3843,9 @@ mod tests {
         let mut roots = Vec::new();
         for fresh in [false, true] {
             let sealed: TestTree = PersistentTree::seal(root.clone(), Cache::new());
-            let mut tree = HitchhikerTree::open(&sealed).with_op_buf_size(100_000);
+            let mut tree = HitchhikerTree::open(&sealed)
+                .with_op_buf_size(100_000)
+                .with_op_buf_bytes(usize::MAX);
             for &k in &batch {
                 tree = tree
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
