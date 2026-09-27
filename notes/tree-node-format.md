@@ -12,7 +12,7 @@ We also need to keep reading every node already stored, and a reader has to lear
 
 ## Goals
 
-- Old nodes stay readable forever, with no migration.
+- Nodes written in the old format stay readable forever, with no migration. New builds write only the new format; nothing needs to write the old one again.
 - New fields can be added without coordinating a single version line, and fields can be retired.
 - An older program keeps working with a newer peer's tree: fields it does not understand cost it a suboptimal tree shape, never a refusal, unless the field changes how data is read.
 - The same node always has the same bytes (content addressing).
@@ -53,7 +53,7 @@ Every integer in the preamble and the fields (version, kind, lengths, codes, int
 | 4 | 66,040 - 16,843,255 |
 | 5-9 | larger, up to `u64::MAX` |
 
-The `bijou64` crate (MIT/Apache-2.0) has been superseded by `bijoux`; we should depend on whichever is maintained, or vendor the few dozen lines of the codec.
+We use the `bijoux` crate (MIT/Apache-2.0), the maintained successor of `bijou64`. Its documentation does not spell out that its `u64` encoding is byte-for-byte bijou64, so the implementation pins the encoding with test vectors at the range boundaries above (0, 247, 248, 503, 504, 66,039, 66,040, `u64::MAX`), which also guards against the encoding drifting in a future release.
 
 ### Alignment
 
@@ -119,19 +119,13 @@ Field bytes are identical on every node of a tree, so the decoded manifest is me
 
 ## Writing
 
-- Every new node is written tagged. An edit to a legacy tree writes tagged nodes along the edited path and leaves untouched legacy subtrees as they are. Each node describes itself, so trees mixing both layouts are fine.
-- Rewriting existing data in the new layout changes its hashes, so it will not deduplicate against legacy copies of the same data. Untouched legacy nodes keep sharing as before.
+A new build writes every node it creates in the tagged layout, from the start. It only has to read the old layout, never write it.
 
-## Rollout
-
-A build that predates this layout cannot read tagged nodes, and peers run different builds. So:
-
-1. Ship the reader first: builds that read both layouts but still write legacy nodes.
-2. Once those builds are what peers run, switch writing to the tagged layout.
+- An edit to a legacy tree writes tagged nodes along the edited path and leaves untouched legacy subtrees as they are. Each node describes itself, so trees mixing both layouts are fine.
+- Nothing is lost by switching: any node an edit touches gets a new hash anyway, so encoding it in the new layout costs nothing extra, and untouched legacy nodes keep their hashes and keep sharing as before.
 
 ## Open questions
 
 - A per-node **level** (leaf 0, each index level above +1) would let sync and diffing know a subtree's depth without descending. Nothing needs it today; it would be one more preamble byte, added with a new version.
 - Whether the table stays a CSV the code is checked against, or becomes a schema file the Rust type is generated from (the schemaboi direction), with the CSV derived from it.
-- Integer codec: depend on `bijoux`, or vendor the codec.
 - Whether the empty tree's node stays a segment with no entries (as now), or gets its own kind.
