@@ -21,6 +21,9 @@ mod fs;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs::*;
 
+mod flaky;
+pub use flaky::*;
+
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 type MakeTargetStorageOutput<K> = (IndexedDbStorageBackend<K, Vec<u8>>, ());
 #[cfg(not(target_arch = "wasm32"))]

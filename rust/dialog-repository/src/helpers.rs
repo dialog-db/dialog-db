@@ -19,10 +19,16 @@ use parking_lot::Mutex;
 /// Create a test repository (this crate's types) using the given operator
 /// as the effect environment.
 #[cfg(test)]
-pub async fn test_repo(
-    operator: &dialog_operator::Operator<VolatileSpaceForTests>,
+pub async fn test_repo<Env>(
+    operator: &Env,
     profile: &dialog_identity::Profile,
-) -> crate::Repository<dialog_credentials::Credential> {
+) -> crate::Repository<dialog_credentials::Credential>
+where
+    Env: Provider<dialog_effects::space::Load>
+        + Provider<dialog_effects::space::Create>
+        + Provider<dialog_effects::memory::List>
+        + RegistryEnv,
+{
     use crate::RepositoryExt as _;
     use dialog_identity::SpaceHandle;
     use dialog_operator::helpers::unique_name;
@@ -35,6 +41,47 @@ pub async fn test_repo(
         .perform(operator)
         .await
         .expect("test_repo: failed to open repository")
+}
+
+/// The space a flaky test operator runs over: volatile, with a memory
+/// provider that loses the publishes a test plans.
+#[cfg(test)]
+pub type FlakySpace = dialog_storage::provider::Space<
+    dialog_storage::provider::Volatile,
+    dialog_storage::Flaky,
+    dialog_storage::provider::Volatile,
+    dialog_storage::provider::Volatile,
+    dialog_storage::provider::Volatile,
+>;
+
+/// A test operator whose memory loses the publishes a test plans, with
+/// its profile and the storage it runs over: the storage is how a test
+/// reaches the [`Flaky`](dialog_storage::Flaky) memory of a
+/// repository, by its DID, to plan them.
+#[cfg(test)]
+pub async fn flaky_operator_with_profile() -> (
+    dialog_operator::Operator<FlakySpace>,
+    dialog_identity::Profile,
+    dialog_storage::provider::storage::Storage<FlakySpace>,
+) {
+    use dialog_capability::Subject;
+    use dialog_identity::Profile;
+    use dialog_operator::DeriveOperator as _;
+    use dialog_operator::helpers::unique_name;
+    use dialog_storage::provider::storage::Storage;
+    let storage = Storage::<FlakySpace>::new();
+    let profile = Profile::open(unique_name("test"))
+        .perform(&storage)
+        .await
+        .expect("flaky_operator_with_profile: failed to open profile");
+    let operator = profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage.clone())
+        .await
+        .expect("flaky_operator_with_profile: failed to build operator");
+    (operator, profile, storage)
 }
 
 #[cfg(test)]
@@ -172,9 +219,6 @@ use dialog_effects::blob::Write;
 use dialog_effects::memory::{Publish, Resolve};
 #[cfg(test)]
 use dialog_network::Network;
-/// The volatile space type test operators run over.
-#[cfg(test)]
-use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;
 
 /// A [`Provider`] wrapper that tallies every effect execution by its
 /// type name, so a test can measure an operation's cost in effect

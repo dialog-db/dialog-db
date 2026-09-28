@@ -152,6 +152,13 @@ impl<S: Clone> Storage<S> {
     pub fn contains(&self, did: &Did) -> bool {
         self.router.spaces.contains(did)
     }
+
+    /// The space mounted for `did`, if one is: a handle onto the same
+    /// providers the router dispatches to, for a test that needs to
+    /// reach past the effects -- to plan a provider's failures, say.
+    pub fn space(&self, did: &Did) -> Option<S> {
+        self.router.spaces.get(did)
+    }
 }
 
 /// Space backed by Volatile providers (blobs held in-memory too).
