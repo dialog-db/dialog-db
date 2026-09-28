@@ -235,3 +235,94 @@ impl<'a> PullDownload<'a> {
         prepared.commit(env).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use std::future::{Future as _, poll_fn};
+    use std::task::Poll;
+
+    use crate::helpers::test_repo;
+    use anyhow::Result;
+    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_peer::helpers::test_session_with_peer;
+    use futures_util::stream;
+
+    fn name(of: &str, is: &str) -> Result<Instruction> {
+        Ok(Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: of.parse()?,
+            is: Value::String(is.to_string()),
+            cause: None,
+        }))
+    }
+
+    /// Yields to the executor once, so whatever runs alongside the caller
+    /// gets a turn before it resumes.
+    async fn yield_once() {
+        let mut yielded = false;
+        poll_fn(move |context| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// A pull that downloads what it adopts lands under the branch's
+    /// write lock, as a plain pull does: while another handle of this
+    /// writer holds the lock, the pull waits for it instead of publishing
+    /// past it.
+    ///
+    /// The race the lock prevents -- a merging commit minting on the head
+    /// this pull is about to move, both under one origin -- turns on the
+    /// interleaving of awaits inside the two operations, which nothing
+    /// outside them can fix. So the lock itself is probed: held by the
+    /// test, it must hold the pull.
+    #[dialog_common::test]
+    async fn it_lands_a_downloading_pull_under_the_write_lock() -> Result<()> {
+        let (session, peer) = test_session_with_peer().await;
+        let repo = test_repo(&session, &peer).await;
+        let main = repo.branch("main").open().perform(&session).await?;
+        main.commit(stream::iter(vec![name("user:a", "Alice")?]))
+            .perform(&session)
+            .await?;
+        let syncing = repo.branch("feature").open().perform(&session).await?;
+        syncing.pull_from(&main).perform(&session).await?;
+
+        let writing = repo.branch("feature").open().perform(&session).await?;
+        let lock = writing.write_lock();
+        let held = lock.lock().await;
+
+        let mut pulling = Box::pin(syncing.pull().download().perform(&session));
+        for _ in 0..1000 {
+            let landed = poll_fn(|context| {
+                Poll::Ready(match pulling.as_mut().poll(context) {
+                    Poll::Ready(result) => Some(result),
+                    Poll::Pending => None,
+                })
+            })
+            .await;
+            if let Some(result) = landed {
+                panic!("the pull landed past the write lock another handle held: {result:?}");
+            }
+            yield_once().await;
+        }
+
+        drop(held);
+        let pulled = pulling.await?;
+        assert_eq!(
+            pulled,
+            main.revision(),
+            "released, the pull adopts main's head"
+        );
+        Ok(())
+    }
+}
