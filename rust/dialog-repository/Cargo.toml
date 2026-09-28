@@ -67,6 +67,9 @@ ruzstd = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Names a filesystem peer by where its platform directory resolves,
+# the same way the filesystem storage lays it out.
+dirs = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

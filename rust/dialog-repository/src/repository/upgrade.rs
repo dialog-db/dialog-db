@@ -519,7 +519,7 @@ mod tests {
             .await?;
         assert_eq!(peers.len(), 1, "one remote, one peer");
         let origin = peers.into_iter().next().expect("one peer");
-        assert_eq!(origin.this.to_string(), "did:web:tonk.network");
+        assert_eq!(origin.this.to_string(), "did:web:tonk.network:ucan");
         assert_eq!(origin.name.0, "origin");
 
         let addresses: Vec<PeerAddress> = registry
