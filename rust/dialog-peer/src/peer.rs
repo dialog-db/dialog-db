@@ -87,12 +87,11 @@ use std::sync::{Arc, OnceLock};
 use dialog_capability::identity::Entity;
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
-use dialog_credentials::{Credential, SignerCredential};
+use dialog_credentials::SignerCredential;
 use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
-use dialog_effects::credential::CredentialError;
 use dialog_effects::peer::PeerConnection;
 use dialog_effects::storage::{Directory, Location};
-use dialog_effects::{archive, blob, credential, memory};
+use dialog_effects::{archive, blob, memory};
 use dialog_identity::access::Access;
 use dialog_identity::{Authority, CredentialHandle, SpaceHandle};
 use dialog_network::{HydrationScheduler, Network};
@@ -204,7 +203,6 @@ pub struct Peer<S: Clone, M: Mode = Local> {
         blob::Read,
         blob::Write,
         blob::Import,
-        credential::Save<Credential>,
         memory::Resolve,
         memory::Publish,
         memory::Retract,
@@ -319,29 +317,6 @@ impl Peer<Unset> {
     /// [space](PeerBuilder::space) branch it is given.
     pub fn operator(operator: impl Into<PeerKey>) -> PeerBuilder<PeerKey, Unset, Session> {
         PeerBuilder::new().operator(operator)
-    }
-}
-
-/// A key is handed only to a handle that holds keys: the peer acting as
-/// itself. A session is refused, whichever key it asks for.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S, M: Mode> Provider<credential::Load<Credential>> for Peer<S, M>
-where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Storage<S>: Provider<credential::Load<Credential>> + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        input: Capability<credential::Load<Credential>>,
-    ) -> Result<Credential, CredentialError> {
-        if !M::HOLDS_KEYS {
-            return Err(CredentialError::Withheld(format!(
-                "the key of {} is not handed to a session",
-                input.subject()
-            )));
-        }
-        input.perform(&self.storage).await
     }
 }
 
@@ -599,7 +574,7 @@ mod tests {
     use dialog_capability::did;
     use dialog_credentials::Ed25519Signer;
     use dialog_credentials::{Credential, SignerCredential};
-    use dialog_effects::credential::{self as credential_fx, prelude::*};
+    use dialog_effects::credential as credential_fx;
     use dialog_effects::storage::Location;
     use dialog_repository::{
         OpenReplicaBranchError, Repository, RepositoryAtExt as _, RepositoryExt as _, secrets,
@@ -662,38 +637,27 @@ mod tests {
             .unwrap();
     }
 
-    /// A site credential is kept in the peer vault, in the peer's space,
-    /// not sealed to the peer: neither the space nor the storage it lives in
-    /// holds a readable copy, and the peer, a member of the vault, reads it
-    /// back.
+    /// A site credential is kept in the peer's space sealed to the peer:
+    /// neither the space nor the storage it lives in holds a readable
+    /// copy, and the peer reads it back.
     #[dialog_common::test]
     async fn it_keeps_a_site_secret_sealed_in_its_state() -> Result<()> {
-        let (_, peer) = test_session_with_peer().await;
+        let peer = test_peer().await;
         peer.secrets()
             .site("https://s3.example/bucket")
             .save(b"access".to_vec())
             .perform(&peer)
             .await?;
 
-        // The storage serves no site secrets at all; what the space holds
-        // is sealed to the peer vault, not to the peer.
-        let peers = peer
-            .state()
-            .vault("account")
-            .vault("peer")
-            .load()
-            .perform(&peer)
-            .await?;
         let sealed = secrets::secret(
             peer.state(),
-            peers.did(),
+            &peer.did(),
             "https://s3.example/bucket",
             &peer,
         )
         .await?
-        .expect("the credential is kept in the peer vault");
-        assert_eq!(sealed.to.0.to_string(), peers.did().to_string());
-        assert_ne!(*peers.did(), peer.did());
+        .expect("the credential is kept sealed to the peer");
+        assert_eq!(sealed.to.0.to_string(), peer.did().to_string());
         assert!(
             !sealed
                 .message
@@ -713,11 +677,11 @@ mod tests {
         Ok(())
     }
 
-    /// A session of a peer reads the peer's site secrets: the peer
-    /// passes it its copies of vault keys sealed to the session, never in
-    /// the clear, and the session opens them with its own key.
+    /// A session of a peer reads none of the peer's site secrets: the
+    /// peer does the syncing they are for, and a session is handed
+    /// nothing sealed to its peer.
     #[dialog_common::test]
-    async fn it_opens_a_peers_site_secret_in_its_sessions() -> Result<()> {
+    async fn it_withholds_a_peers_site_secret_from_its_sessions() -> Result<()> {
         let peer = test_peer().await;
         peer.secrets()
             .site("https://s3.example/bucket")
@@ -730,26 +694,16 @@ mod tests {
             .space(peer.state())
             .allow(Subject::any())
             .await?;
-        let read: Vec<u8> = peer
+        let read = peer
             .secrets()
             .site("https://s3.example/bucket")
-            .load()
+            .load::<Vec<u8>>()
             .perform(&session)
-            .await?;
-        assert_eq!(read, b"access");
-        Ok(())
-    }
-
-    /// A session built from grants alone, with no live peer to seal it a
-    /// vault's key, reads no site secret.
-    #[dialog_common::test]
-    async fn it_keeps_site_secrets_from_a_session_holding_no_vault() -> Result<()> {
-        let peer = test_peer().await;
-        peer.secrets()
-            .site("https://s3.example/bucket")
-            .save(b"access".to_vec())
-            .perform(&peer)
-            .await?;
+            .await;
+        assert!(
+            matches!(read, Err(credential_fx::CredentialError::Withheld(_))),
+            "{read:?}"
+        );
 
         let session = Peer::operator(Ed25519Signer::generate().await?)
             .space(peer.state())
@@ -762,7 +716,10 @@ mod tests {
             .load::<Vec<u8>>()
             .perform(&session)
             .await;
-        assert!(read.is_err(), "a session holding no vault read a secret");
+        assert!(
+            matches!(read, Err(credential_fx::CredentialError::Withheld(_))),
+            "{read:?}"
+        );
         Ok(())
     }
 
@@ -1283,6 +1240,9 @@ mod tests {
     /// A session acts with its own key. The peer's key is not handed to
     /// it, and neither is the key of a repository it loads: it reads and
     /// writes the repository under its grants, never as the repository.
+    /// No peer serves a key-loading effect at all any more, in any mode,
+    /// so the peer's own key cannot be asked for; what is left to pin is
+    /// the repository's.
     #[dialog_common::test]
     async fn it_withholds_keys_from_a_session() -> Result<()> {
         let peer = open_peer(test_storage().await, Location::temp(unique_name("keys"))).await?;
@@ -1291,14 +1251,6 @@ mod tests {
             .space(peer.state())
             .allow(Subject::any().claim(peer.credential()))
             .await?;
-
-        let key = Subject::from(peer.did())
-            .credential()
-            .key(credential_fx::SELF)
-            .load()
-            .perform(&session)
-            .await;
-        assert!(key.is_err(), "the session was handed the peer's key");
 
         let name = unique_name("repo");
         peer.space(name.clone()).open().perform(&peer).await?;
