@@ -298,8 +298,8 @@ mod tests {
         syncing.pull_from(&main).perform(&session).await?;
 
         let writing = repo.branch("feature").open().perform(&session).await?;
-        let lock = writing.write_lock();
-        let held = lock.lock().await;
+        let writer = writing.writer();
+        let held = writer.lock().await;
 
         let mut pulling = Box::pin(syncing.pull().download().perform(&session));
         for _ in 0..1000 {

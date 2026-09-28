@@ -51,6 +51,7 @@ impl OpenBranch {
         induction.resolve().perform(env).await?;
 
         Ok(Branch {
+            writer: Branch::writer_of(&self.branch),
             reference: self.branch,
             revision,
             tracking,
