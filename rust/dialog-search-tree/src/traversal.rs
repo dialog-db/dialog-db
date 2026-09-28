@@ -34,8 +34,8 @@ use rkyv::{
 use std::collections::VecDeque;
 
 use crate::{
-    ArchivedNodeBody, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key,
-    PersistentNode, PersistentTree, Value,
+    ContentAddressedStorage, DialogSearchTreeError, Distribution, Key, NodeBody, PersistentNode,
+    PersistentTree, Value,
 };
 
 /// What a gap-tolerant traversal found at one position in the tree.
@@ -225,7 +225,7 @@ where
                 let node: PersistentNode<Key, Value> =
                     PersistentNode::try_from(Buffer::from(bytes))?;
 
-                if let ArchivedNodeBody::Index(index) = node.body() {
+                if let NodeBody::Index(index) = node.body() {
                     let links = index.links()?;
                     match scope {
                         None => {
@@ -440,7 +440,7 @@ mod tests {
                 while let Some(visit) = visits.next().await {
                     if let Visit::Present(node) = visit? {
                         nodes += 1;
-                        if let crate::ArchivedNodeBody::Segment(segment) = node.body() {
+                        if let crate::NodeBody::Segment(segment) = node.body() {
                             segment.for_each_entry::<[u8; 5], _>(|key, _| {
                                 keys.push(key.to_vec());
                                 Ok(())
@@ -554,7 +554,7 @@ mod tests {
                 let mut count = 0usize;
                 while let Some(visit) = visits.next().await {
                     if let Visit::Present(node) = visit?
-                        && let crate::ArchivedNodeBody::Index(index) = node.body()
+                        && let crate::NodeBody::Index(index) = node.body()
                     {
                         count += index
                             .all_novelty::<[u8; 5]>()?
@@ -579,7 +579,7 @@ mod tests {
         while let Some(visit) = visits.next().await {
             if let Visit::Present(node) = visit? {
                 match node.body() {
-                    crate::ArchivedNodeBody::Segment(segment) => {
+                    crate::NodeBody::Segment(segment) => {
                         segment.for_each_entry::<[u8; 5], _>(|key, _| {
                             if key[0] == 1 {
                                 found += 1;
@@ -587,7 +587,7 @@ mod tests {
                             Ok(())
                         })?;
                     }
-                    crate::ArchivedNodeBody::Index(index) => {
+                    crate::NodeBody::Index(index) => {
                         found += index
                             .all_novelty::<[u8; 5]>()?
                             .into_iter()

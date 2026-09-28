@@ -71,7 +71,7 @@ use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as 
 use dialog_effects::memory;
 use dialog_query::query::Application;
 use dialog_search_tree::{
-    ArchivedNodeBody, ContentAddressedStorage as TreeStorage, NoveltyOp, Traversable as _, Visit,
+    ContentAddressedStorage as TreeStorage, NodeBody, NoveltyOp, Traversable as _, Visit,
     into_owned,
 };
 use futures_util::future::Either;
@@ -704,13 +704,13 @@ impl SnapshotExport {
                 // which do not belong in a tree-walk callback.
                 let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
                 match node.body() {
-                    ArchivedNodeBody::Segment(segment) => {
+                    NodeBody::Segment(segment) => {
                         segment.for_each_entry::<Key, _>(|key, value| {
                             entries.push((Key::from(key.to_vec()), into_owned(value)?));
                             Ok(())
                         })?;
                     }
-                    ArchivedNodeBody::Index(index) => {
+                    NodeBody::Index(index) => {
                         for entry in index.all_novelty::<Key>()? {
                             if let NoveltyOp::Assert(value) = entry.op {
                                 entries.push((Key::from(entry.key), value));

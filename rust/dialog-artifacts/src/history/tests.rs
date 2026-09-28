@@ -2036,7 +2036,7 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
         panic!("a record larger than inline_n spills");
     };
 
-    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(small, Cache::new());
+    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(small.clone(), Cache::new());
     let mut delta = Delta::zero();
     tree.record(&mut store, &mut delta, entries).await?;
     for (digest, buffer) in delta.flush() {

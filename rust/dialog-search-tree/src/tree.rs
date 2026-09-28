@@ -163,7 +163,7 @@ where
     /// node (see [`manifest`](Self::manifest)).
     pub(crate) fn empty_manifest(&self) -> Option<Manifest> {
         match &self.root {
-            TreeRoot::Empty { manifest, .. } => Some(*manifest),
+            TreeRoot::Empty { manifest, .. } => Some(manifest.clone()),
             TreeRoot::Node(_) => None,
         }
     }
@@ -568,7 +568,7 @@ where
             + ConditionalSync,
     {
         match &self.root {
-            TreeRoot::Empty { manifest, .. } => Ok(*manifest),
+            TreeRoot::Empty { manifest, .. } => Ok(manifest.clone()),
             TreeRoot::Node(hash) => {
                 if let Some(manifest) = manifest_memo::get(hash) {
                     return Ok(manifest);
@@ -576,7 +576,7 @@ where
                 let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
                 let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
                 let manifest = node.manifest()?;
-                manifest_memo::insert(hash, manifest);
+                manifest_memo::insert(hash, manifest.clone());
                 Ok(manifest)
             }
         }
@@ -600,7 +600,7 @@ where
     pub fn edit(&self) -> TransientTree<Key, Value, D> {
         match &self.root {
             TreeRoot::Empty { manifest, .. } => {
-                TransientTree::empty_with_manifest(self.node_cache.clone(), *manifest)
+                TransientTree::empty_with_manifest(self.node_cache.clone(), manifest.clone())
             }
             TreeRoot::Node(hash) => TransientTree::new(hash.clone(), self.node_cache.clone()),
         }
@@ -697,7 +697,7 @@ mod manifest_memo {
     }
 
     pub(super) fn get(root: &Blake3Hash) -> Option<Manifest> {
-        memo().lock().ok()?.get(root).copied()
+        memo().lock().ok()?.get(root).cloned()
     }
 
     pub(super) fn insert(root: &Blake3Hash, manifest: Manifest) {

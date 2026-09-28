@@ -244,8 +244,8 @@ where
     /// The format this batch edits under. Known from construction for an
     /// empty or loaded root, and from the first [`load`](Self::load) for a
     /// root opened by hash; asking before then is a bug in this module.
-    fn format(manifest: Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
-        manifest.ok_or_else(|| {
+    fn format(manifest: &Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
+        manifest.clone().ok_or_else(|| {
             DialogSearchTreeError::Node(
                 "The edit's manifest is read before its root was loaded".into(),
             )
@@ -272,7 +272,7 @@ where
             + ConditionalSync,
     {
         let known = || {
-            expected.ok_or_else(|| {
+            expected.clone().ok_or_else(|| {
                 DialogSearchTreeError::Node("An edit over no stored root has no manifest".into())
             })
         };
@@ -282,8 +282,8 @@ where
             TransientRoot::Unloaded(hash) => {
                 let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
                 let header = node.manifest()?;
-                if let Some(expected) = expected
-                    && header != expected
+                if let Some(expected) = &expected
+                    && &header != expected
                 {
                     return Err(DialogSearchTreeError::Node(format!(
                         "Tree manifest mismatch: the root was written under \
@@ -320,8 +320,8 @@ where
     {
         let entry = Entry { key, value };
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
-        let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest).await?;
-        self.manifest = Some(manifest);
+        let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
+        self.manifest = Some(manifest.clone());
 
         let node = match loaded {
             // The first entry of an empty tree becomes a lone segment wrapped in
@@ -365,8 +365,8 @@ where
             + ConditionalSync,
     {
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
-        let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest).await?;
-        self.manifest = Some(manifest);
+        let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
+        self.manifest = Some(manifest.clone());
 
         let Some(root) = loaded else {
             // Deleting from an empty tree is a no-op; leave it empty.
@@ -443,7 +443,7 @@ where
             return Ok(self);
         }
 
-        let manifest = Self::format(self.manifest)?;
+        let manifest = Self::format(&self.manifest)?;
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
         let pieces = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
         self.root = match seal_root::<Key, Value, D, _>(pieces, 0, &manifest, &accessor).await? {
@@ -657,7 +657,7 @@ where
             // The empty tree's persisted form: the canonical
             // manifest-carrying zero-entry node.
             TransientRoot::Empty => {
-                persist_empty_root::<Key, Value>(&Self::format(self.manifest)?, delta)?
+                persist_empty_root::<Key, Value>(&Self::format(&self.manifest)?, delta)?
                     .hash()
                     .clone()
             }
@@ -665,7 +665,7 @@ where
             // durable and is returned verbatim, touching no storage.
             TransientRoot::Unloaded(hash) => hash,
             TransientRoot::Loaded(transient) => transient
-                .persist(delta, &Self::format(self.manifest)?)?
+                .persist(delta, &Self::format(&self.manifest)?)?
                 .hash()
                 .clone(),
         };
@@ -1010,12 +1010,12 @@ where
                 return Some(hash);
             };
             match node.body() {
-                crate::ArchivedNodeBody::Index(index) => {
+                crate::NodeBody::Index(index) => {
                     let at = index.route(key.as_ref()).ok()?;
                     hash = index.hash_at(at).ok()?.clone();
                 }
                 // The leaf is cached, so this path reads nothing.
-                crate::ArchivedNodeBody::Segment(_) => return None,
+                crate::NodeBody::Segment(_) => return None,
             }
         }
     }
@@ -1344,7 +1344,7 @@ where
         // bound to the rank coin, threaded down the reshape chain so every rank
         // decision uses the tree's own format parameters. It is the same
         // manifest stamped into every node this batch persists.
-        let manifest = *manifest;
+        let manifest = manifest.clone();
 
         // Phase one: lift the path to the target leaf, recording the child index
         // chosen at each level. The routing key is borrowed from this edit, so
@@ -5729,22 +5729,20 @@ mod tests {
         Ok(())
     }
 
-    /// A manifest version this build does not know is read and edited, not
-    /// refused: the header reads back as written, an edit goes through under
-    /// this build's newest encoding parameters and keeps the tree's own
-    /// manifest, and a new tree under it persists. A newer peer's tree stays
-    /// usable by an older program; at worst its shape near the edit is not
-    /// the one its own version would give.
+    /// A manifest carrying a shape field this build does not know is read and
+    /// edited, not refused: the header reads back as written, an edit goes
+    /// through and writes the unknown field back into every node it creates,
+    /// and a new tree under it persists. A newer peer's tree stays usable by
+    /// an older program, and the older program does not strip the newer
+    /// peer's settings when it edits.
     #[dialog_common::test]
-    async fn it_reads_and_edits_an_unknown_manifest_version() -> Result<()> {
+    async fn it_reads_and_edits_a_manifest_with_an_unknown_field() -> Result<()> {
         use crate::{Manifest, PersistentNodeBody};
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let unknown = Manifest {
-            version: crate::FORMAT_VERSION + 1,
-            ..Manifest::default()
-        };
-        assert!(!unknown.is_known());
+        // Even code 0x40 is a shape field no build knows; value 7.
+        let unknown = Manifest::decode(&[0x40, 0x01, 0x07])?;
+        assert!(!unknown.extensions.is_empty());
         assert_eq!(
             unknown.entry_overhead(),
             Manifest::default().entry_overhead()
@@ -5754,7 +5752,7 @@ mod tests {
             key: 7u32.to_le_bytes(),
             value: 7u32.to_le_bytes().to_vec(),
         }];
-        let body = PersistentNodeBody::segment_from_entries(entries, unknown)?;
+        let body = PersistentNodeBody::segment_from_entries(entries, unknown.clone())?;
         let buffer = Buffer::from(body.as_bytes()?);
         let root = buffer.blake3_hash().clone();
         storage.store(buffer.as_ref().to_vec(), &root).await?;
@@ -5809,7 +5807,10 @@ mod tests {
             ..Manifest::default()
         };
         let mut sources = Vec::new();
-        for (manifest, keys) in [(narrow, 0..300u32), (Manifest::default(), 300..600u32)] {
+        for (manifest, keys) in [
+            (narrow.clone(), 0..300u32),
+            (Manifest::default(), 300..600u32),
+        ] {
             let mut edit =
                 TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), manifest);
             for key in keys {
@@ -5875,7 +5876,7 @@ mod tests {
             key: 7u32.to_le_bytes(),
             value: 7u32.to_le_bytes().to_vec(),
         }];
-        let body = PersistentNodeBody::segment_from_entries(entries, foreign)?;
+        let body = PersistentNodeBody::segment_from_entries(entries, foreign.clone())?;
         let buffer = Buffer::from(body.as_bytes()?);
         let root = buffer.blake3_hash();
         storage.store(buffer.as_ref().to_vec(), root).await?;
@@ -6237,7 +6238,7 @@ mod tests {
         storage: &'a TestStorage,
     ) -> LeafBounds<'a> {
         Box::pin(async move {
-            use crate::{ArchivedNodeBody, Buffer, PersistentNode, distribution};
+            use crate::{Buffer, NodeBody, PersistentNode, distribution};
 
             let bytes = storage
                 .retrieve(hash)
@@ -6247,12 +6248,12 @@ mod tests {
                 PersistentNode::try_from(Buffer::from(bytes))?;
 
             match node.body() {
-                ArchivedNodeBody::Segment(segment) => {
+                NodeBody::Segment(segment) => {
                     let first: [u8; 4] = segment.first_key::<[u8; 4]>()?.as_slice().try_into()?;
                     let last: [u8; 4] = segment.last_key::<[u8; 4]>()?.as_slice().try_into()?;
                     Ok((first, last))
                 }
-                ArchivedNodeBody::Index(index) => {
+                NodeBody::Index(index) => {
                     let mut previous_max: Option<[u8; 4]> = None;
                     let mut bounds: Option<([u8; 4], [u8; 4])> = None;
                     for (at, link) in index.links()?.into_iter().enumerate() {
@@ -6382,9 +6383,9 @@ mod tests {
         for key in &keys {
             let edit = match tree.stored_root() {
                 Some(root) => {
-                    TransientTree::with_manifest(root.clone(), tree.node_cache(), manifest)
+                    TransientTree::with_manifest(root.clone(), tree.node_cache(), manifest.clone())
                 }
-                None => TransientTree::empty_with_manifest(tree.node_cache(), manifest),
+                None => TransientTree::empty_with_manifest(tree.node_cache(), manifest.clone()),
             };
             tree = edit
                 .insert(key.clone(), key.0.clone(), &storage)
@@ -6454,7 +6455,7 @@ mod tests {
         let mut delta = Delta::zero();
         for key in keys {
             let transient = match &tree {
-                None => TransientTree::empty_with_manifest(Cache::new(), manifest),
+                None => TransientTree::empty_with_manifest(Cache::new(), manifest.clone()),
                 Some(tree) => tree.edit(),
             };
             let next = transient
@@ -6518,9 +6519,9 @@ mod tests {
             keys
         };
 
-        let a = build_incremental(&sorted, manifest, &mut storage).await?;
-        let b = build_incremental(&reversed, manifest, &mut storage).await?;
-        let c = build_incremental(&hashed, manifest, &mut storage).await?;
+        let a = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
+        let b = build_incremental(&reversed, manifest.clone(), &mut storage).await?;
+        let c = build_incremental(&hashed, manifest.clone(), &mut storage).await?;
 
         assert_eq!(
             a.root(),
@@ -6548,7 +6549,7 @@ mod tests {
         // does, coin switched or not.
         let uncapped = Manifest {
             max_segment: 0,
-            ..manifest
+            ..manifest.clone()
         };
         let plain = build_incremental(&sorted, uncapped, &mut storage).await?;
         assert_ne!(
@@ -6589,7 +6590,7 @@ mod tests {
             .collect();
         assert!(!doomed.is_empty() && !survivors.is_empty());
 
-        let full = build_incremental(&sorted, manifest, &mut storage).await?;
+        let full = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
         let pruned = delete_incremental(full, &doomed, &mut storage).await?;
         let rebuilt = build_incremental(&survivors, manifest, &mut storage).await?;
 
@@ -6672,9 +6673,9 @@ mod tests {
             keys
         };
 
-        let a = build_incremental(&sorted, manifest, &mut storage).await?;
-        let b = build_incremental(&reversed, manifest, &mut storage).await?;
-        let c = build_incremental(&hashed, manifest, &mut storage).await?;
+        let a = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
+        let b = build_incremental(&reversed, manifest.clone(), &mut storage).await?;
+        let c = build_incremental(&hashed, manifest.clone(), &mut storage).await?;
 
         assert_eq!(
             a.root(),
@@ -6720,7 +6721,7 @@ mod tests {
         // hashes differ whenever the manifest does, veto fired or not.
         let unvetoed = Manifest {
             max_separator: 512,
-            ..manifest
+            ..manifest.clone()
         };
         let wide = build_incremental(&sorted, unvetoed, &mut storage).await?;
         assert_ne!(
@@ -6763,7 +6764,7 @@ mod tests {
             .collect();
         assert!(!doomed.is_empty() && !survivors.is_empty());
 
-        let full = build_incremental(&sorted, manifest, &mut storage).await?;
+        let full = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
         let pruned = delete_incremental(full, &doomed, &mut storage).await?;
         let rebuilt = build_incremental(&survivors, manifest, &mut storage).await?;
 
@@ -6829,7 +6830,7 @@ mod tests {
         keys.push(VarKey(b"z000".to_vec()));
         keys.sort();
 
-        let tree = build_incremental(&keys, manifest, &mut storage).await?;
+        let tree = build_incremental(&keys, manifest.clone(), &mut storage).await?;
         let pieces = leaf_piece_heads(tree.root(), &storage).await?;
         let bound = manifest.max_separator as usize;
         let anchors: Vec<&(usize, Vec<u8>)> = pieces
@@ -6896,7 +6897,7 @@ mod tests {
         // Even numbers seed the cluster; odd inserts land BETWEEN existing
         // members, the interior churn that would shift positional anchors.
         let seed: Vec<VarKey> = (0..80u32).map(|n| cluster_key(2 * n)).collect();
-        let mut tree = build_incremental(&seed, manifest, &mut storage).await?;
+        let mut tree = build_incremental(&seed, manifest.clone(), &mut storage).await?;
 
         let bound = manifest.max_separator as usize;
         let anchors = |pieces: &[(usize, Vec<u8>)]| -> HashSet<Vec<u8>> {
@@ -7032,9 +7033,9 @@ mod tests {
             keys
         };
 
-        let a = build_incremental(&sorted, manifest, &mut storage).await?;
-        let b = build_incremental(&reversed, manifest, &mut storage).await?;
-        let c = build_incremental(&hashed, manifest, &mut storage).await?;
+        let a = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
+        let b = build_incremental(&reversed, manifest.clone(), &mut storage).await?;
+        let c = build_incremental(&hashed, manifest.clone(), &mut storage).await?;
         assert_eq!(a.root(), b.root(), "orders must converge over the ceiling");
         assert_eq!(a.root(), c.root(), "orders must converge over the ceiling");
 
@@ -7077,7 +7078,7 @@ mod tests {
                 let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
                 let manifest = ceiling_manifest(factor, selector);
                 let sorted = tails_keys("n", 90, &manifest);
-                let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+                let tree = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
 
                 let ceiling = manifest.frame_ceiling();
                 let slack = sorted
@@ -7124,7 +7125,7 @@ mod tests {
         sorted.extend(frame_b.clone());
         sorted.sort();
 
-        let mut tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let mut tree = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
         let mut before: HashSet<Vec<u8>> = leaf_boundaries(tree.root(), &storage)
             .await?
             .into_iter()
@@ -7220,7 +7221,7 @@ mod tests {
         sorted.extend(tails_keys("x", 10, &manifest));
         sorted.sort();
 
-        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let tree = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
         let pieces = leaf_piece_heads(tree.root(), &storage).await?;
         let bound = manifest.max_separator as usize;
         let anchors: Vec<&Vec<u8>> = pieces
@@ -7266,7 +7267,7 @@ mod tests {
         // An all-tails run over the ceiling: no natural cut anywhere, so
         // the frame machinery must force-split it at marked anchors.
         let sorted: Vec<VarKey> = tails_keys("e", 24, &manifest);
-        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let tree = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
         let bound = manifest.max_separator as usize;
         let marked: Vec<(usize, Vec<u8>)> = leaf_piece_heads(tree.root(), &storage)
             .await?
@@ -7314,7 +7315,7 @@ mod tests {
         let mut delta = Delta::zero();
         for key in &sorted {
             let transient = match &fresh {
-                None => TransientTree::empty_with_manifest(Cache::new(), manifest),
+                None => TransientTree::empty_with_manifest(Cache::new(), manifest.clone()),
                 Some(tree) => tree.edit(),
             };
             let value = if key == &target {
@@ -7553,6 +7554,7 @@ mod tests {
         // (and its pass-through) on the incremental path.
         let build_then_edit = |order: Vec<VarKey>| {
             let base = base.clone();
+            let manifest = manifest.clone();
             async move {
                 let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
                 let mut tree = build_incremental(&base, manifest, &mut storage).await?;
@@ -7624,9 +7626,9 @@ mod tests {
             keys
         };
 
-        let a = build_incremental(&sorted, manifest, &mut storage).await?;
-        let b = build_incremental(&reversed, manifest, &mut storage).await?;
-        let c = build_incremental(&hashed, manifest, &mut storage).await?;
+        let a = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
+        let b = build_incremental(&reversed, manifest.clone(), &mut storage).await?;
+        let c = build_incremental(&hashed, manifest.clone(), &mut storage).await?;
         assert_eq!(a.root(), b.root(), "index-paced orders must converge");
         assert_eq!(a.root(), c.root(), "index-paced orders must converge");
 
@@ -7661,7 +7663,7 @@ mod tests {
         let sorted: Vec<VarKey> = (0..600u32)
             .map(|n| VarKey(format!("k{n:04}").into_bytes()))
             .collect();
-        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let tree = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
 
         let stats = index_nodes(tree.root(), &storage).await?;
         let depths: HashSet<usize> = stats.iter().map(|(depth, _, _)| *depth).collect();
@@ -7802,7 +7804,7 @@ mod tests {
         let manifest = ceiling_manifest(0, 1);
 
         let sorted = semantic_cluster();
-        let mut tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let mut tree = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
         // A semantic anchor's stored separator carries exactly lcp + 1 = 25
         // bytes (the sub-boundary divergence, one past the 24-byte cluster
         // prefix); in-sub anchors carry 32 or more.
@@ -7861,7 +7863,7 @@ mod tests {
         let manifest = ceiling_manifest(0, 1);
 
         let sorted = semantic_cluster();
-        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let tree = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
         let sub_b_first = sorted[15].clone();
         let sub_b_second = sorted[16].clone();
 
@@ -7937,9 +7939,9 @@ mod tests {
             keys
         };
 
-        let a = build_incremental(&sorted, manifest, &mut storage).await?;
-        let b = build_incremental(&reversed, manifest, &mut storage).await?;
-        let c = build_incremental(&hashed, manifest, &mut storage).await?;
+        let a = build_incremental(&sorted, manifest.clone(), &mut storage).await?;
+        let b = build_incremental(&reversed, manifest.clone(), &mut storage).await?;
+        let c = build_incremental(&hashed, manifest.clone(), &mut storage).await?;
         assert_eq!(
             a.root(),
             b.root(),
@@ -8139,7 +8141,7 @@ mod tests {
         let mut keys: Vec<VarKey> = (0..=high + 1).map(cluster_key).collect();
         keys.push(VarKey(b"z000".to_vec()));
 
-        let full = build_incremental(&keys, manifest, &mut storage).await?;
+        let full = build_incremental(&keys, manifest.clone(), &mut storage).await?;
         assert!(
             leaf_boundaries(full.root(), &storage).await?.is_empty(),
             "the vetoed stretch must ride in one segment"
@@ -8281,7 +8283,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let first = key_at(0);
-        let mut tree: VarTree = TransientTree::empty_with_manifest(Cache::new(), manifest)
+        let mut tree: VarTree = TransientTree::empty_with_manifest(Cache::new(), manifest.clone())
             .insert(first.clone(), first.0.clone(), &storage)
             .await?
             .persist(&mut delta)?;
@@ -8820,7 +8822,7 @@ mod buffer_edit_interaction_tests {
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
     use crate::{
-        ArchivedNodeBody, Buffer, Change, ContentAddressedStorage, Delta, Entry, HitchhikerTree,
+        Buffer, Change, ContentAddressedStorage, Delta, Entry, HitchhikerTree, NodeBody,
         NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Piece, TransientTree, tree_spec,
     };
 
@@ -8865,9 +8867,9 @@ mod buffer_edit_interaction_tests {
         for i in keys {
             let edit = match base.stored_root() {
                 Some(root) => {
-                    TransientTree::with_manifest(root.clone(), base.node_cache(), manifest)
+                    TransientTree::with_manifest(root.clone(), base.node_cache(), manifest.clone())
                 }
-                None => TransientTree::empty_with_manifest(base.node_cache(), manifest),
+                None => TransientTree::empty_with_manifest(base.node_cache(), manifest.clone()),
             };
             base = edit
                 .insert(i.to_be_bytes(), vec![i as u8], storage)
@@ -8898,21 +8900,21 @@ mod buffer_edit_interaction_tests {
         // Discover a boundary: walk the root's links; each link's upper_bound is
         // the last key of that child, i.e. a boundary key.
         let boundary = {
-            use crate::{ArchivedNodeBody, PersistentNode};
+            use crate::{NodeBody, PersistentNode};
             let bytes = dialog_storage::StorageBackend::get(storage.backend(), base.root())
                 .await?
                 .unwrap();
             let node: PersistentNode<[u8; 4], Vec<u8>> =
                 PersistentNode::try_from(crate::Buffer::from(bytes))?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => {
+                NodeBody::Index(index) => {
                     // Separators are lower bounds, so the second child's
                     // separator IS the boundary key that ends the first child.
                     let separator = index.separator(1)?;
                     <[u8; 4]>::try_from(separator.as_slice())
                         .expect("separator is a whole four-byte key")
                 }
-                ArchivedNodeBody::Segment(_) => panic!("expected an index root"),
+                NodeBody::Segment(_) => panic!("expected an index root"),
             }
         };
 
@@ -8954,21 +8956,21 @@ mod buffer_edit_interaction_tests {
         let base = paced_base(0..600u32, &mut storage).await?;
 
         let boundary = {
-            use crate::{ArchivedNodeBody, PersistentNode};
+            use crate::{NodeBody, PersistentNode};
             let bytes = dialog_storage::StorageBackend::get(storage.backend(), base.root())
                 .await?
                 .unwrap();
             let node: PersistentNode<[u8; 4], Vec<u8>> =
                 PersistentNode::try_from(crate::Buffer::from(bytes))?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => {
+                NodeBody::Index(index) => {
                     // Separators are lower bounds, so the second child's
                     // separator IS the boundary key that ends the first child.
                     let separator = index.separator(1)?;
                     <[u8; 4]>::try_from(separator.as_slice())
                         .expect("separator is a whole four-byte key")
                 }
-                ArchivedNodeBody::Segment(_) => panic!("expected an index root"),
+                NodeBody::Segment(_) => panic!("expected an index root"),
             }
         };
 
@@ -9649,7 +9651,7 @@ mod buffer_edit_interaction_tests {
             frame_ceiling_factor: 0,
             ..crate::Manifest::default()
         };
-        let mut base = TransientTree::empty_with_manifest(Default::default(), manifest);
+        let mut base = TransientTree::empty_with_manifest(Default::default(), manifest.clone());
         for i in (0..24_000u32).step_by(2) {
             base = base
                 .insert(i.to_be_bytes(), vec![i as u8], &observed)
@@ -9958,7 +9960,7 @@ mod buffer_edit_interaction_tests {
     /// structural split or join actually happened rather than trusting that
     /// equal roots imply it did.
     async fn segment_count(tree: &Tree, storage: &Store) -> Result<usize> {
-        use crate::{ArchivedNodeBody, PersistentNode};
+        use crate::{NodeBody, PersistentNode};
         let mut frontier: Vec<dialog_common::Blake3Hash> =
             tree.stored_root().cloned().into_iter().collect();
         let mut segments = 0usize;
@@ -9969,12 +9971,12 @@ mod buffer_edit_interaction_tests {
             let node: PersistentNode<[u8; 4], Vec<u8>> =
                 PersistentNode::try_from(Buffer::from(bytes))?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => {
+                NodeBody::Index(index) => {
                     for at in 0..index.len() {
                         frontier.push(index.hash_at(at)?.clone());
                     }
                 }
-                ArchivedNodeBody::Segment(_) => segments += 1,
+                NodeBody::Segment(_) => segments += 1,
             }
         }
         Ok(segments)
@@ -10021,9 +10023,9 @@ mod buffer_edit_interaction_tests {
         for key in &base_keys {
             base = match base.stored_root() {
                 Some(root) => {
-                    TransientTree::with_manifest(root.clone(), base.node_cache(), manifest)
+                    TransientTree::with_manifest(root.clone(), base.node_cache(), manifest.clone())
                 }
-                None => TransientTree::empty_with_manifest(base.node_cache(), manifest),
+                None => TransientTree::empty_with_manifest(base.node_cache(), manifest.clone()),
             }
             .insert(key.to_be_bytes(), vec![1], &storage)
             .await?
@@ -10225,8 +10227,8 @@ mod buffer_edit_interaction_tests {
         node: &PersistentNode<SpecKey, Vec<u8>>,
     ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
         Ok(match node.body() {
-            ArchivedNodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
-            ArchivedNodeBody::Segment(_) => Vec::new(),
+            NodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
+            NodeBody::Segment(_) => Vec::new(),
         })
     }
 

@@ -53,8 +53,8 @@ use rkyv::{
 };
 
 use crate::{
-    ArchivedNodeBody, Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
-    Key, Manifest, PersistentNode, PersistentTree, Rank, Value,
+    Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution, Key, Manifest,
+    NodeBody, PersistentNode, PersistentTree, Rank, Value,
 };
 
 /// Traversal order for tree iteration.
@@ -183,7 +183,7 @@ where
                 while let Some(hash) = queue.dequeue() {
                     let node = load_node::<Key, Value, Backend>(storage, &hash).await?;
 
-                    if let ArchivedNodeBody::Index(index) = node.body() {
+                    if let NodeBody::Index(index) = node.body() {
                         let children = index
                             .links()?
                             .into_iter()
@@ -472,7 +472,7 @@ impl ObservingBackend {
                 let node = crate::PersistentNode::<Key, Value>::try_from(
                     dialog_common::Buffer::from(bytes),
                 )?;
-                if let crate::ArchivedNodeBody::Index(index) = node.body() {
+                if let crate::NodeBody::Index(index) = node.body() {
                     for link in index.links()? {
                         next.push(link.node);
                     }
@@ -855,10 +855,14 @@ impl TreeDescriptor {
             let leaf_rank = if leaf_boundaries.contains(key) { 2 } else { 1 };
             let seam_rank = seam_ranks.get(key).copied().unwrap_or(1);
             let edit = match tree.stored_root() {
-                Some(root) => {
-                    crate::TransientTree::with_manifest(root.clone(), tree.node_cache(), manifest)
+                Some(root) => crate::TransientTree::with_manifest(
+                    root.clone(),
+                    tree.node_cache(),
+                    manifest.clone(),
+                ),
+                None => {
+                    crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest.clone())
                 }
-                None => crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest),
             };
             tree = edit
                 .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
@@ -944,10 +948,8 @@ impl TreeDescriptor {
         let node = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await?;
 
         let upper_bound: SpecKey = match node.body() {
-            ArchivedNodeBody::Segment(segment) => {
-                SpecKey::try_from_bytes(&segment.last_key::<SpecKey>()?)?
-            }
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Segment(segment) => SpecKey::try_from_bytes(&segment.last_key::<SpecKey>()?)?,
+            NodeBody::Index(index) => {
                 let mut last: Option<SpecKey> = None;
                 for link in index.links()? {
                     last = Some(
@@ -1086,7 +1088,7 @@ impl TreeSpec {
             // and by child count for indexes, whose links carry only
             // separators.
             let (key_str, rank) = match node.body() {
-                ArchivedNodeBody::Segment(segment) => {
+                NodeBody::Segment(segment) => {
                     match (segment.last_key::<SpecKey>(), node.manifest()) {
                         (Ok(upper_bound), Ok(manifest)) => (
                             String::from_utf8_lossy(&decode_key(&upper_bound)).to_string(),
@@ -1098,7 +1100,7 @@ impl TreeSpec {
                         }
                     }
                 }
-                ArchivedNodeBody::Index(index) => (format!("({} children)", index.len()), 0),
+                NodeBody::Index(index) => (format!("({} children)", index.len()), 0),
             };
 
             let branch = if is_last { "└── " } else { "├── " };
@@ -1118,7 +1120,7 @@ impl TreeSpec {
                 ));
             }
 
-            if let ArchivedNodeBody::Index(index) = node.body() {
+            if let NodeBody::Index(index) = node.body() {
                 let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
                 let child_count = index.len();
                 let Ok(links) = index.links() else {

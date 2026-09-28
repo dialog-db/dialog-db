@@ -15,8 +15,8 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{
-    ArchivedNodeBody, ContentAddressedStorage as TreeStorage, MissingBlocks, MissingPolicy,
-    NoveltyOp, PersistentNode, TreeDifference, into_owned,
+    ContentAddressedStorage as TreeStorage, MissingBlocks, MissingPolicy, NodeBody, NoveltyOp,
+    PersistentNode, TreeDifference, into_owned,
 };
 use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -568,11 +568,11 @@ fn node_children(
     node: &PersistentNode<ArtifactKey, State<Datum>>,
 ) -> Result<Vec<NodeHash>, PushError> {
     match node.body() {
-        ArchivedNodeBody::Index(index) => {
+        NodeBody::Index(index) => {
             let links = index.links()?;
             Ok(links.into_iter().map(|link| link.node).collect())
         }
-        ArchivedNodeBody::Segment(_) => Ok(Vec::new()),
+        NodeBody::Segment(_) => Ok(Vec::new()),
     }
 }
 
@@ -1083,13 +1083,13 @@ where
                 // the node lands, mirroring the top-level shipment loop.
                 let mut entries: Vec<(ArtifactKey, State<Datum>)> = Vec::new();
                 match node.body() {
-                    ArchivedNodeBody::Segment(segment) => {
+                    NodeBody::Segment(segment) => {
                         segment.for_each_entry::<ArtifactKey, _>(|key, value| {
                             entries.push((ArtifactKey::from(key.to_vec()), into_owned(value)?));
                             Ok(())
                         })?;
                     }
-                    ArchivedNodeBody::Index(index) => {
+                    NodeBody::Index(index) => {
                         for entry in index.all_novelty::<ArtifactKey>()? {
                             if let NoveltyOp::Assert(value) = entry.op {
                                 entries.push((ArtifactKey::from(entry.key), value));

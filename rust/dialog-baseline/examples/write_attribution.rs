@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Datum, IndexRoot, Key, State};
 use dialog_baseline::se::{SeLog, se_instructions};
-use dialog_search_tree::{ArchivedNodeBody, Buffer as TreeBuffer, PersistentNode};
+use dialog_search_tree::{Buffer as TreeBuffer, NodeBody, PersistentNode};
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend};
 use futures_util::stream;
 
@@ -60,8 +60,8 @@ impl Volume {
             }
         };
         match node.body() {
-            ArchivedNodeBody::Segment(_) => self.leaf.add(bytes.len()),
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Segment(_) => self.leaf.add(bytes.len()),
+            NodeBody::Index(index) => {
                 self.index.add(bytes.len());
                 self.index_novelty_ops += index.novelty_len();
             }
@@ -143,13 +143,13 @@ async fn probe(
         let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
         depth += 1;
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 if depth == 1 {
                     root_stats = (size, index.novelty_len(), index.len());
                 }
                 hash = *index.hash_at(0)?.as_bytes();
             }
-            ArchivedNodeBody::Segment(_) => break,
+            NodeBody::Segment(_) => break,
         }
     }
     Ok((root_stats.0, root_stats.1, root_stats.2, depth))

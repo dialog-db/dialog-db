@@ -496,7 +496,7 @@ where
                 }
                 // With no line there is no tree, and the overlay is read
                 // as a new tree would order it.
-                let manifest = lines.first().copied().unwrap_or_default();
+                let manifest = lines.first().cloned().unwrap_or_default();
                 let keys = if lines.iter().all(|line| *line == manifest) {
                     MergeKeys::Stored
                 } else {
@@ -621,7 +621,7 @@ where
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
         let format = self.format().await?;
-        let manifest = format.manifest;
+        let manifest = format.manifest.clone();
         self.record_demand(&input, &manifest);
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
 
@@ -636,7 +636,7 @@ where
             streams.push(filter_tombstones(
                 raw,
                 line.tombstones.clone(),
-                line.manifest,
+                line.manifest.clone(),
             ));
         }
 
@@ -651,7 +651,11 @@ where
             }
             let rows: ArtifactStream<'a> =
                 Box::pin(stream::iter(rows.into_iter().map(|fact| Ok(fact.into()))));
-            streams.push(filter_tombstones(rows, line.staged.clone(), line.manifest));
+            streams.push(filter_tombstones(
+                rows,
+                line.staged.clone(),
+                line.manifest.clone(),
+            ));
         }
 
         // Overlay stream — the per-query changes, read in the lines'

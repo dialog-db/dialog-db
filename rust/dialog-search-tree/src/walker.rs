@@ -23,7 +23,7 @@ use rkyv::{
 use std::sync::Arc;
 
 use crate::{
-    Accessor, ArchivedNodeBody, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NoveltyOp,
+    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NodeBody, NoveltyOp,
     PersistentNode, Value, into_owned,
 };
 
@@ -213,7 +213,7 @@ where
 {
     let mut winners: Vec<PendingWinner> = Vec::new();
     for (level, (node, descended)) in path.iter().enumerate() {
-        let ArchivedNodeBody::Index(index) = node.body() else {
+        let NodeBody::Index(index) = node.body() else {
             continue;
         };
         let Some(at) = *descended else { continue };
@@ -327,7 +327,7 @@ where
         + ConditionalSync,
 {
     for layer in path {
-        let ArchivedNodeBody::Index(index) = layer.host.body() else {
+        let NodeBody::Index(index) = layer.host.body() else {
             continue;
         };
         let Some(buffer) = index.buffer_for(layer.index) else {
@@ -463,9 +463,9 @@ where
 
             'walk: while let Some((node, maybe_index)) = search_path.pop() {
                 let body = node.body();
-                let is_segment = matches!(body, ArchivedNodeBody::Segment(_));
+                let is_segment = matches!(body, NodeBody::Segment(_));
                 if !is_segment {
-                    let ArchivedNodeBody::Index(index) = body else {
+                    let NodeBody::Index(index) = body else {
                         unreachable!("checked above")
                     };
                     let child_index = if let Some(index) = maybe_index {
@@ -610,7 +610,7 @@ where
                             let segment = match &segment {
                                 Some(segment) => segment,
                                 None => {
-                                    let ArchivedNodeBody::Segment(resolved) = node.body() else {
+                                    let NodeBody::Segment(resolved) = node.body() else {
                                         unreachable!("segment checked above")
                                     };
                                     segment.insert(resolved)
@@ -633,7 +633,7 @@ where
                         }
                     }
                 } else {
-                    let ArchivedNodeBody::Segment(segment) = node.body() else {
+                    let NodeBody::Segment(segment) = node.body() else {
                         unreachable!("segment checked above")
                     };
                     let mut keys = segment.keys::<Key>()?;
@@ -733,7 +733,7 @@ where
             let node = accessor.get_node(&next_node).await?;
 
             match node.body() {
-                ArchivedNodeBody::Index(index) => {
+                NodeBody::Index(index) => {
                     // Descend into the last child whose separator is at or
                     // below the key (a probe equal to a separator belongs to
                     // the seam's right side), clamping to the leftmost child
@@ -747,7 +747,7 @@ where
                         index: child_index,
                     });
                 }
-                ArchivedNodeBody::Segment(_) => {
+                NodeBody::Segment(_) => {
                     let right_neighbor = if options.prefetch_right_neighbor {
                         prefetch_right_neighbor(key, &node, &path, accessor).await?
                     } else {
@@ -871,7 +871,7 @@ where
     let right_leaf = loop {
         let node: PersistentNode<Key, Value> = accessor.get_node(&next_hash).await?;
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 if index.is_empty() {
                     return Err(DialogSearchTreeError::Node(
                         "Empty index node during right-neighbor descent".into(),
@@ -886,7 +886,7 @@ where
                 });
                 next_hash = child_hash;
             }
-            ArchivedNodeBody::Segment(_) => break node,
+            NodeBody::Segment(_) => break node,
         }
     };
 
@@ -1300,7 +1300,7 @@ mod prefetch_tests {
     use futures_util::TryStreamExt as _;
 
     use crate::{
-        ArchivedNodeBody, Buffer, ContentAddressedStorage, Delta, PersistentNode, PersistentTree,
+        Buffer, ContentAddressedStorage, Delta, NodeBody, PersistentNode, PersistentTree,
         helpers::ObservingBackend,
     };
 
@@ -1373,7 +1373,7 @@ mod prefetch_tests {
 
         // The root's second child, and a key from its leftmost leaf.
         let root = load(&storage, tree.root()).await?;
-        let ArchivedNodeBody::Index(index) = root.body() else {
+        let NodeBody::Index(index) = root.body() else {
             anyhow::bail!("the built tree has a single leaf; nothing to warm")
         };
         let sibling = index.hash_at(1)?.clone();
@@ -1381,8 +1381,8 @@ mod prefetch_tests {
         let key: [u8; 4] = loop {
             let node = load(&storage, &hash).await?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
-                ArchivedNodeBody::Segment(segment) => {
+                NodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
+                NodeBody::Segment(segment) => {
                     break segment.first_key::<[u8; 4]>()?.as_slice().try_into()?;
                 }
             }
@@ -1493,16 +1493,16 @@ mod prefetch_tests {
         for step in path.windows(2) {
             let node = load(&storage, &step[0]).await?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => assert!(
+                NodeBody::Index(index) => assert!(
                     index.contains_hash(&step[1]),
                     "a read that is not a child of the read before it"
                 ),
-                ArchivedNodeBody::Segment(_) => panic!("a segment cannot hold a further read"),
+                NodeBody::Segment(_) => panic!("a segment cannot hold a further read"),
             }
         }
 
         let leaf = load(&storage, path.last().expect("a read")).await?;
-        assert!(matches!(leaf.body(), ArchivedNodeBody::Segment(_)));
+        assert!(matches!(leaf.body(), NodeBody::Segment(_)));
 
         Ok(())
     }
@@ -1512,8 +1512,8 @@ mod prefetch_tests {
         loop {
             let node = load(storage, &hash).await?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
-                ArchivedNodeBody::Segment(segment) => {
+                NodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
+                NodeBody::Segment(segment) => {
                     return Ok(segment.first_key::<[u8; 4]>()?.as_slice().try_into()?);
                 }
             }
@@ -1535,7 +1535,7 @@ mod prefetch_tests {
         let tree = built_tree(&mut storage).await?;
 
         let root = load(&storage, tree.root()).await?;
-        let ArchivedNodeBody::Index(index) = root.body() else {
+        let NodeBody::Index(index) = root.body() else {
             anyhow::bail!("the built tree has a single leaf; nothing to read ahead")
         };
         if index.len() < 3 {

@@ -64,7 +64,7 @@ use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_search_tree::NoveltyOp;
 use dialog_search_tree::{
-    ArchivedNodeBody, ContentAddressedStorage as TreeStorage, Traversable as _, Visit, into_owned,
+    ContentAddressedStorage as TreeStorage, NodeBody, Traversable as _, Visit, into_owned,
 };
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_storage::provider::storage::Storage;
@@ -1993,20 +1993,18 @@ async fn assert_remote_closure_complete(
             panic!("the audit walk must reach every block of the head");
         };
         let children = match node.body() {
-            ArchivedNodeBody::Index(body) => {
-                body.links()?.into_iter().map(|link| link.node).collect()
-            }
-            ArchivedNodeBody::Segment(_) => Vec::new(),
+            NodeBody::Index(body) => body.links()?.into_iter().map(|link| link.node).collect(),
+            NodeBody::Segment(_) => Vec::new(),
         };
         let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
         match node.body() {
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Segment(segment) => {
                 segment.for_each_entry::<Key, _>(|key, value| {
                     entries.push((Key::from(key.to_vec()), into_owned(value)?));
                     Ok(())
                 })?;
             }
-            ArchivedNodeBody::Index(body) => {
+            NodeBody::Index(body) => {
                 for entry in body.all_novelty::<Key>()? {
                     if let NoveltyOp::Assert(value) = entry.op {
                         entries.push((Key::from(entry.key), value));
@@ -3757,7 +3755,7 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
         let Visit::Present(node) = visit? else {
             panic!("a pulled replica holds its whole tree");
         };
-        let ArchivedNodeBody::Segment(segment) = node.body() else {
+        let NodeBody::Segment(segment) = node.body() else {
             continue;
         };
         segment.for_each_entry::<Key, _>(|key, value| {
@@ -4610,7 +4608,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
         let node = dialog_search_tree::PersistentNode::<Key, State<Datum>>::try_from(
             dialog_search_tree::Buffer::from(bytes),
         )?;
-        if let ArchivedNodeBody::Index(index) = node.body() {
+        if let NodeBody::Index(index) = node.body() {
             at = index.links()?.first().map(|link| link.node.clone());
         }
     }

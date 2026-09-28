@@ -20,7 +20,7 @@ use dialog_artifacts::{
     ArtifactStoreMutExt, Artifacts, Instruction, Key, MemoryStorageBackend, State,
 };
 use dialog_search_tree::{
-    ArchivedNodeBody, Buffer, ContentAddressedStorage as TreeStorage, PersistentNode,
+    Buffer, ContentAddressedStorage as TreeStorage, NodeBody, PersistentNode,
 };
 
 const ENTITIES: usize = 20_000;
@@ -66,14 +66,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let node: PersistentNode<Key, State<dialog_artifacts::Datum>> =
             PersistentNode::try_from(Buffer::from(bytes))?;
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 index_nodes += 1;
                 index_bytes += size;
                 for at in 0..index.len() {
                     frontier.push(index.hash_at(at)?.clone());
                 }
             }
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Segment(segment) => {
                 segment_nodes += 1;
                 segment_bytes += size;
                 entries += segment.len() as u64;
