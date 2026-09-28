@@ -366,6 +366,10 @@ pub(crate) struct TriggerFootprint {
     pub(crate) reads: BTreeSet<Entity>,
 }
 
+/// The tree root of every layer a rule set was resolved from, in layer
+/// order: `None` for a layer with no tree yet.
+type LayerRoots = Vec<Option<[u8; 32]>>;
+
 #[derive(Debug, Default)]
 struct RuleCacheInner {
     /// Which rule entities conclude a concept, as of a branch head.
@@ -406,7 +410,7 @@ struct RuleCacheInner {
 /// layers it was resolved from.
 #[derive(Debug, Clone)]
 struct Bundle {
-    roots: Vec<[u8; 32]>,
+    roots: LayerRoots,
     descriptor: ConceptDescriptor,
     rules: ConceptRules,
 }
@@ -441,7 +445,7 @@ impl RuleCache {
     pub(crate) fn bundle(
         &self,
         descriptor: &ConceptDescriptor,
-        roots: &[[u8; 32]],
+        roots: &[Option<[u8; 32]>],
     ) -> Option<ConceptRules> {
         let inner = self.inner.read();
         match inner.bundles.get(&descriptor.this()) {
@@ -459,7 +463,7 @@ impl RuleCache {
     pub(crate) fn record_bundle(
         &self,
         descriptor: ConceptDescriptor,
-        roots: Vec<[u8; 32]>,
+        roots: LayerRoots,
         rules: ConceptRules,
     ) {
         self.inner.write().bundles.insert(

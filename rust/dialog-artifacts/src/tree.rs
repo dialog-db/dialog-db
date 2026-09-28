@@ -39,7 +39,7 @@ use std::iter::repeat_n;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
-use crate::history::{Cause as HistoryCause, Claim, Record, Version};
+use crate::history::{Cause as HistoryCause, Claim, Record, RecordEntries, Version};
 use crate::key::value_payload as build_value_payload;
 use crate::{
     ATTRIBUTE_KEY_TAG, Artifact, ArtifactSelector, ArtifactView, ArtifactWriter, AttributeKey,
@@ -699,13 +699,14 @@ pub trait ArtifactTreeExt {
             + ConditionalSync;
 
     /// Write pre-built entries (e.g. revision lineage records — see
-    /// [`Record::into_entry`](crate::history::Record::into_entry)) into the
-    /// tree as one edit batch, accumulating new nodes in `delta`
+    /// [`RevisionRecord::entries`](crate::history::RevisionRecord::entries))
+    /// into the tree as one edit batch, accumulating new nodes in `delta`,
+    /// and store a spilled value's block in `store`.
     async fn record<S>(
         &mut self,
         store: &mut S,
         delta: &mut Delta<NodeHash, Buffer>,
-        entries: Vec<(Key, State<Datum>)>,
+        entries: RecordEntries,
     ) -> Result<(), DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -835,10 +836,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 delta: &*delta,
                 store: store.clone(),
             });
-            (
-                self.manifest(&read_through).await?,
-                self.edit_with_manifest(&read_through).await?,
-            )
+            (self.manifest(&read_through).await?, self.edit())
         };
         // Open one transient edit batch over this tree's spine and apply every
         // instruction's writes to it in flight, so the whole instruction stream
@@ -958,13 +956,15 @@ impl ArtifactTreeExt for ArtifactTree {
         &mut self,
         store: &mut S,
         delta: &mut Delta<NodeHash, Buffer>,
-        entries: Vec<(Key, State<Datum>)>,
+        entries: RecordEntries,
     ) -> Result<(), DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
             + ConditionalSync,
     {
+        let RecordEntries { entries, spill } = entries;
+        store_spilled_value(store, spill).await?;
         let transient = {
             // Read through the delta: this tree's latest nodes may only
             // exist there (persisted by an earlier batch, not yet flushed).
@@ -976,7 +976,7 @@ impl ArtifactTreeExt for ArtifactTree {
             // `apply_versioned` does), not the default: an edit through the
             // default restamps the touched path with the default format,
             // silently rewriting a tree built under other constants.
-            let mut transient = self.edit_with_manifest(&storage).await?;
+            let mut transient = self.edit();
             for (key, entry) in entries {
                 transient = transient.insert(key, entry, &storage).await?;
             }
@@ -1771,7 +1771,6 @@ mod spill_cache_tests {
     use super::{
         ArtifactTree, ArtifactTreeExt, SpillCache, fetch_spilled, fetch_spilled_cached, spill_cache,
     };
-    use crate::key::default_manifest;
     use crate::{Artifact, EntityKey, Instruction, KeyView, Value};
     use dialog_search_tree::Delta;
     use dialog_storage::{Blake3Hash, MeasuredStorage, MemoryStorageBackend, StorageBackend};
@@ -1954,7 +1953,8 @@ mod spill_cache_tests {
                 .await
                 .unwrap();
         }
-        let key = EntityKey::from_artifact(&artifact, &default_manifest()).into_key();
+        let key = EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default())
+            .into_key();
         assert!(EntityKey(&key).value_is_spilled(), "value must spill");
         (store, key, value)
     }
@@ -2013,7 +2013,8 @@ mod spill_cache_tests {
             stream::iter(vec![Instruction::Assert(artifact.clone())]),
         )
         .await?;
-        let key = EntityKey::from_artifact(&artifact, &default_manifest()).into_key();
+        let key = EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default())
+            .into_key();
         let cache = spill_cache();
         assert_eq!(fetch_spilled_cached(&store, &cache, &key).await?, None);
         assert_eq!(fetch_spilled(&store, &key).await?, None);
@@ -2027,7 +2028,6 @@ mod range_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::selector_range;
-    use crate::key::default_manifest;
     use crate::{ArtifactSelector, NameShape};
 
     /// A name shape under a whole-domain prefix narrows the scanned
@@ -2037,7 +2037,7 @@ mod range_tests {
     /// half instead of sweeping the domain and filtering.
     #[dialog_common::test]
     fn it_narrows_domain_ranges_by_name_shape() {
-        let manifest = default_manifest();
+        let manifest = dialog_search_tree::Manifest::default();
         let domain = || ArtifactSelector::new().the_starting_with("todo.list/");
 
         let all = selector_range(&domain(), &manifest);
@@ -2085,7 +2085,6 @@ mod selector_range_tests {
     use std::str::FromStr as _;
 
     use super::{apply_prefix_bounds, selector_range};
-    use crate::key::default_manifest;
     use crate::selector::Constrained;
     use crate::{
         ArtifactSelector, Attribute, AttributeKey, Entity, EntityKey, Key, KeyViewConstruct,
@@ -2213,9 +2212,11 @@ mod selector_range_tests {
     /// (which moves the inline-vs-spill decision for the probe values).
     #[dialog_common::test]
     async fn it_builds_ranges_identical_to_the_view_chain() {
-        let mut shifted = default_manifest();
-        shifted.inline_n = 24;
-        for manifest in [default_manifest(), shifted] {
+        let shifted = dialog_search_tree::Manifest {
+            inline_n: 24,
+            ..dialog_search_tree::Manifest::default()
+        };
+        for manifest in [dialog_search_tree::Manifest::default(), shifted] {
             for (at, selector) in selector_matrix(&manifest).into_iter().enumerate() {
                 let fast = selector_range(&selector, &manifest);
                 let legacy = legacy_selector_range(&selector, &manifest);
@@ -2308,7 +2309,7 @@ mod corrupt_row_tests {
                 ));
             }
         }
-        tree.record(&mut store, &mut delta, entries).await?;
+        tree.record(&mut store, &mut delta, entries.into()).await?;
 
         for (_, buffer) in delta.flush() {
             store

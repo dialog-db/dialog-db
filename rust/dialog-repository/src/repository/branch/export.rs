@@ -11,7 +11,7 @@ use dialog_effects::memory::Resolve;
 use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use futures_util::TryStreamExt;
 
-use crate::{Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite};
+use crate::{Branch, Index, NetworkedIndex, RemoteSite};
 
 /// Command struct for exporting all artifacts from a branch.
 pub struct Export<'a, E> {
@@ -45,13 +45,11 @@ impl<E: Exporter> Export<'_, E> {
         let catalog = ArchiveScope::new(branch.subject()).index();
         let store = NetworkedIndex::new(env, catalog, remote);
 
-        let tree_hash = branch
-            .revision()
-            .as_ref()
-            .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPTY_TREE_HASH);
-
-        let tree = Index::from_hash(NodeHash::from(tree_hash));
+        let tree = match branch.revision() {
+            Some(revision) => Index::from_hash(NodeHash::from(*revision.tree.hash())),
+            // No revision, no tree: the export streams nothing.
+            None => Index::empty(),
+        };
 
         let range = <EntityKey<Key> as KeyViewConstruct>::min().into_key()
             ..=<EntityKey<Key> as KeyViewConstruct>::max().into_key();

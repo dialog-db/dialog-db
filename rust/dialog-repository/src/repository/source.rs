@@ -26,9 +26,7 @@ use std::sync::Arc;
 
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
-use crate::{
-    Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot,
-};
+use crate::{Branch, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot};
 
 /// An owned line to read from: a branch or a snapshot. Query
 /// environments hold these so the only lifetime they carry is the
@@ -124,15 +122,10 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The tree root to read: the revision's, or the empty tree's.
-    pub(crate) fn root(self) -> Blake3Hash {
-        match self {
-            SourceRef::Branch(branch) => branch
-                .revision()
-                .map(|revision| *revision.tree.hash())
-                .unwrap_or(EMPTY_TREE_HASH),
-            SourceRef::Snapshot(snapshot) => *snapshot.revision().tree.hash(),
-        }
+    /// The tree root to read: the revision's, or `None` for a branch with
+    /// no commits yet, which has no tree at all.
+    pub(crate) fn root(self) -> Option<Blake3Hash> {
+        self.revision().map(|revision| *revision.tree.hash())
     }
 
     /// Whether a read of this line can fetch what it lacks: whether it
@@ -274,8 +267,12 @@ impl<'a> SourceRef<'a> {
     {
         let remote = self.fallback();
         let store = NetworkedIndex::new(env, self.archive().index(), remote);
-        TreeHistory::from_root_with_cache(&self.root(), store, self.node_cache())
-            .with_record_cache(self.records())
+        let history = match self.root() {
+            Some(root) => TreeHistory::from_root_with_cache(&root, store, self.node_cache()),
+            // No revision, no tree, no records.
+            None => TreeHistory::empty_with_cache(store, self.node_cache()),
+        };
+        history.with_record_cache(self.records())
     }
 
     /// This line's committed history, newest first — at most `limit`

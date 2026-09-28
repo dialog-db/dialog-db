@@ -33,8 +33,9 @@ pub enum Upstream {
     Local {
         /// The branch name.
         branch: String,
-        /// The tree at the last sync.
-        tree: TreeReference,
+        /// The tree at the last sync, if any sync has happened.
+        #[serde(deserialize_with = "sync_base::deserialize")]
+        tree: Option<TreeReference>,
     },
     /// A branch of a repository held at a peer.
     Remote {
@@ -42,8 +43,9 @@ pub enum Upstream {
         remote: ConnectedReplica,
         /// The branch name there.
         branch: String,
-        /// The tree at the last sync.
-        tree: TreeReference,
+        /// The tree at the last sync, if any sync has happened.
+        #[serde(deserialize_with = "sync_base::deserialize")]
+        tree: Option<TreeReference>,
     },
     /// A branch whose peer could not be resolved when the branch was
     /// opened. Syncing with it fails, saying why; reading around it does
@@ -53,23 +55,69 @@ pub enum Upstream {
         target: Entity,
         /// Why it could not be resolved.
         reason: String,
-        /// The tree at the last sync.
-        tree: TreeReference,
+        /// The tree at the last sync, if any sync has happened.
+        #[serde(deserialize_with = "sync_base::deserialize")]
+        tree: Option<TreeReference>,
     },
 }
 
+/// Reads a stored sync base.
+///
+/// "Never synced" is written as an absent tree. Versions before the
+/// sentinel-free empty tree recorded it as the all-zero tree reference
+/// instead; no real tree has that root (the empty tree persists as a
+/// manifest-carrying node), so zero reads back as `None` too.
+mod sync_base {
+    use crate::TreeReference;
+    use serde::{Deserialize, Deserializer};
+
+    const NEVER_SYNCED: [u8; 32] = [0u8; 32];
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<TreeReference>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let stored = Option::<TreeReference>::deserialize(deserializer)?;
+        Ok(stored.filter(|tree| *tree.hash() != NEVER_SYNCED))
+    }
+}
+
+/// Reads a stored sync base.
+///
+/// "Never synced" is written as an absent tree. Versions before the
+/// sentinel-free empty tree recorded it as the all-zero tree reference
+/// instead; no real tree has that root (the empty tree persists as a
+/// manifest-carrying node), so zero reads back as `None` too.
+pub(crate) mod sync_base {
+    use crate::TreeReference;
+    use serde::{Deserialize, Deserializer};
+
+    const NEVER_SYNCED: [u8; 32] = [0u8; 32];
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Option<TreeReference>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let stored = Option::<TreeReference>::deserialize(deserializer)?;
+        Ok(stored.filter(|tree| *tree.hash() != NEVER_SYNCED))
+    }
+}
+
 impl Upstream {
-    /// The tree at the last sync with this upstream.
-    pub fn tree(&self) -> &TreeReference {
+    /// The tree at the last sync with this upstream, if any sync has
+    /// happened: `None` means the divergence point is "anything in the
+    /// upstream from now on".
+    pub fn tree(&self) -> Option<&TreeReference> {
         match self {
             Self::Local { tree, .. }
             | Self::Remote { tree, .. }
-            | Self::Unreachable { tree, .. } => tree,
+            | Self::Unreachable { tree, .. } => tree.as_ref(),
         }
     }
 
-    /// This upstream, last in sync at `tree`.
-    pub fn with_tree(self, tree: TreeReference) -> Self {
+    /// This upstream, last in sync at `tree`, or never when `None`.
+    pub fn with_tree(self, tree: impl Into<Option<TreeReference>>) -> Self {
+        let tree = tree.into();
         match self {
             Self::Local { branch, .. } => Self::Local { branch, tree },
             Self::Remote { remote, branch, .. } => Self::Remote {
@@ -243,9 +291,9 @@ pub enum Route {
 }
 
 impl Route {
-    /// The upstream this route leads to, last in sync at `tree`, with a
-    /// remote's state cached under `host`.
-    pub(crate) fn upstream(&self, host: &Subject, tree: TreeReference) -> Upstream {
+    /// The upstream this route leads to, last in sync at `tree` (never,
+    /// when `None`), with a remote's state cached under `host`.
+    pub(crate) fn upstream(&self, host: &Subject, tree: Option<TreeReference>) -> Upstream {
         match self {
             Self::Local { branch } => Upstream::Local {
                 branch: branch.clone(),
@@ -300,16 +348,21 @@ impl Tracking {
             .map(|synced| &synced.tree)
     }
 
-    /// The tree to merge with `target` from: the one recorded, or the
-    /// empty tree.
-    pub fn tree(&self, target: &Target) -> TreeReference {
-        self.get(target).cloned().unwrap_or_default()
+    /// The tree to merge with `target` from: the one recorded, or `None`
+    /// before any sync, when everything the upstream holds is new.
+    pub fn tree(&self, target: &Target) -> Option<TreeReference> {
+        self.get(target).cloned()
     }
 
-    /// Record that `upstream` was last in sync at its tree.
+    /// Record that `upstream` was last in sync at its tree. An upstream
+    /// never synced has nothing to record, and a record it had is
+    /// forgotten.
     pub fn record(&mut self, upstream: &Upstream) {
         let target = upstream.target();
-        let tree = upstream.tree().clone();
+        let Some(tree) = upstream.tree().cloned() else {
+            self.synced.retain(|synced| synced.target != target);
+            return;
+        };
         let route = upstream.route();
         match self
             .synced
@@ -333,7 +386,7 @@ impl Tracking {
     pub(crate) fn synced_with(&self, host: &Subject) -> Upstreams {
         self.synced
             .iter()
-            .map(|synced| synced.route.upstream(host, synced.tree.clone()))
+            .map(|synced| synced.route.upstream(host, Some(synced.tree.clone())))
             .collect()
     }
 
@@ -354,7 +407,7 @@ impl Tracking {
         routes(resolved)
             .iter()
             .map(|route| {
-                let upstream = route.upstream(host, TreeReference::default());
+                let upstream = route.upstream(host, None);
                 let tree = self.tree(&upstream.target());
                 upstream.with_tree(tree)
             })
@@ -404,12 +457,12 @@ impl From<UpstreamBranch> for Upstream {
         match source {
             UpstreamBranch::Local(branch) => Upstream::Local {
                 branch: branch.name().to_string(),
-                tree: TreeReference::default(),
+                tree: None,
             },
             UpstreamBranch::Remote(branch) => Upstream::Remote {
                 remote: branch.repository().clone(),
                 branch: branch.name().to_string(),
-                tree: TreeReference::default(),
+                tree: None,
             },
         }
     }
@@ -425,23 +478,20 @@ mod tests {
     use crate::TreeReference;
 
     /// The sync record keeps one tree per upstream, replacing it in
-    /// place, and answers the empty tree for an upstream never synced.
+    /// place, and answers no tree for an upstream never synced.
     #[dialog_common::test]
     fn it_records_one_tree_per_upstream() {
         let develop = |tree| Upstream::Local {
             branch: "develop".into(),
-            tree: TreeReference::from(tree),
+            tree: Some(TreeReference::from(tree)),
         };
         let main = |tree| Upstream::Local {
             branch: "main".into(),
-            tree: TreeReference::from(tree),
+            tree: Some(TreeReference::from(tree)),
         };
         let mut syncs = Tracking::default();
 
-        assert_eq!(
-            syncs.tree(&main([0; 32]).target()),
-            TreeReference::default()
-        );
+        assert_eq!(syncs.tree(&main([0; 32]).target()), None);
         syncs.record(&main([1; 32]));
         syncs.record(&develop([2; 32]));
         syncs.record(&main([3; 32]));

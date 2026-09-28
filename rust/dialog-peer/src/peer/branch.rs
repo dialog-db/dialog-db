@@ -29,7 +29,8 @@ use dialog_effects::method;
 use dialog_repository::registry::{active, forget, list, record, switch};
 use dialog_repository::schema::{Branch as BranchConcept, Replica};
 use dialog_repository::{
-    Branch, EMPTY_TREE_HASH, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt, RetractError,
+    Branch, LEGACY_EMPTY_ROOT, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt,
+    RetractError,
 };
 
 /// The environment a branch operation runs against.
@@ -137,7 +138,10 @@ where
                     reason: "the revision's signature does not hold",
                 });
             }
-            if *revision.tree.hash() != EMPTY_TREE_HASH {
+            // The all-zero root is what releases before the tagged node
+            // layout wrote for an empty tree; it names no node, and reads
+            // as the empty tree.
+            if *revision.tree.hash() != LEGACY_EMPTY_ROOT {
                 let tree = ArchiveScope::new(Subject::from(subject.clone()))
                     .index()
                     .read()

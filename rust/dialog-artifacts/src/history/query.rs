@@ -195,6 +195,13 @@ where
             .buffered(SPILL_LOOKAHEAD)
     }
 
+    /// Read history over no tree at all — the shape of a branch with no
+    /// revision. There is no root to read records from, so every lookup
+    /// resolves to nothing without touching storage.
+    pub fn empty_with_cache(store: S, cache: ArtifactNodeCache) -> Self {
+        Self::new(ArtifactTree::empty_with_cache(cache), store)
+    }
+
     /// Every record in the history region, in key order (ascending by
     /// version; no record appears before one produced by an ancestor
     /// revision)

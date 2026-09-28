@@ -399,7 +399,7 @@ impl Distribution for Geometric {
 pub fn weight_paced_seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
     let hash = hash_memo::hash(separator);
     let bytes = *hash.as_bytes();
-    let weight = cap::link_weight(separator) as u128;
+    let weight = cap::link_weight(separator, manifest) as u128;
     let target = manifest.max_segment as u128;
     let mut rank = BOTTOM_RANK + 1;
     for level in 0..8usize {
@@ -444,7 +444,7 @@ pub fn weight_paced_seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
 /// `BOTTOM_RANK + 1` (cut) or `BOTTOM_RANK` (no cut); index promotion is the
 /// seam coin's job alone.
 pub fn weight_paced_rank(key: &[u8], manifest: &Manifest) -> Rank {
-    if weight_paced_cut(key, cap::entry_weight(key), manifest) {
+    if weight_paced_cut(key, cap::entry_weight(key, manifest), manifest) {
         BOTTOM_RANK + 1
     } else {
         BOTTOM_RANK
@@ -571,29 +571,21 @@ pub mod cap {
 
     use crate::{Key, Manifest};
 
-    /// Weight charged per entry beyond its key bytes: a stand-in for the
-    /// value slot and per-entry encoding overhead. The cap needs a
-    /// deterministic per-entry weight at cut time, when the encoded node
-    /// size (front coding, per-node dictionaries) is not yet known; for
-    /// artifact trees the key carries the value, so key length dominates
-    /// real cost and front coding brings real blocks in under the proxy.
-    pub const ENTRY_WEIGHT_OVERHEAD: usize = 32;
-
-    /// The weight an entry contributes toward `Manifest::max_segment`.
-    pub fn entry_weight(key: &[u8]) -> usize {
-        key.len() + ENTRY_WEIGHT_OVERHEAD
+    /// The weight the per-key cut floor charges an entry toward
+    /// `manifest.max_segment`: its key bytes plus
+    /// [`Manifest::key_overhead`]. The cap needs a deterministic per-entry
+    /// weight at cut time, when the value and the encoded node size (front
+    /// coding, per-node dictionaries) are not in hand; for artifact trees
+    /// the key carries the value, so key length dominates real cost.
+    pub fn entry_weight(key: &[u8], manifest: &Manifest) -> usize {
+        key.len() + manifest.key_overhead()
     }
 
-    /// Weight charged per link beyond its separator bytes at index levels:
-    /// the 32-byte child hash plus per-link encoding overhead (offsets,
-    /// front-coding bookkeeping). The index analog of
-    /// [`ENTRY_WEIGHT_OVERHEAD`].
-    pub const LINK_WEIGHT_OVERHEAD: usize = 16;
-
     /// The weight a link contributes toward an index node's `max_segment`
-    /// budget: its separator bytes plus the child hash plus fixed overhead.
-    pub fn link_weight(separator: &[u8]) -> usize {
-        separator.len() + 32 + LINK_WEIGHT_OVERHEAD
+    /// budget: its separator bytes, the 32-byte child hash, and
+    /// [`Manifest::link_overhead`].
+    pub fn link_weight(separator: &[u8], manifest: &Manifest) -> usize {
+        separator.len() + 32 + manifest.link_overhead()
     }
 
     /// Deterministic forced cut positions bounding an INDEX-level frame —
@@ -1222,12 +1214,12 @@ pub mod geometric {
     use super::Rank;
 
     /// Computes the rank of a node from its hash using a geometric
-    /// distribution with the default [`Manifest`](crate::Manifest)'s branch
-    /// factor — the same modulus [`Geometric`](super::Geometric) uses for a
-    /// default-manifest tree, so callers (test oracles, diagnostics)
-    /// classify boundaries exactly as the tree does.
-    pub fn rank(hash: &Blake3Hash) -> Rank {
-        compute_geometric_rank(hash, crate::Manifest::default().branch_factor())
+    /// distribution with `manifest`'s branch factor — the same modulus
+    /// [`Geometric`](super::Geometric) uses for a tree under that manifest,
+    /// so callers (test oracles, diagnostics) classify boundaries exactly as
+    /// the tree does.
+    pub fn rank(hash: &Blake3Hash, manifest: &crate::Manifest) -> Rank {
+        compute_geometric_rank(hash, manifest.branch_factor())
     }
 
     /// Compute the rank of a hash using a threshold-based geometric
@@ -1471,7 +1463,7 @@ mod tests {
             let len = rng.gen_range(20..=600usize);
             let mut key = vec![0u8; len];
             rng.fill(&mut key[..]);
-            run += cap::entry_weight(&key);
+            run += cap::entry_weight(&key, &manifest);
             if weight_paced_rank(&key, &manifest) > BOTTOM_RANK {
                 runs.push(run);
                 run = 0;

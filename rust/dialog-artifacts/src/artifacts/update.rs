@@ -1,5 +1,5 @@
 use crate::artifacts::query::Select;
-use crate::key::{default_manifest, value_tail_bytes};
+use crate::key::value_tail_bytes;
 use crate::selector::Constrained;
 use crate::{
     Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Entity,
@@ -367,10 +367,32 @@ impl Statement for Changes {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<'a> Provider<Select<'a>> for Changes {
+    /// A batch on its own belongs to no tree, so it orders its rows as a new
+    /// tree would ([`Manifest::default`]). A caller merging the batch with a
+    /// tree's scan reads it with [`Changes::select`] under that tree's
+    /// manifest instead.
     async fn execute(
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+        let matched = self.select(&input, &Manifest::default());
+        Ok(Box::pin(stream::iter(
+            matched.into_iter().map(|artifact| Ok(artifact.into())),
+        )))
+    }
+}
+
+impl Changes {
+    /// The asserted facts matching `input`, in [`sort_key`] order under
+    /// `manifest`: the order a scan of a tree written under `manifest` would
+    /// produce them, so the result merges with that tree's scan (see
+    /// [`SortKey`]). Retracts are not yielded, as in the `Provider<Select>`
+    /// impl.
+    pub fn select(
+        &self,
+        input: &ArtifactSelector<Constrained>,
+        manifest: &Manifest,
+    ) -> Vec<Artifact> {
         let the = input.attribute();
         let of = input.entity();
         let is = input.value();
@@ -414,32 +436,13 @@ impl<'a> Provider<Select<'a>> for Changes {
             }
         }
         // Sort by `sort_key` so this overlay's output is in the same
-        // order the prolly tree would scan for this selector — see
-        // `SortKey` docs. That's the precondition `merge_grouped`
-        // relies on when it unions this stream with a branch scan.
-        // This overlay is sorted in memory against a branch scan that is
-        // itself in `sort_key` order. Both sides order by the same function,
-        // and the comparison never touches stored key bytes, so the default
-        // threshold is sound here (see `default_sort_key`).
-        matched.sort_by_key(default_sort_key);
-        Ok(Box::pin(stream::iter(
-            matched.into_iter().map(|artifact| Ok(artifact.into())),
-        )))
+        // order a scan of a tree written under `manifest` would produce for
+        // this selector — see `SortKey` docs. That's the precondition
+        // `merge_grouped` relies on when it unions this stream with that
+        // tree's scan.
+        matched.sort_by_cached_key(|artifact| sort_key(artifact, manifest));
+        matched
     }
-}
-
-/// [`sort_key`] under the default format [`Manifest`], for callers with no tree
-/// in scope.
-///
-/// Sound only where the key is used as an in-memory ordering/identity key
-/// compared against OTHER `default_sort_key` values within the same process,
-/// never against bytes read out of a tree. Under that use the format merely has
-/// to be a consistent function of the value, and every participant applies the
-/// same one, so which manifest it is cannot change any comparison's outcome.
-/// Callers that compare against stored keys must pass the tree's own manifest
-/// to [`sort_key`] instead.
-pub fn default_sort_key(artifact: &Artifact) -> SortKey {
-    sort_key(artifact, &default_manifest())
 }
 
 #[cfg(test)]
@@ -515,7 +518,7 @@ mod tests {
 
         // Both orderings must be built under the SAME manifest: that
         // agreement is the property under test.
-        let manifest = default_manifest();
+        let manifest = Manifest::default();
         let mut by_sort_key = facts.clone();
         by_sort_key.sort_by_key(|fact| sort_key(fact, &manifest));
         let mut by_tree_key = facts;
@@ -662,7 +665,10 @@ mod tests {
         assert_eq!(results.len(), 2);
         // Attributes ordered by their key bytes — verify by checking
         // the output is monotonic under sort_key.
-        let keys: Vec<_> = results.iter().map(default_sort_key).collect();
+        let keys: Vec<_> = results
+            .iter()
+            .map(|artifact| sort_key(artifact, &Manifest::default()))
+            .collect();
         let mut sorted_keys = keys.clone();
         sorted_keys.sort();
         assert_eq!(keys, sorted_keys);

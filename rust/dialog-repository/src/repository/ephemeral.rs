@@ -45,8 +45,7 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, AttributeKey, Changes, DialogArtifactsError,
-    Entity, EntityKey, Instruction, Key, Select, SortKey, Statement, Update, ValueKey,
-    default_sort_key,
+    Entity, EntityKey, Instruction, Key, Select, SortKey, Statement, Update, ValueKey, sort_key,
 };
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash;
@@ -212,7 +211,7 @@ impl State {
                 // Not held here: hide it beneath. A tombstone is a
                 // change readers see (the fact disappears), so it is
                 // reported as retracted.
-                if let Entry::Vacant(slot) = self.shadowed.entry(default_sort_key(&fact)) {
+                if let Entry::Vacant(slot) = self.shadowed.entry(sort_key(&fact, &self.manifest)) {
                     slot.insert(fact.clone());
                     delta.tombstones_changed = true;
                     delta.retracted.push(fact);
@@ -238,7 +237,7 @@ impl State {
         chunks.push(self.sequence.to_be_bytes().to_vec());
         for (polarity, facts) in [(b'+', &delta.asserted), (b'-', &delta.retracted)] {
             for fact in facts {
-                let (the, of, tail) = default_sort_key(fact);
+                let (the, of, tail) = sort_key(fact, &self.manifest);
                 let mut chunk = Vec::with_capacity(1 + the.len() + of.len() + tail.len() + 2);
                 chunk.push(polarity);
                 chunk.extend(the);
