@@ -955,7 +955,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let mut forged = commit(&operator, &did, "main").await?;
-        forged.tree = TreeReference::default();
+        forged.tree = TreeReference::from([7u8; 32]);
 
         let created = Subject::from(did.clone())
             .writer()
