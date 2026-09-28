@@ -79,9 +79,10 @@ impl<'a> Pull<'a> {
     /// Execute the pull operation: [`prepare`](Self::prepare) the merge, then
     /// [`commit`](PreparedPull::commit) it.
     ///
-    /// The one-shot form. To hold an exclusive lock over only the (instant)
-    /// cell-advancing step while the (network-bound) fetch + rebase run
-    /// lock-free, drive the two phases separately:
+    /// The one-shot form. To interpose work between the (network-bound)
+    /// fetch + rebase and the (instant) cell advance -- materializing the
+    /// merged head before the branch points at it, say -- drive the two
+    /// phases separately:
     ///
     /// ```no_run
     /// # use dialog_repository::{Branch, PullError};
@@ -173,11 +174,11 @@ impl<'a> Pull<'a> {
     /// the merged tree's blocks — **without** writing any branch cell.
     ///
     /// All the network and CPU work lives here (resolve/fetch upstream,
-    /// differentiate, integrate, import), so a caller can run it under a shared
-    /// lock concurrently with everything else. The returned [`PreparedPull`]
+    /// differentiate, integrate, import), and it runs concurrently with
+    /// everything else: no lock is held. The returned [`PreparedPull`]
     /// carries the merged revision and a checkpoint of the head it rebased on;
-    /// [`PreparedPull::commit`] does the instant cell advance and can be run
-    /// under a brief exclusive lock.
+    /// [`PreparedPull::commit`] does the instant cell advance under the
+    /// branch's write lock.
     pub async fn prepare<Env>(self, env: &Env) -> Result<PreparedPull<'a>, PullError>
     where
         Env: ResolveEnv,
@@ -230,9 +231,10 @@ impl<'a> Pull<'a> {
 ///
 /// When `moved` -- an earlier pull of the same call landed since this
 /// one was prepared -- the head it finds moved is its own doing, so it is
-/// prepared again from it: local work, its blocks already fetched. A head
-/// moved by anything else fails the pull, as a pull racing a commit
-/// always has: the caller refreshes and pulls again.
+/// prepared again from it: local work, its blocks already fetched, under
+/// the same hold of the lock. A head moved by anything else fails the
+/// pull, as a pull racing a commit always has: the caller refreshes and
+/// pulls again.
 async fn land<'a, Env: ResolveEnv>(
     branch: &'a Branch,
     upstream: Upstream,
@@ -242,12 +244,12 @@ async fn land<'a, Env: ResolveEnv>(
 ) -> Result<Option<Revision>, PullError> {
     let lock = branch.write_lock();
     let _landing = lock.lock().await;
-    match prepared.commit(env).await {
+    match prepared.advance(env).await {
         Err(PullError::Publish(PublishError::VersionMismatch { .. })) if moved => {
             let tree = branch.tracked().tree(&upstream.target());
             Box::pin(prepare_upstream(branch, upstream.with_tree(tree), env))
                 .await?
-                .commit(env)
+                .advance(env)
                 .await
         }
         result => result,
@@ -1071,8 +1073,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
 ///
 /// All the network + CPU work is already done and the merged tree's blocks are
 /// persisted locally; [`commit`](Self::commit) does only the (instant) cell
-/// publishes. Splitting the two lets a caller hold an exclusive lock over just
-/// the cell-advancing step while the prepare ran lock-free.
+/// publishes, under the branch's write lock. Splitting the two lets a caller
+/// interpose work between them: materializing the merged head before the
+/// branch points at it, say.
 pub enum PreparedPull<'a> {
     /// Nothing to pull — upstream is empty or hasn't moved since the last sync.
     /// `commit` is a no-op returning `Ok(None)`.
@@ -1115,11 +1118,28 @@ impl PreparedPull<'_> {
     /// Phase two: advance the branch cells — the head to the merged revision
     /// and the sync-base marker to the merged upstream tree.
     ///
-    /// Instant (no network): just two cell CAS publishes. A caller can hold an
-    /// exclusive lock over only this. On a head-version mismatch (a commit
-    /// advanced the head since prepare) the publish fails so the caller can
-    /// refresh and re-pull. A no-op prepare returns `Ok(None)`.
+    /// Instant (no network): just two cell CAS publishes, under the branch's
+    /// write lock, so a commit or another pull of this writer moves the head
+    /// before or after, never in between. On a head-version mismatch (a
+    /// commit advanced the head since prepare) the publish fails so the
+    /// caller can refresh and re-pull. A no-op prepare returns `Ok(None)`.
     pub async fn commit<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
+    where
+        Env: Provider<Publish> + Provider<Resolve> + ConditionalSync + 'static,
+    {
+        let merged = match self {
+            PreparedPull::NoOp => return Ok(None),
+            PreparedPull::Merged(merged) => merged,
+        };
+        let lock = merged.branch.write_lock();
+        let _landing = lock.lock().await;
+        PreparedPull::Merged(merged).advance(env).await
+    }
+
+    /// The cell advance of [`commit`](Self::commit), for a caller already
+    /// holding the branch's write lock. The lock is not re-entrant, so a
+    /// holder must call this and not `commit`.
+    pub(crate) async fn advance<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
     where
         Env: Provider<Publish> + Provider<Resolve> + ConditionalSync + 'static,
     {
@@ -1491,8 +1511,8 @@ mod tests {
 
     /// Driving the two phases explicitly (`prepare` then `commit`) lands the
     /// same result as the one-shot `perform`. This is the split a consumer uses
-    /// to run the network-bound prepare lock-free and hold an exclusive lock
-    /// over only the instant cell advance.
+    /// to interpose work between the network-bound prepare and the instant
+    /// cell advance.
     #[dialog_common::test]
     async fn it_pulls_in_two_phases_prepare_then_commit() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
