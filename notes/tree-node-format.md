@@ -151,6 +151,14 @@ A new build writes every node it creates in the tagged layout, from the start. I
 
 An empty tree still has a format, so it persists as a node: a segment with no entries, carrying the manifest like any other node. With the default manifest it is 16 bytes of prelude and an empty segment body. It is only ever a root; the first insert replaces it.
 
+## Compatibility
+
+A new build reads both layouts and writes only the tagged one. An old build reads only the legacy layout: a tagged node fails its rkyv validation, so the node, and every node above it, is unreadable to that build.
+
+- **A shared branch flips the moment a new build commits to it.** The commit writes tagged nodes along the edited path up to the root, so the root itself is tagged. Every old build that pulls that revision opens a root it cannot read. There is no intermediate state where a branch is both edited by a new build and readable by an old one, and no way for the old build to read around the new root. Upgrade the readers of a shared branch before any writer.
+- **The repository layout version does not gate this.** The `dialog/version` cell (`rust/dialog-repository/src/repository/upgrade.rs`) tracks the layout of the repository's cells and registry, and its upgrades run over those. The node layout version lives inside each node's prelude and is checked by the node reader alone, so a repository at the current layout version can hold trees an old build cannot read, and an old build sees no version mismatch until it fails to read a node.
+- **Convergence is not content-only while a tree mixes layouts.** Two trees holding the same entries under the same manifest get the same root only when every node along the compared path is in the same layout. A tree edited by a new build keeps its untouched legacy subtrees, so it and a tree written entirely in the tagged layout hold the same entries under different roots. Until the touched paths are rewritten, the differential cannot prune equal subtrees by hash across the boundary and does the extra work of comparing their entries, and a root-equality check reports two such trees as divergent when they are not. Converging replicas through a full rewrite of the tree (every node touched) returns them to content-only roots.
+
 ## Open questions
 
 - A per-node **level** (leaf 0, each index level above +1) would let sync and diffing know a subtree's depth without descending. Nothing needs it today; it would be one more preamble byte, added with a new version.
