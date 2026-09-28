@@ -516,7 +516,7 @@ where
                         // The common case, nothing staged, shares the
                         // overlay's own set rather than copying it per
                         // query.
-                        let session = source.as_ref().overlay().tombstones();
+                        let session = source.as_ref().overlay().tombstones(&line);
                         let tombstones = if staged.is_empty() {
                             session
                         } else if session.is_empty() {
@@ -645,7 +645,7 @@ where
         // *beneath* it, never its own. Pushed only when it has rows,
         // for the same reason the per-query stream is below.
         for (source, line) in self.sources.iter().zip(&format.lines) {
-            let rows = source.as_ref().overlay().scan(&input);
+            let rows = source.as_ref().overlay().select(&input, &line.manifest);
             if rows.is_empty() {
                 continue;
             }
