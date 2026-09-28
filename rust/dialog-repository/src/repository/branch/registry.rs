@@ -463,7 +463,7 @@ mod tests {
     async fn it_forgets_relations_naming_a_forgotten_branch() -> anyhow::Result<()> {
         use crate::repository::branch::resolve::resolve;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let identity = Identify.perform(&operator).await?;
         let main = repo.branch("main").open().perform(&operator).await?;

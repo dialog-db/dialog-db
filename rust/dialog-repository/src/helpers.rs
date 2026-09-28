@@ -66,7 +66,7 @@ pub async fn flaky_session_with_peer() -> (Peer<FlakySpace, Session>, Peer<Flaky
 }
 
 #[cfg(test)]
-use crate::{ConnectedReplica, PeersEnv, SiteAddress, contact, peer_did};
+use crate::{ConnectedReplica, PeersEnv, Repository, SiteAddress, contact, peer_did};
 #[cfg(test)]
 use dialog_credentials::Credential;
 #[cfg(test)]
@@ -78,7 +78,7 @@ use dialog_storage::provider::storage::Storage;
 #[cfg(test)]
 use dialog_storage::provider::{Space, Volatile};
 #[cfg(test)]
-use dialog_varsig::{Did, Principal};
+use dialog_varsig::Did;
 
 /// Make the peer reached at `address` a contact named `name`, and connect
 /// to its replica of the repository `subject`: what tests once did by
