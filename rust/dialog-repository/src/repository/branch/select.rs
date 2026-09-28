@@ -74,7 +74,7 @@ where
         Some(root) => Index::from_hash_with_cache(NodeHash::from(root), node_cache),
         None => Index::empty_with_cache(node_cache),
     };
-    let remote = source.fallback(env).await;
+    let remote = source.fallback();
     let store = NetworkedIndex::new(env, ArchiveScope::new(source.subject()).index(), remote);
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
     Ok(tree.manifest(&storage).await?)

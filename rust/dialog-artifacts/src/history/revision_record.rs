@@ -191,31 +191,7 @@ impl RevisionRecord {
             spill: encoded.spill,
         })
     }
-}
 
-/// Pre-built tree entries to write outside the instruction path (revision
-/// records, blob-index machinery), with the value block they need when a
-/// value spilled out of its key.
-///
-/// The write paths ([`ArtifactTreeExt::record`](crate::tree::ArtifactTreeExt::record),
-/// [`BufferedBatch::record`](crate::BufferedBatch::record)) store the block
-/// with the entries, so a spilled value is never written without its bytes.
-#[derive(Debug, Clone, Default)]
-pub struct RecordEntries {
-    /// The tree entries.
-    pub entries: Vec<(Key, State<Datum>)>,
-    /// A spilled value's block: the reference its keys carry and the raw
-    /// value bytes stored under it. `None` when every value stays inline.
-    pub spill: Option<(dialog_storage::Blake3Hash, Vec<u8>)>,
-}
-
-impl From<Vec<(Key, State<Datum>)>> for RecordEntries {
-    fn from(entries: Vec<(Key, State<Datum>)>) -> Self {
-        Self {
-            entries,
-            spill: None,
-        }
-    }
     /// The record for `revision` —
     /// everything the revision states about itself as one atomic fact,
     /// ready to be signed and written into the tree.
@@ -239,6 +215,31 @@ impl From<Vec<(Key, State<Datum>)>> for RecordEntries {
             parents,
             skips,
             signature: Vec::new(),
+        }
+    }
+}
+
+/// Pre-built tree entries to write outside the instruction path (revision
+/// records, blob-index machinery), with the value block they need when a
+/// value spilled out of its key.
+///
+/// The write paths ([`ArtifactTreeExt::record`](crate::tree::ArtifactTreeExt::record),
+/// [`BufferedBatch::record`](crate::BufferedBatch::record)) store the block
+/// with the entries, so a spilled value is never written without its bytes.
+#[derive(Debug, Clone, Default)]
+pub struct RecordEntries {
+    /// The tree entries.
+    pub entries: Vec<(Key, State<Datum>)>,
+    /// A spilled value's block: the reference its keys carry and the raw
+    /// value bytes stored under it. `None` when every value stays inline.
+    pub spill: Option<(dialog_storage::Blake3Hash, Vec<u8>)>,
+}
+
+impl From<Vec<(Key, State<Datum>)>> for RecordEntries {
+    fn from(entries: Vec<(Key, State<Datum>)>) -> Self {
+        Self {
+            entries,
+            spill: None,
         }
     }
 }

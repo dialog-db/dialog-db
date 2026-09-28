@@ -34,7 +34,6 @@ pub enum Upstream {
         /// The branch name.
         branch: String,
         /// The tree at the last sync, if any sync has happened.
-        #[serde(deserialize_with = "sync_base::deserialize")]
         tree: Option<TreeReference>,
     },
     /// A branch of a repository held at a peer.
@@ -44,7 +43,6 @@ pub enum Upstream {
         /// The branch name there.
         branch: String,
         /// The tree at the last sync, if any sync has happened.
-        #[serde(deserialize_with = "sync_base::deserialize")]
         tree: Option<TreeReference>,
     },
     /// A branch whose peer could not be resolved when the branch was
@@ -56,30 +54,8 @@ pub enum Upstream {
         /// Why it could not be resolved.
         reason: String,
         /// The tree at the last sync, if any sync has happened.
-        #[serde(deserialize_with = "sync_base::deserialize")]
         tree: Option<TreeReference>,
     },
-}
-
-/// Reads a stored sync base.
-///
-/// "Never synced" is written as an absent tree. Versions before the
-/// sentinel-free empty tree recorded it as the all-zero tree reference
-/// instead; no real tree has that root (the empty tree persists as a
-/// manifest-carrying node), so zero reads back as `None` too.
-mod sync_base {
-    use crate::TreeReference;
-    use serde::{Deserialize, Deserializer};
-
-    const NEVER_SYNCED: [u8; 32] = [0u8; 32];
-
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<TreeReference>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let stored = Option::<TreeReference>::deserialize(deserializer)?;
-        Ok(stored.filter(|tree| *tree.hash() != NEVER_SYNCED))
-    }
 }
 
 /// Reads a stored sync base.

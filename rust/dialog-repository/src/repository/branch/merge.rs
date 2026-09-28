@@ -126,7 +126,12 @@ where
     let tree = |reference: &TreeReference| {
         Index::from_hash_with_cache(NodeHash::from(*reference.hash()), branch.node_cache())
     };
-    let base_tree = tree(&base.map(|base| base.tree.clone()).unwrap_or_default());
+    // No base means the commit's ancestry and the head's share nothing:
+    // everything the commit holds is its change.
+    let base_tree = match base {
+        Some(base) => tree(&base.tree),
+        None => Index::empty_with_cache(branch.node_cache()),
+    };
     let mine_tree = tree(&mine.tree);
     let mut merged = tree(&theirs.tree);
 
@@ -159,6 +164,7 @@ where
                 dialog_search_tree::Prefetch::Eager,
             ),
             observed.clone(),
+            store.clone(),
         ),
         context.clone(),
     );
@@ -183,12 +189,9 @@ where
     // final.
     let authority = Identify.perform(env).await?;
     let branch_entity = crate::branch_of(branch.of(), authority.profile(), branch.name());
-    let mut revision = theirs.merge(
-        mine,
-        TreeReference::default(),
-        branch_entity,
-        authority.did(),
-    );
+    // The tree is the head's for now; it is replaced once the merged
+    // root is final, below.
+    let mut revision = theirs.merge(mine, theirs.tree.clone(), branch_entity, authority.did());
     let mut record = RevisionRecord::create(
         &revision,
         authority.profile(),
