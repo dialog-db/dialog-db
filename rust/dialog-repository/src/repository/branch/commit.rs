@@ -208,21 +208,24 @@ where
         // One writer moves the head at a time within an environment: its
         // commits and its pulls of this branch take turns, since both mint
         // under its origin and would otherwise take the same edition.
-        let lock = branch.write_lock();
-        let _writing = lock.lock().await;
+        let writer = branch.writer();
+        let _writing = writer.lock().await;
 
         // A merging commit builds on a head its own writer moved since
         // this handle read it, a pull of its own say: that is not a
         // concurrent change to merge with, and minting on the older head
-        // would take the edition the newer one holds. A head another writer
-        // moved stays a race, merged as the commit asked.
+        // would take the edition the newer one holds. A head this writer
+        // minted names it as issuer; one its pull adopted by fast-forward
+        // names the remote writer, and is known by the writer's record of
+        // it. A head another writer moved stays a race, merged as the
+        // commit asked.
         if self.merge {
             let stored = branch.subject().branch(branch.name()).revision();
             stored.resolve().perform(env).await?;
             let issuer = Identify.perform(env).await?.did();
             if let Some(newer) = stored.content()
                 && Some(&newer) != branch.revision().as_ref()
-                && newer.issuer == issuer
+                && (newer.issuer == issuer || writer.adopted() == Some(newer.version()))
             {
                 branch.revision.resolve().perform(env).await?;
             }

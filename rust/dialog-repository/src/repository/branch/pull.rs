@@ -242,8 +242,8 @@ async fn land<'a, Env: ResolveEnv>(
     moved: bool,
     env: &Env,
 ) -> Result<Option<Revision>, PullError> {
-    let lock = branch.write_lock();
-    let _landing = lock.lock().await;
+    let writer = branch.writer();
+    let _landing = writer.lock().await;
     match prepared.advance(env).await {
         Err(PullError::Publish(PublishError::VersionMismatch { .. })) if moved => {
             let tree = branch.tracked().tree(&upstream.target());
@@ -1131,8 +1131,8 @@ impl PreparedPull<'_> {
             PreparedPull::NoOp => return Ok(None),
             PreparedPull::Merged(merged) => merged,
         };
-        let lock = merged.branch.write_lock();
-        let _landing = lock.lock().await;
+        let writer = merged.branch.writer();
+        let _landing = writer.lock().await;
         PreparedPull::Merged(merged).advance(env).await
     }
 
@@ -1174,6 +1174,11 @@ impl PreparedPull<'_> {
         // new from this upstream" cannot be invalidated by it.
         if branch.revision().as_ref() != Some(&new_revision) {
             head.publish(new_revision.clone(), env).await?;
+            // Remembered for this writer's commits: a fast-forward adopts
+            // a head another writer issued, and a merging commit through
+            // another handle must still know it moved by this writer's
+            // own doing (see `Commit::merge`).
+            branch.writer().adopt(new_revision.version());
         }
 
         // Advance the pulled upstream's recorded sync base to the tree we

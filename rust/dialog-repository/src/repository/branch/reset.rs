@@ -46,8 +46,8 @@ impl Reset<'_> {
     where
         Env: Provider<Publish>,
     {
-        let lock = self.branch.write_lock();
-        let _writing = lock.lock().await;
+        let writer = self.branch.writer();
+        let _writing = writer.lock().await;
         self.branch
             .revision
             .publish(self.revision)
