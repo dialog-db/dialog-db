@@ -133,7 +133,7 @@ where
             .refresh(self)
             .await
             .map_err(|error| failed(error.to_string()))?;
-        let mut found = spaces::find(state, name, self)
+        let mut found = spaces::find(state, &self.holder(), name, self)
             .await
             .map_err(|error| failed(error.to_string()))?;
         match found.len() {
@@ -151,7 +151,7 @@ where
         &self,
         repository: &Did,
     ) -> Result<Option<storage_fx::Location>, storage_fx::StorageError> {
-        let found = spaces::locate(self.state(), repository, self)
+        let found = spaces::locate(self.state(), &self.holder(), repository, self)
             .await
             .map_err(|error| storage_fx::StorageError::Storage(error.to_string()))?;
         Ok(found.into_iter().next().map(|(_, location)| location))
@@ -169,9 +169,16 @@ where
         name: &str,
         location: &storage_fx::Location,
     ) -> Result<(), storage_fx::StorageError> {
-        spaces::record(self.state(), repository, name, location, self)
-            .await
-            .map_err(failed)
+        spaces::record(
+            self.state(),
+            &self.holder(),
+            repository,
+            name,
+            location,
+            self,
+        )
+        .await
+        .map_err(failed)
     }
 
     /// Keep the key of the repository `repository`, sealed to `account`,
@@ -255,6 +262,17 @@ where
 }
 
 impl<S: Clone, M: Mode> Peer<S, M> {
+    /// The peer this handle acts for, whose records of spaces it reads:
+    /// itself when it holds its key, and the peer whose home it shares
+    /// when it is a session.
+    pub(crate) fn holder(&self) -> Did {
+        if M::HOLDS_KEYS {
+            self.did()
+        } else {
+            self.home().clone()
+        }
+    }
+
     /// `seed`, sealed to `account`.
     async fn seal_to_account(
         &self,
@@ -876,12 +894,16 @@ mod tests {
             .await?;
 
         let state = peer.state();
-        assert!(spaces::find(state, &name, &peer).await?.is_empty());
+        assert!(
+            spaces::find(state, &peer.holder(), &name, &peer)
+                .await?
+                .is_empty()
+        );
         let loaded = peer.space(name.clone()).load().perform(&peer).await?;
         assert_eq!(loaded.did(), repository.did());
         state.refresh(&peer).await?;
         assert_eq!(
-            spaces::find(state, &name, &peer).await?,
+            spaces::find(state, &peer.holder(), &name, &peer).await?,
             vec![(repository.did(), location)]
         );
         Ok(())

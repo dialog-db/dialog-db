@@ -40,7 +40,7 @@ pub enum SecretError {
 }
 
 /// An entity derived from `bytes`, under `scheme`.
-fn derived(scheme: &str, bytes: &[u8]) -> Entity {
+pub(crate) fn derived(scheme: &str, bytes: &[u8]) -> Entity {
     format!(
         "{scheme}:{}",
         Blake3Hash::hash(bytes).as_bytes().to_base58()
