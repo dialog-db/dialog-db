@@ -242,6 +242,32 @@ mod tests {
         Ok(())
     }
 
+    /// A branch at a peer is reached through the repository the peer is
+    /// recorded in. Tracking one reached through another repository on
+    /// this device is refused: the peer's addresses are in that
+    /// repository's registry, so from this one the branch resolves as
+    /// unreachable, and the first pull fails.
+    #[dialog_common::test]
+    async fn it_refuses_a_remote_upstream_reached_through_another_repository() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let other = test_repo(&operator, &profile).await;
+        let origin = connect(&other, "origin", site(), other.did(), &operator).await?;
+        let remote_main = origin.branch("main").open().perform(&operator).await?;
+
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let refused = branch.set_upstream(&remote_main).perform(&operator).await;
+        assert!(
+            matches!(
+                refused,
+                Err(SetUpstreamError::ForeignRemoteUpstream { ref branch, .. }) if branch == "main"
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(branch.pulls().iter().count(), 0, "nothing was recorded");
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_errors_setting_upstream_to_self() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
