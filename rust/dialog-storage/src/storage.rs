@@ -13,12 +13,6 @@ pub mod provider;
 mod cache;
 pub use cache::*;
 
-mod compress;
-pub use compress::*;
-
-mod overlay;
-pub use overlay::*;
-
 mod measure;
 pub use measure::*;
 
@@ -31,9 +25,6 @@ pub use content_addressed::*;
 
 mod journal;
 pub use journal::*;
-
-mod transactional_memory;
-pub use transactional_memory::*;
 
 /// A universal envelope for all compatible combinations of [Encoder] and
 /// [StorageBackend] implementations. See the crate documentation for
