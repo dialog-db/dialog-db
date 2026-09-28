@@ -8,27 +8,29 @@ use std::pin::Pin;
 use dialog_capability::access::{Access, Prove};
 use dialog_capability::{Ability, Capability, Constraint, Subject, did};
 use dialog_common::Holdings;
-use dialog_credentials::{Ed25519Signer, Signer, SignerCredential};
+use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential, Verifier};
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
 use dialog_identity::access::{Access as Accessor, Claim};
 use dialog_network::Network;
-use dialog_repository::BranchReference;
+use dialog_repository::{BranchReference, secrets};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan, UcanCertificate};
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
 use dialog_varsig::Principal as _;
 
 use parking_lot::Mutex;
+use std::sync::OnceLock;
 
+use super::secret::{open_key, seal_key};
 use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
 
 /// A peer built from the branch that holds its state: the same builder
-/// [`Peer::new`] starts, with this branch [mounted](PeerBuilder::mount).
+/// [`Peer::new`] starts, with this branch as its [space](PeerBuilder::space).
 ///
 /// ```no_run
 /// # use dialog_peer::{Allowance, BranchPeerExt as _};
 /// # use dialog_repository::Repository;
-/// # use dialog_varsig::Principal as _;
+/// # use dialog_varsig::{Did, Principal as _};
 /// # async fn example(
 /// #     credential: dialog_credentials::SignerCredential,
 /// #     storage: dialog_storage::provider::storage::Storage<dialog_storage::provider::storage::VolatileSpace>,
@@ -36,7 +38,7 @@ use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
 /// # ) -> anyhow::Result<()> {
 /// let peer = Repository::from(credential.did())
 ///     .branch("profile")
-///     .peer(credential)
+///     .peer(credential.clone())
 ///     .with(storage)
 ///     .grant(granted)
 ///     .await?;
@@ -52,7 +54,7 @@ pub trait BranchPeerExt {
 
 impl BranchPeerExt for BranchReference {
     fn peer(self, credential: impl Into<SignerCredential>) -> PeerBuilder<PeerKey> {
-        Peer::new(credential).mount(self)
+        Peer::new(credential).space(self)
     }
 }
 
@@ -291,7 +293,7 @@ impl<S: Clone> PeerBuilder<PeerKey, Storage<S>, Session> {
     /// A session builder pre-filled from `peer`: its storage, network,
     /// runtime and base directory, with `peer` as the issuer of
     /// bare-capability grants. Its state branch is not assumed to be the
-    /// peer's: it is given one with [`mount`](Self::mount).
+    /// peer's: it is given one with [`space`](Self::space).
     pub(crate) fn from_peer(peer: &Peer<S, Local>, key: PeerKey) -> Self {
         Self {
             state: None,
@@ -318,12 +320,12 @@ impl<S: Clone> PeerBuilder<PeerKey, Storage<S>, Session> {
 }
 
 impl<K, St, M> PeerBuilder<K, St, M> {
-    /// Where the home repository's space lives. Mounted at open when it
-    /// is not already, and checked to be the space `home` names.
+    /// Where the home repository's space lives: mounted at open, and
+    /// created holding the home's public identity when it is not there
+    /// yet, then checked to be the space the home names.
     ///
     /// Not needed when the space is already mounted in the storage, as it
-    /// is after `OpenCredential` loaded the credential from it, or for a
-    /// worker of a peer that mounted it.
+    /// is for a session of a peer that mounted it.
     pub fn at(mut self, location: Location) -> Self {
         self.location = Some(location);
         self
@@ -353,12 +355,13 @@ impl<K, St, M> PeerBuilder<K, St, M> {
         self
     }
 
-    /// Mount `branch` as the peer's state: the branch where it finds
-    /// delegations and retains them, and records its spaces and contacts.
-    /// Its repository is the peer's home. Required: a peer is never
-    /// assumed to keep its state anywhere in particular, and a session is
-    /// not assumed to share its peer's.
-    pub fn mount(mut self, branch: impl Into<BranchReference>) -> Self {
+    /// The space the peer keeps its records in: `branch`, where it finds
+    /// delegations and retains them, records its spaces and contacts, and
+    /// keeps its sealed secrets. Its repository is
+    /// the peer's home. Required: a peer is never assumed to keep its
+    /// records anywhere in particular, and a session is not assumed to
+    /// share its peer's.
+    pub fn space(mut self, branch: impl Into<BranchReference>) -> Self {
         self.state = Some(branch.into());
         self
     }
@@ -502,20 +505,33 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
     pub async fn build(self) -> Result<Peer<S, M>, PeerError> {
         let Some(reference) = self.state else {
             return Err(PeerError::State(
-                "no state branch: mount one with `mount`".to_string(),
+                "no state branch: give the peer one with `space`".to_string(),
             ));
         };
         let home = reference.of().clone();
+        let issuer = self.issuer.clone();
         let credential = self.key.resolve().await?;
 
         if let Some(location) = &self.location {
-            let mounted = Subject::from(did!("local:storage"))
+            let at = Subject::from(did!("local:storage"))
                 .attenuate(storage_fx::Storage)
-                .attenuate(location.clone())
-                .load()
-                .perform(&self.storage)
-                .await
-                .map_err(|error| PeerError::Open(error.to_string()))?;
+                .attenuate(location.clone());
+            // The home space holds the home's public identity only, like
+            // every space: created from the home DID's verifier when it is
+            // not there yet.
+            let mounted = match at.clone().load().perform(&self.storage).await {
+                Ok(mounted) => mounted,
+                Err(storage_fx::StorageError::NotFound(_)) => {
+                    let identity: Verifier = home.to_string().parse().map_err(|_| {
+                        PeerError::Home(format!("the home {home} names no public key"))
+                    })?;
+                    at.create(Credential::from(identity))
+                        .perform(&self.storage)
+                        .await
+                        .map_err(|error| PeerError::Open(error.to_string()))?
+                }
+                Err(error) => return Err(PeerError::Open(error.to_string())),
+            };
             if mounted.did() != home {
                 return Err(PeerError::Home(format!(
                     "the space at {location:?} is {}, not the home {home}",
@@ -658,12 +674,40 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 network: self.network,
                 runtime: self.runtime,
                 state,
+                keys: OnceLock::new(),
                 chains: Mutex::default(),
                 grants,
                 holdings: Holdings::default(),
                 connections: Mutex::default(),
             },
         );
+
+        // A session of a live peer is passed its peer's copies of role
+        // keys, each sealed to the session's own key: it opens what is
+        // sealed for its peer's roles without the peer's key, and nothing
+        // is recorded for it.
+        if !M::HOLDS_KEYS
+            && let Some(issuer) = &issuer
+            && issuer.did() != peer.did()
+        {
+            let mut copies = Vec::new();
+            for (principal, copy) in secrets::keys_for(peer.state(), &issuer.did(), &peer)
+                .await
+                .map_err(|error| PeerError::State(error.to_string()))?
+            {
+                let seed = open_key(issuer, &copy)
+                    .await
+                    .map_err(|error| PeerError::State(error.to_string()))?;
+                let sealed = seal_key(&seed, &peer.did())
+                    .await
+                    .map_err(|error| PeerError::State(error.to_string()))?;
+                copies.push((principal, sealed));
+            }
+            peer.inner
+                .keys
+                .set(copies)
+                .unwrap_or_else(|_| unreachable!("a freshly built peer holds no keys yet"));
+        }
 
         // A peer acting as itself must be granted the storage it is built
         // on. A session need not: it may be scoped to other work, and one

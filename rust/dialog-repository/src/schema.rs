@@ -224,6 +224,126 @@ pub mod replica {
     );
 }
 
+/// Attribute newtypes for sealed messages ([`SealedMessage`],
+/// [`SealedKey`]).
+///
+/// All attributes here live under the `dialog.secret` domain: ciphertext
+/// only its recipient can open, and what it holds.
+pub mod secret {
+    use super::{Attribute, Entity};
+
+    /// `dialog.secret/to` — who can open the message: the principal it
+    /// was sealed to.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct To(
+        /// The recipient's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.secret/message` — the sealed bytes.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct Message(
+        /// The ciphertext.
+        pub Vec<u8>,
+    );
+
+    /// `dialog.secret/key-of` — the principal whose key a message holds,
+    /// when it holds one: a role's key sealed to one of its members.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct KeyOf(
+        /// The principal's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.secret/kind` — what a principal whose key is held sealed
+    /// is: `space` for a repository's key.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct Kind(
+        /// The kind.
+        pub String,
+    );
+
+    /// `dialog.secret/seed` — the message holding a principal's key.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct Seed(
+        /// The message's entity.
+        pub Entity,
+    );
+}
+
+/// Attribute newtypes for [`RootVault`] and [`ChildVault`] entities.
+///
+/// All attributes here live under the `dialog.vault` domain: the vaults a
+/// space records, each named within its parent, and the parent's proof
+/// that it derived a child.
+pub mod vault {
+    use super::{Attribute, Entity};
+
+    /// `dialog.vault/name` — the vault's name within its parent, or among
+    /// the top-level vaults.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault")]
+    pub struct Name(
+        /// The name.
+        pub String,
+    );
+
+    /// `dialog.vault/parent` — the vault a child is derived from.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault")]
+    pub struct Parent(
+        /// The parent's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.vault/signature` — the parent's signature over a child's
+    /// name and DID, so a record naming a key its parent did not derive
+    /// is ignored.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault")]
+    pub struct Signature(
+        /// The signature bytes.
+        pub Vec<u8>,
+    );
+}
+
+/// Attribute newtypes for [`VaultSecret`] entities.
+///
+/// All attributes here live under the `dialog.vault.secret` domain: the
+/// secrets a vault keeps by name.
+pub mod vault_secret {
+    use super::{Attribute, Entity};
+
+    /// `dialog.vault.secret/vault` — the vault the secret is sealed to.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault.secret")]
+    pub struct Vault(
+        /// The vault's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.vault.secret/name` — the secret's name within its vault.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault.secret")]
+    pub struct Name(
+        /// The name.
+        pub String,
+    );
+
+    /// `dialog.vault.secret/message` — the sealed message holding it.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault.secret")]
+    pub struct Message(
+        /// The message's entity.
+        pub Entity,
+    );
+}
+
 /// Attribute newtypes for [`Space`].
 ///
 /// All attributes here live under the `dialog.space` domain: the
@@ -719,6 +839,80 @@ pub struct SpaceKey {
     pub this: Entity,
     /// The sealed key.
     pub key: space::Key,
+}
+
+/// Ciphertext only its recipient can open.
+///
+/// Keyed by the ciphertext itself: sealing is randomized, so sealing the
+/// same bytes twice is two messages, and a re-seal adds one rather than
+/// silently replacing what it supersedes.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SealedMessage {
+    /// The message's entity, derived from its ciphertext.
+    pub this: Entity,
+    /// Who can open it.
+    pub to: secret::To,
+    /// The ciphertext.
+    pub message: secret::Message,
+}
+
+/// A sealed message that holds a principal's key: a role's key sealed to
+/// one of its members, or to the role above it.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SealedKey {
+    /// The message's entity.
+    pub this: Entity,
+    /// The principal whose key it holds.
+    pub key_of: secret::KeyOf,
+}
+
+/// A principal whose key is held sealed: a repository whose key is
+/// sealed for its owner.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SecretPrincipal {
+    /// The principal's entity: its DID.
+    pub this: Entity,
+    /// What the principal is.
+    pub kind: secret::Kind,
+    /// The message holding its key.
+    pub seed: secret::Seed,
+}
+
+/// A top-level vault: its key generated when it was created, and sealed
+/// to its owners.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RootVault {
+    /// The vault's entity: its DID.
+    pub this: Entity,
+    /// Its name among the top-level vaults.
+    pub name: vault::Name,
+}
+
+/// A vault derived from its parent's key, with the parent's signature
+/// over its name and DID.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChildVault {
+    /// The vault's entity: its DID.
+    pub this: Entity,
+    /// The vault it is derived from.
+    pub parent: vault::Parent,
+    /// Its name within its parent.
+    pub name: vault::Name,
+    /// The parent's signature over its name and DID.
+    pub signature: vault::Signature,
+}
+
+/// A secret a vault keeps by name: the sealed message holding it.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VaultSecret {
+    /// The secret's entity, derived from its vault and name.
+    pub this: Entity,
+    /// The vault it is sealed to.
+    pub vault: vault_secret::Vault,
+    /// Its name within the vault.
+    pub name: vault_secret::Name,
+    /// The sealed message holding it.
+    pub message: vault_secret::Message,
 }
 
 /// A contact: a peer the host knows by name.

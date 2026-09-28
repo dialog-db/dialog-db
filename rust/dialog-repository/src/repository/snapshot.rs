@@ -1065,12 +1065,12 @@ mod tests {
             .await?;
         let peer = dialog_peer::Peer::new(stage.profile.credential().clone())
             .with(destination)
-            .mount(test_state(&stage.profile.credential().did()))
+            .space(test_state(&stage.profile.credential().did()))
             .grant(test_grant().await)
             .await?;
         Ok(peer
             .session(b"snapshot-destination")
-            .mount(peer.state())
+            .space(peer.state())
             .allow(Subject::any())
             .await?)
     }

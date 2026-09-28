@@ -16,7 +16,7 @@ mod tests {
 
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .await
             .unwrap();
 
@@ -31,7 +31,7 @@ mod tests {
             .unwrap();
         let op1 = profile1
             .session(b"context-a")
-            .mount(profile1.state())
+            .space(profile1.state())
             .await
             .unwrap();
 
@@ -41,7 +41,7 @@ mod tests {
             .unwrap();
         let op2 = profile2
             .session(b"context-b")
-            .mount(profile2.state())
+            .space(profile2.state())
             .await
             .unwrap();
 
@@ -64,7 +64,7 @@ mod tests {
 
             let operator = profile
                 .session(b"alice")
-                .mount(profile.state())
+                .space(profile.state())
                 .await
                 .unwrap();
 
@@ -97,7 +97,7 @@ mod tests {
 
             let operator = profile
                 .session(b"alice")
-                .mount(profile.state())
+                .space(profile.state())
                 .await
                 .unwrap();
 
@@ -125,7 +125,7 @@ mod tests {
 
             let operator = profile
                 .session(b"alice")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any().reader().archive().catalog("index"))
                 .await
                 .unwrap();
@@ -159,7 +159,7 @@ mod tests {
 
             let operator = profile
                 .session(b"alice")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any().reader().archive().catalog("index"))
                 .await
                 .unwrap();
@@ -190,7 +190,7 @@ mod tests {
             use dialog_effects::storage as fx_storage;
             let operator = profile
                 .session(b"admin")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -219,7 +219,7 @@ mod tests {
 
             let operator = profile
                 .session(b"alice")
-                .mount(profile.state())
+                .space(profile.state())
                 .await
                 .unwrap();
 
@@ -248,7 +248,7 @@ mod tests {
 
             let operator = profile
                 .session(b"alice")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any().reader().archive().catalog("index"))
                 .await
                 .unwrap();
@@ -300,7 +300,7 @@ mod tests {
             .unwrap();
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .await
                 .unwrap();
             (operator, profile)
@@ -700,6 +700,8 @@ mod tests {
         }
     }
 
+    // A site secret is sealed to the peer, so only the peer, not a
+    // session of it, opens it to sign an S3 request.
     mod s3_credential_tests {
         use super::*;
         use dialog_capability::Subject;
@@ -743,23 +745,17 @@ mod tests {
             )
             .await
             .unwrap();
-            let operator = profile
-                .session(b"test")
-                .mount(profile.state())
-                .allow(Subject::any())
-                .await
-                .unwrap();
 
             let address = address_from(&s3);
 
             // Fork without saving credentials: should fail with credential not found
-            let result = Subject::from(operator.home().clone())
+            let result = Subject::from(profile.home().clone())
                 .reader()
                 .archive()
                 .catalog("data")
                 .get(Blake3Hash::hash(b"test"))
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await;
 
             let err = result.unwrap_err();
@@ -777,12 +773,6 @@ mod tests {
             let profile = open_peer(storage.clone(), Location::profile(unique_name("s3-get")))
                 .await
                 .unwrap();
-            let operator = profile
-                .session(b"test")
-                .mount(profile.state())
-                .allow(Subject::any())
-                .await
-                .unwrap();
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -791,19 +781,19 @@ mod tests {
                 .secrets()
                 .site(&address)
                 .save(credential)
-                .perform(&operator)
+                .perform(&profile)
                 .await
                 .unwrap();
 
             // Fork get: credential is loaded, request reaches the S3 server,
             // returns None because the content doesn't exist (not an auth error).
-            let result = Subject::from(operator.home().clone())
+            let result = Subject::from(profile.home().clone())
                 .reader()
                 .archive()
                 .catalog("cred-test")
                 .get(Blake3Hash::hash(b"nonexistent"))
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await;
 
             let content = result?;
@@ -820,12 +810,6 @@ mod tests {
             )
             .await
             .unwrap();
-            let operator = profile
-                .session(b"test")
-                .mount(profile.state())
-                .allow(Subject::any())
-                .await
-                .unwrap();
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -834,7 +818,7 @@ mod tests {
                 .secrets()
                 .site(&address)
                 .save(credential)
-                .perform(&operator)
+                .perform(&profile)
                 .await
                 .unwrap();
 
@@ -842,24 +826,24 @@ mod tests {
             let digest = Blake3Hash::hash(&content);
 
             // Put content via fork
-            Subject::from(operator.home().clone())
+            Subject::from(profile.home().clone())
                 .writer()
                 .archive()
                 .catalog("cred-roundtrip")
                 .put(Buffer::from(content.clone()))
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await
                 .unwrap();
 
             // Get it back via fork
-            let retrieved = Subject::from(operator.home().clone())
+            let retrieved = Subject::from(profile.home().clone())
                 .reader()
                 .archive()
                 .catalog("cred-roundtrip")
                 .get(digest)
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await
                 .unwrap();
 
@@ -875,11 +859,6 @@ mod tests {
                 Location::profile(unique_name("s3-mem-pub")),
             )
             .await?;
-            let operator = profile
-                .session(b"test")
-                .mount(profile.state())
-                .allow(Subject::any())
-                .await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -887,10 +866,10 @@ mod tests {
                 .secrets()
                 .site(&address)
                 .save(credential)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
-            let subject = operator.home().clone();
+            let subject = profile.home().clone();
             let content = b"memory content".to_vec();
 
             let edition = Subject::from(subject.clone())
@@ -900,7 +879,7 @@ mod tests {
                 .cell("head")
                 .publish(content.clone(), None)
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             let resolved = Subject::from(subject)
@@ -910,7 +889,7 @@ mod tests {
                 .cell("head")
                 .resolve()
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             let publication = resolved.unwrap();
@@ -927,11 +906,6 @@ mod tests {
                 Location::profile(unique_name("s3-mem-upd")),
             )
             .await?;
-            let operator = profile
-                .session(b"test")
-                .mount(profile.state())
-                .allow(Subject::any())
-                .await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -939,10 +913,10 @@ mod tests {
                 .secrets()
                 .site(&address)
                 .save(credential)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
-            let subject = operator.home().clone();
+            let subject = profile.home().clone();
 
             let edition1 = Subject::from(subject.clone())
                 .writer()
@@ -951,7 +925,7 @@ mod tests {
                 .cell("head")
                 .publish(b"initial".to_vec(), None)
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             let edition2 = Subject::from(subject.clone())
@@ -961,7 +935,7 @@ mod tests {
                 .cell("head")
                 .publish(b"updated".to_vec(), Some(edition1))
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             let resolved = Subject::from(subject)
@@ -971,7 +945,7 @@ mod tests {
                 .cell("head")
                 .resolve()
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             let publication = resolved.unwrap();
@@ -988,11 +962,6 @@ mod tests {
                 Location::profile(unique_name("s3-mem-cas")),
             )
             .await?;
-            let operator = profile
-                .session(b"test")
-                .mount(profile.state())
-                .allow(Subject::any())
-                .await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -1000,10 +969,10 @@ mod tests {
                 .secrets()
                 .site(&address)
                 .save(credential)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
-            let subject = operator.home().clone();
+            let subject = profile.home().clone();
 
             let edition1 = Subject::from(subject.clone())
                 .writer()
@@ -1012,7 +981,7 @@ mod tests {
                 .cell("head")
                 .publish(b"initial".to_vec(), None)
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             Subject::from(subject.clone())
@@ -1022,7 +991,7 @@ mod tests {
                 .cell("head")
                 .publish(b"by-writer-1".to_vec(), Some(edition1.clone()))
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             let result = Subject::from(subject.clone())
@@ -1032,7 +1001,7 @@ mod tests {
                 .cell("head")
                 .publish(b"by-writer-2".to_vec(), Some(edition1))
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await;
 
             assert!(result.is_err(), "CAS should fail due to edition mismatch");
@@ -1044,7 +1013,7 @@ mod tests {
                 .cell("head")
                 .resolve()
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             assert_eq!(resolved.unwrap().content, b"by-writer-1");
@@ -1059,11 +1028,6 @@ mod tests {
                 Location::profile(unique_name("s3-mem-ret")),
             )
             .await?;
-            let operator = profile
-                .session(b"test")
-                .mount(profile.state())
-                .allow(Subject::any())
-                .await?;
 
             let address = address_from(&s3);
             let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
@@ -1071,10 +1035,10 @@ mod tests {
                 .secrets()
                 .site(&address)
                 .save(credential)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
-            let subject = operator.home().clone();
+            let subject = profile.home().clone();
 
             let edition = Subject::from(subject.clone())
                 .writer()
@@ -1083,7 +1047,7 @@ mod tests {
                 .cell("head")
                 .publish(b"to-be-retracted".to_vec(), None)
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             Subject::from(subject.clone())
@@ -1094,7 +1058,7 @@ mod tests {
                 .cell("head")
                 .retract(edition)
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             let resolved = Subject::from(subject)
@@ -1104,7 +1068,7 @@ mod tests {
                 .cell("head")
                 .resolve()
                 .fork(&address)
-                .perform(&operator)
+                .perform(&profile)
                 .await?;
 
             assert!(resolved.is_none(), "cell should be empty after retract");
@@ -1140,7 +1104,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
 
@@ -1169,7 +1133,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
 
@@ -1211,7 +1175,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
 
@@ -1241,7 +1205,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
 
@@ -1285,7 +1249,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
 
@@ -1338,7 +1302,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
 
@@ -1404,7 +1368,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
 
@@ -1457,7 +1421,7 @@ mod tests {
             // Only delegate archive access, not memory
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 // Reading and writing are separate powers now that the
                 // verb is a level of the hierarchy, so a delegation that
                 // covers both says so twice.
@@ -1525,7 +1489,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
 
@@ -1572,7 +1536,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
 
@@ -1630,7 +1594,7 @@ mod tests {
             .await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
             let subject = Subject::from(profile.did());
@@ -1720,7 +1684,7 @@ mod tests {
 
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -1748,7 +1712,7 @@ mod tests {
 
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();

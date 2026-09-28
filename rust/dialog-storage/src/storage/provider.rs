@@ -40,4 +40,4 @@ pub mod space;
 pub use space::{Space, SpaceProvider};
 
 pub mod storage;
-pub use storage::Storage;
+pub use storage::{CredentialStore, Storage};

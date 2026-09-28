@@ -30,7 +30,7 @@ See `notes/peer-and-session.md`.
 # use dialog_identity::OpenCredential;
 # use dialog_peer::{Allowance, Peer};
 # use dialog_repository::{Repository, RepositoryExt as _};
-# use dialog_storage::provider::storage::{Storage, VolatileSpace};
+# use dialog_storage::provider::storage::{CredentialStore, Storage, VolatileSpace};
 # use dialog_varsig::Principal as _;
 # async fn example() -> anyhow::Result<()> {
 // The storage belongs to a system: opening spaces in it takes the
@@ -38,13 +38,15 @@ See `notes/peer-and-session.md`.
 let system = SignerCredential::from(Ed25519Signer::generate().await?);
 let storage = Storage::<VolatileSpace>::volatile().owned_by(system.did());
 
-// The credential is opened apart from the peer; here from the storage.
-let credential = OpenCredential::open("alice").perform(&storage).await?;
+// The key is opened from the credential store, apart from the peer.
+let credentials = CredentialStore::<VolatileSpace>::new().owned_by(system.did());
+let credential = OpenCredential::open("alice").perform(&credentials).await?;
 
-// The peer, acting with its own key, keeping its state in the main
-// branch of its own repository, and granted the storage.
+// The peer, acting with its own key on its own behalf, keeping its
+// records in the main branch of its own repository, and granted the
+// storage.
 let alice = Peer::new(credential.clone())
-    .mount(Repository::from(credential.did()).branch("main"))
+    .space(Repository::from(credential.did()).branch("main"))
     .with(storage)
     .grant(Allowance::storage(&system))
     .build()
@@ -54,7 +56,7 @@ let alice = Peer::new(credential.clone())
 // state in the peer's branch.
 let job = alice
     .session(b"my-app")
-    .mount(alice.state())
+    .space(alice.state())
     .allow(Subject::any())
     .await?;
 
@@ -76,10 +78,10 @@ the storage and the peer's state, holding a delegation of the storage:
 #     storage: dialog_storage::provider::storage::Storage<dialog_storage::provider::storage::VolatileSpace>,
 #     state: dialog_repository::BranchReference,
 # ) -> anyhow::Result<()> {
-let session = Peer::new(credential)
+let session = Peer::new(credential.clone())
     .session(b"worker")
     .with(storage)
-    .mount(state)
+    .space(state)
     .allow(Subject::any())
     .await?;
 # let _ = session;

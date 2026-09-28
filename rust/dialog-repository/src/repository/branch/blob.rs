@@ -699,7 +699,7 @@ mod tests {
         let profile = open_peer(storage.clone(), Location::profile(unique_name("blob"))).await?;
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(Subject::any())
             .await?;
         let repo = profile
@@ -760,7 +760,7 @@ mod tests {
         .await?;
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(Subject::any())
             .await?;
         let repo = profile
@@ -834,7 +834,7 @@ mod tests {
         .await?;
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(Subject::any())
             .await?;
         let repo = profile
