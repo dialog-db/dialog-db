@@ -9,7 +9,7 @@ use dialog_artifacts::{Artifact, Attribute, Entity, Value};
 use dialog_capability::Subject;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::credential::CredentialError;
-use dialog_effects::storage::Location;
+use dialog_effects::storage::{Directory, Location};
 use dialog_repository::{ACCESS_BRANCH, BranchReference, Repository};
 use dialog_storage::provider::storage::{CredentialStore, Storage, VolatileSpace};
 use dialog_varsig::{Did, Principal as _};
@@ -111,19 +111,33 @@ pub async fn open_peer<S: PeerSpace>(
     Ok(peer)
 }
 
+/// The custodian guarding `peer`'s account in tests: a key of its own in
+/// the [test credential store](test_credential_store), the way an
+/// onboarding custodian is a key of its own beside the peer's. The same
+/// peer always gets the same custodian.
+pub async fn test_custodian<S: PeerSpace, M: Mode>(
+    peer: &Peer<S, M>,
+) -> Result<SignerCredential, CredentialError> {
+    OpenCredential::open(format!("custodian-{}", peer.home()))
+        .at(Directory::Temp)
+        .perform(&test_credential_store())
+        .await
+        .map_err(|error| CredentialError::Storage(error.to_string()))
+}
+
 /// Onboard `peer`, unless its space has an account: the space creates the
-/// `account` vault with the peer as its member, the account delegates to
-/// the peer, and the peer becomes a member of `account` → `peer`, as
-/// onboarding and sign-in would.
-pub async fn onboard<S: PeerSpace>(peer: &Peer<S>) -> Result<(), CredentialError> {
+/// `account` vault guarded by the peer's [test custodian](test_custodian),
+/// and the account delegates to the peer, as onboarding would. The peer
+/// holds no copy of the account's key. Yields the custodian.
+pub async fn onboard<S: PeerSpace>(peer: &Peer<S>) -> Result<SignerCredential, CredentialError> {
+    let custodian = test_custodian(peer).await?;
     if peer.authority().await.is_ok() {
-        return Ok(());
+        return Ok(custodian);
     }
     let account = peer.state().vault("account").create().perform(peer).await?;
-    account.add(peer.did()).perform(peer).await?;
+    account.add(custodian.did()).perform(peer).await?;
     account.delegate(peer.did()).perform(peer).await?;
-    let peers = account.vault("peer").open().perform(peer).await?;
-    peers.add(peer.did()).perform(peer).await
+    Ok(custodian)
 }
 
 /// A fresh volatile peer under a unique name.

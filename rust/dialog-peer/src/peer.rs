@@ -248,10 +248,6 @@ pub(crate) struct Inner {
     /// from its `dialog.ucan/*` facts and retained delegations commit
     /// into it.
     state: Branch,
-    /// Copies of principals' keys sealed to this handle's key and passed
-    /// to it when it was built, never recorded: a session's copies of its
-    /// peer's role keys, with the principal each is the key of.
-    keys: OnceLock<Vec<(Did, Vec<u8>)>>,
     /// Resolved-chain cache: its keys carry the principal, and its epoch
     /// is the registry head.
     chains: Mutex<ChainCache>,
