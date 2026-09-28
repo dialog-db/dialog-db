@@ -44,10 +44,17 @@ pub(crate) async fn resolve<Env: RegistryEnv>(
     };
 
     // Other syncs write this cell too, recording how far they got. On a
-    // conflict, re-read it and lay the routes over what is there now.
+    // conflict, re-read it and lay the routes over what is there now,
+    // until they land: every caller reads the routes from the cell after
+    // this, so answering before they are recorded would have it act on
+    // whatever the last writer left -- routes resolved before the
+    // registry moved. A cell that keeps moving is given up on, saying so.
     let cell = branch.tracking();
-    for _ in 0..2 {
+    for _ in 0..ATTEMPTS {
         let mut tracking = branch.tracked();
+        if matches!(&tracking.resolved, Some(current) if current.at == resolved.at) {
+            return Ok(());
+        }
         tracking.resolved = Some(resolved.clone());
         match cell.checkpoint().publish(tracking, env).await {
             Ok(()) => return Ok(()),
@@ -57,8 +64,15 @@ pub(crate) async fn resolve<Env: RegistryEnv>(
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(())
+    Err(ResolveUpstreamsError::Contended {
+        branch: branch.name().to_string(),
+        attempts: ATTEMPTS,
+    })
 }
+
+/// How many times the routes are laid over a tracking cell that moved
+/// before resolving gives up on it.
+const ATTEMPTS: usize = 8;
 
 /// Where each branch `this` pulls from lives.
 async fn pulls<Env: RegistryEnv>(
@@ -247,7 +261,7 @@ mod tests {
     use crate::helpers::{flaky_operator_with_profile, test_repo};
     use crate::registry::{apply, pull};
     use crate::schema::{Peer, Replica};
-    use crate::{PullError, RepositoryMemoryExt as _, Route, Upstream};
+    use crate::{PullError, RepositoryMemoryExt as _, ResolveUpstreamsError, Route, Upstream};
     use anyhow::Result;
     use dialog_artifacts::Changes;
     use dialog_operator::helpers::test_operator_with_profile;
@@ -331,7 +345,10 @@ mod tests {
         let memory = storage.space(&repo.did()).expect("mounted").memory;
         memory.lose_publishes("branch/feature", "tracking", 0..);
         let resolved = resolve(&feature, &operator).await;
-        assert!(resolved.is_err(), "{resolved:?}");
+        assert!(
+            matches!(resolved, Err(ResolveUpstreamsError::Contended { .. })),
+            "{resolved:?}"
+        );
         Ok(())
     }
 
