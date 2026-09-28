@@ -280,6 +280,16 @@ impl ConceptDescriptor {
             .clone()
     }
 
+    /// A weak handle on the implicit rule, to check it is freed with the
+    /// descriptor.
+    #[cfg(test)]
+    fn implicit_weak(&self) -> std::sync::Weak<DeductiveRule> {
+        Arc::downgrade(
+            self.implicit
+                .get_or_init(|| unreachable!("the implicit rule is computed first")),
+        )
+    }
+
     /// The implicit rule's plan under `adornment`, computed with `plan`
     /// on the first ask and reused by every clone of this descriptor.
     pub(crate) fn implicit_plan(
@@ -827,6 +837,34 @@ mod tests {
     use crate::artifact::Type;
     use crate::the;
     use crate::{Attribute, Concept};
+
+    /// The implicit rule concludes a copy of its descriptor. Clones share
+    /// the memo the rule is kept in, so a rule holding a plain copy holds
+    /// the cell that holds the rule, and neither is ever freed. Every
+    /// descriptor a query builds and assembles rules for would leak.
+    #[dialog_common::test]
+    fn it_frees_a_descriptor_whose_implicit_rule_was_computed() {
+        let descriptor = ConceptDescriptor::try_from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User's name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+
+        let rule = descriptor.implicit_rule();
+        let weak = descriptor.implicit_weak();
+        drop(rule);
+        drop(descriptor);
+
+        assert!(
+            weak.upgrade().is_none(),
+            "the implicit rule keeps its descriptor alive, and the descriptor the rule"
+        );
+    }
 
     #[dialog_common::test]
     fn it_serializes_to_expected_json() {
