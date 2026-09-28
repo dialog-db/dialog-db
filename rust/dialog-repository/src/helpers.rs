@@ -19,21 +19,15 @@ use parking_lot::Mutex;
 /// Create a test repository (this crate's types) using the given operator
 /// as the effect environment.
 #[cfg(test)]
-pub async fn test_repo<Env>(
-    operator: &Env,
-    profile: &dialog_identity::Profile,
-) -> crate::Repository<dialog_credentials::Credential>
+pub async fn test_repo<Env>(operator: &Env, profile: &Profile) -> Repository<Credential>
 where
-    Env: Provider<dialog_effects::space::Load>
-        + Provider<dialog_effects::space::Create>
-        + Provider<dialog_effects::memory::List>
-        + RegistryEnv,
+    Env: Provider<space::Load> + Provider<space::Create> + Provider<List> + RegistryEnv,
 {
     use crate::RepositoryExt as _;
     use dialog_identity::SpaceHandle;
     use dialog_operator::helpers::unique_name;
     let handle = SpaceHandle {
-        profile_did: dialog_varsig::Principal::did(profile),
+        profile_did: profile.did(),
         name: unique_name("repo"),
     };
     handle
@@ -46,29 +40,17 @@ where
 /// The space a flaky test operator runs over: volatile, with a memory
 /// provider that loses the publishes a test plans.
 #[cfg(test)]
-pub type FlakySpace = dialog_storage::provider::Space<
-    dialog_storage::provider::Volatile,
-    dialog_storage::Flaky,
-    dialog_storage::provider::Volatile,
-    dialog_storage::provider::Volatile,
-    dialog_storage::provider::Volatile,
->;
+pub type FlakySpace = Space<Volatile, Flaky, Volatile, Volatile, Volatile>;
 
 /// A test operator whose memory loses the publishes a test plans, with
 /// its profile and the storage it runs over: the storage is how a test
-/// reaches the [`Flaky`](dialog_storage::Flaky) memory of a
-/// repository, by its DID, to plan them.
+/// reaches the [`Flaky`] memory of a repository, by its DID, to plan
+/// them.
 #[cfg(test)]
-pub async fn flaky_operator_with_profile() -> (
-    dialog_operator::Operator<FlakySpace>,
-    dialog_identity::Profile,
-    dialog_storage::provider::storage::Storage<FlakySpace>,
-) {
+pub async fn flaky_operator_with_profile() -> (Operator<FlakySpace>, Profile, Storage<FlakySpace>) {
     use dialog_capability::Subject;
-    use dialog_identity::Profile;
     use dialog_operator::DeriveOperator as _;
     use dialog_operator::helpers::unique_name;
-    use dialog_storage::provider::storage::Storage;
     let storage = Storage::<FlakySpace>::new();
     let profile = Profile::open(unique_name("test"))
         .perform(&storage)
@@ -88,6 +70,22 @@ pub async fn flaky_operator_with_profile() -> (
 use crate::registry::RegistryEnv;
 #[cfg(test)]
 use crate::{ConnectedReplica, Repository, SiteAddress, peer_did};
+#[cfg(test)]
+use dialog_credentials::Credential;
+#[cfg(test)]
+use dialog_effects::memory::List;
+#[cfg(test)]
+use dialog_effects::space;
+#[cfg(test)]
+use dialog_identity::Profile;
+#[cfg(test)]
+use dialog_operator::Operator;
+#[cfg(test)]
+use dialog_storage::Flaky;
+#[cfg(test)]
+use dialog_storage::provider::storage::Storage;
+#[cfg(test)]
+use dialog_storage::provider::{Space, Volatile};
 #[cfg(test)]
 use dialog_varsig::{Did, Principal};
 
