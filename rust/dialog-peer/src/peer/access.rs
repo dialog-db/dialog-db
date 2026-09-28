@@ -794,6 +794,46 @@ mod tests {
         Ok(())
     }
 
+    /// A delegation issued directly to the session's key proves although
+    /// a session grant covers the claim and the grant's issuer cannot.
+    ///
+    /// The helpers' default session is allowed `Subject::any()`, so some
+    /// grant covers every claim. When the peer that issued the grant has
+    /// no route to the subject -- a space that delegated to this session
+    /// alone, cross-party -- the covering grant must not hide the
+    /// delegation the plain walk finds retained to the session itself.
+    #[dialog_common::test]
+    async fn it_proves_a_delegation_to_the_session_behind_a_failing_grant() -> Result<()> {
+        let storage = Storage::volatile();
+        let profile = open_peer(storage.clone(), Location::profile(unique("direct-grant"))).await?;
+        let operator = profile.session(b"test").allow(Subject::any()).await?;
+
+        let space = Ed25519Signer::generate().await?;
+        let delegation = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&operator.did())
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        Subject::from(operator.home().clone())
+            .attenuate(Access)
+            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+                DelegationChain::new(delegation),
+            )))
+            .perform(&operator)
+            .await?;
+
+        let proof = operator
+            .resolve(Prove::<Ucan>::new(operator.did(), storage_scope(&space)))
+            .await
+            .expect("the delegation retained to the session proves");
+        assert_eq!(proof.proofs().len(), 1);
+        assert_eq!(proof.proofs()[0].0.audience(), &operator.did());
+        Ok(())
+    }
+
     /// Any head movement drops the cache: retaining another delegation
     /// moves the branch head, and the next prove re-walks rather than
     /// serving a chain resolved against the old head.
