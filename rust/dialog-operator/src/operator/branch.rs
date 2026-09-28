@@ -342,8 +342,8 @@ mod tests {
     use dialog_capability::{Did, Subject};
     use dialog_effects::MethodExt as _;
     use dialog_effects::authority::{Identify, OperatorExt as _};
-    use dialog_effects::branch::BranchRecord;
     use dialog_effects::branch::prelude::*;
+    use dialog_effects::branch::{BranchError, BranchRecord};
     use dialog_query::{Output as _, Query, Term};
     use dialog_repository::schema::{ActiveBranch, Branch as BranchConcept, Replica};
     use dialog_repository::{REGISTRY, RepositoryMemoryExt as _, Revision};
@@ -660,27 +660,41 @@ mod tests {
         Ok(())
     }
 
-    /// A branch name is one path segment. The filesystem store resolves
-    /// `./meta`, `meta/` and `x/../meta` to the registry's own cells,
-    /// and `scratch/../main` reaches past a `scratch*` delegation, so a
-    /// name that is not a single plain segment is refused before
-    /// anything is written.
+    /// A branch name is one plain path segment: letters, digits, `.`,
+    /// `_` and `-`, not starting with `.`. The filesystem store lays a
+    /// branch's cells out under its name, so a name that URL or path
+    /// resolution reads (`meta?x` is `meta` with a query, `x/../meta`
+    /// is `meta`, `scratch/../main` reaches past a `scratch*`
+    /// delegation) is refused before anything is written, by create
+    /// and by delete alike, each for the reason it is not a name.
     #[dialog_common::test]
     async fn it_refuses_a_name_that_is_not_one_segment() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
 
-        for name in [
-            "./meta",
-            "meta/",
-            "x/../meta",
-            "scratch/../main",
-            "a/b",
-            "",
-            ".",
-            "..",
-        ] {
+        let unsafe_char =
+            "a branch name holds a character that is not a letter, digit, `.`, `_` or `-`";
+        let long = "a".repeat(256);
+        let cases: Vec<(&str, &str)> = vec![
+            ("", "a branch name is not empty"),
+            (".", "a branch name is not a relative path"),
+            ("..", "a branch name is not a relative path"),
+            ("./meta", "a branch name is one path segment"),
+            ("meta/", "a branch name is one path segment"),
+            ("x/../meta", "a branch name is one path segment"),
+            ("scratch/../main", "a branch name is one path segment"),
+            ("a/b", "a branch name is one path segment"),
+            ("meta\\..\\main", "a branch name is one path segment"),
+            ("meta\n", "a branch name holds no control characters"),
+            (".meta", "a branch name does not start with `.`"),
+            ("meta?x", unsafe_char),
+            ("meta#x", unsafe_char),
+            ("meta x", unsafe_char),
+            ("mét@", unsafe_char),
+            (long.as_str(), "a branch name is at most 255 bytes"),
+        ];
+        for (name, reason) in cases {
             let created = Subject::from(did.clone())
                 .writer()
                 .branches()
@@ -688,10 +702,112 @@ mod tests {
                 .create()
                 .perform(&operator)
                 .await;
-            assert!(created.is_err(), "{name:?} is not a branch name");
+            assert!(
+                matches!(
+                    &created,
+                    Err(BranchError::Refused { operation: "created", reason: actual, .. })
+                        if *actual == reason
+                ),
+                "creating {name:?}: {created:?}"
+            );
+
+            let deleted = Subject::from(did.clone())
+                .voider()
+                .branches()
+                .branch(name)
+                .delete(None)
+                .perform(&operator)
+                .await;
+            assert!(
+                matches!(
+                    &deleted,
+                    Err(BranchError::Refused { operation: "deleted", reason: actual, .. })
+                        if *actual == reason
+                ),
+                "deleting {name:?}: {deleted:?}"
+            );
         }
         let names = listed(&operator, &did).await?;
         assert_eq!(names, vec![REGISTRY.to_string()], "nothing was recorded");
+        Ok(())
+    }
+
+    /// A name is refused before it reaches a store that lays cells out
+    /// by name. The suite runs on volatile storage, which keys cells by
+    /// the raw string and cannot see this; on the filesystem store
+    /// `branch/meta?x` resolved to `branch/meta` (the `?` began a URL
+    /// query), so creating `meta?x` at a revision published that
+    /// revision as the registry's head. The store now keeps such a
+    /// segment apart too, but the name is not a name and does not get
+    /// that far.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_keeps_the_registry_head_from_a_name_that_aliases_it_on_disk() -> anyhow::Result<()>
+    {
+        use crate::helpers::unique_name;
+        use crate::{DeriveOperator as _, Profile};
+        use dialog_effects::storage::Directory;
+        use dialog_network::Network;
+        use dialog_repository::RepositoryExt as _;
+        use dialog_storage::provider::storage::{NativeSpace, Storage};
+
+        let root = tempfile::tempdir()?;
+        let directory = Directory::At(root.path().to_string_lossy().into_owned());
+        let storage = Storage::<NativeSpace>::new();
+        let profile = Profile::open(unique_name("test"))
+            .at(directory.clone())
+            .perform(&storage)
+            .await?;
+        let operator = profile
+            .derive(b"test")
+            .allow(Subject::any())
+            .network(Network::default())
+            .base(directory)
+            .build(storage)
+            .await?;
+        let did = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&operator)
+            .await?
+            .did();
+
+        let source = Subject::from(did.clone())
+            .branch("main")
+            .open()
+            .perform(&operator)
+            .await?
+            .commit(stream::iter(Vec::<Instruction>::new()))
+            .allow_empty()
+            .perform(&operator)
+            .await?;
+        let registry = || Subject::from(did.clone()).branch(REGISTRY).open();
+        let before = registry().perform(&operator).await?.revision();
+
+        let created = Subject::from(did.clone())
+            .writer()
+            .branches()
+            .branch("meta?x")
+            .create()
+            .revision(source)
+            .perform(&operator)
+            .await;
+
+        assert_eq!(
+            registry().perform(&operator).await?.revision(),
+            before,
+            "the registry's head moved"
+        );
+        assert!(
+            matches!(
+                created,
+                Err(BranchError::Refused {
+                    operation: "created",
+                    ..
+                })
+            ),
+            "{created:?}"
+        );
         Ok(())
     }
 
