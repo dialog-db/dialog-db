@@ -762,4 +762,175 @@ mod tests {
         let expected_version = dialog_effects::memory::Version::from(Blake3Hash::hash(&content));
         assert_eq!(publication.version, expected_version);
     }
+
+    /// The segments a caller could hand a store to reach another name's
+    /// cells. Each one is either refused, or lands under the base at a
+    /// path of its own: never on `meta`, `main` or the base itself, in
+    /// the URL, on disk, or one cell deeper, where a branch's `revision`
+    /// cell is. Before this was pinned, `meta?x` was `meta` (the `?`
+    /// began a query), `x%2F..%2Fmeta` was `meta` on disk (`to_file_path`
+    /// decodes `%2F`), and `.` was the base.
+    #[dialog_common::test]
+    async fn it_keeps_an_adversarial_segment_under_its_own_name() {
+        let space = test_space(&unique_name("segment-aliasing")).await;
+        let base = space.memory().unwrap();
+        let base_path: PathBuf = (&base).try_into().unwrap();
+        let mut taken: Vec<PathBuf> = vec![base_path.clone()];
+        for name in ["meta", "main"] {
+            let handle = base.resolve(name).unwrap();
+            taken.push((&handle).try_into().unwrap());
+            taken.push((&handle.resolve("revision").unwrap()).try_into().unwrap());
+        }
+        let meta_revision = base_path.join("meta").join("revision");
+        std::fs::create_dir_all(meta_revision.parent().unwrap()).unwrap();
+        std::fs::write(&meta_revision, b"the registry's head").unwrap();
+
+        for segment in [
+            "meta?x",
+            "meta#x",
+            "x%2F..%2Fmeta",
+            "%2e%2e",
+            "..",
+            ".",
+            "",
+            "meta.",
+            "meta ",
+            "mét@",
+            "a/b",
+            "meta\\..\\main",
+            "meta\0",
+            "meta\n",
+        ] {
+            let Ok(handle) = base.resolve(segment) else {
+                continue;
+            };
+            assert!(
+                handle.path().starts_with(base.path()),
+                "{segment:?} escapes the base in the URL: {}",
+                handle.path()
+            );
+            let Ok(path) = PathBuf::try_from(&handle) else {
+                continue;
+            };
+            let cell = handle.resolve("revision").unwrap();
+            let cell_path = PathBuf::try_from(&cell).unwrap();
+            for candidate in [&path, &cell_path] {
+                assert!(
+                    candidate.starts_with(&base_path),
+                    "{segment:?} escapes the base on disk: {candidate:?}"
+                );
+                assert!(
+                    !taken.contains(candidate),
+                    "{segment:?} aliases another name: {candidate:?}"
+                );
+            }
+            if cell.write(b"clobbered").await.is_ok() {
+                assert_eq!(
+                    std::fs::read(&meta_revision).unwrap(),
+                    b"the registry's head",
+                    "writing {segment:?}'s revision cell reached meta's"
+                );
+            }
+        }
+    }
+
+    /// Distinct plain names never share a path.
+    #[dialog_common::test]
+    async fn it_gives_distinct_plain_names_distinct_paths() {
+        let space = test_space(&unique_name("segment-distinct")).await;
+        let base = space.memory().unwrap();
+        let names = [
+            "main",
+            "meta",
+            "Main",
+            "main.",
+            "main_",
+            "main-",
+            "m.e.t.a",
+            ".main",
+            "main..",
+            "did:key:z6Mk",
+        ];
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for name in names {
+            let path: PathBuf = (&base.resolve(name).unwrap()).try_into().unwrap();
+            assert!(!paths.contains(&path), "{name:?} shares a path: {path:?}");
+            paths.push(path);
+        }
+    }
+
+    /// A plain name lays out exactly where it always has, both in the
+    /// URL and on disk: the encoding that keeps adversarial segments
+    /// apart must not move existing data. Pins the strings.
+    #[dialog_common::test]
+    async fn it_keeps_the_layout_of_plain_names() {
+        let space = test_space(&unique_name("segment-layout")).await;
+        let root = space.handle().path().to_string();
+        let root_path: PathBuf = space.handle().clone().try_into().unwrap();
+        let relative = |handle: &FileSystemHandle| {
+            handle
+                .path()
+                .strip_prefix(root.as_str())
+                .map(str::to_string)
+        };
+
+        let main = space.memory().unwrap().resolve("main").unwrap();
+        assert_eq!(relative(&main).as_deref(), Some("memory/main"));
+        assert_eq!(
+            PathBuf::try_from(&main).unwrap(),
+            root_path.join("memory").join("main")
+        );
+
+        let meta = space.memory().unwrap().resolve("meta").unwrap();
+        assert_eq!(relative(&meta).as_deref(), Some("memory/meta"));
+        assert_eq!(
+            PathBuf::try_from(&meta).unwrap(),
+            root_path.join("memory").join("meta")
+        );
+
+        let revision = space
+            .memory()
+            .unwrap()
+            .resolve("branch/meta")
+            .unwrap()
+            .resolve("revision")
+            .unwrap();
+        assert_eq!(
+            relative(&revision).as_deref(),
+            Some("memory/branch/meta/revision")
+        );
+        assert_eq!(
+            PathBuf::try_from(&revision).unwrap(),
+            root_path
+                .join("memory")
+                .join("branch")
+                .join("meta")
+                .join("revision")
+        );
+
+        let credential = space.credential_key("self").unwrap();
+        assert_eq!(
+            relative(&credential).as_deref(),
+            Some("credential/key/self")
+        );
+
+        let certificate = space
+            .certificate()
+            .unwrap()
+            .resolve("did:key:z6MkExample")
+            .unwrap()
+            .resolve("_")
+            .unwrap();
+        assert_eq!(
+            relative(&certificate).as_deref(),
+            Some("certificate/did:key:z6MkExample/_")
+        );
+        assert_eq!(
+            PathBuf::try_from(&certificate).unwrap(),
+            root_path
+                .join("certificate")
+                .join("did:key:z6MkExample")
+                .join("_")
+        );
+    }
 }
