@@ -275,7 +275,15 @@ impl ConceptDescriptor {
     /// attribute is an instance.
     pub fn implicit_rule(&self) -> DeductiveRule {
         self.implicit
-            .get_or_init(|| Arc::new(DeductiveRule::from(self)))
+            .get_or_init(|| {
+                // The rule concludes a copy of this descriptor. The copy
+                // must not share the memo the rule is about to be kept
+                // in, or the rule would hold the cell that holds it and
+                // neither would ever be freed.
+                let mut conclusion = self.clone();
+                conclusion.implicit = Memo::default();
+                Arc::new(DeductiveRule::from(&conclusion))
+            })
             .as_ref()
             .clone()
     }
