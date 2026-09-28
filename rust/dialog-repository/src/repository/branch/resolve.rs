@@ -259,11 +259,16 @@ mod tests {
 
     use super::resolve;
     use crate::helpers::{flaky_operator_with_profile, test_repo};
-    use crate::registry::{apply, pull};
+    use crate::registry::{RegistryEnv, apply, pull};
     use crate::schema::{Peer, Replica};
-    use crate::{PullError, RepositoryMemoryExt as _, ResolveUpstreamsError, Route, Upstream};
+    use crate::{
+        Branch, PullError, Repository, RepositoryMemoryExt as _, ResolveUpstreamsError, Route,
+        Upstream,
+    };
     use anyhow::Result;
     use dialog_artifacts::Changes;
+    use dialog_credentials::Credential;
+    use dialog_identity::Profile;
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::Statement as _;
     use dialog_varsig::did;
@@ -272,19 +277,19 @@ mod tests {
     /// second is recorded straight into the registry, so the branch's
     /// tracking cell still holds the routes from when only `main` was.
     async fn two_upstreams_one_recorded<Env>(
-        repo: &crate::Repository<dialog_credentials::Credential>,
-        profile: &dialog_identity::Profile,
+        repo: &Repository<Credential>,
+        profile: &Profile,
         env: &Env,
-    ) -> Result<crate::Branch>
+    ) -> Result<Branch>
     where
-        Env: crate::registry::RegistryEnv,
+        Env: RegistryEnv,
     {
         let main = repo.branch("main").open().perform(env).await?;
         let feature = repo.branch("feature").open().perform(env).await?;
         feature.pull_from(&main).perform(env).await?;
         assert_eq!(feature.pulls().iter().count(), 1);
 
-        let local = Replica::new(dialog_varsig::Principal::did(profile), repo.did());
+        let local = Replica::new(profile.did(), repo.did());
         let dev = local.branch("dev");
         let mut changes = Changes::new();
         dev.clone().assert(&mut changes);

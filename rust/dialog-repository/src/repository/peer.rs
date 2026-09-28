@@ -535,17 +535,18 @@ fn file_uri(location: &Location) -> String {
 /// places the filesystem storage resolves it to.
 #[cfg(not(target_arch = "wasm32"))]
 fn resolve(directory: &Directory) -> Option<String> {
+    use std::env;
     use std::path::PathBuf;
     let path = match directory {
         Directory::Profile => dirs::data_dir()?.join("dialog"),
-        Directory::Current => std::env::current_dir().ok()?,
-        Directory::Temp => std::env::temp_dir(),
+        Directory::Current => env::current_dir().ok()?,
+        Directory::Temp => env::temp_dir(),
         Directory::At(path) => {
             let path = PathBuf::from(path);
             if path.is_absolute() {
                 path
             } else {
-                std::env::current_dir().ok()?.join(path)
+                env::current_dir().ok()?.join(path)
             }
         }
     };
@@ -728,24 +729,23 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     fn it_names_a_platform_directory_by_where_it_resolves() -> anyhow::Result<()> {
+        use std::env;
+        use std::path::PathBuf;
         let fs = |directory: Directory, name: &str| {
             SiteAddress::Fs(FsAddress::new(Location::new(directory, name)))
         };
-        let at = |path: std::path::PathBuf| Directory::At(path.to_string_lossy().into_owned());
+        let at = |path: PathBuf| Directory::At(path.to_string_lossy().into_owned());
         assert_eq!(
             peer_did(&fs(Directory::Current, "backup"))?,
-            peer_did(&fs(at(std::env::current_dir()?), "backup"))?
+            peer_did(&fs(at(env::current_dir()?), "backup"))?
         );
         assert_eq!(
             peer_did(&fs(Directory::Temp, "backup"))?,
-            peer_did(&fs(at(std::env::temp_dir()), "backup"))?
+            peer_did(&fs(at(env::temp_dir()), "backup"))?
         );
         assert_eq!(
             peer_did(&fs(Directory::At("relative/dir".into()), "backup"))?,
-            peer_did(&fs(
-                at(std::env::current_dir()?.join("relative/dir")),
-                "backup"
-            ))?
+            peer_did(&fs(at(env::current_dir()?.join("relative/dir")), "backup"))?
         );
         assert_ne!(
             peer_did(&fs(Directory::Current, "backup"))?,
