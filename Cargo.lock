@@ -1683,7 +1683,6 @@ dependencies = [
  "async-trait",
  "base58",
  "blake3",
- "brotli",
  "bytes",
  "clap",
  "dialog-capability",

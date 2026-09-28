@@ -38,7 +38,6 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
-brotli = { workspace = true }
 futures-util = { workspace = true }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, features = ["server", "tokio", "service"], optional = true }
