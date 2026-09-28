@@ -141,7 +141,8 @@ pub async fn record<Env: RegistryEnv>(
 
 /// Forget `name`, so it stops being listed, along with every branch it
 /// pulls from and pushes to: a branch created again under the name is a
-/// new branch, and starts with none.
+/// new branch, and starts with none. Every other branch's relation to
+/// it goes too, since it would name a branch that is gone for good.
 ///
 /// The caller retracts the branch's cells first: this half is what a
 /// listing reads, so retracting it last means a failure part-way leaves
@@ -195,13 +196,16 @@ async fn write<Env: RegistryEnv>(
     apply(registry, changes, env).await
 }
 
-/// Every pull and push relation recorded from `branch`.
+/// Every pull and push relation recorded from `branch`, and every one
+/// recorded to it from another branch: a relation naming a branch that
+/// is gone would resolve as unreachable for good.
 async fn relations<Env: RegistryEnv>(
     registry: &Branch,
     branch: &BranchConcept,
     env: &Env,
 ) -> Result<(Vec<BranchPull>, Vec<BranchPush>), CommitError> {
-    let pulls = Box::pin(
+    let query = |error: dialog_query::EvaluationError| CommitError::Registry(error.to_string());
+    let mut pulls: Vec<BranchPull> = Box::pin(
         registry
             .query()
             .select(Query::<BranchPull> {
@@ -212,8 +216,22 @@ async fn relations<Env: RegistryEnv>(
             .try_vec(),
     )
     .await
-    .map_err(|error| CommitError::Registry(error.to_string()))?;
-    let pushes = Box::pin(
+    .map_err(query)?;
+    pulls.extend(
+        Box::pin(
+            registry
+                .query()
+                .select(Query::<BranchPull> {
+                    this: Term::var("this"),
+                    pull: branch.this.clone().into(),
+                })
+                .perform(env)
+                .try_vec(),
+        )
+        .await
+        .map_err(query)?,
+    );
+    let mut pushes: Vec<BranchPush> = Box::pin(
         registry
             .query()
             .select(Query::<BranchPush> {
@@ -224,7 +242,21 @@ async fn relations<Env: RegistryEnv>(
             .try_vec(),
     )
     .await
-    .map_err(|error| CommitError::Registry(error.to_string()))?;
+    .map_err(query)?;
+    pushes.extend(
+        Box::pin(
+            registry
+                .query()
+                .select(Query::<BranchPush> {
+                    this: Term::var("this"),
+                    push: branch.this.clone().into(),
+                })
+                .perform(env)
+                .try_vec(),
+        )
+        .await
+        .map_err(query)?,
+    );
     Ok((pulls, pushes))
 }
 
