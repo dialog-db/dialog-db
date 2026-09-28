@@ -1,13 +1,15 @@
 //! [`PeerBuilder`]: opens a [`Peer`].
 
+use std::any::Any;
 use std::fmt;
 use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use dialog_capability::access::{Access, Prove};
 use dialog_capability::{Ability, Capability, Constraint, Subject, did};
-use dialog_common::Holdings;
+use dialog_common::{Held, Holdings};
 use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential, Verifier};
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
 use dialog_identity::access::{Access as Accessor, Claim};
@@ -21,6 +23,7 @@ use dialog_varsig::{Did, Principal as _};
 
 use parking_lot::Mutex;
 
+use super::upgrade::Step;
 use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
 
 /// A peer built from the branch that holds its state: the same builder
@@ -289,6 +292,10 @@ pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     /// Certificates addressed to someone above this peer in its chain:
     /// a session's peer's own grants, which its proofs pass through.
     held: Vec<Grant>,
+    /// Steps bringing the peer's records up to date, run when it opens:
+    /// each a `Step<S>` for the storage's space, type-erased until the
+    /// storage is known.
+    steps: Vec<Held>,
     mode: PhantomData<M>,
 }
 
@@ -305,6 +312,7 @@ impl<M> PeerBuilder<Unset, Unset, M> {
             issuer: None,
             allowed: Vec::new(),
             held: Vec::new(),
+            steps: Vec::new(),
             mode: PhantomData,
         }
     }
@@ -335,6 +343,7 @@ impl<S: Clone> PeerBuilder<PeerKey, Storage<S>, Session> {
                 .filter(|grant| &grant.issuer == peer.system())
                 .cloned()
                 .collect(),
+            steps: Vec::new(),
             mode: PhantomData,
         }
     }
@@ -427,6 +436,7 @@ impl<St> PeerBuilder<PeerKey, St, Local> {
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
+            steps: self.steps,
             mode: PhantomData,
         }
     }
@@ -467,6 +477,7 @@ impl<St, M> PeerBuilder<Unset, St, M> {
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
+            steps: self.steps,
             mode: PhantomData,
         }
     }
@@ -496,6 +507,7 @@ impl<K, M, S: Clone> With<Storage<S>> for PeerBuilder<K, Unset, M> {
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
+            steps: self.steps,
             mode: PhantomData,
         }
     }
@@ -512,6 +524,14 @@ impl<K, St, M> With<Network> for PeerBuilder<K, St, M> {
 }
 
 impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
+    /// Register `step`, run when the peer opens if its version is above
+    /// the one the peer's records are at. See
+    /// [`upgrade`](super::upgrade). A session runs no step.
+    pub fn upgrade(mut self, step: Step<S>) -> Self {
+        self.steps.push(Arc::new(step));
+        self
+    }
+
     /// Open the peer: resolve its key, mount its home space when told
     /// where, mint its grants, and open its state branch.
     ///
@@ -736,6 +756,17 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 })?;
         }
 
+        // A peer acting as itself brings its records up to date. A
+        // session runs no step: it writes nothing to its peer's space.
+        if let Some(local) = (&peer as &dyn Any).downcast_ref::<Peer<S, Local>>() {
+            let steps: Vec<&Step<S>> = self
+                .steps
+                .iter()
+                .filter_map(|step| step.downcast_ref::<Step<S>>())
+                .collect();
+            local.upgrade(&steps).await?;
+        }
+
         Ok(peer)
     }
 }
@@ -790,6 +821,11 @@ pub enum PeerError {
     /// The peer was given no state branch, or it could not be opened.
     #[error("State error: {0}")]
     State(String),
+
+    /// A step bringing the peer's records up to date failed, or its
+    /// version could not be read or recorded.
+    #[error("Upgrade error: {0}")]
+    Upgrade(String),
 }
 
 #[cfg(test)]
