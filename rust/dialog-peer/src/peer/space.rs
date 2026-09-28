@@ -161,14 +161,15 @@ where
         let _ = spaces::record(self.state(), repository, name, location, self).await;
     }
 
-    /// Keep the sealed key of the repository `repository` in this peer's
-    /// state, as it keeps the space's name and location.
+    /// Keep the key of the repository `repository`, sealed to `account`,
+    /// in this peer's state: a principal whose key is held sealed.
     async fn seal_space(
         &self,
         repository: &Did,
+        account: &Did,
         sealed: Vec<u8>,
     ) -> Result<(), storage_fx::StorageError> {
-        spaces::seal(self.state(), repository, sealed, self)
+        spaces::seal(self.state(), repository, account, sealed, self)
             .await
             .map_err(failed)
     }
@@ -246,7 +247,7 @@ where
         let account = self.authority().await.map_err(failed)?;
         let sealed = self.seal_to_account(&account, &seed).await?;
         self.delegate_to_account(&account, &signer).await?;
-        self.seal_space(&credential.did(), sealed.to_bytes())
+        self.seal_space(&credential.did(), &account, sealed.to_bytes())
             .await?;
         Subject::from(credential.did())
             .credential()
@@ -402,7 +403,8 @@ where
         // Its authority goes to the account it is created for, where the
         // peer acting for that account proves it from.
         self.delegate_to_account(&account, &signer).await?;
-        self.seal_space(&created.did(), sealed.to_bytes()).await?;
+        self.seal_space(&created.did(), &account, sealed.to_bytes())
+            .await?;
         self.record_space(&created.did(), name, &location).await;
         Ok(Credential::Signer(SignerCredential::from(signer)))
     }

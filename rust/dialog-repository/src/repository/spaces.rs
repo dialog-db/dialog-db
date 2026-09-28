@@ -12,8 +12,12 @@ use dialog_query::{EvaluationError, Output as _, Query, Statement as _, Term};
 use dialog_varsig::Did;
 
 use crate::registry::{RegistryEnv, apply};
-use crate::schema::{DidExt as _, Space, SpaceKey, space};
+use crate::schema::{DidExt as _, Space, space};
+use crate::secrets;
 use crate::{Branch, CommitError};
+
+/// The kind a repository's key is held sealed as.
+const SPACE: &str = "space";
 
 /// Why a space could not be recorded or read back.
 #[derive(Debug, thiserror::Error)]
@@ -58,21 +62,25 @@ pub async fn record<Env: RegistryEnv>(
     Ok(apply(state, changes, env).await?)
 }
 
-/// Record in `state` the key of the repository `subject`, sealed to the
-/// account it delegates to.
+/// Record in `state` the key of the repository `subject`, sealed to
+/// `account`: a principal whose key is held sealed, the way tonk keeps
+/// custody.
 pub async fn seal<Env: RegistryEnv>(
     state: &Branch,
     subject: &Did,
+    account: &Did,
     sealed: Vec<u8>,
     env: &Env,
 ) -> Result<(), SpaceError> {
-    let mut changes = Changes::new();
-    SpaceKey {
-        this: subject.this(),
-        key: space::Key(sealed),
-    }
-    .assert(&mut changes);
-    Ok(apply(state, changes, env).await?)
+    secrets::hold_principal(
+        state,
+        subject,
+        SPACE,
+        secrets::sealed_message(account, sealed),
+        env,
+    )
+    .await
+    .map_err(|error| SpaceError::Encoding(error.to_string()))
 }
 
 /// The key of the repository `subject`, sealed, if `state` holds it.
@@ -81,18 +89,11 @@ pub async fn sealed<Env: RegistryEnv>(
     subject: &Did,
     env: &Env,
 ) -> Result<Option<Vec<u8>>, SpaceError> {
-    let rows: Vec<SpaceKey> = Box::pin(
-        state
-            .query()
-            .select(Query::<SpaceKey> {
-                this: subject.this().into(),
-                key: Term::var("key"),
-            })
-            .perform(env)
-            .try_vec(),
-    )
-    .await?;
-    Ok(rows.into_iter().next().map(|row| row.key.0))
+    Ok(secrets::held_principal(state, subject, env)
+        .await
+        .map_err(|error| SpaceError::Encoding(error.to_string()))?
+        .filter(|held| held.kind == SPACE)
+        .map(|held| held.sealed))
 }
 
 /// The records of the repositories `state` knows by `name`.
