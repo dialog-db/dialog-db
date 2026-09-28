@@ -17,6 +17,7 @@
 //!
 //! ```no_run
 //! # use dialog_peer::{Peer, SpaceVaultExt as _};
+//! # use dialog_varsig::Principal as _;
 //! # async fn example(
 //! #     peer: &Peer<dialog_storage::provider::storage::VolatileSpace>,
 //! #     custodian: &dialog_credentials::SignerCredential,
