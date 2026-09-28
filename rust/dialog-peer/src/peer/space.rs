@@ -14,7 +14,7 @@ use dialog_credentials::{
 use dialog_effects::space as space_fx;
 use dialog_effects::storage::{self as storage_fx, LocationExt as _};
 use dialog_repository::registry::RegistryEnv;
-use dialog_repository::spaces;
+use dialog_repository::{secrets, spaces};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan, UcanDelegation};
 use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -109,7 +109,9 @@ where
 
         let location = storage_fx::Location::new(self.directory().clone(), name);
         let credential = self.load_at(location.clone()).await?;
-        self.record_space(&credential.did(), name, &location).await;
+        // Best-effort: the repository is where it is either way, and a
+        // name left unrecorded is found here again the next time.
+        let _ = self.record_space(&credential.did(), name, &location).await;
         Ok(handed::<M>(credential))
     }
 }
@@ -161,8 +163,15 @@ where
     /// Best-effort: the repository is where it is either way, and a name
     /// left unrecorded is found in the base directory and recorded the
     /// next time it is loaded.
-    async fn record_space(&self, repository: &Did, name: &str, location: &storage_fx::Location) {
-        let _ = spaces::record(self.state(), repository, name, location, self).await;
+    async fn record_space(
+        &self,
+        repository: &Did,
+        name: &str,
+        location: &storage_fx::Location,
+    ) -> Result<(), storage_fx::StorageError> {
+        spaces::record(self.state(), repository, name, location, self)
+            .await
+            .map_err(failed)
     }
 
     /// Keep the key of the repository `repository`, sealed to `account`,
@@ -270,7 +279,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         &self,
         account: &Did,
         space: &Signer,
-    ) -> Result<(), storage_fx::StorageError>
+    ) -> Result<UcanDelegation, storage_fx::StorageError>
     where
         Self: Provider<Retain<Ucan>>,
     {
@@ -282,18 +291,18 @@ impl<S: Clone, M: Mode> Peer<S, M> {
             .try_build()
             .await
             .map_err(|error| storage_fx::StorageError::Storage(format!("{error:?}")))?;
+        let delegation = UcanDelegation::new(DelegationChain::new(delegation));
         Subject::from(self.home().clone())
             .attenuate(Access)
-            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
-                DelegationChain::new(delegation),
-            )))
+            .invoke(Retain::<Ucan>::new(delegation.clone()))
             .perform(self)
             .await
             .map_err(|error| {
                 storage_fx::StorageError::Storage(format!(
                     "the space's delegation to its account was not kept: {error}"
                 ))
-            })
+            })?;
+        Ok(delegation)
     }
 
     /// Refuse `mount` unless this peer can prove the storage's system
@@ -330,7 +339,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<space_fx::Create> for Peer<S, M>
 where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    S: PeerSpace,
     Storage<S>: Provider<storage_fx::Create> + Provider<storage_fx::Load>,
     Self: RegistryEnv
         + Provider<Prove<Ucan>>
@@ -375,22 +384,33 @@ where
                 .map_err(failed)?,
         );
         let location = storage_fx::Location::new(self.directory().clone(), name);
-
-        // The space keeps its identity, not its key: whoever holds the
-        // storage finds nothing to sign as the space with.
         let create = Subject::from(self.system().clone())
             .attenuate(storage_fx::Storage)
             .attenuate(location.clone())
             .create(Credential::from(signer.verifier()));
         self.may_mount(&create).await?;
-        let created = create.perform(&self.storage).await?;
 
-        // Its authority goes to the account it is created for, where the
-        // peer acting for that account proves it from.
-        self.delegate_to_account(&account, &signer).await?;
-        self.seal_space(&created.did(), &account, sealed.to_bytes())
+        // The key is in custody and the space delegates to its account
+        // before the space exists: a create that stops after the space is
+        // made would otherwise leave a name nobody can ever sign as. A
+        // create that stops before it leaves records naming a space that
+        // was never made, which the next attempt, with a key of its own,
+        // does not see. When the storage refuses, the records go.
+        self.seal_space(&signer.did(), &account, sealed.to_bytes())
             .await?;
-        self.record_space(&created.did(), name, &location).await;
+        let delegation = self.delegate_to_account(&account, &signer).await?;
+
+        // The space keeps its identity, not its key: whoever holds the
+        // storage finds nothing to sign as the space with.
+        let created = match create.perform(&self.storage).await {
+            Ok(created) => created,
+            Err(error) => {
+                let _ = self.retract(delegation).await;
+                let _ = secrets::forget_principal(self.state(), &signer.did(), self).await;
+                return Err(error);
+            }
+        };
+        self.record_space(&created.did(), name, &location).await?;
         Ok(Credential::Signer(SignerCredential::from(signer)))
     }
 }
@@ -575,6 +595,70 @@ mod tests {
             .invoke(Prove::<Ucan>::new(peer.did(), scope))
             .perform(&peer)
             .await?;
+        Ok(())
+    }
+
+    /// A peer refused its storage mounts nothing in it: the home it would
+    /// have been built over is not left mounted for others to find.
+    #[dialog_common::test]
+    async fn it_mounts_nothing_for_a_peer_it_refuses() -> anyhow::Result<()> {
+        let system = SignerCredential::from(Ed25519Signer::generate().await?);
+        let storage = Storage::volatile().owned_by(system.did());
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let refused = Peer::new(credential.clone())
+            .at(home_of(&credential))
+            .with(storage.clone())
+            .space(Repository::from(credential.did()).branch("main"))
+            .await;
+        assert!(refused.is_err(), "a peer with no grant was built");
+        assert!(
+            storage.identity(&credential.did()).await.is_none(),
+            "the refused peer left its home mounted"
+        );
+        Ok(())
+    }
+
+    /// A create the storage refuses leaves nothing behind: no key in
+    /// custody for a space that was never made, and no delegation from it.
+    #[dialog_common::test]
+    async fn it_leaves_nothing_behind_when_the_storage_refuses_a_space() -> anyhow::Result<()> {
+        use dialog_capability::access::Export;
+
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/refused").await?;
+        let name = unique_name("notes");
+        peer.space(name.clone()).create().perform(&peer).await?;
+        let account = peer.authority().await?;
+        let held = secrets::held_by(peer.state(), &account, &peer).await?.len();
+        let retained = Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Export::<Ucan>::new())
+            .perform(&peer)
+            .await?
+            .len();
+
+        let refused = peer.space(name).create().perform(&peer).await;
+        assert!(refused.is_err(), "a name in use was created again");
+        assert_eq!(
+            secrets::held_by(peer.state(), &account, &peer).await?.len(),
+            held,
+            "a key stayed in custody for a space that was never made"
+        );
+        assert_eq!(
+            Subject::from(peer.did())
+                .attenuate(Access)
+                .invoke(Export::<Ucan>::new())
+                .perform(&peer)
+                .await?
+                .len(),
+            retained,
+            "a delegation stayed from a space that was never made"
+        );
         Ok(())
     }
 

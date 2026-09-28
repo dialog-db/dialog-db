@@ -307,6 +307,32 @@ pub async fn hold_principal<Env: RegistryEnv>(
     Ok(apply(state, changes, env).await?)
 }
 
+/// Forget that `principal`'s key is held sealed: the record naming it,
+/// not the message it pointed at, which stays ciphertext nobody reads.
+pub async fn forget_principal<Env: RegistryEnv>(
+    state: &Branch,
+    principal: &Did,
+    env: &Env,
+) -> Result<(), SecretError> {
+    let rows: Vec<SecretPrincipal> = Box::pin(
+        state
+            .query()
+            .select(Query::<SecretPrincipal> {
+                this: principal.this().into(),
+                kind: Term::var("kind"),
+                seed: Term::var("seed"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    let mut changes = Changes::new();
+    for row in rows {
+        row.retract(&mut changes);
+    }
+    Ok(apply(state, changes, env).await?)
+}
+
 /// The top-level vault `state` records as `name`.
 pub async fn root<Env: RegistryEnv>(
     state: &Branch,
