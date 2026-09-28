@@ -424,6 +424,38 @@ mod tests {
         Ok(())
     }
 
+    /// Forgetting a branch forgets what other branches pulled from and
+    /// pushed to it, too: a relation naming a branch that is gone would
+    /// resolve as unreachable for good, with nothing to remove it.
+    #[dialog_common::test]
+    async fn it_forgets_relations_naming_a_forgotten_branch() -> anyhow::Result<()> {
+        use crate::repository::branch::resolve::resolve;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let identity = Identify.perform(&operator).await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        assert_eq!(feature.pulls().iter().count(), 1);
+
+        let registry = Subject::from(repo.did())
+            .registry()
+            .open()
+            .perform(&operator)
+            .await?;
+        super::forget(&registry, &identity, "main", &operator).await?;
+
+        resolve(&feature, &operator).await?;
+        assert_eq!(
+            feature.pulls().iter().count() + feature.pushes().iter().count(),
+            0,
+            "feature no longer pulls from or pushes to main: {:?}",
+            feature.tracked().resolved
+        );
+        Ok(())
+    }
+
     /// The active branch is written under the name tonk reads it by,
     /// `dialog.replica/active-branch`, on the replica's entity. The
     /// name is the contract, so it is checked against the stored claim
