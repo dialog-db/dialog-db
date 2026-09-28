@@ -252,6 +252,14 @@ impl Demand {
         *recorded = Some(manifest.clone());
     }
 
+    /// The format the recorded ranges are keyed under, or `None` while
+    /// nothing is recorded. A key checked against the cover is built
+    /// under it: one built under another format brackets other bytes,
+    /// and would miss a range the evaluation really read.
+    pub(crate) fn manifest(&self) -> Option<dialog_search_tree::Manifest> {
+        self.manifest.lock().expect("demand manifest lock").clone()
+    }
+
     /// Whether the key falls inside any recorded range.
     pub fn covers(&self, key: &Key) -> bool {
         self.covers_facts(key) || self.covers_rules(key)
@@ -368,6 +376,70 @@ impl Branch {
             initialized: false,
             recomputes: 0,
             maintenances: 0,
+        }
+    }
+}
+
+/// Classify what `instants` of a session overlay changed within
+/// `demand`'s cover: the exact facts they asserted and retracted,
+/// filtered by their index keys against the cover, with no diff to
+/// compute. A change inside a rule-discovery range is
+/// [`Touched::Rules`].
+///
+/// The keys are built under the manifest the cover was recorded in
+/// ([`Demand::manifest`]): the cover brackets keys of that format, and a
+/// key built under another one (the default, say, for a tree whose
+/// values spill at another length) would fall outside a range the
+/// evaluation really read. A cover nothing was recorded in covers no
+/// key, so it is touched by nothing.
+fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
+    let Some(manifest) = demand.manifest() else {
+        return Touched::Nothing;
+    };
+    let mut subjects = BTreeSet::new();
+    let mut asserted = Vec::new();
+    let mut retracted = Vec::new();
+    let mut seen = BTreeSet::new();
+    for instant in instants {
+        for (arriving, facts) in [(true, instant.asserted), (false, instant.retracted)] {
+            for fact in facts {
+                let keys = [
+                    EntityKey::from_artifact(&fact, &manifest).into_key(),
+                    AttributeKey::from_artifact(&fact, &manifest).into_key(),
+                    ValueKey::from_artifact(&fact, &manifest).into_key(),
+                ];
+                if keys.iter().any(|key| demand.covers_rules(key)) {
+                    return Touched::Rules;
+                }
+                if !keys.iter().any(|key| demand.covers_facts(key)) {
+                    continue;
+                }
+                if !seen.insert((
+                    arriving,
+                    fact.of.to_string(),
+                    fact.the.to_string(),
+                    fact.is.to_bytes(),
+                )) {
+                    continue;
+                }
+                subjects.insert(fact.of.clone());
+                if arriving {
+                    asserted.push(fact);
+                } else {
+                    retracted.push(fact);
+                }
+            }
+        }
+    }
+    if subjects.is_empty() {
+        Touched::Nothing
+    } else {
+        let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
+        Touched::Facts {
+            subjects,
+            facts,
+            asserted,
+            retracted,
         }
     }
 }
@@ -744,53 +816,7 @@ where
         let Some(instants) = self.branch.overlay().since(sequence) else {
             return Touched::Rules;
         };
-        let manifest = dialog_search_tree::Manifest::default();
-        let mut subjects = BTreeSet::new();
-        let mut asserted = Vec::new();
-        let mut retracted = Vec::new();
-        let mut seen = BTreeSet::new();
-        for instant in instants {
-            for (arriving, facts) in [(true, instant.asserted), (false, instant.retracted)] {
-                for fact in facts {
-                    let keys = [
-                        EntityKey::from_artifact(&fact, &manifest).into_key(),
-                        AttributeKey::from_artifact(&fact, &manifest).into_key(),
-                        ValueKey::from_artifact(&fact, &manifest).into_key(),
-                    ];
-                    if keys.iter().any(|key| self.demand.covers_rules(key)) {
-                        return Touched::Rules;
-                    }
-                    if !keys.iter().any(|key| self.demand.covers_facts(key)) {
-                        continue;
-                    }
-                    if !seen.insert((
-                        arriving,
-                        fact.of.to_string(),
-                        fact.the.to_string(),
-                        fact.is.to_bytes(),
-                    )) {
-                        continue;
-                    }
-                    subjects.insert(fact.of.clone());
-                    if arriving {
-                        asserted.push(fact);
-                    } else {
-                        retracted.push(fact);
-                    }
-                }
-            }
-        }
-        if subjects.is_empty() {
-            Touched::Nothing
-        } else {
-            let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
-            Touched::Facts {
-                subjects,
-                facts,
-                asserted,
-                retracted,
-            }
-        }
+        touched_by(&self.demand, instants)
     }
 
     /// Maintain the retained result incrementally: for each touched
@@ -1071,7 +1097,7 @@ mod tests {
     use dialog_query::{AttributeQuery, Claim, Term, the};
     use dialog_query::{Cardinality, ConceptDescriptor, ConceptQuery, Output as _};
     use dialog_storage::provider::storage::VolatileSpace;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::str::FromStr;
 
     /// The head flag flips only for scans that can actually read the
@@ -4512,6 +4538,63 @@ mod tests {
             bindings(subscription.results()),
             bindings(&fresh),
             "maintained rows read exactly like recomputed ones"
+        );
+        Ok(())
+    }
+
+    /// A session overlay's changes are keyed under the manifest the
+    /// demand cover was recorded in. A value the tree's manifest keeps
+    /// inline spills under the default one, and its key then carries a
+    /// prefix and a hash instead of the value: a cover checked with
+    /// default-keyed changes would miss a fact the evaluation really
+    /// read.
+    #[dialog_common::test]
+    fn it_keys_overlay_changes_under_the_demands_manifest() -> anyhow::Result<()> {
+        let default = dialog_search_tree::Manifest::default();
+        let inlining = dialog_search_tree::Manifest {
+            inline_n: default.inline_n * 2,
+            ..default.clone()
+        };
+        let alice = Entity::new()?;
+        let fact = dialog_artifacts::Artifact {
+            the: "person/bio".parse()?,
+            of: alice.clone(),
+            is: Value::String("x".repeat(default.inline_n as usize + 1)),
+            cause: None,
+        };
+        let demand = super::Demand::new();
+        demand.record(
+            &dialog_artifacts::ArtifactSelector::new()
+                .the(fact.the.clone())
+                .is(fact.is.clone()),
+            &inlining,
+        );
+        assert_eq!(demand.manifest(), Some(inlining.clone()));
+        assert!(
+            !demand.covers(&dialog_artifacts::ValueKey::from_artifact(&fact, &default).into_key()),
+            "keyed under the default manifest the fact spills and falls outside the cover"
+        );
+
+        let instant = crate::Instant {
+            sequence: 1,
+            hash: dialog_common::Blake3Hash::from([0u8; 32]),
+            asserted: vec![fact],
+            retracted: Vec::new(),
+        };
+        match super::touched_by(&demand, vec![instant.clone()]) {
+            super::Touched::Facts { subjects, .. } => {
+                assert_eq!(subjects, BTreeSet::from([alice]));
+            }
+            _ => panic!("a session fact inside the cover touches it"),
+        }
+
+        let untouched = super::Demand::new();
+        assert!(
+            matches!(
+                super::touched_by(&untouched, vec![instant]),
+                super::Touched::Nothing
+            ),
+            "a cover nothing was recorded in is touched by nothing"
         );
         Ok(())
     }
