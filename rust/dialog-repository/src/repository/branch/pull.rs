@@ -1669,6 +1669,53 @@ mod tests {
         );
         Ok(())
     }
+
+    /// An upstream whose merge cannot land after an earlier one of the
+    /// pull did does not hide what landed: the pull reports the head the
+    /// earlier ones left and which upstream failed, as it does for one
+    /// it could not reach.
+    #[dialog_common::test]
+    async fn it_reports_what_landed_when_a_later_upstream_cannot() -> Result<()> {
+        use crate::PullError;
+        use crate::helpers::flaky_operator_with_profile;
+
+        let (operator, profile, storage) = flaky_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        for name in ["main", "dev"] {
+            let upstream = repo.branch(name).open().perform(&operator).await?;
+            upstream
+                .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                    the: "user/name".parse()?,
+                    of: format!("user:{name}").parse()?,
+                    is: Value::String(name.to_string()),
+                    cause: None,
+                })]))
+                .perform(&operator)
+                .await?;
+            feature.pull_from(&upstream).perform(&operator).await?;
+        }
+
+        // The first upstream's merge lands. The second's was prepared
+        // from the same head, so it is prepared again from the moved one
+        // and lands on the third publish -- which the store refuses, as
+        // a commit racing the pull would make it.
+        let memory = storage.space(&repo.did()).expect("mounted").memory;
+        memory.lose_publishes("branch/feature", "revision", 2..3);
+
+        let pulled = feature.pull().perform(&operator).await;
+        let Err(PullError::Partial { landed, unreached }) = pulled else {
+            panic!("what landed is reported: {pulled:?}");
+        };
+        let landed = landed.expect("the first upstream landed");
+        assert_eq!(unreached.len(), 1, "{unreached:?}");
+        assert_eq!(
+            feature.revision().map(|revision| revision.tree),
+            Some(landed.tree),
+            "the head is what the first upstream left"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
