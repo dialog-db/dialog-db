@@ -6,9 +6,11 @@
 //! the same peer:
 //!
 //! - a service reached over HTTP (S3, UCAN) is `did:web` of the
-//!   endpoint's origin;
+//!   endpoint's origin and the path it is served under, so two services
+//!   on one host are two peers;
 //! - a directory on the local filesystem is the `did:key` of the
-//!   Ed25519 key seeded by the Blake3 hash of its file URI.
+//!   Ed25519 key seeded by the Blake3 hash of its file URI, one for one
+//!   directory however its path is spelled.
 
 use dialog_common::Blake3Hash;
 use dialog_credentials::Ed25519Verifier;
@@ -425,41 +427,71 @@ pub fn peer_did(address: &SiteAddress) -> Result<Did, PeerError> {
         // other bucket there, so the bucket joins the DID as a path
         // segment: two buckets are two stores, and two peers.
         SiteAddress::S3(address) if address.path_style() => {
-            web_at(address.endpoint(), Some(address.bucket()))
+            web(address.endpoint(), [address.bucket()])
         }
-        SiteAddress::S3(address) => web(address.endpoint()),
+        SiteAddress::S3(address) => web(address.endpoint(), []),
+        // A UCAN service is served under a path, and one host may serve
+        // several: the path joins the DID, so each is its own peer.
         SiteAddress::Ucan(address) => {
             let endpoint = Url::parse(&address.endpoint).map_err(|_| PeerError::NoOrigin {
                 endpoint: address.endpoint.clone(),
             })?;
-            web(&endpoint)
+            let path: Vec<&str> = endpoint
+                .path_segments()
+                .into_iter()
+                .flatten()
+                .filter(|segment| !segment.is_empty())
+                .collect();
+            web(&endpoint, path)
         }
         SiteAddress::Fs(address) => Ok(key(address.location())),
     }
 }
 
-/// `did:web` of the endpoint's origin: its host, with a non-default
-/// port percent-encoded after it as the `did:web` method requires.
-fn web(endpoint: &Url) -> Result<Did, PeerError> {
-    web_at(endpoint, None)
-}
-
-/// `did:web` of the endpoint's origin, with `path` appended as a segment
-/// when given.
-fn web_at(endpoint: &Url, path: Option<&str>) -> Result<Did, PeerError> {
+/// `did:web` of the endpoint's origin, with `path` appended as segments.
+///
+/// `did:web` names an HTTPS origin: `did:web:h` is `https://h`, and a
+/// port other than 443 follows the host percent-encoded, as the method
+/// requires. A plain HTTP endpoint is the same host reached another
+/// way, so it carries its port even when that is the default 80: `http://h`
+/// is `did:web:h%3A80`, and `http://h` and `https://h` are two peers. An
+/// explicit port names one service whichever scheme reaches it, since a
+/// port serves one protocol. Each path segment is percent-encoded to
+/// the characters a DID allows.
+fn web<'a>(endpoint: &Url, path: impl IntoIterator<Item = &'a str>) -> Result<Did, PeerError> {
     let no_origin = || PeerError::NoOrigin {
         endpoint: endpoint.to_string(),
     };
     let host = endpoint.host_str().ok_or_else(no_origin)?;
-    let mut did = match endpoint.port() {
+    let port = match (endpoint.scheme(), endpoint.port_or_known_default()) {
+        ("https", Some(443)) => None,
+        ("https" | "http", Some(port)) => Some(port),
+        _ => return Err(no_origin()),
+    };
+    let mut did = match port {
         Some(port) => format!("did:web:{host}%3A{port}"),
         None => format!("did:web:{host}"),
     };
-    if let Some(path) = path {
+    for segment in path {
         did.push(':');
-        did.push_str(path);
+        did.push_str(&encode(segment));
     }
     did.parse().map_err(|_| no_origin())
+}
+
+/// `segment` with every byte outside a DID's unreserved characters
+/// percent-encoded.
+fn encode(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'_' => {
+                encoded.push(byte as char)
+            }
+            byte => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 /// `did:key` of the Ed25519 key seeded by the Blake3 hash of the
@@ -470,16 +502,74 @@ fn key(location: &Location) -> Did {
     Ed25519Verifier::from(key).did()
 }
 
-/// The file URI naming a location: an absolute directory as a `file://`
-/// URL, and a platform directory by its role, since where it resolves
-/// differs by device.
+/// The file URI naming a location: one for one directory, however its
+/// path is spelled.
+///
+/// Natively the directory is resolved to where it is on this device --
+/// a platform directory to the path it stands for, as the filesystem
+/// storage lays it out, and a relative one against the working
+/// directory -- and the path is normalized lexically: `.` and `..`
+/// folded, slashes single and none trailing. So the same role on two
+/// devices is two peers, and one directory named by role or by path is
+/// one peer. A platform directory that cannot be resolved is named by
+/// its role instead.
+///
+/// On the web there is no path to resolve: a platform directory is
+/// named by its role and `At` by its key, normalized the same way, so
+/// these identities are per origin rather than per directory.
 fn file_uri(location: &Location) -> String {
     let Location { directory, name } = location;
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = resolve(directory) {
+        return format!("file://{}/{name}", normalize(&path));
+    }
     match directory {
-        Directory::At(path) => format!("file://{}/{name}", path.trim_end_matches('/')),
+        Directory::At(path) => format!("file://{}/{name}", normalize(path)),
         Directory::Profile => format!("file:profile/{name}"),
         Directory::Current => format!("file:current/{name}"),
         Directory::Temp => format!("file:temp/{name}"),
+    }
+}
+
+/// Where `directory` is on this device, if that can be told: the same
+/// places the filesystem storage resolves it to.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve(directory: &Directory) -> Option<String> {
+    use std::path::PathBuf;
+    let path = match directory {
+        Directory::Profile => dirs::data_dir()?.join("dialog"),
+        Directory::Current => std::env::current_dir().ok()?,
+        Directory::Temp => std::env::temp_dir(),
+        Directory::At(path) => {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir().ok()?.join(path)
+            }
+        }
+    };
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// `path` with `.` and `..` folded, slashes single and none trailing,
+/// keeping whether it is absolute.
+fn normalize(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            segment => segments.push(segment),
+        }
+    }
+    let joined = segments.join("/");
+    if path.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
     }
 }
 
