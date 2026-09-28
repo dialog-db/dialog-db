@@ -600,3 +600,89 @@ pub enum PeerError {
     #[error("Certificate error: {0}")]
     Certificate(String),
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::helpers::test_peer;
+    use anyhow::Result;
+    use dialog_storage::provider::storage::VolatileSpace;
+    use dialog_ucan_core::Delegation;
+    use dialog_ucan_core::subject::Subject as UcanSubject;
+    use dialog_varsig::AnySignature;
+
+    /// The context the certificate tests derive their session key for.
+    const CONTEXT: &[u8] = b"certificate";
+
+    /// A delegation from a fresh space to the key `peer.session(CONTEXT)`
+    /// derives, valid from `not_before` on.
+    async fn delegation_to_session(
+        peer: &Peer<VolatileSpace>,
+        not_before: Option<Timestamp>,
+    ) -> Result<Delegation<AnySignature>> {
+        let space = Ed25519Signer::generate().await?;
+        let audience = peer.credential().derive(CONTEXT).await?.did();
+        let mut builder = DelegationBuilder::new()
+            .issuer(Signer::from(space.clone()))
+            .audience(&audience)
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()]);
+        if let Some(not_before) = not_before {
+            builder = builder.not_before(not_before);
+        }
+        builder
+            .try_build()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))
+    }
+
+    /// A certificate whose envelope signature does not verify against
+    /// its issuer is refused at build, before it can become a grant.
+    #[dialog_common::test]
+    async fn it_refuses_a_certificate_whose_signature_does_not_verify() -> Result<()> {
+        let peer = test_peer().await;
+        let delegation = delegation_to_session(&peer, None).await?;
+
+        // The envelope encodes as `[signature, payload]`: a two-element
+        // array whose first element is the 64-byte signature. Flip one
+        // byte inside it, leaving the payload the issuer signed intact.
+        let mut bytes = delegation.encoded().to_vec();
+        assert_eq!(&bytes[..3], &[0x82, 0x58, 0x40], "the envelope layout");
+        bytes[3 + 20] ^= 0xff;
+        let tampered: Delegation<AnySignature> = serde_ipld_dagcbor::from_slice(&bytes)?;
+        assert_eq!(tampered.issuer(), delegation.issuer());
+
+        let Err(refused) = peer.session(CONTEXT).grant(UcanCertificate(tampered)).await else {
+            panic!("a tampered certificate is refused");
+        };
+        assert!(matches!(refused, PeerError::Certificate(_)), "{refused:?}");
+
+        // The untampered certificate is the peer's authority.
+        peer.session(CONTEXT)
+            .grant(UcanCertificate(delegation))
+            .await?;
+        Ok(())
+    }
+
+    /// A certificate that is not valid yet is refused at build, as an
+    /// expired one is.
+    #[dialog_common::test]
+    async fn it_refuses_a_certificate_not_valid_yet() -> Result<()> {
+        let peer = test_peer().await;
+        let in_an_hour = Timestamp::try_from(i128::from(Timestamp::now().to_unix()) + 3600)?;
+        let delegation = delegation_to_session(&peer, Some(in_an_hour)).await?;
+
+        let Err(refused) = peer
+            .session(CONTEXT)
+            .grant(UcanCertificate(delegation))
+            .await
+        else {
+            panic!("a certificate not valid yet is refused");
+        };
+        assert!(matches!(refused, PeerError::Certificate(_)), "{refused:?}");
+        Ok(())
+    }
+}
