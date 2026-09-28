@@ -65,6 +65,13 @@ impl<T> RegistryEnv for T where
 /// Idempotent: the fact is derived from `(replica, name)`, so recording
 /// the same branch twice converges on one record rather than
 /// conflicting.
+///
+/// A machinery-scope write with no capability check of its own: it
+/// commits under [`machinery`](super::Commit::machinery), which is what
+/// lets it write the reserved `dialog.` namespace, and it takes the
+/// caller's word that `name` is a branch name and that the caller may
+/// record it. The check belongs to the `branch` capability providers
+/// that call this; anything else calling it bypasses them.
 pub async fn record<Env: RegistryEnv>(
     registry: &Branch,
     operator: &Capability<Operator>,
@@ -80,6 +87,10 @@ pub async fn record<Env: RegistryEnv>(
 /// listing reads, so retracting it last means a failure part-way leaves
 /// cells nothing points at rather than a branch that lists but cannot
 /// be opened.
+///
+/// A machinery-scope write with no capability check of its own, as
+/// [`record`] is: whether the caller may forget `name` is decided by
+/// the `branch` capability providers that call this.
 pub async fn forget<Env: RegistryEnv>(
     registry: &Branch,
     operator: &Capability<Operator>,
@@ -121,6 +132,10 @@ async fn write<Env: RegistryEnv>(
 /// replica, so switching again supersedes the previous one. The branch
 /// is named by its entity rather than a name because it need not be on
 /// this replica: it is not looked up, only pointed at.
+///
+/// A machinery-scope write with no capability check of its own, as
+/// [`record`] is: whether the caller may switch the replica is decided
+/// by the `branch` capability providers that call this.
 pub async fn switch<Env: RegistryEnv>(
     registry: &Branch,
     operator: &Capability<Operator>,

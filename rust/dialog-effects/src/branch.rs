@@ -217,12 +217,21 @@ impl Effect for Delete {
     type Output = Result<(), BranchError>;
 }
 
+/// The most bytes a branch name holds: what a filesystem allows one
+/// path component, since stores lay a branch's cells out under its name.
+pub const MAX_NAME_LENGTH: usize = 255;
+
 /// Why `name` cannot name a branch, or `None` when it can.
 ///
-/// A branch name is one plain path segment: stores lay a branch's cells
-/// out under its name, and one that is empty, is `.` or `..`, or holds a
-/// separator or a control character would reach cells that belong to
-/// something else (`x/../meta` is the registry's on a filesystem).
+/// A branch name is one plain path segment: ASCII letters, digits, `.`,
+/// `_` and `-`, not starting with `.`, at most [`MAX_NAME_LENGTH`]
+/// bytes. Stores lay a branch's cells out under its name, and this is
+/// the set no store reads as anything but a name: a separator, a `?`
+/// or `#` that URL resolution cuts the path at, a `%` that it decodes,
+/// a control or a space that it strips, would each reach cells that
+/// belong to something else (`x/../meta` and `meta?x` are the
+/// registry's on a filesystem). A whitelist rather than a blacklist,
+/// because the next store may read something else.
 pub fn invalid_name(name: &str) -> Option<&'static str> {
     if name.is_empty() {
         Some("a branch name is not empty")
@@ -232,6 +241,15 @@ pub fn invalid_name(name: &str) -> Option<&'static str> {
         Some("a branch name is one path segment")
     } else if name.chars().any(char::is_control) {
         Some("a branch name holds no control characters")
+    } else if name.starts_with('.') {
+        Some("a branch name does not start with `.`")
+    } else if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        Some("a branch name holds a character that is not a letter, digit, `.`, `_` or `-`")
+    } else if name.len() > MAX_NAME_LENGTH {
+        Some("a branch name is at most 255 bytes")
     } else {
         None
     }

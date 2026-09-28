@@ -257,15 +257,23 @@ where
         // The cells go first, the head before the rest. It is checked
         // against the revision the caller named: a branch that moved
         // since they last looked is not the branch they decided to
-        // delete, and is left alone. A head that is already gone passes:
-        // either the branch was empty, or an earlier delete got this far,
-        // and in both there is no work left to lose.
+        // delete, and is left alone. A head that is already gone passes
+        // only while the branch is still listed: either it was empty, or
+        // an earlier delete got this far, and in both there is no work
+        // left to lose and a fact left to retract. A name that neither
+        // points anywhere nor is recorded names no branch, and deleting
+        // it is not done.
         let reference = Subject::from(subject.clone()).branch(name.as_str());
 
         let revision = reference.revision();
         revision.resolve().perform(self).await.map_err(failed)?;
         match revision.content() {
-            None => {}
+            None => {
+                let listed = list(&registry, &operator, self).await.map_err(failed)?;
+                if !listed.iter().any(|branch| branch.name.0 == name) {
+                    return Err(BranchError::NotFound { name });
+                }
+            }
             Some(head) if Some(&head) == expected.as_ref() => {
                 // The retraction names the version just read, so a commit
                 // that lands between the check above and this point is
@@ -875,6 +883,34 @@ mod tests {
 
         let names = listed(&operator, &did).await?;
         assert!(!names.contains(&"empty".into()), "{names:?}");
+        Ok(())
+    }
+
+    /// A name that neither points anywhere nor is recorded names no
+    /// branch, so deleting it is not done, whatever revision the caller
+    /// expected: it is refused as not found. Only a branch that is
+    /// still listed passes with its head gone, since that is a delete
+    /// that stopped part-way and has a fact left to retract.
+    #[dialog_common::test]
+    async fn it_refuses_to_delete_a_branch_that_does_not_exist() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let did = repo.did();
+        let source = commit(&operator, &did, "main").await?;
+
+        for expected in [None, Some(source)] {
+            let deleted = Subject::from(did.clone())
+                .voider()
+                .branches()
+                .branch("missing")
+                .delete(expected)
+                .perform(&operator)
+                .await;
+            assert!(
+                matches!(&deleted, Err(BranchError::NotFound { name }) if name == "missing"),
+                "{deleted:?}"
+            );
+        }
         Ok(())
     }
 
