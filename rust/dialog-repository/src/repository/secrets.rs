@@ -17,8 +17,8 @@ use dialog_varsig::Did;
 
 use crate::registry::{RegistryEnv, apply};
 use crate::schema::{
-    ChildVault, DidExt as _, RootVault, SealedKey, SealedMessage, VaultSecret, secret, vault,
-    vault_secret,
+    ChildVault, DidExt as _, RootVault, SealedKey, SealedMessage, SecretPrincipal, VaultSecret,
+    secret, vault, vault_secret,
 };
 use crate::{Branch, CommitError};
 
@@ -191,6 +191,84 @@ pub async fn message<Env: RegistryEnv>(
         Some(row) => Ok(Some((principal(&row.to.0)?, row.message.0))),
         None => Ok(None),
     }
+}
+
+/// A principal whose key is held sealed: what it is, who can open the
+/// message holding its key, and the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldPrincipal {
+    /// What the principal is: `space` for a repository's key.
+    pub kind: String,
+    /// Who the message holding its key is sealed to.
+    pub to: Did,
+    /// The sealed key.
+    pub sealed: Vec<u8>,
+}
+
+/// The principal `principal`, if `state` records its key held sealed.
+pub async fn held_principal<Env: RegistryEnv>(
+    state: &Branch,
+    principal: &Did,
+    env: &Env,
+) -> Result<Option<HeldPrincipal>, SecretError> {
+    let rows: Vec<SecretPrincipal> = Box::pin(
+        state
+            .query()
+            .select(Query::<SecretPrincipal> {
+                this: principal.this().into(),
+                kind: Term::var("kind"),
+                seed: Term::var("seed"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some((to, sealed)) = message(state, &row.seed.0, env).await? else {
+        return Ok(None);
+    };
+    Ok(Some(HeldPrincipal {
+        kind: row.kind.0,
+        to,
+        sealed,
+    }))
+}
+
+/// Record in `state` that `principal`'s key is held sealed in `message`,
+/// recording the message with it, in place of what held it before.
+pub async fn hold_principal<Env: RegistryEnv>(
+    state: &Branch,
+    principal: &Did,
+    kind: &str,
+    message: SealedMessage,
+    env: &Env,
+) -> Result<(), SecretError> {
+    let rows: Vec<SecretPrincipal> = Box::pin(
+        state
+            .query()
+            .select(Query::<SecretPrincipal> {
+                this: principal.this().into(),
+                kind: Term::var("kind"),
+                seed: Term::var("seed"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    let mut changes = Changes::new();
+    for row in rows {
+        row.retract(&mut changes);
+    }
+    SecretPrincipal {
+        this: principal.this(),
+        kind: secret::Kind(kind.to_string()),
+        seed: secret::Seed(message.this.clone()),
+    }
+    .assert(&mut changes);
+    message.assert(&mut changes);
+    Ok(apply(state, changes, env).await?)
 }
 
 /// The top-level vault `state` records as `name`.
