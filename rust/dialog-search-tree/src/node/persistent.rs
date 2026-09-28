@@ -562,9 +562,9 @@ const OTHER_PRELUDE: usize = LEGACY_BIT;
 ///   prelude is some other one, left to the cold path to parse;
 /// - [`OTHER_PRELUDE`] alone when they are not a valid tagged body.
 ///
-/// A body at offset 0 would overlap its own prelude; no writer makes one.
-/// Its root with [`OTHER_PRELUDE`] is indistinguishable from "not a valid
-/// body", so the cold path refuses it, which is the right answer anyway.
+/// A body at offset 0 would overlap its own prelude; no writer makes one,
+/// and both paths refuse it: this one reports "not a valid body", and a
+/// root of 0 with [`OTHER_PRELUDE`] is what the cold path refuses too.
 ///
 /// Every tagged node is validated here and nowhere else. This is the whole
 /// read path of nearly every node, so it is held to the
@@ -610,7 +610,14 @@ where
     let Ok(at) = at else {
         return OTHER_PRELUDE;
     };
-    let root = (at - bytes.as_ptr().addr()) | usize::from(kind);
+    let offset = at - bytes.as_ptr().addr();
+    // A body at offset 0 sits where its prelude is: the bytes then read
+    // as two things at once, which no writer produces. Refused here as
+    // the cold path refuses it, rather than accepted with a root of 0.
+    if offset == 0 {
+        return OTHER_PRELUDE;
+    }
+    let root = offset | usize::from(kind);
     // One comparison of the first 16 bytes against the default manifest's
     // prelude for this kind checks the empty header and the padding.
     if u128::from_le_bytes(*head) != TAGGED_LAYOUT as u128 | u128::from(kind) << 8
