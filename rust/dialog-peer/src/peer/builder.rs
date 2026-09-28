@@ -15,8 +15,9 @@ use dialog_network::Network;
 use dialog_repository::BranchReference;
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan, UcanCertificate};
+use dialog_ucan_core::subject::Subject as UcanSubject;
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
-use dialog_varsig::Principal as _;
+use dialog_varsig::{Did, Principal as _};
 
 use parking_lot::Mutex;
 
@@ -192,6 +193,28 @@ impl Allowance {
             *unbounded = true;
         }
         self
+    }
+
+    /// Whether this allowance so much as names the storage of `system`:
+    /// a scope or certificate over that subject whose command covers
+    /// `storage`. Not a proof, a first look before anything is mounted.
+    fn names_storage_of(&self, system: &Did) -> bool {
+        let covers = |segments: &[String]| {
+            segments.is_empty() || segments.first().map(String::as_str) == Some("storage")
+        };
+        match &self.kind {
+            AllowanceKind::Scope { scope, .. } => {
+                matches!(&scope.subject, UcanSubject::Specific(subject) if subject == system)
+                    && covers(scope.command.segments())
+            }
+            AllowanceKind::Certificate(certificate) => {
+                let subject = match certificate.0.subject() {
+                    UcanSubject::Any => true,
+                    UcanSubject::Specific(subject) => subject == system,
+                };
+                subject && covers(&certificate.0.command().0)
+            }
+        }
     }
 }
 
@@ -509,6 +532,31 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
         let home = reference.of().clone();
         let credential = self.key.resolve().await?;
 
+        // Mounting a space takes the authority of the system the storage
+        // belongs to. Nothing grants it implicitly: the peer holds a grant
+        // from that system in memory, or proves one through its state.
+        let Some(system) = self.storage.system().cloned() else {
+            return Err(PeerError::Storage(
+                "the storage belongs to no system: give it one with `Storage::owned_by`"
+                    .to_string(),
+            ));
+        };
+        // A peer acting as itself is refused before it mounts anything
+        // when no grant it was given so much as names the storage: the
+        // proof below is what admits it, but a refused peer must not
+        // leave its home mounted in the storage it was refused.
+        if M::HOLDS_KEYS
+            && !self
+                .allowed
+                .iter()
+                .any(|allowance| allowance.names_storage_of(&system))
+        {
+            return Err(PeerError::Storage(format!(
+                "nothing grants {} the storage of {system}: grant it with `Allowance::storage`",
+                credential.did()
+            )));
+        }
+
         if let Some(location) = &self.location {
             let at = Subject::from(did!("local:storage"))
                 .attenuate(storage_fx::Storage)
@@ -643,16 +691,6 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
             };
             grants.push(grant);
         }
-
-        // Mounting a space takes the authority of the system the storage
-        // belongs to. Nothing grants it implicitly: the peer holds a grant
-        // from that system in memory, or proves one through its state.
-        let Some(system) = self.storage.system().cloned() else {
-            return Err(PeerError::Storage(
-                "the storage belongs to no system: give it one with `Storage::owned_by`"
-                    .to_string(),
-            ));
-        };
 
         let state = reference
             .open()
