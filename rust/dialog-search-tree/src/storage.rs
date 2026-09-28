@@ -1,6 +1,10 @@
-use dialog_common::{Blake3Hash, ConditionalSend};
+use async_trait::async_trait;
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
 
 use dialog_storage::{DialogStorageError, StorageBackend};
+
+use crate::{DialogSearchTreeError, Load};
 
 /// Content-addressed storage wrapper for tree nodes.
 ///
@@ -66,5 +70,22 @@ where
         } else {
             Ok(None)
         }
+    }
+}
+
+/// Serves the tree's [`Load`] from a storage backend.
+///
+/// A bridge for callers that still hold a [`StorageBackend`] while the
+/// capability model replaces them. The tree checks what it loads, so this
+/// reads the backend without checking the bytes a second time.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> Provider<Load> for ContentAddressedStorage<Backend>
+where
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+{
+    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        Ok(self.backend.get(&hash).await?.map(Buffer::from))
     }
 }

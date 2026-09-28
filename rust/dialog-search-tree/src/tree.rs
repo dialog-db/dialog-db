@@ -3,8 +3,8 @@ pub use transient::*;
 
 use std::{marker::PhantomData, ops::RangeBounds};
 
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use rkyv::{
     Deserialize, Serialize,
@@ -17,9 +17,9 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential, Distribution,
-    Entry, Geometric, Key, Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions,
-    SearchResult, TreeDifference, TreeWalker, Value, into_owned,
+    Accessor, Cache, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key,
+    Load, Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions, SearchResult,
+    TreeDifference, TreeWalker, Value, into_owned,
 };
 
 /// A node on a range estimate's edge path, with the range's bound on each
@@ -259,14 +259,13 @@ where
     /// Returns `Ok(Some(value))` if the key exists, `Ok(None)` if the key is
     /// not found, or an error if the tree structure is invalid or storage
     /// access fails.
-    pub async fn get<Backend>(
+    pub async fn get<Env>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         // The search path is the copy-on-write frontier for an update; a read
         // ignores it and takes only the leaf. Building it is allocation-free
@@ -311,13 +310,12 @@ where
     ///
     /// Internally, this calls [`stream_range`](Self::stream_range) with an
     /// unbounded range covering all possible keys.
-    pub fn stream<'a, Backend>(
+    pub fn stream<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         self.stream_range(.., storage)
     }
@@ -337,20 +335,19 @@ where
     /// Interior scales are estimates, so the whole is an upper bound, not
     /// an exact count: it answers "is this range large or small" for a
     /// planner comparing scan sizes.
-    pub async fn range_estimate<Backend>(
+    pub async fn range_estimate<Env>(
         &self,
         lower: &[u8],
         upper: &[u8],
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<u64>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         let Some(root) = self.stored_root() else {
             return Ok(None);
         };
-        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.node_cache.clone(), storage);
         // Each pending node is bounded on the sides the range cuts through
         // it: `None` on a side means the range runs past that side, so the
         // node's whole extent on it counts.
@@ -405,17 +402,16 @@ where
     ///
     /// The range can be bounded or unbounded on either end, following Rust's
     /// standard [`RangeBounds`] trait. Entries are yielded in sorted order.
-    pub fn stream_range<R, Backend>(
+    pub fn stream_range<R, Env>(
         &self,
         range: R,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
-        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.node_cache.clone(), storage);
 
         TreeWalker::new(self.stored_root().cloned()).stream(range, accessor)
     }
@@ -425,18 +421,17 @@ where
     /// leaves' entries borrow the memoized decoded-keys arena with no
     /// per-entry key copy. For consumers that work directly on the raw key
     /// bytes (the artifact scan paths).
-    pub fn stream_range_handles<R, Backend>(
+    pub fn stream_range_handles<R, Env>(
         &self,
         range: R,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> impl Stream<Item = Result<Entry<crate::KeyHandle, Value>, DialogSearchTreeError>>
     + ConditionalSend
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
-        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.node_cache.clone(), storage);
 
         TreeWalker::<Key, Value>::new(self.stored_root().cloned()).stream_handles(range, accessor)
     }
@@ -448,15 +443,14 @@ where
     /// [`integrate`](TransientTree::integrate) on an edit batch) results in
     /// `other`. Only blocks on differing paths are read; see
     /// [`TreeDifference`](crate::TreeDifference) for the frugality contract.
-    pub fn differentiate<'a, Backend>(
+    pub fn differentiate<'a, Env>(
         &'a self,
         other: &'a Self,
-        self_storage: &'a ContentAddressedStorage<Backend>,
-        other_storage: &'a ContentAddressedStorage<Backend>,
+        self_storage: &'a Env,
+        other_storage: &'a Env,
     ) -> impl Differential<Key, Value> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         Value: PartialEq,
     {
         async_stream::try_stream! {
@@ -477,16 +471,15 @@ where
     /// differing regions within the scope, not to the full difference. On
     /// a partial replica this keeps the diff from fetching subtrees the
     /// caller never demanded.
-    pub fn differentiate_within<'a, Backend>(
+    pub fn differentiate_within<'a, Env>(
         &'a self,
         other: &'a Self,
         scope: &'a [core::ops::RangeInclusive<Key>],
-        self_storage: &'a ContentAddressedStorage<Backend>,
-        other_storage: &'a ContentAddressedStorage<Backend>,
+        self_storage: &'a Env,
+        other_storage: &'a Env,
     ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         // `Key`/`Value` bound `ConditionalSync` (not just the trait's
         // `ConditionalSend`) so that `&PersistentTree` — which the
         // returned `async_stream` captures — is `Send` on native.
@@ -507,17 +500,16 @@ where
     /// the price of a bounded number of reads the lazy walk would skip;
     /// it is for consumers that stream the whole difference over a
     /// high-latency backend (see [`Prefetch`]).
-    pub fn differentiate_within_with<'a, Backend>(
+    pub fn differentiate_within_with<'a, Env>(
         &'a self,
         other: &'a Self,
         scope: &'a [core::ops::RangeInclusive<Key>],
-        self_storage: &'a ContentAddressedStorage<Backend>,
-        other_storage: &'a ContentAddressedStorage<Backend>,
+        self_storage: &'a Env,
+        other_storage: &'a Env,
         prefetch: Prefetch,
     ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         Key: ConditionalSync,
         Value: PartialEq + ConditionalSync,
         D: ConditionalSync,
@@ -559,13 +551,9 @@ where
     /// reading its header. An empty tree that was never persisted has no
     /// node to read from, but it knows the manifest it was created under
     /// and reports that without touching storage.
-    pub async fn manifest<Backend>(
-        &self,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<Manifest, DialogSearchTreeError>
+    pub async fn manifest<Env>(&self, storage: &Env) -> Result<Manifest, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         match &self.root {
             TreeRoot::Empty { manifest, .. } => Ok(manifest.clone()),
@@ -573,7 +561,7 @@ where
                 if let Some(manifest) = manifest_memo::get(hash) {
                     return Ok(manifest);
                 }
-                let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+                let accessor = Accessor::new(self.node_cache.clone(), storage);
                 let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
                 let manifest = node.manifest()?;
                 manifest_memo::insert(hash, manifest.clone());
@@ -619,17 +607,16 @@ where
     /// it enables efficient reconstruction of the tree after changes.
     ///
     /// Returns `None` if the tree is empty.
-    async fn search<Backend>(
+    async fn search<Env>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
-        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.node_cache.clone(), storage);
 
         TreeWalker::new(self.stored_root().cloned())
             .search(key, accessor, options)
@@ -750,7 +737,7 @@ mod tests {
                 .await?;
         }
 
-        let accessor = Accessor::new(tree.node_cache(), storage.clone());
+        let accessor = Accessor::new(tree.node_cache(), &storage);
         let root = accessor.get_node(tree.root()).await?;
         let estimate = root.scale().estimate();
 
@@ -866,7 +853,7 @@ mod tests {
                 .await?;
         }
 
-        let accessor = Accessor::new(tree.node_cache(), storage.clone());
+        let accessor = Accessor::new(tree.node_cache(), &storage);
         let root = accessor.get_node(tree.root()).await?;
         let flushed = root.scale();
 
@@ -1351,7 +1338,7 @@ mod tests {
                 .await?;
         }
 
-        let accessor = Accessor::new(empty.node_cache(), storage.clone());
+        let accessor = Accessor::new(empty.node_cache(), &storage);
         let root = accessor.get_node(empty.root()).await?;
         let crate::NodeBody::Index(index) = root.body() else {
             anyhow::bail!("the empty tree's root is a segment, not an index");

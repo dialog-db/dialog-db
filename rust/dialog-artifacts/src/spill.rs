@@ -13,8 +13,9 @@
 use std::collections::HashSet;
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Change, ContentAddressedStorage, TreeDifference};
+use dialog_capability::Provider;
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_search_tree::{Change, ContentAddressedStorage, Load, TreeDifference};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
@@ -122,12 +123,11 @@ pub fn shipment_ref(
 ///
 /// Classification of each entry is [`shipment_ref`]; this adds the walk
 /// and the deduplication.
-pub fn shipment_refs<'a, Backend>(
-    difference: &'a TreeDifference<'a, Key, State<Datum>, Backend>,
+pub fn shipment_refs<'a, Env>(
+    difference: &'a TreeDifference<'a, Key, State<Datum>, Env>,
 ) -> impl Stream<Item = Result<ShipmentRef, DialogArtifactsError>> + 'a + ConditionalSend
 where
-    Backend: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     try_stream! {
         let changes = difference.changes();

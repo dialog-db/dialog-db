@@ -14,16 +14,16 @@
 //! no shape decisions, because the shape was already established at edit time.
 
 use crate::{
-    Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, IndexPieceOrigin, Key,
-    Link, Manifest, Node, NodeCache, Novelty, NoveltyEntry, NoveltyOp, PersistentIndex,
-    PersistentNode, PersistentNodeBody, PersistentTree, PieceOrigin, Rank, TransientIndex,
-    TransientNode, TransientSegment, TreeWalker, Value, link_bounds, regroup_children,
-    regroup_children_reusing, regroup_entries, regroup_entries_reusing,
+    Accessor, BOTTOM_RANK, Buffer, Cache, Change, Delta, DialogSearchTreeError, Differential,
+    Distribution, Entry, Geometric, IndexPieceOrigin, Key, Link, Load, Manifest, Node, NodeCache,
+    Novelty, NoveltyEntry, NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody,
+    PersistentTree, PieceOrigin, Rank, TransientIndex, TransientNode, TransientSegment, TreeWalker,
+    Value, link_bounds, regroup_children, regroup_children_reusing, regroup_entries,
+    regroup_entries_reusing,
 };
 use async_stream::try_stream;
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
@@ -262,14 +262,13 @@ where
     /// root's manifest, so the root's header speaks for the tree. When the
     /// batch was opened expecting a format ([`with_manifest`](Self::with_manifest)),
     /// a root written under another fails loudly instead.
-    async fn load<Backend>(
+    async fn load<Env>(
         root: TransientRoot<Key, Value>,
-        accessor: &Accessor<Key, Value, Backend>,
+        accessor: &Accessor<'_, Key, Value, Env>,
         expected: Option<Manifest>,
     ) -> Result<(Option<TransientNode<Key, Value>>, Manifest), DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         let known = || {
             expected.clone().ok_or_else(|| {
@@ -308,18 +307,17 @@ where
     }
 
     /// Inserts a key/value pair, mutating the transient tree in place.
-    pub async fn insert<Backend>(
+    pub async fn insert<Env>(
         mut self,
         key: Key,
         value: Value,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         let entry = Entry { key, value };
-        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.cache.clone(), storage);
         let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
         self.manifest = Some(manifest.clone());
 
@@ -345,7 +343,7 @@ where
                 })
             }
             Some(root) => Edit::Upsert(entry)
-                .apply::<Backend, D>(root, &accessor, &manifest)
+                .apply::<Env, D>(root, &accessor, &manifest)
                 .await?
                 .expect("an insert never empties the tree"),
         };
@@ -355,16 +353,15 @@ where
 
     /// Deletes a key, mutating the transient tree in place. A missing key is a
     /// no-op.
-    pub async fn delete<Backend>(
+    pub async fn delete<Env>(
         mut self,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
-        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.cache.clone(), storage);
         let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
         self.manifest = Some(manifest.clone());
 
@@ -374,7 +371,7 @@ where
             return Ok(self);
         };
         let edited = Edit::Delete(key.clone())
-            .apply::<Backend, D>(root, &accessor, &manifest)
+            .apply::<Env, D>(root, &accessor, &manifest)
             .await?;
         self.root = match edited {
             Some(node) => TransientRoot::Loaded(node),
@@ -404,14 +401,13 @@ where
     /// and the per-op replay produce the same bytes (converge_check's
     /// single-commit arm pins exactly this equality against the per-txn
     /// arms). A batch whose surviving set is empty leaves the tree empty.
-    pub(crate) async fn plant<Backend>(
+    pub(crate) async fn plant<Env>(
         mut self,
         mut ops: Vec<NoveltyEntry<Value>>,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         debug_assert!(self.is_unplanted(), "plant requires an empty tree");
         ops.sort_by(|a, b| a.key.cmp(&b.key));
@@ -444,7 +440,7 @@ where
         }
 
         let manifest = Self::format(&self.manifest)?;
-        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.cache.clone(), storage);
         let pieces = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
         self.root = match seal_root::<Key, Value, D, _>(pieces, 0, &manifest, &accessor).await? {
             Some(node) => TransientRoot::Loaded(node),
@@ -498,14 +494,13 @@ where
     /// fully persistent: a point lookup into one delegates to the same read
     /// path [`PersistentTree::get`] uses. Only the edited
     /// [`Node::Transient`] spine is descended in memory.
-    pub async fn get<Backend>(
+    pub async fn get<Env>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         let mut node = match &self.root {
             TransientRoot::Empty => return Ok(None),
@@ -555,15 +550,14 @@ where
     /// Delegates a point lookup over a fully persistent subtree rooted at
     /// `hash` to [`PersistentTree::get`], so the transient read of an untouched
     /// subtree is byte-for-byte the persistent read.
-    async fn persistent_get<Backend>(
+    async fn persistent_get<Env>(
         &self,
         hash: &Blake3Hash,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         let subtree: PersistentTree<Key, Value, D> =
             PersistentTree::seal(hash.clone(), self.cache.clone());
@@ -578,15 +572,14 @@ where
     /// fully persistent: each streams through the same [`TreeWalker`] path
     /// [`PersistentTree::stream_range`] uses. Only the edited
     /// [`Node::Transient`] spine is traversed in memory.
-    pub fn stream_range<R, Backend>(
+    pub fn stream_range<R, Env>(
         &self,
         range: R,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         // The transient spine borrows `self`, but the returned stream must own
         // everything it touches. Snapshot the spine into an owned plan of steps
@@ -595,7 +588,6 @@ where
         // Persistent subtrees stay as hashes, so the snapshot copies no
         // untouched node.
         let cache = self.cache.clone();
-        let storage = storage.clone();
 
         // Snapshot the range bounds to owned, cloneable form: the walker
         // consumes a range per persistent subtree, and the transient leaves are
@@ -617,7 +609,7 @@ where
             for step in plan {
                 match step {
                     StreamStep::Persistent(hash) => {
-                        let accessor = Accessor::new(cache.clone(), storage.clone());
+                        let accessor = Accessor::new(cache.clone(), storage);
                         let inner = TreeWalker::<Key, Value>::new(Some(hash))
                             .stream(bounds.clone(), accessor);
                         futures_util::pin_mut!(inner);
@@ -688,14 +680,13 @@ where
     /// Atomicity is the caller's: on error the batch is dropped and never
     /// persisted, leaving the original tree untouched. The caller seals a
     /// successful integration with [`persist`](Self::persist).
-    pub async fn integrate<Backend, Changes>(
+    pub async fn integrate<Env, Changes>(
         mut self,
         changes: Changes,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         Changes: Differential<Key, Value>,
         Value: PartialEq,
     {
@@ -891,22 +882,18 @@ where
     /// took the level in slices, and a slice of the next level went out
     /// while the tail of this one was still queued, which looked like the
     /// continuation queue without being it.
-    async fn open_pending<'changes, Backend, Changes>(
-        &self,
-        changes: Changes,
-        storage: &ContentAddressedStorage<Backend>,
-    ) where
+    async fn open_pending<'changes, Env, Changes>(&self, changes: Changes, storage: &Env)
+    where
         Key: 'changes,
         Value: 'changes,
         Changes: Iterator<Item = &'changes Change<Key, Value>>,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         let keys: Vec<&Key> = changes.map(Change::key).collect();
         if keys.is_empty() {
             return;
         }
-        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.cache.clone(), storage);
 
         // The paths (by position in `keys`) stopped at each node not yet
         // read, and the nodes waiting for a slot, in the order the paths
@@ -1035,13 +1022,12 @@ where
     /// stay [`Node::Persistent`] links, are never fetched, and are re-emitted
     /// verbatim at persist time, so the persist delta scales with the seams,
     /// not the entry count.
-    pub async fn stitch<Backend>(
+    pub async fn stitch<Env>(
         pieces: Vec<Piece<'_, Key, Value, D>>,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         // One cache serves the whole stitch. Nodes are content-addressed, so
         // sharing the first source's cache (when there is one) is always safe
@@ -1053,7 +1039,7 @@ where
                 Piece::Entries(_) => None,
             })
             .unwrap_or_else(Cache::new);
-        let accessor = Accessor::new(cache.clone(), storage.clone());
+        let accessor = Accessor::new(cache.clone(), storage);
 
         // The stitched tree keeps its sources' format, read from the first
         // source's root (an unpersisted empty source knows the format it was
@@ -1329,15 +1315,14 @@ where
     /// synchronous re-shape applies the edit to the leaf and re-groups the
     /// touched path bottom-up. Splitting the work this way keeps the synchronous
     /// re-shape free of borrows spanning awaits.
-    async fn apply<Backend, D>(
+    async fn apply<Env, D>(
         self,
         mut root: TransientNode<Key, Value>,
-        accessor: &Accessor<Key, Value, Backend>,
+        accessor: &Accessor<'_, Key, Value, Env>,
         manifest: &Manifest,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         D: Distribution,
     {
         // The manifest supplies the branching parameter and the length-guard
@@ -1411,7 +1396,7 @@ where
             }
         };
         let mut piece_origins = if changes_membership {
-            let verdict = forced_run_quiet::<Key, Value, Backend, D>(
+            let verdict = forced_run_quiet::<Key, Value, Env, D>(
                 &mut root, &path, &self, accessor, &manifest,
             )
             .await?;
@@ -1437,7 +1422,7 @@ where
             if matches!(verdict, RunVerdict::Quiet) {
                 None
             } else {
-                merge_forced_run::<Key, Value, Backend>(
+                merge_forced_run::<Key, Value, Env>(
                     &mut root,
                     &mut path,
                     &mut [],
@@ -1789,7 +1774,7 @@ where
         // be an identity rebuild.
         let (index_widened, mut index_origins) =
             if changes_membership && manifest.frame_ceiling() > 0 {
-                merge_forced_index_runs::<Key, Value, D, Backend>(
+                merge_forced_index_runs::<Key, Value, D, Env>(
                     &mut root,
                     &mut path,
                     &mut [],
@@ -1816,7 +1801,7 @@ where
         // separator length and joins nothing.
         let mut neighbor_path = match neighbor_path {
             Some(mut neighbor_path) if manifest.max_segment > 0 => {
-                let merged_leaf = merge_forced_run::<Key, Value, Backend>(
+                let merged_leaf = merge_forced_run::<Key, Value, Env>(
                     &mut root,
                     &mut neighbor_path,
                     &mut [&mut path],
@@ -1827,7 +1812,7 @@ where
                 .is_some();
                 let mut merged_index = false;
                 if manifest.frame_ceiling() > 0 {
-                    merged_index = merge_forced_index_runs::<Key, Value, D, Backend>(
+                    merged_index = merge_forced_index_runs::<Key, Value, D, Env>(
                         &mut root,
                         &mut neighbor_path,
                         &mut [&mut path],
@@ -1914,7 +1899,7 @@ where
                         if let Some(neighbor) = neighbor_path.as_mut() {
                             co_paths.push(neighbor);
                         }
-                        let merged_leaf = merge_forced_run::<Key, Value, Backend>(
+                        let merged_leaf = merge_forced_run::<Key, Value, Env>(
                             &mut root,
                             &mut left_path,
                             &mut co_paths,
@@ -1925,7 +1910,7 @@ where
                         .is_some();
                         let mut merged_index = false;
                         if manifest.frame_ceiling() > 0 {
-                            merged_index = merge_forced_index_runs::<Key, Value, D, Backend>(
+                            merged_index = merge_forced_index_runs::<Key, Value, D, Env>(
                                 &mut root,
                                 &mut left_path,
                                 &mut co_paths,
@@ -2149,11 +2134,11 @@ where
 /// complete frame. Top-down, adjusting the deeper path indices as children
 /// concatenate. Long (leaf-forced) separators never join at index levels:
 /// elections exclude them, so a piece boundary can never sit on one.
-async fn merge_forced_index_runs<Key, Value, D, Backend>(
+async fn merge_forced_index_runs<Key, Value, D, Env>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
     co_paths: &mut [&mut Vec<usize>],
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
     manifest: &Manifest,
 ) -> Result<(bool, Vec<(usize, Vec<IndexPieceOrigin>)>), DialogSearchTreeError>
 where
@@ -2164,8 +2149,7 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     D: Distribution,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     let mut origins_by_remaining: Vec<(usize, Vec<IndexPieceOrigin>)> = Vec::new();
     let mut merged_any = false;
@@ -2349,11 +2333,11 @@ enum RunVerdict {
 /// rebuild-and-re-encode of every piece in the run — plus the new blocks
 /// that rebuild ships to every replica — for piece decodes and memoized
 /// key hashes, leaving the untouched pieces byte-identical in the store.
-async fn forced_run_quiet<Key, Value, Backend, D>(
+async fn forced_run_quiet<Key, Value, Env, D>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
     edit: &Edit<Key, Value>,
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
     manifest: &Manifest,
 ) -> Result<RunVerdict, DialogSearchTreeError>
 where
@@ -2363,8 +2347,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
     D: Distribution,
 {
     if path.is_empty() || manifest.max_segment == 0 {
@@ -2466,15 +2449,14 @@ where
     // interior edits, and widens for the min-insert shape (the stream
     // cannot license a surgical apply). In debug builds every compressed
     // interior verdict is pinned against the full stream's.
-    let compressed = compressed_run_quiet::<Key, Value, Backend, D>(
-        root, path, lo, hi, edit, accessor, manifest,
-    )
-    .await?;
+    let compressed =
+        compressed_run_quiet::<Key, Value, Env, D>(root, path, lo, hi, edit, accessor, manifest)
+            .await?;
 
     if min_insert {
         #[cfg(debug_assertions)]
         if let Some(verdict) = compressed {
-            let full = streamed_run_quiet::<Key, Value, Backend, D>(
+            let full = streamed_run_quiet::<Key, Value, Env, D>(
                 root, path, lo, hi, edit, accessor, manifest,
             )
             .await?;
@@ -2492,7 +2474,7 @@ where
         let verdict = match compressed {
             Some(verdict) => verdict,
             None => {
-                streamed_run_quiet::<Key, Value, Backend, D>(
+                streamed_run_quiet::<Key, Value, Env, D>(
                     root, path, lo, hi, edit, accessor, manifest,
                 )
                 .await?
@@ -2539,7 +2521,7 @@ where
     if let Some(verdict) = compressed {
         #[cfg(debug_assertions)]
         {
-            let full = streamed_run_quiet::<Key, Value, Backend, D>(
+            let full = streamed_run_quiet::<Key, Value, Env, D>(
                 root, path, lo, hi, edit, accessor, manifest,
             )
             .await?;
@@ -2556,10 +2538,8 @@ where
     }
 
     Ok(
-        if streamed_run_quiet::<Key, Value, Backend, D>(
-            root, path, lo, hi, edit, accessor, manifest,
-        )
-        .await?
+        if streamed_run_quiet::<Key, Value, Env, D>(root, path, lo, hi, edit, accessor, manifest)
+            .await?
         {
             RunVerdict::Quiet
         } else {
@@ -2573,13 +2553,13 @@ where
 /// the exact stored partition. The authoritative fallback (and debug
 /// oracle) for `compressed_run_quiet`.
 #[allow(clippy::too_many_arguments)]
-async fn streamed_run_quiet<Key, Value, Backend, D>(
+async fn streamed_run_quiet<Key, Value, Env, D>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
     lo: usize,
     hi: usize,
     edit: &Edit<Key, Value>,
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
     manifest: &Manifest,
 ) -> Result<bool, DialogSearchTreeError>
 where
@@ -2589,8 +2569,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
     D: Distribution,
 {
     let at = path[path.len() - 1];
@@ -2731,13 +2710,13 @@ where
 /// boundary, an over-weight interior stretch, a transient index sibling),
 /// in which case the full entry stream decides.
 #[allow(clippy::too_many_arguments)]
-async fn compressed_run_quiet<Key, Value, Backend, D>(
+async fn compressed_run_quiet<Key, Value, Env, D>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
     lo: usize,
     hi: usize,
     edit: &Edit<Key, Value>,
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
     manifest: &Manifest,
 ) -> Result<Option<bool>, DialogSearchTreeError>
 where
@@ -2747,8 +2726,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
     D: Distribution,
 {
     use crate::distribution::summary::{self, PieceSummary};
@@ -2981,11 +2959,11 @@ where
 /// workload — a 7x regression); this widening reaches only force-split
 /// runs, which are rare (vetoed clusters, or the coin's `e^(-ceiling/S)`
 /// tail) and bounded by their own extent.
-async fn merge_forced_run<Key, Value, Backend>(
+async fn merge_forced_run<Key, Value, Env>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
     co_paths: &mut [&mut Vec<usize>],
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
     manifest: &Manifest,
 ) -> Result<Option<Vec<PieceOrigin>>, DialogSearchTreeError>
 where
@@ -2995,8 +2973,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     if path.is_empty() {
         return Ok(None);
@@ -3169,9 +3146,9 @@ fn follow<'a, Key, Value>(
 
 /// Ensures `node` is transient, loading and opening it from storage if it is
 /// still a persistent reference.
-async fn lift<Key, Value, Backend>(
+async fn lift<Key, Value, Env>(
     node: &mut Node<Key, Value>,
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,
@@ -3179,8 +3156,7 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     if let Node::Persistent(link) = node {
         let persistent = accessor.get_node(&link.node).await?;
@@ -3205,10 +3181,10 @@ where
 /// leaf, lifting each node on the way. Returns the path to the neighbor's
 /// leftmost leaf, or `None` when `path` already reaches the rightmost leaf and
 /// there is no neighbor to fuse with.
-async fn lift_right_neighbor_spine<Key, Value, Backend>(
+async fn lift_right_neighbor_spine<Key, Value, Env>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -3217,8 +3193,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     // Find the deepest ancestor with a right sibling of the descended child, and
     // build the path to that sibling: the ancestor prefix, then the next index.
@@ -3271,10 +3246,10 @@ where
 /// sibling, then walking that sibling's rightmost edge down to its leaf,
 /// lifting each node on the way. Returns the path to the neighbor's rightmost
 /// leaf, or `None` when `path` runs along the tree's leftmost edge.
-async fn lift_left_neighbor_spine<Key, Value, Backend>(
+async fn lift_left_neighbor_spine<Key, Value, Env>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -3283,8 +3258,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     let mut neighbor_path: Option<Vec<usize>> = None;
     for depth in (0..path.len()).rev() {
@@ -4034,11 +4008,11 @@ where
 /// linked node's kind — an index child makes the wrapper a non-canonical
 /// chain, a segment child makes it the canonical root. The child is lifted to
 /// find out.
-async fn seal_root<Key, Value, D, Backend>(
+async fn seal_root<Key, Value, D, Env>(
     mut replacement: Vec<Node<Key, Value>>,
     height: Rank,
     manifest: &Manifest,
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
 ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -4046,8 +4020,7 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
     D: Distribution,
 {
     if replacement.is_empty() {
@@ -4170,10 +4143,10 @@ enum Trim {
 /// range remain [`Node::Persistent`] links and are never loaded. Returns the
 /// carved root, its height, and the trim outcome, or `None` when the tree is
 /// empty or no entry falls within the range.
-async fn carve<Key, Value, Backend>(
+async fn carve<Key, Value, Env>(
     root: Blake3Hash,
     range: &RangeInclusive<Key>,
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
 ) -> Result<Option<(TransientNode<Key, Value>, Rank, Trim)>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -4181,8 +4154,7 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
     // A zero-entry root is the empty tree's format marker: nothing to carve.
@@ -4426,10 +4398,10 @@ fn lifted_child<Key, Value>(
 /// spine when `leftmost`, otherwise the rightmost. A join re-cuts exactly
 /// these spines, so they are the only nodes it needs loaded; nodes that are
 /// already transient cost nothing.
-async fn lift_boundary_spine<Key, Value, Backend>(
+async fn lift_boundary_spine<Key, Value, Env>(
     root: &mut TransientNode<Key, Value>,
     leftmost: bool,
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,
@@ -4437,8 +4409,7 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     let mut path = Vec::new();
     loop {
@@ -4923,8 +4894,10 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let built = sequential(&(0..200).collect::<Vec<u32>>(), &mut storage).await?;
 
-        // A fresh cache reads the persisted nodes straight from storage.
-        let accessor = Accessor::new(Cache::new(), storage.clone());
+        // A fresh cache reads the persisted nodes straight from storage,
+        // through a handle of its own so the edit below can keep writing.
+        let reader = storage.clone();
+        let accessor = Accessor::new(Cache::new(), &reader);
         let root: PersistentNode<[u8; 4], Vec<u8>> = accessor.get_node(built.root()).await?;
         assert_eq!(root.manifest()?, Manifest::default());
 
@@ -6633,7 +6606,7 @@ mod tests {
         storage: &ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     ) -> Result<Vec<Vec<u8>>> {
         let mut boundaries: Vec<Vec<u8>> = Vec::new();
-        let accessor = Accessor::new(Cache::new(), storage.clone());
+        let accessor = Accessor::new(Cache::new(), storage);
         let mut frontier = vec![root.clone()];
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -6794,7 +6767,7 @@ mod tests {
         storage: &ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     ) -> Result<Vec<(usize, Vec<u8>)>> {
         let mut pieces: Vec<(usize, Vec<u8>)> = Vec::new();
-        let accessor = Accessor::new(Cache::new(), storage.clone());
+        let accessor = Accessor::new(Cache::new(), storage);
         let mut frontier: Vec<(Blake3Hash, usize)> = vec![(root.clone(), 0)];
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -7357,7 +7330,7 @@ mod tests {
         storage: &ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     ) -> Result<Vec<(usize, usize, usize)>> {
         let mut stats = Vec::new();
-        let accessor = Accessor::new(Cache::new(), storage.clone());
+        let accessor = Accessor::new(Cache::new(), storage);
         let mut frontier = vec![root.clone()];
         let mut depth = 0usize;
         while !frontier.is_empty() {
@@ -7388,7 +7361,7 @@ mod tests {
         storage: &ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     ) -> Result<Vec<HashSet<Blake3Hash>>> {
         let mut levels: Vec<HashSet<Blake3Hash>> = Vec::new();
-        let accessor = Accessor::new(Cache::new(), storage.clone());
+        let accessor = Accessor::new(Cache::new(), storage);
         let mut frontier = vec![root.clone()];
         while !frontier.is_empty() {
             let mut next = Vec::new();

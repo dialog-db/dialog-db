@@ -18,8 +18,8 @@
 //! complete inventory of what is missing.
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
 use futures_util::stream::FuturesUnordered;
 use rkyv::{
@@ -34,8 +34,8 @@ use rkyv::{
 use std::collections::VecDeque;
 
 use crate::{
-    ContentAddressedStorage, DialogSearchTreeError, Distribution, Key, NodeBody, PersistentNode,
-    PersistentTree, Value,
+    DialogSearchTreeError, Distribution, Key, Load, NodeBody, PersistentNode, PersistentTree,
+    Value, load,
 };
 
 /// What a gap-tolerant traversal found at one position in the tree.
@@ -69,13 +69,12 @@ where
     ///
     /// Breadth-first from the root. Child hashes are read out of each
     /// node's already-decoded body, so descending costs no extra reads.
-    fn traverse_available<'a, Backend>(
+    fn traverse_available<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend;
+        Env: Provider<Load> + ConditionalSync;
 
     /// [`traverse_available`](Self::traverse_available) restricted to
     /// `scope`: a child subtree whose key span cannot intersect any range
@@ -89,14 +88,13 @@ where
     /// Pruning is conservative in the same direction as
     /// [`TreeDifference::compute_within`](crate::TreeDifference::compute_within):
     /// it may keep a node the scope does not need, never drop one it does.
-    fn traverse_available_within<'a, Backend>(
+    fn traverse_available_within<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend;
+        Env: Provider<Load> + ConditionalSync;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -112,27 +110,25 @@ where
         + ConditionalSync,
     D: Distribution,
 {
-    fn traverse_available<'a, Backend>(
+    fn traverse_available<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend,
+        Env: Provider<Load> + ConditionalSync,
     {
-        traverse::<Key, Value, Backend>(self.stored_root().cloned(), storage, None)
+        traverse::<Key, Value, Env>(self.stored_root().cloned(), storage, None)
     }
 
-    fn traverse_available_within<'a, Backend>(
+    fn traverse_available_within<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend,
+        Env: Provider<Load> + ConditionalSync,
     {
-        traverse::<Key, Value, Backend>(self.stored_root().cloned(), storage, Some(scope))
+        traverse::<Key, Value, Env>(self.stored_root().cloned(), storage, Some(scope))
     }
 }
 
@@ -160,9 +156,9 @@ fn span_intersects(
 /// The walk shared by [`Traversable::traverse_available`] and
 /// [`Traversable::traverse_available_within`]; `scope` of `None` keeps
 /// every child.
-fn traverse<'a, Key, Value, Backend>(
+fn traverse<'a, Key, Value, Env>(
     root: Option<Blake3Hash>,
-    storage: &'a ContentAddressedStorage<Backend>,
+    storage: &'a Env,
     scope: Option<&'a [core::ops::RangeInclusive<Vec<u8>>]>,
 ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
 where
@@ -172,8 +168,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend,
+    Env: Provider<Load> + ConditionalSync,
 {
     use futures_util::StreamExt as _;
 
@@ -207,11 +202,11 @@ where
             loop {
                 while let Some(hash) = queue.pop_front() {
                     reads.push(async move {
-                        // `retrieve` verifies stored bytes against the
-                        // hash it was asked for, so `None` here is
-                        // genuinely "not stored" -- a corrupt block
-                        // raises instead, and still fails the walk.
-                        let bytes = storage.retrieve(&hash).await;
+                        // `load` verifies loaded bytes against the hash
+                        // it was asked for, so `None` here is genuinely
+                        // "not stored" -- a corrupt block raises instead,
+                        // and still fails the walk.
+                        let bytes = load(storage, &hash).await;
                         (hash, bytes)
                     });
                 }
@@ -222,8 +217,7 @@ where
                     yield Visit::Absent(hash);
                     continue;
                 };
-                let node: PersistentNode<Key, Value> =
-                    PersistentNode::try_from(Buffer::from(bytes))?;
+                let node: PersistentNode<Key, Value> = PersistentNode::try_from(bytes)?;
 
                 if let NodeBody::Index(index) = node.body() {
                     let links = index.links()?;

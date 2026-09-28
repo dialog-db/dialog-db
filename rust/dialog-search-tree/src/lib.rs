@@ -161,6 +161,9 @@ pub use entry::*;
 mod node;
 pub use node::*;
 
+mod load;
+pub use load::*;
+
 mod storage;
 pub use storage::*;
 

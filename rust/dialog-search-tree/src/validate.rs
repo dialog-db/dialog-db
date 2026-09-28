@@ -49,8 +49,8 @@
 //! key …" at the causing edit. Cost is O(n) in entries plus one in-memory
 //! rebuild; no reference store, no second persist.
 
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
 use rkyv::{
     Deserialize, Serialize,
     bytecheck::CheckBytes,
@@ -62,8 +62,8 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key, NodeBody,
-    NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientTree, Value, into_owned,
+    Accessor, DialogSearchTreeError, Distribution, Key, Load, NodeBody, NoveltyEntry, NoveltyOp,
+    PersistentNode, PersistentTree, TransientTree, Value, into_owned,
 };
 
 /// Renders a separator for a violation message: a bounded hex prefix, so
@@ -101,14 +101,12 @@ where
     /// See the module docs for the precise property statement — this is
     /// meaningful for canonicalized roots, and will (correctly) report a
     /// buffered hitchhiker root as non-canonical.
-    pub async fn canonical_divergences<Backend>(
+    pub async fn canonical_divergences<Env>(
         &self,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Vec<String>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        Env: Provider<Load> + Clone + ConditionalSync,
     {
         // An unpersisted empty tree has no stored form to validate; it is
         // trivially canonical.
@@ -116,7 +114,7 @@ where
             return Ok(Vec::new());
         }
         let manifest = self.manifest(storage).await?;
-        let accessor: Accessor<K, V, Backend> = Accessor::new(Default::default(), storage.clone());
+        let accessor: Accessor<'_, K, V, Env> = Accessor::new(Default::default(), storage);
 
         // The empty tree's node: canonical exactly when it is byte-identical
         // to the fixed zero-entry encoding for its manifest — under every

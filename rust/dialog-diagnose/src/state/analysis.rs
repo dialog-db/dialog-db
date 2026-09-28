@@ -73,7 +73,7 @@ impl ArtifactsTreeAnalysis {
 
         tokio::spawn(async move {
             let tree_storage = TreeStorage::new(TreeStorageBridge(storage));
-            let accessor = Accessor::new(Cache::new(), tree_storage);
+            let accessor = Accessor::new(Cache::new(), &tree_storage);
 
             let mut stats = ArtifactsTreeStats::default();
             let mut levels = VecDeque::from([vec![root]]);
