@@ -884,7 +884,7 @@ mod tests {
         let profile = open_peer(storage.clone(), Location::profile(unique("direct-grant"))).await?;
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(Subject::any())
             .await?;
 
