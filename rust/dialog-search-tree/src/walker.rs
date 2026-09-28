@@ -7,8 +7,8 @@ use std::{
 };
 
 use async_stream::try_stream;
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use nonempty::NonEmpty;
@@ -23,7 +23,7 @@ use rkyv::{
 use std::sync::Arc;
 
 use crate::{
-    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NodeBody, NoveltyOp,
+    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, Load, NodeBody, NoveltyOp,
     PersistentNode, Value, into_owned,
 };
 
@@ -385,21 +385,20 @@ where
     }
 
     /// Returns a stream of entries within the specified key range.
-    pub fn stream<R, Backend>(
+    pub fn stream<R, Env>(
         self,
         range: R,
-        accessor: Accessor<Key, Value, Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         // A thin adapter, not another generator: wrapping the walk in a
         // second `try_stream!` layer measurably bloats every future that
         // embeds a walk (clippy's `large_futures` catches it downstream).
         futures_util::TryStreamExt::map_ok(
-            self.stream_scan::<R, Backend, TypedKey<Key>>(range, accessor),
+            self.stream_scan::<R, Env, TypedKey<Key>>(range, accessor),
             |entry| Entry {
                 key: entry.key.0,
                 value: entry.value,
@@ -412,31 +411,29 @@ where
     /// borrow the memoized decoded-keys arena with NO per-entry copy, and
     /// only novelty ops and cold streaming decodes copy. For consumers that
     /// work on the raw key bytes.
-    pub fn stream_handles<R, Backend>(
+    pub fn stream_handles<R, Env>(
         self,
         range: R,
-        accessor: Accessor<Key, Value, Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
-        self.stream_scan::<R, Backend, KeyHandle>(range, accessor)
+        self.stream_scan::<R, Env, KeyHandle>(range, accessor)
     }
 
     /// The walk shared by [`stream`](Self::stream) and
     /// [`stream_handles`](Self::stream_handles); `Out` decides how yielded
     /// keys materialize (see [`ScanKey`]).
-    fn stream_scan<R, Backend, Out>(
+    fn stream_scan<R, Env, Out>(
         self,
         range: R,
-        accessor: Accessor<Key, Value, Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         Out: ScanKey + 'static,
     {
         try_stream! {
@@ -702,15 +699,14 @@ where
     }
 
     /// Searches for the leaf segment that would contain the given key.
-    pub async fn search<Backend>(
+    pub async fn search<Env>(
         &self,
         key: &Key,
-        accessor: Accessor<Key, Value, Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         let Some(root) = &self.root else {
             return Ok(None);
@@ -833,11 +829,11 @@ async fn until_warmed<Warm>(
 /// Returns `None` when either the key is not the leaf's last entry or the leaf
 /// has no right-adjacent neighbor (the leaf is the rightmost segment in the
 /// tree).
-async fn prefetch_right_neighbor<Key, Value, Backend>(
+async fn prefetch_right_neighbor<Key, Value, Env>(
     key: &Key,
     leaf: &PersistentNode<Key, Value>,
     path: &[TreeLayer<Key, Value>],
-    accessor: Accessor<Key, Value, Backend>,
+    accessor: Accessor<'_, Key, Value, Env>,
 ) -> Result<Option<RightNeighbor<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -846,8 +842,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.
@@ -1372,7 +1367,7 @@ mod prefetch_tests {
 
         let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
         let tree = built_tree(&mut storage).await?;
-        let accessor = crate::Accessor::new(tree.node_cache(), storage.clone());
+        let accessor = crate::Accessor::new(tree.node_cache(), &storage);
 
         // The root's second child, and a key from its leftmost leaf.
         let root = load(&storage, tree.root()).await?;

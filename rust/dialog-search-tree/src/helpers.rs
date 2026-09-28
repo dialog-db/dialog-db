@@ -37,7 +37,8 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_storage::{DialogStorageError, JournaledStorage, MemoryStorageBackend, StorageBackend};
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -53,8 +54,8 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution, Key, Manifest,
-    NodeBody, PersistentNode, PersistentTree, Rank, Value,
+    ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution, Key, Load, Manifest,
+    NodeBody, PersistentNode, PersistentTree, Rank, Value, load,
 };
 
 /// Traversal order for tree iteration.
@@ -141,14 +142,13 @@ where
     /// * `order` - The traversal order:
     ///   - `DepthFirst`: Visit children before siblings (pre-order)
     ///   - `BreadthFirst`: Visit all nodes at each level before going deeper
-    fn traverse<'a, Backend>(
+    fn traverse<'a, Env>(
         &'a self,
         order: TraversalOrder,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend;
+        Env: Provider<Load> + ConditionalSync;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -164,14 +164,13 @@ where
         + ConditionalSync,
     D: Distribution,
 {
-    fn traverse<'a, Backend>(
+    fn traverse<'a, Env>(
         &'a self,
         order: TraversalOrder,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend,
+        Env: Provider<Load> + ConditionalSync,
     {
         let root = self.stored_root().cloned();
 
@@ -181,7 +180,7 @@ where
                 queue.enqueue([root]);
 
                 while let Some(hash) = queue.dequeue() {
-                    let node = load_node::<Key, Value, Backend>(storage, &hash).await?;
+                    let node = load_node::<Key, Value, Env>(storage, &hash).await?;
 
                     if let NodeBody::Index(index) = node.body() {
                         let children = index
@@ -200,8 +199,8 @@ where
 }
 
 /// Reads a node from storage by hash.
-async fn load_node<Key, Value, Backend>(
-    storage: &ContentAddressedStorage<Backend>,
+async fn load_node<Key, Value, Env>(
+    storage: &Env,
     hash: &Blake3Hash,
 ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
 where
@@ -210,13 +209,12 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend,
+    Env: Provider<Load> + ConditionalSync,
 {
-    let bytes = storage.retrieve(hash).await?.ok_or_else(|| {
+    let buffer = load(storage, hash).await?.ok_or_else(|| {
         DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
     })?;
-    PersistentNode::try_from(Buffer::from(bytes))
+    PersistentNode::try_from(buffer)
 }
 
 /// A stream of tree nodes.
@@ -945,7 +943,7 @@ impl TreeDescriptor {
         height: usize,
         expected_ops: &HashMap<(Vec<u8>, usize), Expect>,
     ) -> Result<SpecKey, DialogSearchTreeError> {
-        let node = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await?;
+        let node = load_node::<SpecKey, Vec<u8>, TestStorage>(storage, hash).await?;
 
         let upper_bound: SpecKey = match node.body() {
             NodeBody::Segment(segment) => SpecKey::try_from_bytes(&segment.last_key::<SpecKey>()?)?,
@@ -1079,8 +1077,7 @@ impl TreeSpec {
         is_last: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
         Box::pin(async move {
-            let Ok(node) = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await
-            else {
+            let Ok(node) = load_node::<SpecKey, Vec<u8>, TestStorage>(storage, hash).await else {
                 output.push_str(&format!("{prefix}(missing node {hash})\n"));
                 return;
             };

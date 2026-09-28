@@ -24,8 +24,8 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use rkyv::{
@@ -37,9 +37,8 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry, Key, Link,
-    NodeBody, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Value, into_owned,
-    resolve_pending,
+    DialogSearchTreeError, Distribution, Entry, Key, Link, Load, NodeBody, NoveltyEntry, NoveltyOp,
+    PersistentNode, PersistentTree, Value, into_owned, load, resolve_pending,
 };
 
 /// How many frontier blocks a comparison pass fetches concurrently in the
@@ -50,8 +49,8 @@ const LOAD_CONCURRENCY: usize = 16;
 /// back tagged with the frontier slot it was collected for. Absence and
 /// failure both come back as `None`; the comparison read that actually
 /// needs the block owns the error and the [`MissingBlocks`] policy.
-async fn preload_block<Key, Value, Backend>(
-    storage: &ContentAddressedStorage<Backend>,
+async fn preload_block<Key, Value, Env>(
+    storage: &Env,
     is_target: bool,
     offset: usize,
     hash: Blake3Hash,
@@ -62,11 +61,10 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend,
+    Env: Provider<Load> + ConditionalSync,
 {
-    let node = match storage.retrieve(&hash).await {
-        Ok(Some(bytes)) => PersistentNode::try_from(Buffer::from(bytes)).ok(),
+    let node = match load(storage, &hash).await {
+        Ok(Some(buffer)) => PersistentNode::try_from(buffer).ok(),
         _ => None,
     };
     (is_target, offset, node)
@@ -82,8 +80,8 @@ type FetchedChild<Key, Value> =
 /// fetches and parses a node, tagged with its child position. Unlike
 /// [`preload_block`] this is not speculative — every child of a visited
 /// index is consumed — so errors are returned for the descent to own.
-async fn fetch_block<Key, Value, Backend>(
-    storage: &ContentAddressedStorage<Backend>,
+async fn fetch_block<Key, Value, Env>(
+    storage: &Env,
     at: usize,
     hash: Blake3Hash,
 ) -> (
@@ -96,16 +94,12 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend,
+    Env: Provider<Load> + ConditionalSync,
 {
-    let result = match storage.retrieve(&hash).await {
-        Ok(Some(bytes)) => match PersistentNode::try_from(Buffer::from(bytes)) {
-            Ok(node) => Ok(Some(node)),
-            Err(error) => Err(error),
-        },
+    let result = match load(storage, &hash).await {
+        Ok(Some(buffer)) => PersistentNode::try_from(buffer).map(Some),
         Ok(None) => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error),
     };
     (at, result)
 }
@@ -339,12 +333,12 @@ where
 /// loaded nodes and unloaded references) plus every index node that was
 /// loaded and expanded along the way (the novel interior nodes of this
 /// side).
-struct SparseTree<'a, Key, Value, Backend>
+struct SparseTree<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+    Env: Provider<Load>,
 {
-    storage: &'a ContentAddressedStorage<Backend>,
+    storage: &'a Env,
     nodes: Vec<SparseTreeNode<Key, Value>>,
     expanded: Vec<PersistentNode<Key, Value>>,
     /// Every hash that ever entered this side's frontier, including nodes
@@ -364,15 +358,14 @@ where
     unresolved: Vec<Link>,
 }
 
-impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
+impl<'a, Key, Value, Env> SparseTree<'a, Key, Value, Env>
 where
     Key: self::Key,
     Value: self::Value + PartialEq,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend,
+    Env: Provider<Load> + ConditionalSync,
 {
     /// The frontier slots still held by reference, with their hashes: the
     /// blocks a later pass reads unless pruning settles them first.
@@ -418,7 +411,7 @@ where
 
     /// Reads a node from storage by hash.
     async fn load(
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         Self::try_load(storage, hash).await?.ok_or_else(|| {
@@ -428,11 +421,11 @@ where
 
     /// Reads a node from storage by hash; `None` when the block is absent.
     async fn try_load(
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         hash: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        match storage.retrieve(hash).await? {
-            Some(bytes) => Ok(Some(PersistentNode::try_from(Buffer::from(bytes))?)),
+        match load(storage, hash).await? {
+            Some(buffer) => Ok(Some(PersistentNode::try_from(buffer)?)),
             None => Ok(None),
         }
     }
@@ -447,9 +440,9 @@ where
     /// walk while the other side's matching subtrees still prune.
     async fn from_root(
         root: Option<&Blake3Hash>,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
         missing: MissingBlocks,
-    ) -> Result<SparseTree<'a, Key, Value, Backend>, DialogSearchTreeError> {
+    ) -> Result<SparseTree<'a, Key, Value, Env>, DialogSearchTreeError> {
         if let Some(root) = root
             && missing == MissingBlocks::Boundary
             && Self::try_load(storage, root).await?.is_none()
@@ -1232,16 +1225,16 @@ where
 /// [`changes`](Self::changes) (to transform source into target) or
 /// node-level novelty via [`novel_nodes`](Self::novel_nodes) (the target
 /// nodes the source side does not have).
-pub struct TreeDifference<'a, Key, Value, Backend>
+pub struct TreeDifference<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+    Env: Provider<Load>,
 {
-    source: SparseTree<'a, Key, Value, Backend>,
-    target: SparseTree<'a, Key, Value, Backend>,
+    source: SparseTree<'a, Key, Value, Env>,
+    target: SparseTree<'a, Key, Value, Env>,
 }
 
-impl<'a, Key, Value, Backend> TreeDifference<'a, Key, Value, Backend>
+impl<'a, Key, Value, Env> TreeDifference<'a, Key, Value, Env>
 where
     Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + PartialEq + ConditionalSync + 'static,
@@ -1259,9 +1252,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     /// Computes the difference between two trees.
     ///
@@ -1275,9 +1266,9 @@ where
     pub async fn compute<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+        source_storage: &'a Env,
+        target_storage: &'a Env,
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1301,10 +1292,10 @@ where
     pub async fn compute_with<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
         missing: MissingPolicy,
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1352,10 +1343,10 @@ where
     pub async fn compute_within<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
         scope: &[core::ops::RangeInclusive<Key>],
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1375,11 +1366,11 @@ where
     pub async fn compute_within_with<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
         scope: &[core::ops::RangeInclusive<Key>],
         prefetch: Prefetch,
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1398,12 +1389,12 @@ where
     async fn compute_scoped<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
         scope: Option<&[core::ops::RangeInclusive<Key>]>,
         missing: MissingPolicy,
         prefetch: Prefetch,
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1433,8 +1424,8 @@ where
         // The two roots are independent reads, so against a hydrating
         // backend they cost one round trip together rather than one each.
         let (mut source, mut target): (
-            SparseTree<'a, Key, Value, Backend>,
-            SparseTree<'a, Key, Value, Backend>,
+            SparseTree<'a, Key, Value, Env>,
+            SparseTree<'a, Key, Value, Env>,
         ) = futures_util::future::try_join(
             SparseTree::from_root(source_tree.stored_root(), source_storage, missing.source),
             SparseTree::from_root(target_tree.stored_root(), target_storage, missing.target),
@@ -1469,8 +1460,7 @@ where
             // `expand_at`'s own read keeps owning the error and the
             // `MissingBlocks` policy; the `attempted` set keeps a block
             // that stayed a reference from being refetched every pass.
-            let mut pending: Vec<(bool, usize, &ContentAddressedStorage<Backend>, Blake3Hash)> =
-                Vec::new();
+            let mut pending: Vec<(bool, usize, &Env, Blake3Hash)> = Vec::new();
             if prefetch == Prefetch::Eager {
                 for (is_target, offset, storage, hash) in source
                     .unloaded()
@@ -1809,7 +1799,7 @@ where
                     SparseTreeNode::Settled { .. } => continue,
                     SparseTreeNode::Loaded { node, .. } => node.clone(),
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
-                        match SparseTree::<Key, Value, Backend>::try_load(
+                        match SparseTree::<Key, Value, Env>::try_load(
                             self.target.storage,
                             &link.node,
                         )

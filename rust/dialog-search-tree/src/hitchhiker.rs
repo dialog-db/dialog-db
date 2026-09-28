@@ -28,8 +28,8 @@
 use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_util::Stream;
 use rkyv::{
     Deserialize, Serialize,
@@ -42,10 +42,10 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
-    Entry, Geometric, Key, Manifest, Node, NodeBody, NodeCache, NoveltyEntry, NoveltyOp,
-    PersistentNode, PersistentTree, TransientNode, TransientRootParts, TransientSegment,
-    TransientTree, Value, link_bounds,
+    Accessor, Buffer, Cache, Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key,
+    Load, Manifest, Node, NodeBody, NodeCache, NoveltyEntry, NoveltyOp, PersistentNode,
+    PersistentTree, TransientNode, TransientRootParts, TransientSegment, TransientTree, Value,
+    link_bounds,
 };
 
 /// The per-node op-count cap a buffered tree flushes at: the tree's expected
@@ -361,15 +361,14 @@ where
     }
 
     /// Buffers an insert (or value update) of `key` into the tree.
-    pub async fn insert<Backend>(
+    pub async fn insert<Env>(
         self,
         key: Key,
         value: Value,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         self.write(
             vec![NoveltyEntry {
@@ -382,14 +381,9 @@ where
     }
 
     /// Buffers a delete (tombstone) of `key` into the tree.
-    pub async fn delete<Backend>(
-        self,
-        key: Key,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<Self, DialogSearchTreeError>
+    pub async fn delete<Env>(self, key: Key, storage: &Env) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         self.write(
             vec![NoveltyEntry {
@@ -408,15 +402,14 @@ where
     /// cascades into any given child at most once instead of re-flushing it
     /// on every overflow the batch crosses. Reads are novelty-aware wherever
     /// ops sit, so a deferred tree reads exactly like a settled one.
-    pub async fn insert_deferred<Backend>(
+    pub async fn insert_deferred<Env>(
         self,
         key: Key,
         value: Value,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         self.write_with(
             vec![NoveltyEntry {
@@ -431,14 +424,13 @@ where
 
     /// Buffers a delete WITHOUT evaluating the flush policy; see
     /// [`insert_deferred`](Self::insert_deferred).
-    pub async fn delete_deferred<Backend>(
+    pub async fn delete_deferred<Env>(
         self,
         key: Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         self.write_with(
             vec![NoveltyEntry {
@@ -455,13 +447,9 @@ where
     /// accumulated: the settle half of batch writing. Buffers that ended the
     /// batch over their trigger cascade now, top-down, each child receiving
     /// its whole accumulated share in one flush.
-    pub async fn settle<Backend>(
-        self,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<Self, DialogSearchTreeError>
+    pub async fn settle<Env>(self, storage: &Env) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         match self.root {
             // Nothing buffered in memory: nothing to settle. (A persisted
@@ -479,14 +467,13 @@ where
     /// leaf are collected and applied afterward through the canonical
     /// [`TransientTree`] insert/delete path so leaf landings reshape exactly as
     /// a sequential edit would.
-    async fn write<Backend>(
+    async fn write<Env>(
         self,
         msgs: Vec<NoveltyEntry<Value>>,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         self.write_with(msgs, storage, true).await
     }
@@ -496,17 +483,16 @@ where
     /// the classic behavior. Leaf-bound ops (an empty or segment-rooted
     /// tree, the `Immediate` policy) always go to the canonical edit path
     /// immediately — a leaf has no buffer to defer into.
-    async fn write_with<Backend>(
+    async fn write_with<Env>(
         mut self,
         msgs: Vec<NoveltyEntry<Value>>,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         settle: bool,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
-        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.cache.clone(), storage);
 
         // An empty tree has no node to buffer into; every op goes straight to
         // the (initially empty) canonical tree.
@@ -547,7 +533,7 @@ where
                 Some(node)
             }
             Some(node) => {
-                let node = enqueue::<Key, Value, D, Backend>(
+                let node = enqueue::<Key, Value, D, Env>(
                     node,
                     msgs,
                     EnqueueConfig {
@@ -680,14 +666,13 @@ where
     /// the canonical edit path so the returned tree is deterministic and
     /// history-independent, the same root a sequential build of the surviving
     /// fact set produces. The buffered tree is consumed.
-    pub async fn canonicalize<Backend>(
+    pub async fn canonicalize<Env>(
         self,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         delta: &mut Delta<Blake3Hash, Buffer>,
     ) -> Result<PersistentTree<Key, Value, D>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         // Collect every buffered op across the whole spine in key order, clearing
         // the buffers as we go, then replay them as canonical edits onto the
@@ -699,7 +684,7 @@ where
         // deeper therefore means older, so after the stable sort by key the
         // SHALLOWEST (newest) op for a key sits last, and last-write-wins
         // replay lets exactly that op stand.
-        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.cache.clone(), storage);
         let edit = match self.root {
             // The session's manifest rides along so the empty tree
             // canonicalizes to the manifest-carrying empty node.
@@ -714,7 +699,7 @@ where
                 // no novelty anywhere is already canonical (an empty buffer is
                 // byte-identical to a canonical node's) and keeps its hash
                 // with no rewrite.
-                if !subtree_has_novelty::<Key, Value, Backend>(&hash, &accessor).await? {
+                if !subtree_has_novelty::<Key, Value, Env>(&hash, &accessor).await? {
                     TransientTree::<Key, Value, D>::new(hash, self.cache.clone())
                 } else {
                     let root: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
@@ -759,14 +744,13 @@ where
     /// [`Assert`](NoveltyOp::Assert) shadows it. With no covering buffered op the
     /// stored leaf value stands, read through the same path
     /// [`PersistentTree::get`] uses for untouched subtrees.
-    pub async fn get<Backend>(
+    pub async fn get<Env>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         let mut node = match &self.root {
             HitchhikerRoot::Empty => return Ok(None),
@@ -825,14 +809,13 @@ where
     /// [`Assert`](NoveltyOp::Assert) replaces or inserts an entry, a
     /// [`Retract`](NoveltyOp::Retract) hides one. The result is exactly what the
     /// same range would yield after [`canonicalize`](Self::canonicalize).
-    pub fn stream_range<R, Backend>(
+    pub fn stream_range<R, Env>(
         &self,
         range: R,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
         Key: Clone,
         Value: Clone,
@@ -905,21 +888,19 @@ where
     /// memory) and is blind to `novelty` by construction, so this yields exactly
     /// the pre-buffer state that [`stream_range`](Self::stream_range) merges
     /// buffered ops over.
-    fn persistent_range<R, Backend>(
+    fn persistent_range<R, Env>(
         &self,
         range: R,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
         // Snapshot the spine into an owned plan (persistent subtrees as hashes,
         // live leaf entries cloned) so the stream borrows nothing from `self`.
         // Untouched subtrees stay hashes, so nothing below the spine is copied.
         let cache = self.cache.clone();
-        let storage = storage.clone();
         let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
 
         let plan = match &self.root {
@@ -936,7 +917,7 @@ where
             for step in plan {
                 match step {
                     StoredStep::Subtree(hash) => {
-                        let accessor = Accessor::new(cache.clone(), storage.clone());
+                        let accessor = Accessor::new(cache.clone(), storage);
                         let inner = crate::TreeWalker::<Key, Value>::new(Some(hash))
                             .stream(bounds.clone(), accessor);
                         futures_util::pin_mut!(inner);
@@ -957,15 +938,14 @@ where
     /// Delegates a point lookup over a fully persistent subtree to
     /// [`PersistentTree::get`], so reads of an untouched subtree match the
     /// persistent read exactly.
-    async fn persistent_get<Backend>(
+    async fn persistent_get<Env>(
         &self,
         hash: &Blake3Hash,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<Load> + ConditionalSync,
     {
         let subtree: PersistentTree<Key, Value, D> =
             PersistentTree::seal(hash.clone(), self.cache.clone());
@@ -1071,12 +1051,12 @@ struct EnqueueConfig {
 /// - **Index overflow**: each child receives its own link's buffer verbatim
 ///   via a recursive one-level `enqueue`. The grouping already happened at
 ///   enqueue, so a flush partitions nothing.
-fn enqueue<'a, Key, Value, D, Backend>(
+fn enqueue<'a, Key, Value, D, Env>(
     node: TransientNode<Key, Value>,
     msgs: Vec<NoveltyEntry<Value>>,
     config: EnqueueConfig,
     deferred: &'a mut Vec<NoveltyEntry<Value>>,
-    accessor: &'a Accessor<Key, Value, Backend>,
+    accessor: &'a Accessor<'_, Key, Value, Env>,
 ) -> NodeFuture<'a, Key, Value>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1086,8 +1066,7 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     D: Distribution,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     Box::pin(async move {
         let mut node = node;
@@ -1201,7 +1180,7 @@ where
                 FlushPolicy::Recursive => 0,
                 _ => config.op_buf_size,
             };
-            let updated = enqueue::<Key, Value, D, Backend>(
+            let updated = enqueue::<Key, Value, D, Env>(
                 child,
                 took,
                 EnqueueConfig {
@@ -1225,9 +1204,9 @@ where
 
 /// Lifts `child` from a [`Node::Persistent`] reference into editable transient
 /// form, loading it from storage; a transient child is left untouched.
-async fn lift_child<Key, Value, Backend>(
+async fn lift_child<Key, Value, Env>(
     child: &mut Node<Key, Value>,
-    accessor: &Accessor<Key, Value, Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1235,8 +1214,7 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     if let Node::Persistent(link) = child {
         let persistent = accessor.get_node(&link.node).await?;
@@ -1420,10 +1398,10 @@ where
 }
 
 /// Replays a list of buffered ops as canonical inserts/deletes on an edit batch.
-async fn replay_ops<Key, Value, D, Backend>(
+async fn replay_ops<Key, Value, D, Env>(
     mut edit: TransientTree<Key, Value, D>,
     ops: Vec<NoveltyEntry<Value>>,
-    storage: &ContentAddressedStorage<Backend>,
+    storage: &Env,
 ) -> Result<TransientTree<Key, Value, D>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1438,8 +1416,7 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     D: Distribution,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     // Bulk-load fast path: a batch landing in an EMPTY tree builds the
     // canonical tree bottom-up in one pass instead of one canonical edit
@@ -1467,9 +1444,9 @@ where
 /// Novelty lives only in index nodes, so the probe walks the subtree's index
 /// spine and never touches a leaf. It is what lets the drain lift exactly the
 /// subtrees that need rewriting, leaving every clean subtree's hash untouched.
-fn subtree_has_novelty<'a, Key, Value, Backend>(
+fn subtree_has_novelty<'a, Key, Value, Env>(
     hash: &'a Blake3Hash,
-    accessor: &'a Accessor<Key, Value, Backend>,
+    accessor: &'a Accessor<'_, Key, Value, Env>,
 ) -> BoolFuture<'a>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1478,8 +1455,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     Box::pin(async move {
         let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
@@ -1493,7 +1469,7 @@ where
             }
         };
         for link in links {
-            if subtree_has_novelty::<Key, Value, Backend>(&link.node, accessor).await? {
+            if subtree_has_novelty::<Key, Value, Env>(&link.node, accessor).await? {
                 return Ok(true);
             }
         }
@@ -1514,10 +1490,10 @@ where
 /// the shallowest (newest) op for every key in the last position for
 /// last-write-wins replay. Within one node the buffer is already sorted with
 /// the newest op for a key last, so appending it whole keeps that order too.
-fn drain_novelty<'a, Key, Value, Backend>(
+fn drain_novelty<'a, Key, Value, Env>(
     node: &'a mut TransientNode<Key, Value>,
     ops: &'a mut Vec<NoveltyEntry<Value>>,
-    accessor: &'a Accessor<Key, Value, Backend>,
+    accessor: &'a Accessor<'_, Key, Value, Env>,
 ) -> UnitFuture<'a>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1526,14 +1502,13 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<Load> + ConditionalSync,
 {
     Box::pin(async move {
         if let TransientNode::Index(index) = node {
             for child in &mut index.children {
                 if let Node::Persistent(link) = child {
-                    if !subtree_has_novelty::<Key, Value, Backend>(&link.node, accessor).await? {
+                    if !subtree_has_novelty::<Key, Value, Env>(&link.node, accessor).await? {
                         continue;
                     }
                     // Measurement-only (uncommitted, env-gated) lift breadcrumb.
@@ -1651,7 +1626,7 @@ mod tests {
         let keys: Vec<u32> = (0..2000).collect();
         let tree = sequential(&keys, &mut storage).await?;
         let root_hashes: Vec<Blake3Hash> = {
-            let accessor = crate::Accessor::new(crate::Cache::new(), storage.clone());
+            let accessor = crate::Accessor::new(crate::Cache::new(), &storage);
             let node: crate::PersistentNode<[u8; 4], Vec<u8>> =
                 accessor.get_node(tree.root()).await?;
             let index = node.as_index()?;
@@ -3575,7 +3550,7 @@ mod tests {
             emptied.stored_root().is_some(),
             "an emptied tree must keep a stored root node"
         );
-        let node: PersistentNode<[u8; 4], Vec<u8>> = Accessor::new(Cache::new(), storage.clone())
+        let node: PersistentNode<[u8; 4], Vec<u8>> = Accessor::new(Cache::new(), &storage)
             .get_node(emptied.root())
             .await?;
         assert!(node.is_empty()?, "the empty root is a zero-entry node");
