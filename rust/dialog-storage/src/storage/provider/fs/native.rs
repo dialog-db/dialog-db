@@ -160,6 +160,41 @@ impl TryFrom<FileSystemHandle> for PathBuf {
     }
 }
 
+/// `Url::to_file_path` percent-decodes every segment, so a `%2F` in the
+/// URL becomes a separator in the OS path and `%2E%2E` a parent: the
+/// path can have more, or other, components than the URL has segments,
+/// and land outside the name that was resolved. `FileSystemHandle::resolve`
+/// encodes `%` so a handle it produced cannot carry one, but a handle
+/// can also be built from a raw URL; this is the check at the OS-path
+/// boundary. Every decoded segment must be one plain component, and the
+/// last of them must be the path's final component.
+fn verify_segments(url: &Url, path: &std::path::Path) -> Result<(), FileSystemError> {
+    use std::path::Component;
+
+    let mut last = None;
+    for segment in url.path_segments().into_iter().flatten() {
+        if segment.is_empty() {
+            continue;
+        }
+        let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+        if matches!(decoded.as_ref(), "." | "..") || decoded.chars().any(std::path::is_separator) {
+            return Err(FileSystemError::Containment(format!(
+                "URL segment '{segment}' does not decode to one path component"
+            )));
+        }
+        last = Some(decoded);
+    }
+
+    if let (Some(expected), Some(Component::Normal(actual))) = (last, path.components().next_back())
+        && actual.to_str() != Some(expected.as_ref())
+    {
+        return Err(FileSystemError::Containment(format!(
+            "URL segment '{expected}' is not the path's final component {actual:?}"
+        )));
+    }
+    Ok(())
+}
+
 impl TryFrom<&FileSystemHandle> for PathBuf {
     type Error = FileSystemError;
 
@@ -168,6 +203,7 @@ impl TryFrom<&FileSystemHandle> for PathBuf {
             .url()
             .to_file_path()
             .map_err(|_| FileSystemError::Io("Failed to convert URL to path".to_string()))?;
+        verify_segments(location.url(), &path)?;
 
         // On Windows, escape characters illegal in filenames (DIDs carry
         // colons) per path component, and drop the trailing separator that

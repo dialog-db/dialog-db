@@ -178,6 +178,48 @@ use web as backend;
 
 pub(crate) use backend::{LockGuard, lock};
 
+/// The bytes of a path segment that URL resolution would otherwise read:
+/// `?` begins a query and `#` a fragment (both cut the path short), `\`
+/// is a separator in a `file:` URL, `%` begins an escape (`%2F` reaches
+/// the OS as `/` once `Url::to_file_path` decodes it), and a leading or
+/// trailing space or control is stripped from the input before parsing
+/// (`meta ` would be `meta`). Everything else, `:` and non-ASCII
+/// included, is left to the URL layer, which round-trips it; encoding
+/// only these keeps a plain name's layout exactly where it was.
+const SEGMENT_RESERVED: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'%')
+    .add(b'?')
+    .add(b'#')
+    .add(b'\\');
+
+/// Percent-encode one path segment so URL resolution treats it as a
+/// name. A leading `.` is encoded too, so no segment can begin to look
+/// like a dot segment to anything downstream.
+fn encode_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    let rest = match segment.strip_prefix('.') {
+        Some(rest) => {
+            encoded.push_str("%2E");
+            rest
+        }
+        None => segment,
+    };
+    encoded.extend(percent_encoding::utf8_percent_encode(
+        rest,
+        SEGMENT_RESERVED,
+    ));
+    encoded
+}
+
+/// Whether `segment` names the current or the parent location rather
+/// than a child: empty, `.` or `..`, or a percent-encoding of one, which
+/// URL resolution treats the same way.
+fn is_dot_segment(segment: &str) -> bool {
+    let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+    matches!(decoded.as_ref(), "" | "." | "..")
+}
+
 impl FileSystemHandle {
     /// Returns the underlying URL.
     pub fn url(&self) -> &Url {
@@ -199,11 +241,21 @@ impl FileSystemHandle {
         }
     }
 
-    /// Resolves a path segment relative to this location, validating containment.
+    /// Resolves a relative path (one or more `/`-separated segments)
+    /// under this location, validating containment.
     ///
-    /// Returns an error if the resulting path escapes this location (e.g., via `..`).
-    /// The segment is prefixed with `./` to ensure it's interpreted as a relative
-    /// path, preventing segments containing `:` from being parsed as URL schemes.
+    /// Each segment is a name, never an instruction to the resolver:
+    /// `?`, `#`, `%`, `\` and control characters are percent-encoded
+    /// before the join so URL resolution cannot read them (`meta?x` is
+    /// the name `meta?x`, not `meta` with a query), and a segment that is
+    /// empty, `.` or `..` (or percent-encodes to one) is refused, since
+    /// it names this location or its parent rather than a child.
+    /// Segments of plain bytes are left as they are, so the layout of
+    /// existing data does not move.
+    ///
+    /// The path is prefixed with `./` to ensure it's interpreted as
+    /// relative, preventing segments containing `:` from being parsed as
+    /// URL schemes.
     pub fn resolve(&self, segment: &str) -> Result<Self, FileSystemError> {
         // Normalize base to ensure it ends with '/' for correct directory semantics.
         // Without trailing slash, joining "baz" to "file:///foo/bar" gives "file:///foo/baz"
@@ -216,9 +268,17 @@ impl FileSystemHandle {
             url
         };
 
-        // Prefix with "./" to ensure the segment is treated as a relative path.
-        // Without this, "did:key:z6Mk" would be interpreted as a URL with scheme "did".
-        let relative_segment = format!("./{}", segment);
+        let mut relative_segment = String::from(".");
+        for piece in segment.split('/') {
+            if is_dot_segment(piece) {
+                return Err(FileSystemError::Containment(format!(
+                    "Path '{}' has a segment that is empty, '.' or '..'",
+                    segment
+                )));
+            }
+            relative_segment.push('/');
+            relative_segment.push_str(&encode_segment(piece));
+        }
 
         let joined = normalized_base
             .join(&relative_segment)
