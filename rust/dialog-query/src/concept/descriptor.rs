@@ -32,6 +32,8 @@ use serde::{Deserialize, Serialize};
 use serde_ipld_dagcbor::to_vec as to_cbor_vec;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Not;
+#[cfg(test)]
+use std::sync::Weak;
 use std::sync::{Arc, RwLock};
 
 /// A concept descriptor: a named set of attribute descriptors that together
@@ -291,7 +293,7 @@ impl ConceptDescriptor {
     /// A weak handle on the implicit rule, to check it is freed with the
     /// descriptor.
     #[cfg(test)]
-    fn implicit_weak(&self) -> std::sync::Weak<DeductiveRule> {
+    fn implicit_weak(&self) -> Weak<DeductiveRule> {
         Arc::downgrade(
             self.implicit
                 .get_or_init(|| unreachable!("the implicit rule is computed first")),
