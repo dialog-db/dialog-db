@@ -244,7 +244,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::resolve;
-    use crate::helpers::test_repo;
+    use crate::helpers::{flaky_operator_with_profile, test_repo};
     use crate::registry::{apply, pull};
     use crate::schema::{Peer, Replica};
     use crate::{PullError, RepositoryMemoryExt as _, Route, Upstream};
@@ -253,6 +253,87 @@ mod tests {
     use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::Statement as _;
     use dialog_varsig::did;
+
+    /// Routes that resolve to `main` and `dev` on this replica: the
+    /// second is recorded straight into the registry, so the branch's
+    /// tracking cell still holds the routes from when only `main` was.
+    async fn two_upstreams_one_recorded<Env>(
+        repo: &crate::Repository<dialog_credentials::Credential>,
+        profile: &dialog_identity::Profile,
+        env: &Env,
+    ) -> Result<crate::Branch>
+    where
+        Env: crate::registry::RegistryEnv,
+    {
+        let main = repo.branch("main").open().perform(env).await?;
+        let feature = repo.branch("feature").open().perform(env).await?;
+        feature.pull_from(&main).perform(env).await?;
+        assert_eq!(feature.pulls().iter().count(), 1);
+
+        let local = Replica::new(dialog_varsig::Principal::did(profile), repo.did());
+        let dev = local.branch("dev");
+        let mut changes = Changes::new();
+        dev.clone().assert(&mut changes);
+        pull(&local.branch("feature"), &dev).assert(&mut changes);
+        apply(
+            &repo.subject().registry().open().perform(env).await?,
+            changes,
+            env,
+        )
+        .await?;
+        Ok(feature)
+    }
+
+    /// Other syncs write the tracking cell too. Losing it to them,
+    /// however many times running, does not leave the routes
+    /// unrecorded: resolve lays them over what is there until they
+    /// land, and only then answers -- a caller reading the routes after
+    /// a resolve that answered without recording them would act on
+    /// whatever the last writer left, routes resolved before the
+    /// registry moved.
+    #[dialog_common::test]
+    async fn it_records_its_routes_however_often_the_cell_moves() -> Result<()> {
+        let (operator, profile, storage) = flaky_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let feature = two_upstreams_one_recorded(&repo, &profile, &operator).await?;
+
+        let memory = storage.space(&repo.did()).expect("mounted").memory;
+        memory.lose_next_publishes("branch/feature", "tracking", 3);
+        resolve(&feature, &operator).await?;
+
+        let registry = repo.subject().registry().open().perform(&operator).await?;
+        let resolved = feature.tracked().resolved.expect("resolved");
+        assert_eq!(
+            resolved.at,
+            registry.revision(),
+            "the routes were resolved at the registry's head"
+        );
+        assert_eq!(resolved.pulls.len(), 2, "{:?}", resolved.pulls);
+        assert_eq!(memory.publishes("branch/feature", "tracking"), 4);
+
+        let reopened = repo.branch("feature").open().perform(&operator).await?;
+        assert_eq!(
+            reopened.tracked().resolved,
+            Some(resolved),
+            "the routes were recorded, not just cached"
+        );
+        Ok(())
+    }
+
+    /// A cell that never stops moving is given up on, saying so, rather
+    /// than answering with the routes unrecorded.
+    #[dialog_common::test]
+    async fn it_gives_up_on_a_cell_that_never_stops_moving() -> Result<()> {
+        let (operator, profile, storage) = flaky_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let feature = two_upstreams_one_recorded(&repo, &profile, &operator).await?;
+
+        let memory = storage.space(&repo.did()).expect("mounted").memory;
+        memory.lose_publishes("branch/feature", "tracking", 0..);
+        let resolved = resolve(&feature, &operator).await;
+        assert!(resolved.is_err(), "{resolved:?}");
+        Ok(())
+    }
 
     /// Routes are cached against the registry revision they were resolved
     /// at: an upstream recorded through another handle is picked up the
