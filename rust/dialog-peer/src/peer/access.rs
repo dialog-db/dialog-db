@@ -393,7 +393,7 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     /// The session grant covers the claim or the operator was never
     /// allowed this scope; the branch walk then proves the PROFILE's
     /// authority (empty for the profile's own subjects) and the in-memory
-    /// link completes the chain. When no session grant covers the claim,
+    /// link completes the chain. When no session grant proves the claim,
     /// fall back to a plain walk: a cross-party delegation directly to
     /// this operator may still prove it.
     async fn prove_as_operator(&self, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
@@ -410,9 +410,16 @@ impl<S: Clone, M: Mode> Peer<S, M> {
                 Err(error) => refused = Some(error),
             }
         }
-        match refused {
-            Some(error) => Err(error),
-            None => self.walk(claim.principal.clone(), claim).await,
+        // Nor does a covering grant hide a delegation issued to this
+        // operator's own key: a session allowed `Subject::any()` is
+        // covered for every claim, and its peer proves none of the
+        // subjects that delegated to the session alone. When the walk
+        // fails too, the grant's refusal is the one reported: it names
+        // the authority the session was opened with, where the walk's
+        // only says the key holds nothing.
+        match self.walk(claim.principal.clone(), claim).await {
+            Ok(proof) => Ok(proof),
+            Err(walked) => Err(refused.unwrap_or(walked)),
         }
     }
 
