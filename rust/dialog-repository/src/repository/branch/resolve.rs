@@ -70,7 +70,10 @@ pub(crate) async fn resolve<Env: ResolveEnv>(
     let cell = branch.tracking();
     for _ in 0..ATTEMPTS {
         let mut tracking = branch.tracked();
-        if matches!(&tracking.resolved, Some(current) if current.at == resolved.at) {
+        // What the registry says at one revision may still resolve to
+        // different routes, when the host's contacts moved: only the
+        // same routes already recorded are taken as landed.
+        if tracking.resolved.as_ref() == Some(&resolved) {
             return Ok(());
         }
         tracking.resolved = Some(resolved.clone());
@@ -296,9 +299,9 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::resolve;
+    use super::{ResolveEnv, resolve};
     use crate::helpers::{connect, flaky_session_with_peer, test_repo};
-    use crate::registry::{RegistryEnv, apply, pull};
+    use crate::registry::{apply, pull};
     use crate::schema::Replica;
     use crate::{
         Branch, PullError, Repository, RepositoryMemoryExt as _, ResolveUpstreamsError, Route,
@@ -322,7 +325,7 @@ mod tests {
         env: &Env,
     ) -> Result<Branch>
     where
-        Env: RegistryEnv,
+        Env: ResolveEnv,
     {
         let main = repo.branch("main").open().perform(env).await?;
         let feature = repo.branch("feature").open().perform(env).await?;

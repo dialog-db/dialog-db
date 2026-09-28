@@ -110,7 +110,7 @@ impl Upgrade {
         env: &Env,
     ) -> Result<Upgraded, UpgradeError>
     where
-        Env: RegistryEnv + Provider<List>,
+        Env: RegistryEnv + PeersEnv + Provider<List>,
     {
         if from > VERSION {
             return Err(UpgradeError::Newer {

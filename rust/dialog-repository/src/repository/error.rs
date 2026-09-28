@@ -327,18 +327,6 @@ pub enum SetUpstreamError {
         target: String,
     },
 
-    /// The upstream is a branch at a peer reached through another
-    /// repository on this device. The peer and its addresses are
-    /// recorded in that repository's registry, so from this one the
-    /// branch could not be reached.
-    #[error("Branch {branch} cannot track {target} at a peer of another local repository")]
-    ForeignRemoteUpstream {
-        /// The branch name.
-        branch: String,
-        /// The branch it was asked to track, as `peer/branch`.
-        target: String,
-    },
-
     /// The operator could not say who it acts for.
     #[error(transparent)]
     Authority(#[from] AuthorityError),
