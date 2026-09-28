@@ -225,6 +225,7 @@ mod tests {
     use crate::registry::RegistryEnv;
     use crate::{Branch, CommitError, PublishError, PullError};
     use anyhow::Result;
+    use dialog_artifacts::history::History as _;
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use futures_util::{StreamExt, stream};
@@ -336,10 +337,69 @@ mod tests {
             .await?;
 
         assert_ne!(landed.version(), won.version());
+        let record = second
+            .history(&worker)
+            .revision_record(&landed.version())
+            .await?
+            .expect("the landed revision's record is retrievable");
+        assert_eq!(
+            record.parents,
+            vec![won.version()],
+            "the commit built on the head its writer moved rather than merging with it"
+        );
         let fresh = repo.branch("main").open().perform(&worker).await?;
         assert_eq!(fresh.revision(), Some(landed));
         assert_eq!(
             names(&fresh, &worker).await?,
+            vec![Value::String("Alice".into()), Value::String("Bob".into())]
+        );
+        Ok(())
+    }
+
+    /// A merging commit builds on a head a pull of its own writer
+    /// fast-forwarded to, although another writer issued that head: the
+    /// pull was this writer's doing, not a concurrent change, so the
+    /// commit lands with one parent rather than minting a merge.
+    #[dialog_common::test]
+    async fn it_builds_on_a_head_its_own_pull_adopted() -> Result<()> {
+        let (session, peer) = test_session_with_peer().await;
+        let repo = test_repo(&session, &peer).await;
+        let main = repo.branch("main").open().perform(&peer).await?;
+        let theirs = main
+            .commit(stream::iter(vec![name("user:a", "Alice")?]))
+            .perform(&peer)
+            .await?;
+
+        let syncing = repo.branch("feature").open().perform(&session).await?;
+        let writing = repo.branch("feature").open().perform(&session).await?;
+        syncing.pull_from(&main).perform(&session).await?;
+        let adopted = syncing
+            .pull()
+            .perform(&session)
+            .await?
+            .expect("the pull adopts main's head");
+        assert_eq!(adopted, theirs, "a fast-forward adopts the head as issued");
+
+        let landed = writing
+            .commit(stream::iter(vec![name("user:b", "Bob")?]))
+            .merge()
+            .perform(&session)
+            .await?;
+
+        let record = writing
+            .history(&session)
+            .revision_record(&landed.version())
+            .await?
+            .expect("the landed revision's record is retrievable");
+        assert_eq!(
+            record.parents,
+            vec![adopted.version()],
+            "the commit built on the head its own pull adopted rather than merging with it"
+        );
+        let fresh = repo.branch("feature").open().perform(&session).await?;
+        assert_eq!(fresh.revision(), Some(landed));
+        assert_eq!(
+            names(&fresh, &session).await?,
             vec![Value::String("Alice".into()), Value::String("Bob".into())]
         );
         Ok(())
