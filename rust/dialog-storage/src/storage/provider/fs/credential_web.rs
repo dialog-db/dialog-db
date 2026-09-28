@@ -18,8 +18,10 @@
 use super::FileSystem;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
-use dialog_effects::credential::prelude::{LoadCredentialExt, SaveCredentialExt};
-use dialog_effects::credential::{CredentialError, Load, Save};
+use dialog_effects::credential::prelude::{
+    LoadCredentialExt, RetractCredentialExt, SaveCredentialExt,
+};
+use dialog_effects::credential::{CredentialError, Load, Retract, Save};
 
 const CREDENTIAL: &str = "credential";
 const KEY: &str = "key";
@@ -49,6 +51,14 @@ impl Provider<Save<Credential>> for FileSystem {
         // cannot be stored, and the identity is all the FS layout needs.
         let bytes = input.credential().to_identity_bytes();
         self.credential_key(input.address())?.write(&bytes).await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl Provider<Retract<Credential>> for FileSystem {
+    async fn execute(&self, input: Capability<Retract<Credential>>) -> Result<(), CredentialError> {
+        self.credential_key(input.address())?.remove().await?;
         Ok(())
     }
 }

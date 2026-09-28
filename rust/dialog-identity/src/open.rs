@@ -4,7 +4,12 @@
 use dialog_capability::{Capability, Provider, Subject, did};
 use dialog_common::ConditionalSync;
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
+use dialog_effects::credential::prelude::{
+    CredentialCapabilityExt as _, CredentialKeyExt as _, CredentialSubjectExt as _,
+};
+use dialog_effects::credential::{self as credential_fx};
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt};
+use dialog_varsig::Principal as _;
 
 use crate::IdentityError;
 
@@ -110,6 +115,60 @@ impl OpenCredential {
     }
 }
 
+impl OpenCredential {
+    /// Forget the credential named `name`, destroying the key where the
+    /// store holds its only copy: a later [`open`](Self::open) creates a
+    /// new one. Forgetting a name that holds nothing succeeds.
+    pub fn forget(name: impl Into<String>) -> ForgetCredential {
+        ForgetCredential {
+            name: name.into(),
+            directory: Directory::Profile,
+        }
+    }
+}
+
+/// Command to forget the signing credential at a named location. Created
+/// by [`OpenCredential::forget`].
+pub struct ForgetCredential {
+    name: String,
+    directory: Directory,
+}
+
+impl ForgetCredential {
+    /// Set the directory the credential lives in.
+    pub fn at(mut self, directory: Directory) -> Self {
+        self.directory = directory;
+        self
+    }
+
+    /// Execute against a credential store.
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), IdentityError>
+    where
+        Env: Provider<storage_fx::Load>
+            + Provider<credential_fx::Retract<Credential>>
+            + ConditionalSync,
+    {
+        let loaded = Subject::from(did!("local:storage"))
+            .attenuate(storage_fx::Storage)
+            .attenuate(Location::new(self.directory, &self.name))
+            .load()
+            .perform(env)
+            .await;
+        let credential = match loaded {
+            Ok(credential) => credential,
+            Err(storage_fx::StorageError::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(IdentityError::Storage(error.to_string())),
+        };
+        Subject::from(credential.did())
+            .credential()
+            .key(credential_fx::SELF)
+            .retract()
+            .perform(env)
+            .await
+            .map_err(|error| IdentityError::Storage(error.to_string()))
+    }
+}
+
 async fn generate() -> Result<Credential, IdentityError> {
     let signer = Ed25519Signer::generate()
         .await
@@ -123,7 +182,6 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_varsig::Principal as _;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use dialog_effects::storage::{Create, Load, StorageError};
@@ -187,6 +245,36 @@ mod tests {
             !storage.create_called.load(Ordering::SeqCst),
             "a backend failure must not fall through to credential creation"
         );
+    }
+
+    /// A forgotten credential is gone: loading it fails, and opening it
+    /// again creates a new key.
+    #[dialog_common::test]
+    async fn it_forgets_a_credential() {
+        let storage = CredentialStore::<VolatileSpace>::new();
+
+        let first = OpenCredential::open("dora")
+            .perform(&storage)
+            .await
+            .unwrap();
+        OpenCredential::forget("dora")
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            OpenCredential::load("dora").perform(&storage).await,
+            Err(IdentityError::NotFound)
+        ));
+        let second = OpenCredential::open("dora")
+            .perform(&storage)
+            .await
+            .unwrap();
+        assert_ne!(first.did(), second.did());
+        OpenCredential::forget("nobody")
+            .perform(&storage)
+            .await
+            .unwrap();
     }
 
     #[dialog_common::test]

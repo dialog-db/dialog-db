@@ -228,6 +228,23 @@ where
     }
 }
 
+/// A key retracted from the store is gone: the store held its only copy.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<credential::Retract<Credential>> for CredentialStore<S>
+where
+    S: Clone + ConditionalSync,
+    Router<S>: Provider<credential::Retract<Credential>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<credential::Retract<Credential>>,
+    ) -> Result<(), credential::CredentialError> {
+        input.perform(&self.router).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]

@@ -17,6 +17,6 @@ mod space;
 pub use access::{Claim, ClaimExt, SaveDelegation};
 pub use authority::*;
 pub use error::IdentityError;
-pub use open::OpenCredential;
+pub use open::{ForgetCredential, OpenCredential};
 pub use secret::*;
 pub use space::SpaceHandle;
