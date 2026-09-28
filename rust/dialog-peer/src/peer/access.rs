@@ -32,7 +32,7 @@
 //! does not want proving to pay download latency materializes the branch
 //! up front with `Branch::download`.
 
-use super::{Grant, Local, Mode, Peer};
+use super::{Grant, Local, Mode, Peer, PeerSpace};
 use dialog_capability::access::{
     Access, Authorize, AuthorizeError, Certificate as _, Export, Proof as _, Protocol, Prove,
     Retain, Scope as _, TimeRange,
@@ -46,7 +46,7 @@ use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead, Wr
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_repository::RemoteSite;
 use dialog_storage::provider::storage::Storage;
-use dialog_ucan::{Ucan, UcanCertificate, UcanProof};
+use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use std::collections::HashMap;
 
@@ -565,6 +565,48 @@ where
                 }
             }
         }
+    }
+}
+
+impl<S: PeerSpace, M: Mode> Peer<S, M> {
+    /// The delegations retained where this peer proves from that `issuer`
+    /// issued.
+    pub(crate) async fn issued_by(
+        &self,
+        issuer: &Did,
+    ) -> Result<Vec<UcanDelegation>, AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        Box::pin(branch.delegations().issued_by(issuer.clone()).perform(&env)).await
+    }
+
+    /// Stop proving from `delegation`: retract it where this peer retains
+    /// delegations.
+    pub(crate) async fn retract(&self, delegation: UcanDelegation) -> Result<(), AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        Box::pin(branch.delegations().retract(delegation).perform(&env))
+            .await
+            .map(|_| ())
+            .map_err(|error| AuthorizeError::Malformed {
+                detail: format!("failed to retract delegation: {error}"),
+            })
     }
 }
 

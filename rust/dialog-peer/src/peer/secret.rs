@@ -38,6 +38,7 @@
 
 use core::fmt::{self, Debug, Display};
 
+use super::space::SPACE_KEY;
 use super::{Mode, Peer, PeerSpace};
 use dialog_capability::access::{Access, Retain};
 use dialog_capability::{Capability, Policy, Provider, Subject};
@@ -47,8 +48,8 @@ use dialog_credentials::{Ed25519Signer, Ed25519Verifier, Extractable, Signer, Si
 use dialog_effects::credential::{self, CredentialError, Secret as SiteSecret};
 use dialog_repository::registry::RegistryEnv;
 use dialog_repository::schema::SealedMessage;
-use dialog_repository::secrets;
 use dialog_repository::{Branch, BranchReference};
+use dialog_repository::{secrets, spaces};
 use dialog_ucan::{Ucan, UcanDelegation};
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use dialog_ucan_core::{DelegationBuilder, DelegationChain};
@@ -222,6 +223,9 @@ impl VaultReference {
 #[derive(Clone)]
 pub struct Vault {
     space: BranchReference,
+    /// The name of a top-level vault; a vault below another has none of
+    /// its own to rotate by.
+    name: Option<String>,
     did: Did,
     seed: [u8; 32],
 }
@@ -293,6 +297,18 @@ impl Vault {
         }
     }
 
+    /// Replace this top-level vault's key with a new one, generated
+    /// unless [given](Rotate::to), leaving out the members
+    /// [removed](Rotate::without): what the old key reached is moved to the
+    /// new one.
+    pub fn rotate(&self) -> Rotate {
+        Rotate {
+            vault: self.clone(),
+            to: None,
+            without: Vec::new(),
+        }
+    }
+
     /// The vault's key.
     pub(crate) async fn key(&self) -> Result<Ed25519Signer, CredentialError> {
         Ed25519Signer::import(&self.seed).await.map_err(unavailable)
@@ -328,6 +344,7 @@ impl Vault {
         }
         Ok(Vault {
             space: self.space.clone(),
+            name: None,
             did,
             seed: seed_of(&child).await?,
         })
@@ -423,6 +440,7 @@ async fn obtain<S: PeerSpace, M: Mode>(
     {
         return Ok(Some(Vault {
             space: space.clone(),
+            name: (above.is_empty() && base.is_none()).then(|| last.clone()),
             did: did.clone(),
             seed,
         }));
@@ -440,6 +458,7 @@ async fn obtain<S: PeerSpace, M: Mode>(
             .map_err(unavailable)?;
         return Ok(Some(Vault {
             space: space.clone(),
+            name: Some(last.clone()),
             did,
             seed: seed_of(&key).await?,
         }));
@@ -553,6 +572,246 @@ impl Add {
     }
 }
 
+/// Replace a top-level vault's key.
+///
+/// The vault is recorded under its name with the new key, which is sealed
+/// to every member of the old one but those removed. Each vault below it
+/// is derived again from the new key, sealed to its members but those
+/// removed, and the secrets it keeps are sealed again to it. A space whose
+/// key is held sealed to the old vault is held sealed to the new one, and
+/// delegates to it; what the old vault delegated is delegated by the new
+/// one, to all but those removed, and every delegation from the old vault
+/// is retracted where the peer proves from, as is a space's to it.
+///
+/// A member removed keeps what it already had: the old key opens what was
+/// sealed to it before, and a delegation it copied elsewhere stands until
+/// it is revoked there. What is sealed to the vault from now on is not
+/// its to open.
+pub struct Rotate {
+    vault: Vault,
+    to: Option<Ed25519Signer<Extractable>>,
+    without: Vec<Did>,
+}
+
+impl Rotate {
+    /// Rotate to `key` instead of a generated one: an account handed over
+    /// to a key its owner holds.
+    pub fn to(mut self, key: Ed25519Signer<Extractable>) -> Self {
+        self.to = Some(key);
+        self
+    }
+
+    /// Leave `member` out of the rotated vault and everything below it.
+    pub fn without(mut self, member: Did) -> Self {
+        self.without.push(member);
+        self
+    }
+
+    /// Rotate the vault, yielding it with its new key.
+    pub async fn perform<S: PeerSpace, M: Mode>(
+        self,
+        peer: &Peer<S, M>,
+    ) -> Result<Vault, CredentialError> {
+        let Rotate {
+            vault: old,
+            to,
+            without,
+        } = self;
+        let Some(name) = old.name.clone() else {
+            return Err(unavailable(format!(
+                "{} is below another vault and is rotated with it",
+                old.did
+            )));
+        };
+        let key = match to {
+            Some(key) => key,
+            None => <Ed25519Signer<Extractable> as ExtractableKey>::generate()
+                .await
+                .map_err(unavailable)?,
+        };
+        let new = Vault {
+            space: old.space.clone(),
+            name: Some(name.clone()),
+            did: key.did(),
+            seed: seed_of(&key).await?,
+        };
+        if new.did == old.did {
+            return Err(unavailable(format!("{} is already the key", new.did)));
+        }
+        let branch = opened(&old.space, peer).await?;
+        let members = secrets::members(&branch, &old.did, peer)
+            .await
+            .map_err(unavailable)?;
+        for member in members.iter().filter(|member| !without.contains(member)) {
+            new.add(member.clone()).perform(peer).await?;
+        }
+        secrets::replace_root(&branch, &new.did, &name, peer)
+            .await
+            .map_err(unavailable)?;
+        moved(&branch, &old, &new, &without, peer).await?;
+        rehold(&branch, &old, &new, peer).await?;
+        redelegate(&old, &new, &without, peer).await?;
+        Ok(new)
+    }
+}
+
+/// Move what `old` reaches to `new`: the secrets it keeps, and each vault
+/// below it, derived again from `new` and sealed to its members but those
+/// `without`.
+async fn moved<S: PeerSpace, M: Mode>(
+    branch: &Branch,
+    old: &Vault,
+    new: &Vault,
+    without: &[Did],
+    peer: &Peer<S, M>,
+) -> Result<(), CredentialError> {
+    for (name, sealed) in secrets::secrets_of(branch, &old.did, peer)
+        .await
+        .map_err(unavailable)?
+    {
+        let secret = old.reveal(sealed).perform(peer).await?;
+        new.secret(name).conceal(secret).perform(peer).await?;
+    }
+    let mut names: Vec<String> = Vec::new();
+    for (name, did) in secrets::children_of(branch, &old.did, peer)
+        .await
+        .map_err(unavailable)?
+    {
+        if names.contains(&name) {
+            continue;
+        }
+        // Only the child the old key derives is moved: a record naming
+        // another is one the old vault never vouched for.
+        let from = old.derive(branch, &name, false, peer).await?;
+        if from.did != did {
+            continue;
+        }
+        names.push(name.clone());
+        let to = new.derive(branch, &name, true, peer).await?;
+        for member in secrets::members(branch, &from.did, peer)
+            .await
+            .map_err(unavailable)?
+            .into_iter()
+            .filter(|member| !without.contains(member))
+        {
+            to.add(member).perform(peer).await?;
+        }
+        Box::pin(moved(branch, &from, &to, without, peer)).await?;
+    }
+    Ok(())
+}
+
+/// Hold every space key held sealed to `old` sealed to `new` instead, and
+/// have each space delegate to `new`.
+async fn rehold<S: PeerSpace, M: Mode>(
+    branch: &Branch,
+    old: &Vault,
+    new: &Vault,
+    peer: &Peer<S, M>,
+) -> Result<(), CredentialError> {
+    let opener = old.key().await?;
+    for (space, held) in secrets::held_by(branch, &old.did, peer)
+        .await
+        .map_err(unavailable)?
+    {
+        if held.kind != spaces::SPACE {
+            continue;
+        }
+        let seed = opener
+            .secret(SPACE_KEY)
+            .reveal(&SealedSecret::from_bytes(&held.sealed).map_err(unopened)?)
+            .await
+            .map_err(unopened)?;
+        let seed: [u8; 32] = seed
+            .try_into()
+            .map_err(|_| unopened(format!("the key held for {space} is not a key")))?;
+        let signer = Ed25519Signer::import(&seed).await.map_err(unavailable)?;
+        if signer.did() != space {
+            return Err(unopened(format!("the key held for {space} is not its key")));
+        }
+        let sealed = sealable(&new.did)?
+            .secret(SPACE_KEY)
+            .conceal(&seed)
+            .await
+            .map_err(unavailable)?;
+        secrets::hold_principal(
+            branch,
+            &space,
+            spaces::SPACE,
+            secrets::sealed_message(&new.did, sealed.to_bytes()),
+            peer,
+        )
+        .await
+        .map_err(unavailable)?;
+        let delegation = DelegationBuilder::new()
+            .issuer(Signer::from(signer))
+            .audience(&new.did)
+            .subject(UcanSubject::Specific(space.clone()))
+            .command(Vec::new())
+            .try_build()
+            .await
+            .map_err(|error| unavailable(format!("{error:?}")))?;
+        retain(peer, DelegationChain::new(delegation)).await?;
+        for delegation in peer.issued_by(&space).await.map_err(unavailable)? {
+            if delegation.chain().audience() == &old.did {
+                peer.retract(delegation).await.map_err(unavailable)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Have `new` delegate what `old` did, to all but those `without`, and
+/// retract every delegation `old` issued.
+async fn redelegate<S: PeerSpace, M: Mode>(
+    old: &Vault,
+    new: &Vault,
+    without: &[Did],
+    peer: &Peer<S, M>,
+) -> Result<(), CredentialError> {
+    let issuer = Signer::from(new.key().await?);
+    for delegation in peer.issued_by(&old.did).await.map_err(unavailable)? {
+        let issued = delegation
+            .chain()
+            .export()
+            .map(|(_, issued)| issued)
+            .next()
+            .ok_or_else(|| unopened("a delegation with no certificate"))?;
+        if !without.contains(issued.audience()) {
+            let builder = DelegationBuilder::new()
+                .issuer(issuer.clone())
+                .audience(issued.audience())
+                .subject(issued.subject().clone())
+                .command(issued.command().0.clone())
+                .policy(issued.policy().clone());
+            let builder = match issued.expiration() {
+                Some(expiration) => builder.expiration(expiration),
+                None => builder,
+            };
+            let reissued = builder
+                .try_build()
+                .await
+                .map_err(|error| unavailable(format!("{error:?}")))?;
+            retain(peer, DelegationChain::new(reissued)).await?;
+        }
+        peer.retract(delegation).await.map_err(unavailable)?;
+    }
+    Ok(())
+}
+
+/// Retain `chain` where the peer proves from.
+async fn retain<S: PeerSpace, M: Mode>(
+    peer: &Peer<S, M>,
+    chain: DelegationChain,
+) -> Result<(), CredentialError> {
+    Subject::from(peer.home().clone())
+        .attenuate(Access)
+        .invoke(Retain::<Ucan>::new(UcanDelegation::new(chain)))
+        .perform(peer)
+        .await
+        .map_err(unavailable)
+}
+
 /// Have a vault delegate to a principal.
 pub struct Delegate {
     vault: Vault,
@@ -574,14 +833,7 @@ impl Delegate {
             .try_build()
             .await
             .map_err(|error| unavailable(format!("{error:?}")))?;
-        Subject::from(peer.home().clone())
-            .attenuate(Access)
-            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
-                DelegationChain::new(delegation),
-            )))
-            .perform(peer)
-            .await
-            .map_err(unavailable)
+        retain(peer, DelegationChain::new(delegation)).await
     }
 }
 
@@ -1068,6 +1320,80 @@ mod tests {
             matches!(gone, Err(CredentialError::NotFound(_))),
             "{gone:?}"
         );
+        Ok(())
+    }
+
+    /// A member rotated out of the account opens neither it nor anything
+    /// below it, and is delegated nothing by it; the members left open
+    /// both, and keep what was kept before.
+    #[dialog_common::test]
+    async fn it_rotates_a_member_out_of_the_account() -> anyhow::Result<()> {
+        let peer = test_peer().await;
+        let old = peer.state().vault("account").load().perform(&peer).await?;
+        let peers = old.vault("peer").load().perform(&peer).await?;
+        peers
+            .secret("token")
+            .conceal(b"kept".to_vec())
+            .perform(&peer)
+            .await?;
+        let removed = peer_on(peer.state().into(), peer.storage().clone()).await?;
+        old.add(removed.did()).perform(&peer).await?;
+        peers.add(removed.did()).perform(&peer).await?;
+        old.delegate(removed.did()).perform(&peer).await?;
+
+        let account = old.rotate().without(removed.did()).perform(&peer).await?;
+        assert_ne!(account.did(), old.did());
+        assert_eq!(peer.authority().await?, *account.did());
+
+        let opened = peer
+            .state()
+            .vault("account")
+            .vault("peer")
+            .load()
+            .perform(&peer)
+            .await?;
+        assert_ne!(opened.did(), peers.did(), "the child is derived again");
+        assert_eq!(
+            opened.secret("token").reveal().perform(&peer).await?,
+            b"kept"
+        );
+
+        for names in [vec!["account"], vec!["account", "peer"]] {
+            let mut reference = removed.state().vault(names[0]);
+            for name in &names[1..] {
+                reference = reference.vault(*name);
+            }
+            let refused = reference.load().perform(&removed).await;
+            assert!(
+                matches!(refused, Err(CredentialError::Withheld(_))),
+                "{names:?}: {refused:?}"
+            );
+        }
+
+        assert!(peer.issued_by(old.did()).await?.is_empty());
+        let audiences: Vec<_> = peer
+            .issued_by(account.did())
+            .await?
+            .into_iter()
+            .map(|delegation| delegation.chain().audience().clone())
+            .collect();
+        assert!(audiences.contains(&peer.did()), "{audiences:?}");
+        assert!(!audiences.contains(&removed.did()), "{audiences:?}");
+        Ok(())
+    }
+
+    /// A vault below another is rotated with the one above it, not alone.
+    #[dialog_common::test]
+    async fn it_refuses_to_rotate_a_vault_below_another() -> anyhow::Result<()> {
+        let peer = test_peer().await;
+        let peers = peer
+            .state()
+            .vault("account")
+            .vault("peer")
+            .load()
+            .perform(&peer)
+            .await?;
+        assert!(peers.rotate().perform(&peer).await.is_err());
         Ok(())
     }
 

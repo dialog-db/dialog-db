@@ -236,6 +236,42 @@ pub async fn held_principal<Env: RegistryEnv>(
     }))
 }
 
+/// Every principal whose key `state` holds sealed to `to`.
+pub async fn held_by<Env: RegistryEnv>(
+    state: &Branch,
+    to: &Did,
+    env: &Env,
+) -> Result<Vec<(Did, HeldPrincipal)>, SecretError> {
+    let rows: Vec<SecretPrincipal> = Box::pin(
+        state
+            .query()
+            .select(Query::<SecretPrincipal> {
+                this: Term::var("this"),
+                kind: Term::var("kind"),
+                seed: Term::var("seed"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    let mut held = Vec::new();
+    for row in rows {
+        if let Some((recipient, sealed)) = message(state, &row.seed.0, env).await?
+            && recipient == *to
+        {
+            held.push((
+                principal(&row.this)?,
+                HeldPrincipal {
+                    kind: row.kind.0,
+                    to: recipient,
+                    sealed,
+                },
+            ));
+        }
+    }
+    Ok(held)
+}
+
 /// Record in `state` that `principal`'s key is held sealed in `message`,
 /// recording the message with it, in place of what held it before.
 pub async fn hold_principal<Env: RegistryEnv>(
@@ -308,6 +344,91 @@ pub async fn record_root<Env: RegistryEnv>(
     }
     .assert(&mut changes);
     Ok(apply(state, changes, env).await?)
+}
+
+/// Record in `state` the top-level vault `vault` as `name` in place of the
+/// one recorded as `name` before: a rotated root.
+pub async fn replace_root<Env: RegistryEnv>(
+    state: &Branch,
+    vault: &Did,
+    name: &str,
+    env: &Env,
+) -> Result<(), SecretError> {
+    let rows: Vec<RootVault> = Box::pin(
+        state
+            .query()
+            .select(Query::<RootVault> {
+                this: Term::var("this"),
+                name: name.to_string().into(),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    let mut changes = Changes::new();
+    for row in rows {
+        if row.this != vault.this() {
+            row.retract(&mut changes);
+        }
+    }
+    RootVault {
+        this: vault.this(),
+        name: vault::Name(name.to_string()),
+    }
+    .assert(&mut changes);
+    Ok(apply(state, changes, env).await?)
+}
+
+/// The members of `vault`: every principal a copy of its key is sealed to.
+pub async fn members<Env: RegistryEnv>(
+    state: &Branch,
+    vault: &Did,
+    env: &Env,
+) -> Result<Vec<Did>, SecretError> {
+    let copies: Vec<SealedKey> = Box::pin(
+        state
+            .query()
+            .select(Query::<SealedKey> {
+                this: Term::var("this"),
+                key_of: vault.this().into(),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    let mut members = Vec::new();
+    for copy in copies {
+        if let Some((to, _)) = message(state, &copy.this, env).await?
+            && !members.contains(&to)
+        {
+            members.push(to);
+        }
+    }
+    Ok(members)
+}
+
+/// The children `state` records below `parent`, by name.
+pub async fn children_of<Env: RegistryEnv>(
+    state: &Branch,
+    parent: &Did,
+    env: &Env,
+) -> Result<Vec<(String, Did)>, SecretError> {
+    let rows: Vec<ChildVault> = Box::pin(
+        state
+            .query()
+            .select(Query::<ChildVault> {
+                this: Term::var("this"),
+                parent: parent.this().into(),
+                name: Term::var("name"),
+                signature: Term::var("signature"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok((row.name.0, principal(&row.this)?)))
+        .collect()
 }
 
 /// The vaults `state` records as `parent`'s child `name`, each with the
@@ -397,6 +518,34 @@ pub async fn secret<Env: RegistryEnv>(
         return Ok(None);
     };
     Ok(Some(sealed_message(&to, message)))
+}
+
+/// Every secret `vault` keeps, by name.
+pub async fn secrets_of<Env: RegistryEnv>(
+    state: &Branch,
+    vault: &Did,
+    env: &Env,
+) -> Result<Vec<(String, SealedMessage)>, SecretError> {
+    let rows: Vec<VaultSecret> = Box::pin(
+        state
+            .query()
+            .select(Query::<VaultSecret> {
+                this: Term::var("this"),
+                vault: vault.this().into(),
+                name: Term::var("name"),
+                message: Term::var("message"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    let mut kept = Vec::new();
+    for row in rows {
+        if let Some((to, message)) = message(state, &row.message.0, env).await? {
+            kept.push((row.name.0, sealed_message(&to, message)));
+        }
+    }
+    Ok(kept)
 }
 
 /// Forget the secret `vault` keeps as `name`.

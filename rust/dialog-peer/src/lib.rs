@@ -18,7 +18,7 @@ pub use dialog_identity::*;
 
 mod peer;
 pub use peer::{
-    Add, Conceal, Delegate, ForgetSecret, KeepSecret, OpenVault, Reveal, RevealSecret,
+    Add, Conceal, Delegate, ForgetSecret, KeepSecret, OpenVault, Reveal, RevealSecret, Rotate,
     SecretReference, SpaceVaultExt, Vault, VaultReference,
 };
 pub use peer::{

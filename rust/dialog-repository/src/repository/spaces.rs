@@ -17,7 +17,7 @@ use crate::secrets;
 use crate::{Branch, CommitError};
 
 /// The kind a repository's key is held sealed as.
-const SPACE: &str = "space";
+pub const SPACE: &str = "space";
 
 /// Why a space could not be recorded or read back.
 #[derive(Debug, thiserror::Error)]
