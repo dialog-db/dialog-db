@@ -137,7 +137,8 @@ mod tests {
     /// [`Upstream`]; they must decode as a one-entry [`Upstreams`].
     #[dialog_common::test]
     async fn it_decodes_legacy_single_upstream_cells() -> Result<()> {
-        let single = remote("origin", 0);
+        // Not seed 0: the all-zero reference reads as no sync base.
+        let single = remote("origin", 17);
         let (_, bytes) = CborEncoder.encode(&single).await?;
         let decoded: Upstreams = CborEncoder.decode(&bytes).await?;
         assert_eq!(decoded.iter().collect::<Vec<_>>(), vec![&single]);
