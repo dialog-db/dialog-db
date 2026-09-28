@@ -130,9 +130,10 @@ impl<'a> Pull<'a> {
         // else still fails the pull, as a single pull racing a commit does:
         // the caller refreshes and pulls again.
         //
-        // An upstream that cannot be prepared -- unreachable, say -- does
-        // not keep the others from landing: the pull lands what it can and
-        // reports the rest.
+        // An upstream that cannot be prepared -- unreachable, say -- or
+        // whose merge cannot land does not keep the others from landing,
+        // nor hide what landed before it: the pull lands what it can and
+        // reports the rest, with the head the landed ones left.
         let prepared = join_all(
             upstreams
                 .iter()
@@ -157,15 +158,23 @@ impl<'a> Pull<'a> {
                     if landed.is_some() =>
                 {
                     let tree = branch.tracked().tree(&upstream.target());
-                    Box::pin(prepare_upstream(branch, upstream.with_tree(tree), env))
-                        .await?
-                        .commit(env)
-                        .await?
+                    match Box::pin(prepare_upstream(
+                        branch,
+                        upstream.clone().with_tree(tree),
+                        env,
+                    ))
+                    .await
+                    {
+                        Ok(prepared) => prepared.commit(env).await,
+                        Err(error) => Err(error),
+                    }
                 }
-                result => result?,
+                result => result,
             };
-            if committed.is_some() {
-                landed = committed;
+            match committed {
+                Ok(Some(revision)) => landed = Some(revision),
+                Ok(None) => {}
+                Err(error) => unreached.push((upstream.target(), error)),
             }
         }
         match unreached.len() {
