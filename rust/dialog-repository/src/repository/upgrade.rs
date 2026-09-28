@@ -91,7 +91,22 @@ impl Upgrade {
             .into();
         cell.resolve().perform(env).await?;
         let from = cell.content().unwrap_or(0);
+        self.finish(cell, from, env).await
+    }
 
+    /// Run every step from `from`, the version `cell` was read at, then
+    /// record [`VERSION`] through the same cell. Split from
+    /// [`perform`](Self::perform) so a test can drive an upgrade whose
+    /// read of the version another open has since overtaken.
+    pub(crate) async fn finish<Env>(
+        self,
+        cell: Cell<u32>,
+        from: u32,
+        env: &Env,
+    ) -> Result<Upgraded, UpgradeError>
+    where
+        Env: RegistryEnv + Provider<List>,
+    {
         if from > VERSION {
             return Err(UpgradeError::Newer {
                 found: from,
@@ -343,7 +358,7 @@ mod tests {
     use super::{CELL, SPACE, Upgraded, VERSION};
     use crate::Repository;
     use crate::RepositoryExt as _;
-    use crate::helpers::test_repo;
+    use crate::helpers::{flaky_operator_with_profile, test_repo};
     use crate::repository::branch::resolve::resolve;
     use crate::schema::{BranchPull, BranchPush, Peer, PeerAddress, Replica};
     use crate::{
@@ -713,6 +728,90 @@ mod tests {
         let draft = reopened.branch("draft").open().perform(&operator).await?;
         resolve(&draft, &operator).await?;
         assert_eq!(draft.pulls().iter().count(), 1, "draft pulls from origin");
+        Ok(())
+    }
+
+    /// Two opens of a repository from before versioning race the upgrade.
+    /// The one that comes second to recording the version finds the
+    /// first's there and takes the upgrade as done, rather than failing
+    /// the open; and what the first, and a sync after it, recorded in a
+    /// branch's tracking cell stands, rather than being written over
+    /// with what the legacy cells said.
+    #[dialog_common::test]
+    async fn it_takes_a_version_recorded_meanwhile_as_the_upgrade_done() -> anyhow::Result<()> {
+        // `branch/draft/upstream`, in the older single-entry shape:
+        // `draft` on origin.
+        const ONE: &str = "a16652656d6f7465a3647472656598200909090909090909090909090909090909090909090909090909090909090909666272616e63686564726166746672656d6f7465666f726967696e";
+        // `remote/origin/address`: a UCAN service at
+        // https://tonk.network/ucan/ holding the repository below.
+        const REMOTE: &str = "a26761646472657373a1645563616ea168656e64706f696e74781a68747470733a2f2f746f6e6b2e6e6574776f726b2f7563616e2f677375626a65637478386469643a6b65793a7a364d6b68615867425a44766f74446b4c353235376661697a74694769433251744b4c4770626e6e4547746132646f4b";
+
+        fn bytes(hex: &str) -> Vec<u8> {
+            (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("valid hex"))
+                .collect()
+        }
+
+        let (operator, profile, storage) = flaky_operator_with_profile().await;
+        let name = unique_name("raced");
+        let handle = || SpaceHandle {
+            profile_did: profile.did(),
+            name: name.clone(),
+        };
+        let repo = handle().open().perform(&operator).await?;
+        unversion(&repo, &operator).await?;
+        for (space, cell, content) in [
+            ("remote/origin", "address", REMOTE),
+            ("branch/draft", "upstream", ONE),
+        ] {
+            CellScope::new(Subject::from(repo.did()), space, cell)
+                .publish(bytes(content), None)
+                .perform(&operator)
+                .await?;
+        }
+
+        // The second open reads the version before the first has
+        // recorded one.
+        let stale: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
+            .cell(CELL)
+            .into();
+        stale.resolve().perform(&operator).await?;
+        assert_eq!(stale.content(), None);
+
+        // The first open finishes the upgrade, and a sync after it
+        // records more in draft's tracking cell.
+        let reopened = handle().open().perform(&operator).await?;
+        let draft = reopened.branch("draft").open().perform(&operator).await?;
+        let main = reopened.branch("main").open().perform(&operator).await?;
+        draft.pull_from(&main).perform(&operator).await?;
+        let recorded = draft.tracked();
+        assert_eq!(
+            recorded.resolved.as_ref().expect("resolved").pulls.len(),
+            2,
+            "{recorded:?}"
+        );
+
+        // The second open carries on from the version it read. Every
+        // backend takes a publish of what a cell already holds as landed,
+        // so its record of the same version would go through unnoticed;
+        // the store here refuses it, as a strict compare-and-swap would.
+        let memory = storage.space(&repo.did()).expect("mounted").memory;
+        memory.lose_next_publishes(SPACE, CELL, 1);
+        let upgraded = repo.upgrade().finish(stale, 0, &operator).await?;
+        assert_eq!(
+            upgraded,
+            Upgraded {
+                from: 0,
+                to: VERSION
+            }
+        );
+        let again = reopened.branch("draft").open().perform(&operator).await?;
+        assert_eq!(
+            again.tracked(),
+            recorded,
+            "what the first open and the sync after it recorded stands"
+        );
         Ok(())
     }
 }
