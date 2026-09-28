@@ -642,6 +642,43 @@ mod tests {
     /// The context the certificate tests derive their session key for.
     const CONTEXT: &[u8] = b"certificate";
 
+    /// A fixture pinning the whole derivation: a fixed peer seed and a
+    /// fixed context derive one fixed session DID, on every platform.
+    ///
+    /// The other tests show the derivation is stable within a run, which
+    /// a randomized derivation would also pass on any platform whose
+    /// Ed25519 does not hedge its nonce. This pins the value itself, so
+    /// it fails for a change anywhere in the chain that produces it:
+    /// `dialog_credentials`' known-answer vector pins the derived secret;
+    /// this pins what that secret becomes. If the derivation changes on
+    /// purpose, bump the derivation context there and record the new DID
+    /// deliberately. See `notes/operator-derivation.md`.
+    #[dialog_common::test]
+    async fn it_derives_a_fixed_operator_did_from_a_fixed_seed() -> Result<()> {
+        // RFC 8032 test vector 1, used here only as a stable arbitrary seed.
+        const PEER_SEED: [u8; 32] = [
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ];
+        const FIXTURE: &[u8] = b"fixture";
+        const EXPECTED_SESSION_DID: &str =
+            "did:key:z6MkgAajey1H5u8MLHYnN7YUPd8Pjcvi4MhBtUqqgaRFJbJe";
+
+        let credential = SignerCredential::from(Ed25519Signer::import(&PEER_SEED).await?);
+        let derived = credential.derive(FIXTURE).await?;
+        assert_eq!(derived.did().to_string(), EXPECTED_SESSION_DID);
+
+        // The session a peer opens for the context acts with that key.
+        let session = Peer::new(credential)
+            .storage(Storage::volatile())
+            .ephemeral()
+            .session(FIXTURE)
+            .await?;
+        assert_eq!(session.did().to_string(), EXPECTED_SESSION_DID);
+        Ok(())
+    }
+
     /// A delegation from a fresh space to the key `peer.session(CONTEXT)`
     /// derives, valid from `not_before` on.
     async fn delegation_to_session(
