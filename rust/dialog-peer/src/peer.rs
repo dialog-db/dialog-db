@@ -66,6 +66,7 @@ mod secret;
 mod space;
 #[cfg(test)]
 mod test;
+mod upgrade;
 
 pub use builder::{
     Allowance, BranchPeerExt, OpenFuture, PeerBuilder, PeerError, PeerKey, Unset, With,
@@ -76,6 +77,7 @@ pub use secret::{
     Add, Conceal, Delegate, ForgetSecret, KeepSecret, OpenVault, Reveal, RevealSecret, Rotate,
     SecretReference, SpaceVaultExt, Vault, VaultReference,
 };
+pub use upgrade::{Step, StepBound, StepFuture, Upgraded};
 
 use std::collections::HashMap;
 use std::fmt;
