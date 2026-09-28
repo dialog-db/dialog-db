@@ -24,7 +24,7 @@ use dialog_varsig::{Did, Principal as _};
 
 /// The context a space's key is sealed in, so a sealed key opens only as
 /// one.
-const SPACE_KEY: Context = Context::new("dialog.space/key");
+pub(crate) const SPACE_KEY: Context = Context::new("dialog.space/key");
 
 /// A failure creating a space, as a storage error.
 fn failed(error: impl Display) -> storage_fx::StorageError {
@@ -421,9 +421,9 @@ mod tests {
     use crate::{ClaimExt as _, Peer, SpaceVaultExt as _};
     use dialog_capability::access::{Access, Prove};
     use dialog_capability::{Subject, did};
-    use dialog_credentials::key::KeyExport;
+    use dialog_credentials::key::{ExtractableKey, KeyExport};
     use dialog_credentials::secret::{Context, SealedSecret};
-    use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
+    use dialog_credentials::{Credential, Ed25519Signer, Extractable, SignerCredential};
     use dialog_effects::credential::{self as credential_fx, prelude::*};
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
     use dialog_identity::OpenCredential;
@@ -653,6 +653,64 @@ mod tests {
             .await?;
         let key = Ed25519Signer::import(KeyExport::Extractable(seed)).await?;
         assert_eq!(key.did(), created.did());
+        Ok(())
+    }
+
+    /// An account handed over to a key its owner holds keeps its spaces:
+    /// each space's key is held sealed to the new account, which the space
+    /// delegates to, and the peer proves authority over it through the new
+    /// account alone.
+    #[dialog_common::test]
+    async fn it_hands_an_account_over_to_a_given_key() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/handover").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+        let old = peer.state().vault("account").load().perform(&peer).await?;
+
+        let owner = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await?;
+        let account = old.rotate().to(owner.clone()).perform(&peer).await?;
+        assert_eq!(*account.did(), owner.did());
+        assert_eq!(peer.authority().await?, owner.did());
+
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space is still held sealed");
+        assert_eq!(held.to, owner.did());
+        let seed = owner
+            .secret(Context::new("dialog.space/key"))
+            .reveal(&SealedSecret::from_bytes(&held.sealed)?)
+            .await?;
+        let key = Ed25519Signer::import(KeyExport::Extractable(seed)).await?;
+        assert_eq!(key.did(), created.did());
+
+        assert!(
+            peer.issued_by(old.did()).await?.is_empty(),
+            "the old account's delegations are retracted"
+        );
+        for delegation in peer.issued_by(&created.did()).await? {
+            assert_ne!(
+                delegation.chain().audience(),
+                old.did(),
+                "the space's delegation to the old account is retracted"
+            );
+        }
+        let scope = Scope {
+            subject: UcanSubject::Specific(created.did()),
+            command: UcanCommand(vec!["archive".to_string()]),
+            parameters: Parameters::default(),
+        };
+        Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(peer.did(), scope))
+            .perform(&peer)
+            .await?;
         Ok(())
     }
 
