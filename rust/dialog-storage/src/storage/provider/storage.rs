@@ -1,5 +1,6 @@
 //! Storage: composes Router (DID routing) and Loader (space load/create).
 
+mod credential_store;
 mod loader;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -11,10 +12,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dialog_capability::access::{AuthorizeError, Export, Forget, Protocol, Prove, Retain};
-use dialog_capability::{Capability, Did, Provider};
+use dialog_capability::{Capability, Did, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
-use dialog_effects::credential::Secret;
+use dialog_effects::credential::prelude::*;
+use dialog_effects::storage::LocationExt as _;
 use dialog_effects::{archive, blob, credential, memory, storage};
 
 use loader::Loader;
@@ -23,6 +25,7 @@ use router::Router;
 use crate::provider::{Space, Volatile};
 use crate::resource::Pool;
 
+pub use credential_store::CredentialStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::NativeSpace;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -31,7 +34,7 @@ pub use web::{WebOpfsSpace, WebSpace};
 /// Storage: the runtime context for capability dispatch.
 #[derive(Provider)]
 pub struct Storage<S: Clone> {
-    #[provide(storage::Load, storage::Create)]
+    #[provide(storage::Load)]
     loader: Loader<S>,
 
     #[provide(
@@ -45,11 +48,7 @@ pub struct Storage<S: Clone> {
         memory::Publish,
         memory::Retract,
         memory::List,
-        credential::Load<Credential>,
-        credential::Save<Credential>,
-        credential::Load<Secret>,
-        credential::Save<Secret>,
-        credential::Retract<Secret>
+        credential::Load<Credential>
     )]
     router: Router<S>,
 
@@ -75,6 +74,64 @@ impl<S: Clone> Clone for Storage<S> {
             router: self.router.clone(),
             system: self.system.clone(),
         }
+    }
+}
+
+/// The credential a storage keeps for `credential`: its verifier, when it
+/// is a signing key. A storage keeps no signing key; keys belong to a
+/// credential store.
+fn kept(credential: &Credential) -> Credential {
+    match credential.signer() {
+        Some(signer) => Credential::from(signer.verifier()),
+        None => credential.clone(),
+    }
+}
+
+/// A space created from a signing key is created from its verifier.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<storage::Create> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    Loader<S>: Provider<storage::Create>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<storage::Create>,
+    ) -> Result<Credential, storage::StorageError> {
+        let location = storage::Location::of(&input).clone();
+        let credential = kept(&storage::Create::of(&input).credential);
+        Subject::from(input.subject().clone())
+            .attenuate(storage::Storage)
+            .attenuate(location)
+            .create(credential)
+            .perform(&self.loader)
+            .await
+    }
+}
+
+/// A signing key saved into a space is saved as its verifier.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<credential::Save<Credential>> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    Router<S>: Provider<credential::Save<Credential>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<credential::Save<Credential>>,
+    ) -> Result<(), credential::CredentialError> {
+        let address = credential::Key::of(&input).address.clone();
+        let credential = kept(&credential::Save::<Credential>::of(&input).credential);
+        Subject::from(input.subject().clone())
+            .credential()
+            .key(address)
+            .save(credential)
+            .perform(&self.router)
+            .await
     }
 }
 
@@ -203,6 +260,54 @@ mod tests {
     use dialog_effects::prelude::*;
     use dialog_effects::storage::{LocationExt, Storage as StorageFx};
     use dialog_varsig::Principal;
+
+    /// A storage keeps no signing key: a space created from a signer, or
+    /// a signer saved into one, is kept as its verifier. Keys belong to a
+    /// credential store, never to the storage spaces live in.
+    #[dialog_common::test]
+    async fn it_keeps_only_the_verifier_of_a_signing_key() {
+        let env = Storage::volatile();
+        let credential = test_credential().await;
+
+        let created = StorageFx::profile("keyless")
+            .create(credential.clone())
+            .perform(&env)
+            .await
+            .unwrap();
+        let stored = created
+            .did()
+            .credential()
+            .key(credential::SELF)
+            .load()
+            .perform(&env)
+            .await
+            .unwrap();
+        assert!(
+            matches!(stored, Credential::Verifier(_)),
+            "the storage kept a signing key"
+        );
+
+        created
+            .did()
+            .credential()
+            .key("other")
+            .save(credential)
+            .perform(&env)
+            .await
+            .unwrap();
+        let saved = created
+            .did()
+            .credential()
+            .key("other")
+            .load()
+            .perform(&env)
+            .await
+            .unwrap();
+        assert!(
+            matches!(saved, Credential::Verifier(_)),
+            "the storage kept a saved signing key"
+        );
+    }
 
     #[dialog_common::test]
     async fn it_shares_mounted_spaces_with_a_clone() {

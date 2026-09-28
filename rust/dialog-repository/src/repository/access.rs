@@ -441,7 +441,9 @@ mod tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(facts.len(), 2, "one record per semantic class");
+        // One per semantic class, beside the account's delegation to the
+        // profile that onboarding recorded.
+        assert_eq!(facts.len(), 3, "one record per semantic class");
 
         // A rerun migrates nothing and leaves the survivor in place.
         let again = profile.access().migrate().perform(&storage).await?;
@@ -483,7 +485,7 @@ mod tests {
 
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(dialog_capability::Subject::any())
             .await?;
 

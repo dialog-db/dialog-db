@@ -608,7 +608,7 @@ where
             .perform(self)
             .await?;
 
-        let operator_signer = self.authority().operator_signer().clone();
+        let operator_signer = self.identity().operator_signer().clone();
         proof.claim(operator_signer)
     }
 }
@@ -647,7 +647,7 @@ mod tests {
             .unwrap();
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .await
             .unwrap();
         (operator, profile)
@@ -706,7 +706,7 @@ mod tests {
             open_peer(storage.clone(), Location::profile(unique("access-branch"))).await?;
         let operator = profile
             .session(b"test")
-            .mount(Repository::from(profile.home().clone()).branch("account-test"))
+            .space(Repository::from(profile.home().clone()).branch("account-test"))
             .await?;
 
         let space = Ed25519Signer::generate().await?;
@@ -1091,7 +1091,7 @@ mod tests {
                 .unwrap();
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -1105,10 +1105,12 @@ mod tests {
             .await?;
         assert!(exported.is_empty(), "the legacy store must stay empty");
 
-        let head = operator.delegations().revision();
-        assert!(
-            head.is_none(),
-            "opening a peer and building an operator commit nothing to the access branch"
+        // The profile recorded its roles when it was set up; building the
+        // operator after it committed nothing more.
+        assert_eq!(
+            operator.delegations().revision(),
+            profile.state().revision(),
+            "building an operator commits nothing to the access branch"
         );
 
         // And yet the operator authorizes: the session link is the chain.
@@ -1148,7 +1150,7 @@ mod tests {
                 .unwrap();
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -1194,15 +1196,18 @@ mod tests {
 
     /// A peer's grant of the storage is held in memory, like every grant
     /// it is given: opening it again and again, as a heartbeat would,
-    /// records nothing in its state.
+    /// records nothing more than its account's delegation to it, once.
     #[dialog_common::test]
     async fn it_records_no_storage_grant_however_often_it_opens() -> Result<()> {
         let storage = test_storage().await;
         let location = Location::profile(unique("storage-grant"));
         for _ in 0..3 {
             let peer = open_peer(storage.clone(), location.clone()).await?;
-            assert_eq!(retained_count(&peer).await?, 0);
-            assert!(peer.state().revision().is_none());
+            assert_eq!(
+                retained_count(&peer).await?,
+                1,
+                "only the account's delegation to the peer, recorded once"
+            );
         }
         Ok(())
     }
@@ -1217,7 +1222,7 @@ mod tests {
             .await?
             .credential()
             .clone();
-        let built = Peer::new(credential)
+        let built = Peer::new(credential.clone())
             .with(storage)
             .grant(test_grant().await)
             .await;
@@ -1233,7 +1238,7 @@ mod tests {
             Location::profile(unique("bounded-session")),
         )
         .await?;
-        let setup = profile.session(b"setup").mount(profile.state()).await?;
+        let setup = profile.session(b"setup").space(profile.state()).await?;
         let space = Ed25519Signer::generate().await?;
         let now = now_s();
         let upstream_end = now + 7200;
@@ -1251,8 +1256,10 @@ mod tests {
             .perform(&setup)
             .await?;
         let revision = setup.delegations().revision();
+        // The space's delegation, beside the account's delegation to the
+        // profile that onboarding recorded.
         let retained = retained_count(&setup).await?;
-        assert_eq!(retained, 1);
+        assert_eq!(retained, 2);
         let exported = Subject::from(profile.did())
             .attenuate(Access)
             .invoke(Export::<Ucan>::new())
@@ -1261,7 +1268,7 @@ mod tests {
         for session_end in [now + 3600, now + 10800, now - 60] {
             let operator = profile
                 .session(session_end.to_le_bytes())
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(
                     profile
                         .access()
@@ -1320,7 +1327,7 @@ mod tests {
         let now = now_s();
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(
                 profile
                     .access()
