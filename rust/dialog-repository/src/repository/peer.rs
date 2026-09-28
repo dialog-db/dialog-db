@@ -505,21 +505,59 @@ mod tests {
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_varsig::did;
 
-    /// A UCAN service is the `did:web` of its origin; the path it is
-    /// served under does not change which service it is.
+    /// A UCAN service is the `did:web` of its origin and the path it is
+    /// served under, so two services on one host are two peers. The
+    /// DIDs are pinned: a peer's identity is derived from its address,
+    /// so changing the derivation changes every peer on record.
     #[dialog_common::test]
-    fn it_names_a_ucan_service_by_its_origin() -> anyhow::Result<()> {
-        let address = SiteAddress::from(UcanAddress::new("https://tonk.network/ucan/"));
-        assert_eq!(peer_did(&address)?, did!("web:tonk.network"));
+    fn it_names_a_ucan_service_by_its_origin_and_path() -> anyhow::Result<()> {
+        let ucan = |endpoint: &str| SiteAddress::from(UcanAddress::new(endpoint));
+        assert_eq!(
+            peer_did(&ucan("https://tonk.network/ucan/"))?,
+            did!("web:tonk.network:ucan")
+        );
+        assert_eq!(
+            peer_did(&ucan("https://tonk.network/"))?,
+            did!("web:tonk.network")
+        );
+        assert_eq!(
+            peer_did(&ucan("https://tonk.network/sync/v2/"))?,
+            did!("web:tonk.network:sync:v2")
+        );
+        assert_ne!(
+            peer_did(&ucan("https://tonk.network/a/"))?,
+            peer_did(&ucan("https://tonk.network/b/"))?
+        );
         Ok(())
     }
 
     /// A non-default port is part of the origin, percent-encoded as
-    /// `did:web` requires.
+    /// `did:web` requires. `did:web` names an HTTPS origin, so a plain
+    /// HTTP one carries its port even when it is the default: `http://h`
+    /// and `https://h` are two peers.
     #[dialog_common::test]
-    fn it_keeps_a_non_default_port() -> anyhow::Result<()> {
-        let address = SiteAddress::from(UcanAddress::new("http://localhost:8787/ucan"));
-        assert_eq!(peer_did(&address)?, did!("web:localhost%3A8787"));
+    fn it_tells_schemes_and_ports_apart() -> anyhow::Result<()> {
+        let ucan = |endpoint: &str| SiteAddress::from(UcanAddress::new(endpoint));
+        assert_eq!(
+            peer_did(&ucan("http://localhost:8787/ucan"))?,
+            did!("web:localhost%3A8787:ucan")
+        );
+        assert_eq!(
+            peer_did(&ucan("https://tonk.network:8443/"))?,
+            did!("web:tonk.network%3A8443")
+        );
+        assert_eq!(
+            peer_did(&ucan("http://tonk.network/"))?,
+            did!("web:tonk.network%3A80")
+        );
+        assert_eq!(
+            peer_did(&ucan("https://tonk.network:443/"))?,
+            did!("web:tonk.network")
+        );
+        assert_ne!(
+            peer_did(&ucan("http://tonk.network/"))?,
+            peer_did(&ucan("https://tonk.network/"))?
+        );
         Ok(())
     }
 
@@ -562,20 +600,67 @@ mod tests {
         Ok(())
     }
 
-    /// A directory is a `did:key`, the same one every time it is named,
-    /// and a different one for a different directory.
+    /// A directory is a `did:key`, the same one however its path is
+    /// spelled -- with a trailing slash, doubled slashes, or `.` and
+    /// `..` in it -- and a different one for a different directory. The
+    /// DID is pinned: changing the derivation changes every peer on
+    /// record.
     #[dialog_common::test]
     fn it_names_a_directory_by_a_key_seeded_from_it() -> anyhow::Result<()> {
-        let at = |name: &str| {
+        let at = |path: &str, name: &str| {
             SiteAddress::Fs(FsAddress::new(Location::new(
-                Directory::At("/var/dialog".into()),
+                Directory::At(path.into()),
                 name,
             )))
         };
-        let first = peer_did(&at("backup"))?;
-        assert!(first.as_str().starts_with("did:key:z6Mk"), "{first}");
-        assert_eq!(first, peer_did(&at("backup"))?);
-        assert_ne!(first, peer_did(&at("other"))?);
+        let backup = peer_did(&at("/var/dialog", "backup"))?;
+        assert_eq!(
+            backup,
+            did!("key:z6MkvLsmuzEuydpgVzeoXG1pvKm7R9uTCsrhy25KcJYefBNY"),
+            "the pinned DID of file:///var/dialog/backup"
+        );
+        for spelling in [
+            "/var/dialog/",
+            "/var//dialog",
+            "/var/./dialog",
+            "/var/tmp/../dialog",
+        ] {
+            assert_eq!(peer_did(&at(spelling, "backup"))?, backup, "{spelling}");
+        }
+        assert_ne!(backup, peer_did(&at("/var/dialog", "other"))?);
+        assert_ne!(backup, peer_did(&at("/var/dialog2", "backup"))?);
+        Ok(())
+    }
+
+    /// A platform directory names the directory it resolves to on this
+    /// device, so the same role on two devices is two peers, and the
+    /// same directory named by role or by path is one.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    fn it_names_a_platform_directory_by_where_it_resolves() -> anyhow::Result<()> {
+        let fs = |directory: Directory, name: &str| {
+            SiteAddress::Fs(FsAddress::new(Location::new(directory, name)))
+        };
+        let at = |path: std::path::PathBuf| Directory::At(path.to_string_lossy().into_owned());
+        assert_eq!(
+            peer_did(&fs(Directory::Current, "backup"))?,
+            peer_did(&fs(at(std::env::current_dir()?), "backup"))?
+        );
+        assert_eq!(
+            peer_did(&fs(Directory::Temp, "backup"))?,
+            peer_did(&fs(at(std::env::temp_dir()), "backup"))?
+        );
+        assert_eq!(
+            peer_did(&fs(Directory::At("relative/dir".into()), "backup"))?,
+            peer_did(&fs(
+                at(std::env::current_dir()?.join("relative/dir")),
+                "backup"
+            ))?
+        );
+        assert_ne!(
+            peer_did(&fs(Directory::Current, "backup"))?,
+            peer_did(&fs(Directory::Temp, "backup"))?
+        );
         Ok(())
     }
 
