@@ -761,7 +761,11 @@ mod tests {
         let directory = Directory::At(root.path().to_string_lossy().into_owned());
         let storage = test_owned(Storage::<NativeSpace>::new()).await;
         let peer = open_peer(storage, Location::new(directory, unique_name("test"))).await?;
-        let operator = peer.session(b"test").allow(Subject::any()).await?;
+        let operator = peer
+            .session(b"test")
+            .space(peer.state())
+            .allow(Subject::any())
+            .await?;
         let did = peer
             .space(unique_name("repo"))
             .open()

@@ -879,7 +879,11 @@ mod tests {
             .grant(test_grant().await)
             .build()
             .await?;
-        let session = peer.session(FIXTURE).allow(Subject::any()).await?;
+        let session = peer
+            .session(FIXTURE)
+            .space(peer.state())
+            .allow(Subject::any())
+            .await?;
         assert_eq!(session.did().to_string(), EXPECTED_SESSION_DID);
         Ok(())
     }
@@ -922,13 +926,19 @@ mod tests {
         let tampered: Delegation<AnySignature> = serde_ipld_dagcbor::from_slice(&bytes)?;
         assert_eq!(tampered.issuer(), delegation.issuer());
 
-        let Err(refused) = peer.session(CONTEXT).grant(UcanCertificate(tampered)).await else {
+        let Err(refused) = peer
+            .session(CONTEXT)
+            .space(peer.state())
+            .grant(UcanCertificate(tampered))
+            .await
+        else {
             panic!("a tampered certificate is refused");
         };
         assert!(matches!(refused, PeerError::Certificate(_)), "{refused:?}");
 
         // The untampered certificate is the peer's authority.
         peer.session(CONTEXT)
+            .space(peer.state())
             .grant(UcanCertificate(delegation))
             .await?;
         Ok(())
@@ -944,6 +954,7 @@ mod tests {
 
         let Err(refused) = peer
             .session(CONTEXT)
+            .space(peer.state())
             .grant(UcanCertificate(delegation))
             .await
         else {
