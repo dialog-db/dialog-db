@@ -12,16 +12,14 @@ use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential, Ve
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
 use dialog_identity::access::{Access as Accessor, Claim};
 use dialog_network::Network;
-use dialog_repository::{BranchReference, secrets};
+use dialog_repository::BranchReference;
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan, UcanCertificate};
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
 use dialog_varsig::Principal as _;
 
 use parking_lot::Mutex;
-use std::sync::OnceLock;
 
-use super::secret::{open_key, seal_key};
 use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
 
 /// A peer built from the branch that holds its state: the same builder
@@ -509,7 +507,6 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
             ));
         };
         let home = reference.of().clone();
-        let issuer = self.issuer.clone();
         let credential = self.key.resolve().await?;
 
         if let Some(location) = &self.location {
@@ -674,40 +671,12 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 network: self.network,
                 runtime: self.runtime,
                 state,
-                keys: OnceLock::new(),
                 chains: Mutex::default(),
                 grants,
                 holdings: Holdings::default(),
                 connections: Mutex::default(),
             },
         );
-
-        // A session of a live peer is passed its peer's copies of role
-        // keys, each sealed to the session's own key: it opens what is
-        // sealed for its peer's roles without the peer's key, and nothing
-        // is recorded for it.
-        if !M::HOLDS_KEYS
-            && let Some(issuer) = &issuer
-            && issuer.did() != peer.did()
-        {
-            let mut copies = Vec::new();
-            for (principal, copy) in secrets::keys_for(peer.state(), &issuer.did(), &peer)
-                .await
-                .map_err(|error| PeerError::State(error.to_string()))?
-            {
-                let seed = open_key(issuer, &copy)
-                    .await
-                    .map_err(|error| PeerError::State(error.to_string()))?;
-                let sealed = seal_key(&seed, &peer.did())
-                    .await
-                    .map_err(|error| PeerError::State(error.to_string()))?;
-                copies.push((principal, sealed));
-            }
-            peer.inner
-                .keys
-                .set(copies)
-                .unwrap_or_else(|_| unreachable!("a freshly built peer holds no keys yet"));
-        }
 
         // A peer acting as itself must be granted the storage it is built
         // on. A session need not: it may be scoped to other work, and one
