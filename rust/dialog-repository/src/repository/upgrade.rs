@@ -79,9 +79,10 @@ impl Upgrade {
     /// Run every step from the recorded version to [`VERSION`], then
     /// record it.
     ///
-    /// The version is published against the one just read, so of two
-    /// upgrades racing, the second is refused rather than recording over
-    /// the first.
+    /// The version is published against the one just read. Of two
+    /// upgrades racing, the second finds the first's version recorded
+    /// when it comes to record its own, and takes the upgrade as done:
+    /// both ran the same steps, which assert the same facts.
     pub async fn perform<Env>(self, env: &Env) -> Result<Upgraded, UpgradeError>
     where
         Env: RegistryEnv + Provider<List>,
@@ -124,7 +125,28 @@ impl Upgrade {
             carry_over(&self.subject, &registry, &operator, env).await?;
         }
 
-        cell.publish(VERSION).perform(env).await?;
+        // Another open of the same repository may have run the upgrade
+        // meanwhile and recorded the version first. Its steps and ours
+        // assert the same facts, so the storage is upgraded either way:
+        // what it recorded is read back, and the upgrade is done if it
+        // is the version this one would have recorded.
+        match cell.publish(VERSION).perform(env).await {
+            Ok(()) => {}
+            Err(mismatch @ PublishError::VersionMismatch { .. }) => {
+                cell.resolve().perform(env).await?;
+                match cell.content().unwrap_or(0) {
+                    found if found == VERSION => {}
+                    found if found > VERSION => {
+                        return Err(UpgradeError::Newer {
+                            found,
+                            supported: VERSION,
+                        });
+                    }
+                    _ => return Err(mismatch.into()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
         Ok(Upgraded { from, to: VERSION })
     }
 }
@@ -235,15 +257,32 @@ where
 
     apply(registry, changes, env).await?;
 
-    for (name, routes, mut state) in tracked {
+    for (name, routes, legacy) in tracked {
+        // The cell is written only while it is empty or holds no routes
+        // yet. One with routes is in the current layout already, written
+        // by an upgrade that finished first or a sync after it, and what
+        // it holds is newer than what the legacy cells say; so is one
+        // another writer fills between the read here and the write.
+        let cell = subject.branch(name.as_str()).tracking();
+        cell.resolve().perform(env).await?;
+        let mut state = cell.content().unwrap_or_default();
+        if state.resolved.is_some() {
+            continue;
+        }
+        for synced in legacy.synced {
+            if state.get(&synced.target).is_none() {
+                state.synced.push(synced);
+            }
+        }
         state.resolved = Some(Resolved {
             at: registry.revision(),
             pulls: routes.clone(),
             pushes: routes,
         });
-        let cell = subject.branch(name.as_str()).tracking();
-        cell.resolve().perform(env).await?;
-        cell.publish(state).perform(env).await?;
+        match cell.checkpoint().publish(state, env).await {
+            Ok(()) | Err(PublishError::VersionMismatch { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
