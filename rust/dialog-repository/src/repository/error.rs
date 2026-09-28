@@ -340,6 +340,18 @@ pub enum ResolveUpstreamsError {
     #[error("Failed to record resolved upstreams: {0}")]
     Publish(#[from] PublishError),
 
+    /// The branch's tracking cell was written by other syncs faster than
+    /// the routes could be laid over it, so they are not recorded.
+    #[error(
+        "Branch {branch}'s tracking cell kept moving: its upstreams were not recorded after {attempts} attempts"
+    )]
+    Contended {
+        /// The branch name.
+        branch: String,
+        /// How many times recording them was tried.
+        attempts: usize,
+    },
+
     /// The operator could not say who it acts for.
     #[error(transparent)]
     Authority(#[from] AuthorityError),
