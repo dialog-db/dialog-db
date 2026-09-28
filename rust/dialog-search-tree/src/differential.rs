@@ -37,8 +37,8 @@ use rkyv::{
 };
 
 use crate::{
-    ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry,
-    Key, Link, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Value, into_owned,
+    Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry, Key, Link,
+    NodeBody, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Value, into_owned,
     resolve_pending,
 };
 
@@ -308,7 +308,7 @@ where
     fn is_loaded_index(&self) -> bool {
         match self {
             SparseTreeNode::Loaded { node, .. } => {
-                matches!(node.body(), ArchivedNodeBody::Index(_))
+                matches!(node.body(), NodeBody::Index(_))
             }
             SparseTreeNode::Ref(_)
             | SparseTreeNode::Pending { .. }
@@ -323,7 +323,7 @@ where
     fn links_contain(&self, hash: &Blake3Hash) -> bool {
         match self {
             SparseTreeNode::Loaded { node, .. } => match node.body() {
-                ArchivedNodeBody::Index(index) => index.contains_hash(hash),
+                NodeBody::Index(index) => index.contains_hash(hash),
                 _ => false,
             },
             SparseTreeNode::Ref(_)
@@ -479,7 +479,7 @@ where
             // is the empty bound; a distribution with a different
             // reseparation rule (the test simulator) still aligns.
             let lower_bound = match node.body() {
-                ArchivedNodeBody::Index(index) if !index.is_empty() => index.separator(0)?,
+                NodeBody::Index(index) if !index.is_empty() => index.separator(0)?,
                 _ => Vec::new(),
             };
             // The root inherits nothing: its own buffers are read when it is
@@ -573,7 +573,7 @@ where
         };
 
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 let links = index.links()?;
                 let mut children = Vec::with_capacity(links.len());
                 for (at, link) in links.into_iter().enumerate() {
@@ -628,7 +628,7 @@ where
                 self.nodes.splice(offset..offset + 1, children);
                 Ok(true)
             }
-            ArchivedNodeBody::Segment(_) => {
+            NodeBody::Segment(_) => {
                 let lower_bound = self.nodes[offset].lower_bound().to_vec();
                 self.nodes[offset] = SparseTreeNode::Loaded {
                     node,
@@ -695,7 +695,7 @@ where
         };
         let (ours, theirs) = (ours.clone(), theirs.clone());
 
-        let (ArchivedNodeBody::Index(ours_index), ArchivedNodeBody::Index(theirs_index)) =
+        let (NodeBody::Index(ours_index), NodeBody::Index(theirs_index)) =
             (ours.body(), theirs.body())
         else {
             return Ok(false);
@@ -868,7 +868,7 @@ where
                         // out of scope; keep the node (over-retaining is safe,
                         // over-dropping loses changes) and let the read path
                         // surface the error.
-                        ArchivedNodeBody::Index(index) => {
+                        NodeBody::Index(index) => {
                             index.any_novelty_key::<Key>(in_scope).unwrap_or(true)
                         }
                         _ => false,
@@ -1027,7 +1027,7 @@ where
                         continue;
                     };
                     match node.body() {
-                        ArchivedNodeBody::Index(index) => {
+                        NodeBody::Index(index) => {
                             // Fetch the whole child level in one concurrent
                             // batch before routing. Every child of a visited
                             // index is consumed by the routing below, so the
@@ -1108,7 +1108,7 @@ where
                                 stack.push((child, pending));
                             }
                         }
-                        ArchivedNodeBody::Segment(segment) => {
+                        NodeBody::Segment(segment) => {
                             // Resolve each key once: the winning covering op
                             // wins, and with no covering op the stored entry
                             // stands. Ops for keys the segment does not hold
@@ -1945,10 +1945,14 @@ mod tests {
         let mut delta = Delta::zero();
         for (key, value) in keys {
             let edit = match tree.stored_root() {
-                Some(root) => {
-                    crate::TransientTree::with_manifest(root.clone(), tree.node_cache(), manifest)
+                Some(root) => crate::TransientTree::with_manifest(
+                    root.clone(),
+                    tree.node_cache(),
+                    manifest.clone(),
+                ),
+                None => {
+                    crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest.clone())
                 }
-                None => crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest),
             };
             tree = edit
                 .insert(key.to_le_bytes(), value, storage)
@@ -2126,7 +2130,7 @@ mod tests {
 
         let mut edit = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
             Default::default(),
-            custom,
+            custom.clone(),
         );
         for k in 0..30u32 {
             edit = edit
@@ -4582,7 +4586,7 @@ mod tests {
                 let bytes = StorageBackend::get(storage.backend(), hash).await?.unwrap();
                 let node: PersistentNode<[u8; 4], Vec<u8>> =
                     PersistentNode::try_from(crate::Buffer::from(bytes))?;
-                if let crate::ArchivedNodeBody::Index(index) = node.body() {
+                if let crate::NodeBody::Index(index) = node.body() {
                     let own = index.novelty_len();
                     let mut below = 0;
                     for at in 0..index.len() {
@@ -4590,7 +4594,7 @@ mod tests {
                         let b = StorageBackend::get(storage.backend(), &h).await?.unwrap();
                         let child: PersistentNode<[u8; 4], Vec<u8>> =
                             PersistentNode::try_from(crate::Buffer::from(b))?;
-                        if let crate::ArchivedNodeBody::Index(ci) = child.body() {
+                        if let crate::NodeBody::Index(ci) = child.body() {
                             below += ci.novelty_len();
                         }
                         next.push(h);
@@ -4702,7 +4706,7 @@ mod tests {
                     .unwrap();
                 let node: PersistentNode<[u8; 4], Vec<u8>> =
                     PersistentNode::try_from(crate::Buffer::from(bytes))?;
-                if let crate::ArchivedNodeBody::Index(index) = node.body() {
+                if let crate::NodeBody::Index(index) = node.body() {
                     // Separators are lower bounds, so a node's own table
                     // bounds its ops from BELOW: every buffered key must sort
                     // at or above the leftmost separator. The right end is

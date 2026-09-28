@@ -21,7 +21,7 @@ use dialog_artifacts::{
 };
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_search_tree::{
-    ArchivedNodeBody, Buffer as TreeBuffer, Distribution as _, PersistentNode, Value as _,
+    Buffer as TreeBuffer, Distribution as _, NodeBody, PersistentNode, Value as _,
 };
 use dialog_storage::{
     Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
@@ -55,7 +55,7 @@ async fn leaf_violations(
         let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
         let manifest = node.manifest()?;
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 for at in (0..index.len()).rev() {
                     if index.separator(at)?.len() > manifest.max_separator as usize {
                         forced_links += 1;
@@ -63,7 +63,7 @@ async fn leaf_violations(
                     stack.push(*index.hash_at(at)?.as_bytes());
                 }
             }
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Segment(segment) => {
                 let mut keys = segment.keys::<Key>()?;
                 let mut leaf: Vec<(Vec<u8>, bool)> = Vec::new();
                 while let Some((at, key)) = keys.next_key()? {
@@ -147,12 +147,12 @@ async fn replay_grouped(
         let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
         let manifest = node.manifest()?;
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 for at in (0..index.len()).rev() {
                     stack.push((*index.hash_at(at)?.as_bytes(), index.separator(at)?));
                 }
             }
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Segment(segment) => {
                 let mut leaf_entries = 0usize;
                 let mut first: Option<Vec<u8>> = None;
                 let mut coins: Vec<(Vec<u8>, bool)> = Vec::new();

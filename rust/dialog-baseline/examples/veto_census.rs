@@ -25,7 +25,7 @@
 use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Datum, IndexRoot, Key, State};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_search_tree::{
-    ArchivedNodeBody, Buffer as TreeBuffer, Distribution as _, Geometric, Manifest, PersistentNode,
+    Buffer as TreeBuffer, Distribution as _, Geometric, Manifest, NodeBody, PersistentNode,
 };
 use dialog_storage::{
     Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
@@ -130,7 +130,7 @@ fn main() -> anyhow::Result<()> {
             let size = bytes.len();
             let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => {
+                NodeBody::Index(index) => {
                     for at in (0..index.len()).rev() {
                         if at > 0 {
                             let separator = index.separator(at)?;
@@ -142,7 +142,7 @@ fn main() -> anyhow::Result<()> {
                         stack.push(*index.hash_at(at)?.as_bytes());
                     }
                 }
-                ArchivedNodeBody::Segment(segment) => {
+                NodeBody::Segment(segment) => {
                     let mut keys = segment.keys::<Key>()?;
                     let mut leaf_seams = 0usize;
                     let mut leaf_vetoed = 0usize;

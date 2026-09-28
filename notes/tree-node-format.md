@@ -1,6 +1,6 @@
 # Tree node format: tagged nodes and an extensible manifest
 
-Status: draft for review. Nothing here is implemented yet. The code table lives in [`rust/dialog-search-tree/format/table.csv`](../rust/dialog-search-tree/format/table.csv).
+Status: implemented in `dialog-search-tree` (`manifest.rs`, `node/persistent.rs`); the format is still a draft and may change before release. The code table lives in [`rust/dialog-search-tree/format/table.csv`](../rust/dialog-search-tree/format/table.csv).
 
 ## Why
 
@@ -31,13 +31,13 @@ kind           bijou64   0x00 segment (leaf), 0x01 index
 header length  bijou64   byte length of the fields that follow
 fields         the tree's manifest: code, length, value, repeated
 padding        zero bytes up to the next 16-byte boundary
-body           rkyv bytes: an archived Segment or Index, chosen by kind
+body           rkyv bytes: the archived node, a Segment or an Index
 ```
 
 Like an HTTP message: a short fixed preamble, headers, then a body of plain bytes.
 
 - `version` picks how everything after it is read. It is a node layout version, not a manifest version: a change to the Segment or Index body layout is a new version. `0x01` is reserved for the legacy untagged layout and never written as a tag.
-- `kind` says which body follows, so a reader chooses the archived type before touching rkyv, and code that only needs "is this a leaf" reads one byte. The body is the concrete archived struct, not an enum over both kinds. A kind is must-understand: a node of an unknown kind is unreadable.
+- `kind` says which body follows, so code that only needs "is this a leaf" reads one byte without touching rkyv. The body is the concrete archived struct the kind names, not an enum over both: the kind is stated once, and a reader validates the body as exactly that type, so the two cannot disagree. A kind is must-understand: a node of an unknown kind is unreadable.
 - `header length` lets a reader skip the fields without parsing them, and makes the field bytes directly the key for the manifest decode memo (below).
 - `fields` hold only the tree's manifest, which is identical on every node of a tree. Per-node facts (the kind, and a level if we ever add one) live in the preamble, so a tree's nodes share byte-identical field bytes.
 
@@ -111,11 +111,34 @@ Every tunable that shapes the tree is a field whose default is today's value, in
 ## Reading a node
 
 1. If the bytes start with a known `version`, and the kind, header length, fields, padding and body all parse and validate, the node is a tagged node of that version.
-2. Otherwise it is a legacy node, read with the current decoder. Its inline manifest maps onto the same fields in memory, so legacy and tagged nodes produce the same `Manifest` value.
+2. Otherwise it is a legacy node, read with the legacy decoder. Its inline manifest maps onto the same fields in memory (the fields it predates take their table defaults), so legacy and tagged nodes produce the same `Manifest` value.
+3. If it is not a legacy node either, it is unreadable. When the tagged checks failed only at the fields (malformed, or an unknown critical field), that is the error reported, since the bytes were almost surely a tagged node.
 
 There is no magic prefix. An old node's first byte can be anything, including a known version, but then it has to pass every later check too: a length that fits, strictly sorted fields, exactly zero padding, and a body that passes rkyv's full validation where it lands. Arbitrary old-node bytes fail within the first few bytes and fall through to the legacy decoder. A deliberate "collision" is just a well-formed tagged node, and the rule is deterministic, so every peer reads the same bytes the same way. Keeping lengths exact and padding strictly zero is what makes the rejection fast and deterministic.
 
-Field bytes are identical on every node of a tree, so the decoded manifest is memoized by its field bytes: after the first node of a tree, reading its manifest is one lookup, and the default manifest (empty fields) needs no parse at all. Body validation is separate and already done once per node by the cache of checked nodes (PR #545).
+Field bytes are identical on every node of a tree, so the decoded manifest is memoized by its field bytes: after the first node of a tree, reading its manifest is one lookup, and the default manifest (empty fields) needs no parse at all. Reading a node does not decode its manifest; only asking for it does.
+
+### Cost
+
+A node is built on every read that misses the node cache, and encoded on every write, so the tagged layout is held to the cost of the untagged one. Measured with callgrind against the untagged layout with its manifest version field, in instructions:
+
+| | untagged | tagged |
+|---|---|---|
+| build a leaf and an index from fetched bytes (10-key tree) | 586 | 587 (+0.2%) |
+| a whole `get` on that tree (builds both nodes) | 3,625 | 3,606 (-0.5%) |
+| the same, under a non-default manifest (`fanout_n` 5) | 586 / 3,625 | 642 / 3,660 (+10% / +1.0%) |
+| build every node of a 5,000-key tree (13 nodes, 514 KiB) | 107,682 | 107,820 (+0.1%) |
+| encode a leaf and an index | 3,296 | 2,026 (-39%) |
+
+What keeps it there:
+
+- A read of a tree under the default manifest (every production tree) is one out-of-line function: read the kind byte, validate the body as that kind, then compare the first 16 bytes against the default prelude for that kind. That one comparison checks the layout version, the empty header and the padding. Anything else goes through a separate, cold path.
+- That validation runs without rkyv's shared-pointer validator (tagged bodies hold no shared pointers), which saves building and dropping an empty map per node. This pays for the prelude check.
+- The node remembers where its archived index or segment sits (an offset with the kind and layout packed into its low bits), so reading the body is an addition and a bit test.
+- Every tagged node is validated once, in that function, whatever its manifest. A node under another manifest is accepted by comparing its first 16 or 32 bytes against the last such prelude this thread accepted (every node of a tree carries the same one but for its kind byte); only a tree's first node, or one of another tree, has its prelude parsed on the cold path, still with no second validation.
+- Legacy nodes validate with the shared-pointer validator, a separate compilation of the nested checks, and the legacy types repeat the index and segment fields rather than nesting them. Shared checks get a second caller, and the compiler then stops inlining them into the hot path.
+- A writer never re-encodes the manifest per node: under the default manifest the prelude is one fixed word, and otherwise the fields encoded for the previous node are reused while the manifest is the same.
+- A node's buffer is allocated once at about its encoded size, so encoding does not grow it by doubling.
 
 ## Writing
 
@@ -124,8 +147,11 @@ A new build writes every node it creates in the tagged layout, from the start. I
 - An edit to a legacy tree writes tagged nodes along the edited path and leaves untouched legacy subtrees as they are. Each node describes itself, so trees mixing both layouts are fine.
 - Nothing is lost by switching: any node an edit touches gets a new hash anyway, so encoding it in the new layout costs nothing extra, and untouched legacy nodes keep their hashes and keep sharing as before.
 
+## The empty tree
+
+An empty tree still has a format, so it persists as a node: a segment with no entries, carrying the manifest like any other node. With the default manifest it is 16 bytes of prelude and an empty segment body. It is only ever a root; the first insert replaces it.
+
 ## Open questions
 
 - A per-node **level** (leaf 0, each index level above +1) would let sync and diffing know a subtree's depth without descending. Nothing needs it today; it would be one more preamble byte, added with a new version.
 - Whether the table stays a CSV the code is checked against, or becomes a schema file the Rust type is generated from (the schemaboi direction), with the CSV derived from it.
-- Whether the empty tree's node stays a segment with no entries (as now), or gets its own kind.

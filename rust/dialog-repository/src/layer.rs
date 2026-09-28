@@ -232,26 +232,28 @@ pub(crate) fn filter_tombstones<'a>(
         return inner;
     }
     Box::pin(stream::unfold(
-        (inner, tombstones),
-        move |(mut inner, tombstones)| async move {
+        (inner, tombstones, manifest),
+        |(mut inner, tombstones, manifest)| async move {
             loop {
                 match inner.next().await {
                     None => return None,
-                    Some(Err(e)) => return Some((Err::<ArtifactView, _>(e), (inner, tombstones))),
+                    Some(Err(e)) => {
+                        return Some((Err::<ArtifactView, _>(e), (inner, tombstones, manifest)));
+                    }
                     Some(Ok(view)) => {
                         // A scanned row's sort key comes straight from its
                         // stored key bytes, written under the tree's
                         // manifest; the tombstones were keyed under that
                         // same manifest (see `ArtifactView::sort_key`).
                         match view.sort_key(&manifest) {
-                            Err(e) => return Some((Err(e), (inner, tombstones))),
+                            Err(e) => return Some((Err(e), (inner, tombstones, manifest))),
                             Ok(key) => {
                                 if tombstones.contains(&key) {
                                     continue;
                                 }
                             }
                         }
-                        return Some((Ok(view), (inner, tombstones)));
+                        return Some((Ok(view), (inner, tombstones, manifest)));
                     }
                 }
             }
@@ -416,7 +418,7 @@ mod tests {
             inline_n: 32,
             ..Manifest::default()
         };
-        let (spilling, spilling_store) = tree_under(small, vec![shared.clone()]).await?;
+        let (spilling, spilling_store) = tree_under(small.clone(), vec![shared.clone()]).await?;
         let (inlining, inlining_store) =
             tree_under(Manifest::default(), vec![shared.clone(), other.clone()]).await?;
         let selector = || ArtifactSelector::new().the("test/bio".parse().expect("attribute"));
@@ -435,14 +437,14 @@ mod tests {
             ]
         };
 
-        let merged = collect(merge_grouped(scans(), small, MergeKeys::Fields)).await?;
+        let merged = collect(merge_grouped(scans(), small.clone(), MergeKeys::Fields)).await?;
         assert_eq!(
             merged,
             vec![shared.clone(), other.clone()],
             "the shared fact comes out once"
         );
 
-        let stored = collect(merge_grouped(scans(), small, MergeKeys::Stored)).await?;
+        let stored = collect(merge_grouped(scans(), small.clone(), MergeKeys::Stored)).await?;
         assert_eq!(
             stored.len(),
             3,

@@ -646,6 +646,7 @@ mod tests {
     use crate::{
         ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NoveltyBuffer, NoveltyEntry, NoveltyOp,
         PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
+        TAGGED_LAYOUT,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -886,29 +887,33 @@ mod tests {
     #[dialog_common::test]
     async fn it_rejects_malformed_index_tables() -> Result<()> {
         // Non-monotone ends.
-        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Index(PersistentIndex {
-            header: Manifest::default(),
-            prefix: vec![],
-            suffixes: b"abcd".to_vec(),
-            ends: vec![3, 1],
-            hashes: vec![Blake3Hash::hash(b"x"), Blake3Hash::hash(b"y")],
-            scales: vec![Scale::of(1), Scale::of(1)],
-            novelty: Vec::new(),
-        });
+        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::from_index(
+            PersistentIndex {
+                prefix: vec![],
+                suffixes: b"abcd".to_vec(),
+                ends: vec![3, 1],
+                hashes: vec![Blake3Hash::hash(b"x"), Blake3Hash::hash(b"y")],
+                scales: vec![Scale::of(1), Scale::of(1)],
+                novelty: Vec::new(),
+            },
+            Manifest::default(),
+        );
         let node = TestNode::try_from(&body)?;
         assert!(node.as_index()?.separator(1).is_err());
         assert!(node.as_index()?.route(b"b").is_err());
 
         // End offset past the suffix table.
-        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Index(PersistentIndex {
-            header: Manifest::default(),
-            prefix: vec![],
-            suffixes: b"ab".to_vec(),
-            ends: vec![9],
-            hashes: vec![Blake3Hash::hash(b"x")],
-            scales: vec![Scale::of(1)],
-            novelty: Vec::new(),
-        });
+        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::from_index(
+            PersistentIndex {
+                prefix: vec![],
+                suffixes: b"ab".to_vec(),
+                ends: vec![9],
+                hashes: vec![Blake3Hash::hash(b"x")],
+                scales: vec![Scale::of(1)],
+                novelty: Vec::new(),
+            },
+            Manifest::default(),
+        );
         let node = TestNode::try_from(&body)?;
         assert!(node.as_index()?.separator(0).is_err());
         Ok(())
@@ -919,15 +924,17 @@ mod tests {
     /// must fail at access.
     #[dialog_common::test]
     async fn it_rejects_a_truncated_scales_column() -> Result<()> {
-        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Index(PersistentIndex {
-            header: Manifest::default(),
-            prefix: vec![],
-            suffixes: b"ab".to_vec(),
-            ends: vec![1, 2],
-            hashes: vec![Blake3Hash::hash(b"x"), Blake3Hash::hash(b"y")],
-            scales: vec![Scale::of(1)],
-            novelty: Vec::new(),
-        });
+        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::from_index(
+            PersistentIndex {
+                prefix: vec![],
+                suffixes: b"ab".to_vec(),
+                ends: vec![1, 2],
+                hashes: vec![Blake3Hash::hash(b"x"), Blake3Hash::hash(b"y")],
+                scales: vec![Scale::of(1)],
+                novelty: Vec::new(),
+            },
+            Manifest::default(),
+        );
         let node = TestNode::try_from(&body)?;
 
         assert!(node.as_index()?.scale_at(0).is_ok());
@@ -945,16 +952,18 @@ mod tests {
     async fn it_rejects_malformed_segment_columns() -> Result<()> {
         // One opaque arena column whose stream is a truncated varint, but a
         // value table claiming two entries.
-        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Segment(PersistentSegment {
-            header: Manifest::default(),
-            count: 2,
-            layout: 0,
-            columns: vec![ColumnData::Arena {
-                prefix: vec![],
-                stream: vec![0x80],
-            }],
-            values: vec![vec![1], vec![2]],
-        });
+        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::from_segment(
+            PersistentSegment {
+                count: 2,
+                layout: 0,
+                columns: vec![ColumnData::Arena {
+                    prefix: vec![],
+                    stream: vec![0x80],
+                }],
+                values: vec![vec![1], vec![2]],
+            },
+            Manifest::default(),
+        );
         let node = TestNode::try_from(&body)?;
         let segment = node.as_segment()?;
         // The streaming decoder constructs lazily, so its error surfaces on
@@ -1054,11 +1063,14 @@ mod tests {
             })
             .collect();
         let body = PersistentNodeBody::segment_from_entries(entries, Manifest::default())?;
-        let PersistentNodeBody::Segment(mut segment) = body else {
+        let Some(mut segment) = body.into_segment() else {
             panic!("expected a segment body");
         };
         segment.count = 1;
-        let node = TestNode::try_from(&PersistentNodeBody::Segment(segment))?;
+        let node = TestNode::try_from(&PersistentNodeBody::from_segment(
+            segment,
+            Manifest::default(),
+        ))?;
         let segment = node.as_segment()?;
         assert!(segment.keys::<[u8; 8]>().is_err());
         assert!(segment.first_key::<[u8; 8]>().is_err());
@@ -1068,16 +1080,18 @@ mod tests {
         // A hostile count with a tiny value table must error before any
         // count-sized allocation happens (u32::MAX would be ~100 GB of row
         // spine if trusted).
-        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Segment(PersistentSegment {
-            header: Manifest::default(),
-            count: u32::MAX,
-            layout: 0,
-            columns: vec![ColumnData::Arena {
-                prefix: vec![],
-                stream: vec![],
-            }],
-            values: vec![],
-        });
+        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::from_segment(
+            PersistentSegment {
+                count: u32::MAX,
+                layout: 0,
+                columns: vec![ColumnData::Arena {
+                    prefix: vec![],
+                    stream: vec![],
+                }],
+                values: vec![],
+            },
+            Manifest::default(),
+        );
         let node = TestNode::try_from(&body)?;
         let segment = node.as_segment()?;
         assert!(segment.keys::<[u8; 8]>().is_err());
@@ -1133,7 +1147,7 @@ mod tests {
             key: BadKey([1, 2, 3, 4]),
             value: vec![0u8],
         }];
-        assert!(PersistentSegment::from_entries(entries, Manifest::default()).is_err());
+        assert!(PersistentSegment::from_entries(entries).is_err());
         Ok(())
     }
 
@@ -1155,14 +1169,17 @@ mod tests {
     #[dialog_common::test]
     async fn it_round_trips_a_non_default_manifest() -> Result<()> {
         let manifest = Manifest {
-            version: 1,
             fanout_n: 4,
             max_separator: 128,
             inline_n: 64,
             spill_prefix: 16,
             max_segment: 4096,
-            frame_ceiling_factor: 3,
-            anchor_selector: 1,
+            frame_ceiling_factor: 2,
+            anchor_selector: 0,
+            entry_overhead: 48,
+            key_overhead: 24,
+            link_overhead: 8,
+            ..Manifest::default()
         };
         let entries: Vec<Entry<[u8; 8], Vec<u8>>> = [key("x")]
             .into_iter()
@@ -1171,9 +1188,97 @@ mod tests {
                 value: k.to_vec(),
             })
             .collect();
-        let body = PersistentNodeBody::segment_from_entries(entries, manifest)?;
+        let body = PersistentNodeBody::segment_from_entries(entries, manifest.clone())?;
         let node = TestNode::try_from(&body)?;
         assert_eq!(node.manifest()?, manifest);
+        Ok(())
+    }
+
+    /// A node is written in the tagged layout: version, kind, header length,
+    /// the manifest's fields, zero padding to 16 bytes, then the body. The
+    /// default manifest writes no fields at all.
+    #[dialog_common::test]
+    async fn it_writes_the_tagged_layout() -> Result<()> {
+        let segment = segment_node(&[key("a")])?;
+        assert_eq!(segment.layout_version(), TAGGED_LAYOUT);
+        assert_eq!(
+            &segment.buffer().as_ref()[..16],
+            &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+
+        let index = index_node(&[b"", b"m"])?;
+        assert_eq!(index.layout_version(), TAGGED_LAYOUT);
+        assert_eq!(&index.buffer().as_ref()[..3], &[2, 1, 0]);
+
+        let manifest = Manifest {
+            fanout_n: 4,
+            ..Manifest::decode(&[])?
+        };
+        let entries = vec![Entry {
+            key: key("a"),
+            value: vec![1],
+        }];
+        let body = PersistentNodeBody::segment_from_entries(entries, manifest.clone())?;
+        let node = TestNode::try_from(&body)?;
+        assert_eq!(
+            &node.buffer().as_ref()[..16],
+            &[2, 0, 3, 0x02, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        let read = TestNode::try_from(node.buffer().clone())?;
+        assert_eq!(read.layout_version(), TAGGED_LAYOUT);
+        assert_eq!(read.manifest()?, manifest);
+        Ok(())
+    }
+
+    /// The default-manifest segment's bytes with its 16-byte prelude replaced
+    /// by one carrying `fields`, which must fit before the 16-byte boundary.
+    fn with_fields(fields: &[u8]) -> Result<crate::Buffer> {
+        let node = segment_node(&[key("a")])?;
+        let mut bytes = node.buffer().as_ref().to_vec();
+        let mut prelude = vec![2, 0, fields.len() as u8];
+        prelude.extend_from_slice(fields);
+        assert!(prelude.len() <= 16);
+        prelude.resize(16, 0);
+        bytes[..16].copy_from_slice(&prelude);
+        Ok(crate::Buffer::from(bytes))
+    }
+
+    /// A field this build does not know is kept when it only shapes the tree
+    /// (even code) and written back when the node is re-encoded; one that
+    /// decides how data is read (odd code) makes the node unreadable.
+    #[dialog_common::test]
+    async fn it_keeps_unknown_shape_fields_and_refuses_unknown_critical_ones() -> Result<()> {
+        let node = TestNode::try_from(with_fields(&[0x40, 1, 7])?)?;
+        let manifest = node.manifest()?;
+        assert_eq!(
+            manifest.extensions.iter().collect::<Vec<_>>(),
+            vec![(0x40, &[7u8][..])]
+        );
+
+        let entries = vec![Entry {
+            key: key("b"),
+            value: vec![2],
+        }];
+        let rewritten = TestNode::try_from(&PersistentNodeBody::segment_from_entries(
+            entries, manifest,
+        )?)?;
+        assert_eq!(&rewritten.buffer().as_ref()[..6], &[2, 0, 3, 0x40, 1, 7]);
+
+        assert!(TestNode::try_from(with_fields(&[0x41, 1, 7])?).is_err());
+        Ok(())
+    }
+
+    /// Bytes that are not exactly a tagged node are not read as one: padding
+    /// must be zero, and fields must be canonical.
+    #[dialog_common::test]
+    async fn it_refuses_a_malformed_prelude() -> Result<()> {
+        let node = segment_node(&[key("a")])?;
+        let mut bytes = node.buffer().as_ref().to_vec();
+        bytes[15] = 1;
+        assert!(TestNode::try_from(crate::Buffer::from(bytes)).is_err());
+
+        // fanout_n written with its default value is not canonical.
+        assert!(TestNode::try_from(with_fields(&[0x02, 1, 8])?).is_err());
         Ok(())
     }
 
@@ -1420,23 +1525,21 @@ mod tests {
     #[dialog_common::test]
     async fn it_rejects_malformed_novelty_buffers() -> Result<()> {
         let well_formed = |novelty: Vec<NoveltyBuffer<Vec<u8>>>| -> Result<TestNode> {
-            let mut index = PersistentIndex::from_links(
-                vec![
-                    Link {
-                        separator: b"".to_vec(),
-                        node: Blake3Hash::hash(b"left"),
-                        scale: Scale::EMPTY,
-                    },
-                    Link {
-                        separator: b"g".to_vec(),
-                        node: Blake3Hash::hash(b"right"),
-                        scale: Scale::EMPTY,
-                    },
-                ],
-                Manifest::default(),
-            );
+            let mut index = PersistentIndex::from_links(vec![
+                Link {
+                    separator: b"".to_vec(),
+                    node: Blake3Hash::hash(b"left"),
+                    scale: Scale::EMPTY,
+                },
+                Link {
+                    separator: b"g".to_vec(),
+                    node: Blake3Hash::hash(b"right"),
+                    scale: Scale::EMPTY,
+                },
+            ]);
             index.novelty = novelty;
-            let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Index(index);
+            let body: PersistentNodeBody<Vec<u8>> =
+                PersistentNodeBody::from_index(index, Manifest::default());
             Ok(TestNode::try_from(&body)?)
         };
         let buffer = |child: u32| {

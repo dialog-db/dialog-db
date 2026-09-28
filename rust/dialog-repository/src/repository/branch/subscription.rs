@@ -244,10 +244,12 @@ impl Demand {
     fn keyed_under(&self, manifest: &dialog_search_tree::Manifest) {
         let mut recorded = self.manifest.lock().expect("demand manifest lock");
         debug_assert!(
-            recorded.is_none_or(|recorded| recorded == *manifest),
+            recorded
+                .as_ref()
+                .is_none_or(|recorded| recorded == manifest),
             "one demand cover must be keyed under one format"
         );
-        *recorded = Some(*manifest);
+        *recorded = Some(manifest.clone());
     }
 
     /// Whether the key falls inside any recorded range.

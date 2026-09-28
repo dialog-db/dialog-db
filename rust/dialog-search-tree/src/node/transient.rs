@@ -11,9 +11,9 @@ use rkyv::{
 use std::ops::Bound;
 
 use crate::{
-    ArchivedIndex, ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry,
-    Key, Link, Manifest, Node, NoveltyBuffer, NoveltyEntry, NoveltyOp, PersistentNode,
-    PersistentNodeBody, Rank, Value, distribution::cap, into_owned, resolve_pending,
+    ArchivedIndex, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link, Manifest,
+    Node, NodeBody, NoveltyBuffer, NoveltyEntry, NoveltyOp, PersistentNode, PersistentNodeBody,
+    Rank, Value, distribution::cap, into_owned, resolve_pending,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -1394,10 +1394,8 @@ where
         separator: Vec<u8>,
     ) -> Result<Self, DialogSearchTreeError> {
         match node.body() {
-            ArchivedNodeBody::Index(_) => {
-                Ok(TransientNode::Index(TransientNode::open_index(node)?))
-            }
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Index(_) => Ok(TransientNode::Index(TransientNode::open_index(node)?)),
+            NodeBody::Segment(segment) => {
                 let mut entries = Vec::with_capacity(segment.len());
                 let mut keys = segment.keys::<Key>()?;
                 while let Some((at, key)) = keys.next_key()? {
@@ -1455,7 +1453,7 @@ where
         };
         let body = match self {
             TransientNode::Segment(segment) => {
-                PersistentNodeBody::segment_from_entries(segment.entries, *manifest)?
+                PersistentNodeBody::segment_from_entries(segment.entries, manifest.clone())?
             }
             TransientNode::Index(TransientIndex { children, novelty }) => {
                 let links = children
@@ -1463,7 +1461,7 @@ where
                     .map(|child| child.into_link(delta, manifest))
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
                 let buffers = novelty.into_buffers::<Key>(&links)?;
-                PersistentNodeBody::index_from_buffers(links, buffers, *manifest)?
+                PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?
             }
         };
 
@@ -1503,9 +1501,10 @@ where
             None
         };
         let body = match self {
-            TransientNode::Segment(segment) => {
-                PersistentNodeBody::segment_from_entries(segment.entries().to_vec(), *manifest)?
-            }
+            TransientNode::Segment(segment) => PersistentNodeBody::segment_from_entries(
+                segment.entries().to_vec(),
+                manifest.clone(),
+            )?,
             TransientNode::Index(TransientIndex { children, novelty }) => {
                 // Collapse any live (cascade-touched) child back to its
                 // persisted link; an untouched persistent child passes
@@ -1532,7 +1531,7 @@ where
                     })
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
                 let buffers = novelty.persist_buffers::<Key>(&links)?;
-                PersistentNodeBody::index_from_buffers(links, buffers, *manifest)?
+                PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?
             }
         };
 

@@ -62,7 +62,7 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, ArchivedNodeBody, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key,
+    Accessor, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key, NodeBody,
     NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientTree, Value, into_owned,
 };
 
@@ -149,7 +149,7 @@ where
             for hash in &current {
                 let node: PersistentNode<K, V> = accessor.get_node(hash).await?;
                 match node.body() {
-                    ArchivedNodeBody::Index(index) => {
+                    NodeBody::Index(index) => {
                         for at in 0..index.len() {
                             if index.buffer_for(at).is_some() {
                                 violations.push(format!(
@@ -162,7 +162,7 @@ where
                             next.push(index.hash_at(at)?.clone());
                         }
                     }
-                    ArchivedNodeBody::Segment(segment) => {
+                    NodeBody::Segment(segment) => {
                         let mut keys = segment.keys::<K>()?;
                         while let Some((at, key)) = keys.next_key()? {
                             entries.push(NoveltyEntry {

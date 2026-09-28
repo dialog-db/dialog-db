@@ -135,6 +135,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 memchr = "2"
 rkyv = "0.8"
+bijoux = { version = "0.3.2", default-features = false, features = ["u64"] }
 rsa = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 s3s = "0.13"

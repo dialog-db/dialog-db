@@ -42,10 +42,10 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, ArchivedNodeBody, Buffer, Cache, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Distribution, Entry, Geometric, Key, Manifest, Node, NodeCache,
-    NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientRootParts,
-    TransientSegment, TransientTree, Value, link_bounds,
+    Accessor, Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
+    Entry, Geometric, Key, Manifest, Node, NodeBody, NodeCache, NoveltyEntry, NoveltyOp,
+    PersistentNode, PersistentTree, TransientNode, TransientRootParts, TransientSegment,
+    TransientTree, Value, link_bounds,
 };
 
 /// The per-node op-count cap a buffered tree flushes at: the tree's expected
@@ -324,8 +324,8 @@ where
     /// The format this session writes under: known from opening for an empty
     /// tree, and from the first root load for a stored one. Every path that
     /// reaches a loaded or empty root has it; asking earlier is a bug here.
-    fn format(manifest: Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
-        manifest.ok_or_else(|| {
+    fn format(manifest: &Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
+        manifest.clone().ok_or_else(|| {
             DialogSearchTreeError::Node(
                 "The buffered tree's manifest is read before its root was loaded".into(),
             )
@@ -537,7 +537,7 @@ where
 
         // The buffer caps derive from, and buffered ops are metered under,
         // the tree's own format, known now that the root is loaded.
-        let manifest = Self::format(self.manifest)?;
+        let manifest = Self::format(&self.manifest)?;
         let mut deferred = Vec::new();
         let node = match loaded {
             // Immediate never buffers: every op goes straight to the canonical
@@ -616,7 +616,7 @@ where
                     oplist.extend(deferred);
                     let edit = TransientTree::<Key, Value, D>::empty_with_manifest(
                         self.cache.clone(),
-                        Self::format(self.manifest)?,
+                        Self::format(&self.manifest)?,
                     )
                     .plant(oplist, storage)
                     .await?;
@@ -648,7 +648,7 @@ where
             Some(node) => TransientTree::<Key, Value, D>::from_loaded(
                 node,
                 self.cache.clone(),
-                Self::format(self.manifest)?,
+                Self::format(&self.manifest)?,
             ),
             None => {
                 // An empty tree replays under the SESSION's format, not the
@@ -660,7 +660,7 @@ where
                 // the same entries canonically.)
                 TransientTree::<Key, Value, D>::empty_with_manifest(
                     self.cache.clone(),
-                    Self::format(self.manifest)?,
+                    Self::format(&self.manifest)?,
                 )
             }
         };
@@ -705,7 +705,7 @@ where
             // canonicalizes to the manifest-carrying empty node.
             HitchhikerRoot::Empty => TransientTree::<Key, Value, D>::empty_with_manifest(
                 self.cache.clone(),
-                Self::format(self.manifest)?,
+                Self::format(&self.manifest)?,
             ),
             HitchhikerRoot::Unloaded(hash) => {
                 // A cold reopen of a persisted buffered tree arrives here with
@@ -740,7 +740,7 @@ where
                 let edit = TransientTree::<Key, Value, D>::from_loaded(
                     node,
                     self.cache.clone(),
-                    Self::format(self.manifest)?,
+                    Self::format(&self.manifest)?,
                 );
                 replay_ops(edit, ops, storage).await?
             }
@@ -984,7 +984,7 @@ where
             // the format must survive emptiness (see `persist_empty_root`).
             HitchhikerRoot::Empty => {
                 let node =
-                    crate::persist_empty_root::<Key, Value>(&Self::format(self.manifest)?, delta)?;
+                    crate::persist_empty_root::<Key, Value>(&Self::format(&self.manifest)?, delta)?;
                 self.cache.insert(node.hash().clone(), node.clone());
                 Ok(node.hash().clone())
             }
@@ -994,7 +994,7 @@ where
             // manifest; a tree born empty in this process carries the
             // manifest it was opened under.
             HitchhikerRoot::Loaded(node) => {
-                let manifest = Self::format(self.manifest)?;
+                let manifest = Self::format(&self.manifest)?;
                 let node = node.persist(delta, &manifest)?;
                 // Seed the shared node cache with the frame just produced:
                 // the very next read of this root (a manifest lookup, a
@@ -1024,13 +1024,13 @@ where
             // empty node.
             HitchhikerRoot::Empty => {
                 let node =
-                    crate::persist_empty_root::<Key, Value>(&Self::format(self.manifest)?, delta)?;
+                    crate::persist_empty_root::<Key, Value>(&Self::format(&self.manifest)?, delta)?;
                 self.cache.insert(node.hash().clone(), node.clone());
                 Ok(node.hash().clone())
             }
             HitchhikerRoot::Unloaded(hash) => Ok(hash.clone()),
             HitchhikerRoot::Loaded(node) => {
-                let manifest = Self::format(self.manifest)?;
+                let manifest = Self::format(&self.manifest)?;
                 let node = node.persist_mut(delta, &manifest)?;
                 // Same cache seeding as `persist`: the frame this commit
                 // just produced is what the next read resolves the root to.
@@ -1044,7 +1044,7 @@ where
 /// The knobs one `enqueue` pass runs under: the buffer capacity, how far
 /// an overflow cascades, what makes it fire, and whether it is evaluated
 /// at all (`settle` false = deferred batch routing).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct EnqueueConfig {
     op_buf_size: usize,
     op_buf_bytes: usize,
@@ -1210,7 +1210,7 @@ where
                     // the deferral applies only to the arriving batch's
                     // routing.
                     settle: true,
-                    ..config
+                    ..config.clone()
                 },
                 deferred,
                 accessor,
@@ -1484,8 +1484,8 @@ where
     Box::pin(async move {
         let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
         let links = match node.body() {
-            ArchivedNodeBody::Segment(_) => return Ok(false),
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Segment(_) => return Ok(false),
+            NodeBody::Index(index) => {
                 if !index.novelty.is_empty() {
                     return Ok(true);
                 }
@@ -1563,9 +1563,9 @@ mod tests {
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
     use crate::{
-        Accessor, ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-        Manifest, Node, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientNode,
-        TransientTree, tree_spec,
+        Accessor, Buffer, Cache, Change, ContentAddressedStorage, Delta, Manifest, Node, NodeBody,
+        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientTree,
+        tree_spec,
     };
 
     /// The three flush policies, so an oracle can assert behavior is identical
@@ -2959,8 +2959,8 @@ mod tests {
         node: &PersistentNode<SpecKey, Vec<u8>>,
     ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
         Ok(match node.body() {
-            ArchivedNodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
-            ArchivedNodeBody::Segment(_) => Vec::new(),
+            NodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
+            NodeBody::Segment(_) => Vec::new(),
         })
     }
 
@@ -3409,7 +3409,8 @@ mod tests {
         };
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
-        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+        let mut edit =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
         for k in 0..50u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3446,7 +3447,8 @@ mod tests {
         };
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
-        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+        let mut edit =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
         for k in 0..40u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3499,7 +3501,7 @@ mod tests {
 
         // Fill a pinned session from empty, drain it back to empty, then
         // refill: every write into the empty tree must shape under the pin.
-        let mut tree = HitchhikerTree::<[u8; 4], Vec<u8>>::empty(custom);
+        let mut tree = HitchhikerTree::<[u8; 4], Vec<u8>>::empty(custom.clone());
         for k in 0..30u32 {
             tree = tree
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3550,7 +3552,8 @@ mod tests {
         };
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
-        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+        let mut edit =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
         for k in 0..30u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3665,7 +3668,8 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
         // Build under the custom format, then empty.
-        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+        let mut edit =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
         for k in 0..40u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3810,10 +3814,12 @@ mod tests {
             let mut delta = Delta::zero();
             for &k in &keys {
                 base = match base.stored_root() {
-                    Some(root) => {
-                        TransientTree::with_manifest(root.clone(), base.node_cache(), manifest)
-                    }
-                    None => TransientTree::empty_with_manifest(base.node_cache(), manifest),
+                    Some(root) => TransientTree::with_manifest(
+                        root.clone(),
+                        base.node_cache(),
+                        manifest.clone(),
+                    ),
+                    None => TransientTree::empty_with_manifest(base.node_cache(), manifest.clone()),
                 }
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?
