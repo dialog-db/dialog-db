@@ -87,6 +87,16 @@ impl SetUpstream<'_> {
                 local.branch(target.name())
             }
             UpstreamBranch::Remote(target) => {
+                // The peer and its addresses are recorded in the registry
+                // of the repository the branch was reached through. From
+                // another one the relation would resolve as unreachable,
+                // so it is refused here rather than at the first pull.
+                if *target.repository().host() != branch.subject() {
+                    return Err(SetUpstreamError::ForeignRemoteUpstream {
+                        branch: branch.name().to_string(),
+                        target: format!("{}/{}", target.repository().name(), target.name()),
+                    });
+                }
                 // The tracked branch and its replica are recorded with the
                 // relation, so the rule resolving it can place it.
                 target.repository().replica().assert(&mut changes);
