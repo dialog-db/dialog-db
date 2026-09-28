@@ -63,6 +63,8 @@ use dialog_peer::helpers::test_owned;
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 #[cfg(not(feature = "web-integration-tests"))]
+use dialog_search_tree::Manifest;
+#[cfg(not(feature = "web-integration-tests"))]
 use dialog_search_tree::NoveltyOp;
 use dialog_search_tree::{NodeBody, Traversable as _, Visit, into_owned};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -679,6 +681,143 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         out.extend(chunk);
     }
     assert_eq!(out, payload);
+    Ok(())
+}
+
+/// Retracting an asset drops only the asset's own reference to its bytes.
+/// When a fact still holds the same bytes as a spilled value, push ships
+/// them as that spill, and a replica with its own store reads the value
+/// back in full while no longer recording the asset.
+// Native only, feature-gated: same reasoning as
+// `it_ships_blobs_on_push_and_hydrates_on_read` above.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_ships_a_spill_of_a_retracted_assets_bytes(s3: S3Address) -> Result<()> {
+    // Site A: assert an asset and a fact whose value is the same bytes, large
+    // enough to spill; retract the asset in a later transaction; push once.
+    let storage_a = test_owned(Storage::temp()).await;
+    let profile_a = open_peer(
+        storage_a.clone(),
+        Location::profile(unique_name("asset-spill-a")),
+    )
+    .await?;
+    let operator_a = profile_a
+        .session(b"test")
+        .space(profile_a.state())
+        .allow(Subject::any())
+        .await?;
+    let repo_a = profile_a
+        .space(unique_name("asset-spill"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .secrets()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile_a)
+        .await?;
+    let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    let inline_n = Manifest::default().inline_n as usize;
+    let payload: Vec<u8> = (0..(inline_n * 3) as u32)
+        .map(|i| (i % 197) as u8)
+        .collect();
+    let asset = Asset::from(payload.clone());
+    let body = "doc/body".parse()?;
+    let document: Entity = "doc:spilled".parse()?;
+    let mut spilled = Changes::new();
+    spilled.associate_unique(body, document.clone(), Value::Bytes(payload.clone()));
+
+    branch_a
+        .transaction()
+        .assert(asset.clone())
+        .assert(spilled)
+        .commit()
+        .publish()
+        .perform(&operator_a)
+        .await?;
+    branch_a
+        .transaction()
+        .retract(asset.clone())
+        .commit()
+        .publish()
+        .perform(&operator_a)
+        .await?;
+    assert_eq!(
+        Blob::from(asset.entity()?)
+            .size((&branch_a).into())
+            .perform(&operator_a)
+            .await?,
+        None,
+        "the asset is retracted before the push"
+    );
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // Site B: same remote subject, its own empty store.
+    let storage_b = test_owned(Storage::temp()).await;
+    let profile_b = open_peer(
+        storage_b.clone(),
+        Location::profile(unique_name("asset-spill-b")),
+    )
+    .await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .space(profile_b.state())
+        .allow(Subject::any())
+        .await?;
+    let repo_b = profile_b
+        .space(unique_name("asset-spill-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .secrets()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile_b)
+        .await?;
+    let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+    branch_b.pull().perform(&operator_b).await?;
+
+    let facts: Vec<_> = branch_b
+        .claims()
+        .select(ArtifactSelector::new().of(document))
+        .to_owned()
+        .perform(&operator_b)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(facts.len(), 1);
+    assert_eq!(
+        facts[0].is,
+        Value::Bytes(payload),
+        "the spilled value reads back in full on a replica with its own store"
+    );
+    assert_eq!(
+        Blob::from(asset.entity()?)
+            .size((&branch_b).into())
+            .perform(&operator_b)
+            .await?,
+        None,
+        "the replica does not record the retracted asset"
+    );
     Ok(())
 }
 
