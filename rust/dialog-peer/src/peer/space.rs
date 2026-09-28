@@ -425,7 +425,7 @@ mod tests {
     use dialog_effects::credential::{self as credential_fx, prelude::*};
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
     use dialog_identity::OpenCredential;
-    use dialog_repository::{Repository, RepositoryExt as _, spaces};
+    use dialog_repository::{Repository, RepositoryExt as _, secrets, spaces};
     #[cfg(not(target_arch = "wasm32"))]
     use dialog_storage::provider::FileSystem;
     #[cfg(not(target_arch = "wasm32"))]
@@ -596,6 +596,29 @@ mod tests {
             .invoke(Prove::<Ucan>::new(peer.did(), scope))
             .perform(&peer)
             .await?;
+        Ok(())
+    }
+
+    /// A space's key is kept the way tonk keeps custody: a principal whose
+    /// seed is held sealed, pointing at the message sealed to the account.
+    #[dialog_common::test]
+    async fn it_keeps_a_space_key_as_a_principal_held_sealed() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/principal").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space is recorded as a principal held sealed");
+        assert_eq!(held.kind, "space");
+        assert_eq!(held.to, peer.authority().await?);
         Ok(())
     }
 
