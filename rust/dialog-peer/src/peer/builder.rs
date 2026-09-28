@@ -459,7 +459,8 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
             let grant = match allowance.kind {
                 AllowanceKind::Certificate(certificate) => {
                     // A certificate is this peer's authority only when it
-                    // was issued to this peer's key and still holds.
+                    // was issued to this peer's key, its issuer signed
+                    // it, and it holds now.
                     if *certificate.0.audience() != audience {
                         return Err(PeerError::Certificate(format!(
                             "the certificate from {} is issued to {}, not to {audience}",
@@ -467,13 +468,37 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                             certificate.0.audience()
                         )));
                     }
+                    let now = Timestamp::now();
                     if let Some(expiration) = certificate.0.expiration()
-                        && expiration <= Timestamp::now()
+                        && expiration <= now
                     {
                         return Err(PeerError::Certificate(format!(
                             "the certificate from {} expired at {}",
                             certificate.0.issuer(),
                             expiration.to_unix()
+                        )));
+                    }
+                    if let Some(not_before) = certificate.0.not_before()
+                        && not_before > now
+                    {
+                        return Err(PeerError::Certificate(format!(
+                            "the certificate from {} is not valid before {}",
+                            certificate.0.issuer(),
+                            not_before.to_unix()
+                        )));
+                    }
+                    // The structure names an issuer; only the signature
+                    // says the issuer stands behind it. Checked as the
+                    // delegation walk checks a retained envelope: a local
+                    // did:key parse, no I/O.
+                    if let Err(error) = certificate
+                        .0
+                        .verify_signature(&dialog_credentials::DidKeyResolver)
+                        .await
+                    {
+                        return Err(PeerError::Certificate(format!(
+                            "the certificate from {} does not verify: {error}",
+                            certificate.0.issuer()
                         )));
                     }
                     Grant {
