@@ -17,14 +17,17 @@
 //! the version, which changes every node hash — a visible, intentional fork
 //! rather than a silent one.
 //!
-//! Enforcement today is at the EDIT boundary: loading a root whose header
-//! differs from the edit's manifest (including an unknown version) fails
-//! loudly (see `TransientTree::load`), because an edit under the wrong
-//! parameters would re-coin the touched spine and silently break shape
-//! convergence. Pure reads do not check the header — the node encoding is
-//! self-delimiting and version 1 is the only shipped format. Adopting the
-//! loaded root's manifest for edits (instead of rejecting) is the tracked
-//! follow-up on `TransientTree::manifest`.
+//! A version this build does not know is read and edited rather than refused,
+//! with its encoding parameters taken from this build's newest version (see
+//! [`Manifest::is_known`]).
+//!
+//! Every edit runs under the manifest of the tree it edits: an edit over a
+//! stored root adopts the header that root carries (see
+//! `TransientTree::load`), and a new tree states its manifest when it is
+//! created. [`Manifest::default`] is only the format a new tree starts with;
+//! code working with an existing tree reads that tree's manifest rather than
+//! the default. Pure reads do not check the header — the node encoding is
+//! self-delimiting and version 1 is the only shipped format.
 
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -37,57 +40,6 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// buffer encoded via the segment codec (schema-split columns, per-buffer
 /// dictionaries, front-coded arenas, op polarity as a column).
 pub const FORMAT_VERSION: u8 = 1;
-
-/// The branching parameter as `n`, where the geometric split factor (expected
-/// fanout) is `2^n`. One byte spans the whole practical range; `n = 8` gives a
-/// fanout of 256.
-pub const DEFAULT_FANOUT_N: u8 = 8;
-
-/// Default separator-length bound (the length-guarded coin, plan 5.7a): keys
-/// longer than this are ranked 0 so they never become boundaries, bounding
-/// every separator by construction.
-pub const DEFAULT_MAX_SEPARATOR: u32 = 512;
-
-/// Default value inline-vs-spill threshold (plan 3.1/4): values whose encoded
-/// form exceeds this go to the block store, addressed by the whole-value
-/// hash appended to the key; smaller values inline in order-preserving form.
-/// Sized for a networked store with large nodes, not a 4 KiB disk page.
-pub const DEFAULT_INLINE_N: u32 = 4096;
-
-/// Default spilled-value key-prefix length: a spilled value's key carries the
-/// order-preserving encoding of this many leading raw value bytes, so spilled
-/// values sort INTO their type band next to inline values and prefix/range
-/// predicates decide from the key whenever the answer lies within this many
-/// bytes (beyond it, the scan loads the block and post-filters).
-pub const DEFAULT_SPILL_PREFIX: u16 = 64;
-
-/// Default segment weight target, ~64 KiB: paces every node (leaf and, with
-/// the index-level machinery, index) toward this many weighted bytes between
-/// coin-decided cuts, and a leaf run whose summed entry weight (see
-/// [`entry_weight`](crate::distribution::cap::entry_weight)) exceeds it is
-/// force-split at deterministic positions (see
-/// [`forced_cut_positions`](crate::distribution::cap::forced_cut_positions)),
-/// bounding the unbounded leaves that runs of vetoed seams (near-duplicate
-/// keys) otherwise form. 0 disables byte-pacing entirely, recovering the old
-/// per-key geometric coin byte-for-byte.
-pub const DEFAULT_MAX_SEGMENT: u32 = 65536;
-
-/// Default frame ceiling factor: a frame (the run of entries between
-/// coin-decided cuts) over `frame_ceiling_factor * max_segment` is force-split
-/// at the accepted seams
-/// [`frame_cut_positions`](crate::distribution::cap::frame_cut_positions)
-/// chooses, bounding the weight coin's natural exponential tail. 3 caps the
-/// largest node near three times the target for a modest commit-CPU cost (the
-/// boundary-policy experiment measured 2 and 3; 3 is the default trade, 2 is
-/// available where tighter variance outweighs write CPU). 0 disables it.
-pub const DEFAULT_FRAME_CEILING_FACTOR: u32 = 3;
-
-/// Default forced-cut anchor selector (see
-/// [`AnchorSelector`](crate::distribution::cap::AnchorSelector)): 1 is the
-/// hybrid (shortest-separator class first, hash-minimum within it), which the
-/// experiment showed anchors forced cuts at the most stable semantic breaks
-/// (inserts never move them) for no measurable cost over pure rendezvous (0).
-pub const DEFAULT_ANCHOR_SELECTOR: u32 = 1;
 
 /// The self-describing format constants of a tree, inlined into every node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -120,6 +72,13 @@ pub struct Manifest {
     pub anchor_selector: u32,
 }
 
+/// The format a new tree is created under.
+///
+/// Only for choosing the format of a tree that does not exist yet. An
+/// existing tree's format is the manifest its nodes carry (read with
+/// [`PersistentTree::manifest`](crate::PersistentTree::manifest)), which may
+/// differ from this in any field, so code working with a tree reads that and
+/// never these values.
 impl Default for Manifest {
     fn default() -> Self {
         // Experiment plumbing for the boundary-policy arms (see
@@ -127,39 +86,51 @@ impl Default for Manifest {
         // created under can be overridden through the environment, so the
         // whole artifact stack runs a capture under an arm's format without
         // threading configuration through every layer. Unset variables leave
-        // the shipped defaults untouched; existing trees always keep the
+        // the shipped values untouched; existing trees always keep the
         // manifest their root node carries.
         //
-        // Read once per process: `default()` sits on the per-commit persist
-        // path, and the environment scan showed up as ~4% of a profiled
-        // commit before this memo. The environment of a running process
-        // does not change underneath it.
+        // Read once per process: tree creation can sit on a per-commit path,
+        // and the environment scan showed up as ~4% of a profiled commit
+        // before this memo. The environment of a running process does not
+        // change underneath it.
         //
         // `DIALOG_TREE_FANOUT_N` overrides the branching parameter `n` for
         // fresh trees (clamped to the representable 0..=63; see
         // `branch_factor`), so the sync soak harness can sweep expected
         // fanout (e.g. 5 = 32, 8 = 256) across processes without a code
-        // change. Existing trees keep the manifest their root carries.
+        // change.
         static DEFAULT: std::sync::OnceLock<Manifest> = std::sync::OnceLock::new();
         *DEFAULT.get_or_init(|| Self {
             version: FORMAT_VERSION,
-            fanout_n: env_override("DIALOG_TREE_FANOUT_N", u32::from(DEFAULT_FANOUT_N)).min(63)
-                as u8,
-            max_separator: DEFAULT_MAX_SEPARATOR,
-            inline_n: env_override("DIALOG_TREE_INLINE_N", DEFAULT_INLINE_N),
-            spill_prefix: DEFAULT_SPILL_PREFIX,
-            max_segment: env_override("DIALOG_TREE_MAX_SEGMENT", DEFAULT_MAX_SEGMENT),
-            frame_ceiling_factor: env_override(
-                "DIALOG_TREE_CEILING_FACTOR",
-                DEFAULT_FRAME_CEILING_FACTOR,
-            ),
-            anchor_selector: env_override("DIALOG_TREE_ANCHOR_SELECTOR", DEFAULT_ANCHOR_SELECTOR),
+            // Expected fanout 2^8 = 256.
+            fanout_n: env_override("DIALOG_TREE_FANOUT_N", 8).min(63) as u8,
+            // The length-guarded coin (plan 5.7a): longer keys never become
+            // boundaries, bounding every separator by construction.
+            max_separator: 512,
+            // Sized for a networked store with large nodes, not a 4 KiB disk
+            // page (plan 3.1/4).
+            inline_n: env_override("DIALOG_TREE_INLINE_N", 4096),
+            // Spilled values sort INTO their type band next to inline values,
+            // and prefix/range predicates decide from the key whenever the
+            // answer lies within this many bytes.
+            spill_prefix: 64,
+            // ~64 KiB per node between coin-decided cuts; 0 would recover the
+            // old per-key geometric coin byte-for-byte.
+            max_segment: env_override("DIALOG_TREE_MAX_SEGMENT", 65536),
+            // Caps the largest node near three times the target for a modest
+            // commit-CPU cost (the boundary-policy experiment measured 2 and
+            // 3; 2 is available where tighter variance outweighs write CPU).
+            frame_ceiling_factor: env_override("DIALOG_TREE_CEILING_FACTOR", 3),
+            // Hybrid: the experiment showed it anchors forced cuts at the most
+            // stable semantic breaks (inserts never move them) for no
+            // measurable cost over pure rendezvous (0).
+            anchor_selector: env_override("DIALOG_TREE_ANCHOR_SELECTOR", 1),
         })
     }
 }
 
 /// Reads a `u32` manifest override from the environment, falling back to the
-/// built-in default when the variable is unset or unparsable. On targets
+/// built-in value when the variable is unset or unparsable. On targets
 /// without an environment (wasm) the fallback always wins.
 fn env_override(name: &str, fallback: u32) -> u32 {
     #[cfg(not(target_arch = "wasm32"))]
@@ -197,6 +168,99 @@ impl Manifest {
     pub fn frame_ceiling(&self) -> usize {
         self.frame_ceiling_factor as usize * self.max_segment as usize
     }
+
+    /// Whether this build knows the format `version`: whether the encoding
+    /// parameters derived from it (see
+    /// [`entry_overhead`](Self::entry_overhead) and its siblings) are this
+    /// version's own.
+    ///
+    /// An unknown version is not refused. Its nodes still read (the manifest
+    /// is data, and a body that does not match this build's layout fails its
+    /// own decode), and a tree under it can still be edited: the parameters
+    /// fall back to this build's newest known version, so edits shape the
+    /// touched nodes as this build would. That can leave a tree shaped
+    /// differently from how its own version would shape it — extra work when
+    /// replicas compare, never lost or wrong data — which is far better than
+    /// an older program refusing a newer peer's tree.
+    pub fn is_known(&self) -> bool {
+        Encoding::known(self.version).is_some()
+    }
+
+    /// The encoding parameters `version` fixes, or this build's newest known
+    /// version's for a version it does not know (see
+    /// [`is_known`](Self::is_known)).
+    #[inline]
+    fn encoding(&self) -> Encoding {
+        match self.version {
+            1 => Encoding::V1,
+            _ => Encoding::NEWEST,
+        }
+    }
+
+    /// Weight charged per leaf entry beyond its key bytes and its value's
+    /// payload weight: the columnar bookkeeping each entry costs in an
+    /// encoded leaf (front-coding offsets, dictionary and value-table
+    /// framing, polarity). Derived from `version`, whose node encoding it
+    /// measures. Buffered ops are metered the same way for the buffer byte
+    /// cap.
+    #[inline]
+    pub fn entry_overhead(&self) -> usize {
+        self.encoding().entry_overhead
+    }
+
+    /// Weight the per-key cut floor charges beyond a key's bytes, where the
+    /// value's payload is not in hand: a stand-in for the value slot and the
+    /// per-entry encoding. Derived from `version`; lower than
+    /// [`entry_overhead`](Self::entry_overhead) plus any payload, so the
+    /// floor never predicts a cut the full charge would not make.
+    #[inline]
+    pub fn key_overhead(&self) -> usize {
+        self.encoding().key_overhead
+    }
+
+    /// Weight charged per index link beyond its separator bytes and the
+    /// 32-byte child hash: per-link encoding overhead (offsets, front-coding
+    /// bookkeeping). Derived from `version`; the index-level analog of
+    /// [`entry_overhead`](Self::entry_overhead).
+    #[inline]
+    pub fn link_overhead(&self) -> usize {
+        self.encoding().link_overhead
+    }
+}
+
+/// The weight-metering parameters a format version fixes. They shape the
+/// tree (byte pacing cuts by the weight they meter), and they measure how
+/// that version encodes nodes, so they belong to the version rather than to
+/// any tunable manifest field: a new node encoding is a new version with its
+/// own row here.
+#[derive(Debug, Clone, Copy)]
+struct Encoding {
+    entry_overhead: usize,
+    key_overhead: usize,
+    link_overhead: usize,
+}
+
+impl Encoding {
+    /// Version 1. The entry overhead is calibrated against measured leaf
+    /// encodings on the SE dataset: without it, encoded bytes drifted to
+    /// 1.85x the metered weight at p90 (max 2.1x); with it bytes/weight is
+    /// p50 1.02 / p90 1.05, so `max_segment` and the frame ceiling
+    /// denominate in effective bytes.
+    const V1: Self = Self {
+        entry_overhead: 64,
+        key_overhead: 32,
+        link_overhead: 16,
+    };
+
+    /// The newest version this build knows, used for a version it does not.
+    const NEWEST: Self = Self::V1;
+
+    fn known(version: u8) -> Option<Self> {
+        match version {
+            1 => Some(Self::V1),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,7 +270,7 @@ mod tests {
     // await nothing.
     #![allow(clippy::unused_async)]
 
-    use super::{DEFAULT_FANOUT_N, Manifest};
+    use super::Manifest;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -253,7 +317,6 @@ mod tests {
             .branch_factor(),
             u64::MAX
         );
-        assert_eq!(DEFAULT_FANOUT_N, 8);
         Ok(())
     }
 

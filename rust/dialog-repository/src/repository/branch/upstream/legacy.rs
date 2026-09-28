@@ -11,15 +11,17 @@ use serde::{Deserialize, Serialize};
 ///
 /// Stored in the branch's `upstream` cell. The `tree` field captures
 /// the upstream's tree root at the time of last sync, used as the
-/// divergence base for three-way merge.
+/// divergence base for three-way merge; an upstream never synced was
+/// written with the all-zero reference, which reads as `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Upstream {
     /// A local branch upstream.
     Local {
         /// Branch name.
         branch: String,
-        /// Tree root at last sync point.
-        tree: TreeReference,
+        /// Tree root at last sync point, if any sync has happened.
+        #[serde(deserialize_with = "super::sync_base::deserialize")]
+        tree: Option<TreeReference>,
     },
     /// A remote branch upstream.
     Remote {
@@ -27,17 +29,19 @@ pub enum Upstream {
         remote: String,
         /// Branch name on the remote.
         branch: String,
-        /// Tree root at last sync point.
-        tree: TreeReference,
+        /// Tree root at last sync point, if any sync has happened.
+        #[serde(deserialize_with = "super::sync_base::deserialize")]
+        tree: Option<TreeReference>,
     },
 }
 
 impl Upstream {
-    /// Returns the tree root at the last sync point.
-    pub fn tree(&self) -> &TreeReference {
+    /// Returns the tree root at the last sync point, if any sync has
+    /// happened.
+    pub fn tree(&self) -> Option<&TreeReference> {
         match self {
-            Self::Local { tree, .. } => tree,
-            Self::Remote { tree, .. } => tree,
+            Self::Local { tree, .. } => tree.as_ref(),
+            Self::Remote { tree, .. } => tree.as_ref(),
         }
     }
 }
@@ -97,8 +101,36 @@ mod tests {
         Upstream::Remote {
             remote: name.into(),
             branch: "main".into(),
-            tree: TreeReference::from([seed; 32]),
+            tree: Some(TreeReference::from([seed; 32])),
         }
+    }
+
+    /// Releases before the sentinel-free empty tree wrote "never synced"
+    /// as the all-zero tree reference; it reads back as no sync base, so
+    /// nothing is carried over as a sync that never happened.
+    #[dialog_common::test]
+    async fn it_reads_the_zero_reference_as_never_synced() -> Result<()> {
+        #[derive(Debug, Serialize)]
+        enum Stored {
+            Remote {
+                remote: String,
+                branch: String,
+                tree: TreeReference,
+            },
+        }
+        let legacy = Stored::Remote {
+            remote: "origin".into(),
+            branch: "main".into(),
+            tree: TreeReference::from([0u8; 32]),
+        };
+        let (_, bytes) = CborEncoder.encode(&legacy).await?;
+        let decoded: Upstream = CborEncoder.decode(&bytes).await?;
+        assert_eq!(decoded.tree(), None, "the zero reference reads as None");
+
+        let synced = remote("origin", 7);
+        let (_, bytes) = CborEncoder.encode(&synced).await?;
+        assert_eq!(CborEncoder.decode::<Upstream>(&bytes).await?, synced);
+        Ok(())
     }
 
     /// Cells written before multi-upstream support hold a single bare

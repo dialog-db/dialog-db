@@ -270,6 +270,18 @@ where
             .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
     }
 
+    /// Whether this node is the empty tree's node: a zero-entry segment
+    /// carrying the format manifest and nothing else (see
+    /// [`PersistentSegment::empty`]). Such a node is a pure format marker —
+    /// it is the persisted root of an empty tree, never an interior node —
+    /// and load paths treat it as the absence of a root.
+    pub fn is_empty(&self) -> Result<bool, DialogSearchTreeError> {
+        Ok(match self.body() {
+            ArchivedNodeBody::Index(_) => false,
+            ArchivedNodeBody::Segment(segment) => segment.len() == 0,
+        })
+    }
+
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
     pub fn as_index(&self) -> Result<&ArchivedIndex<Value>, DialogSearchTreeError> {
@@ -534,8 +546,9 @@ where
         Ok((count, layout, columns))
     }
 
-    /// The buffered weight this sealed buffer carries (key bytes plus value
-    /// payload weights, retracts charged at 16), for the byte-capped flush
+    /// The raw buffered weight this sealed buffer carries (key bytes plus
+    /// value payload weights, retracts charged at 16; the per-op overhead is
+    /// added from the manifest by the caller), for the byte-capped flush
     /// trigger: computed by streaming the key columns, with no entry
     /// materialization.
     pub fn weight<Key: self::Key>(&self) -> Result<usize, DialogSearchTreeError> {
@@ -550,7 +563,6 @@ where
             .map(|value| value.payload_weight())
             .sum::<usize>();
         weight += 16 * self.polarity.iter().filter(|&&p| p == 0).count();
-        weight += crate::entry::ENTRY_ENCODING_OVERHEAD * self.count as usize;
         Ok(weight)
     }
 
@@ -939,12 +951,17 @@ where
         header: Manifest,
     ) -> Result<Self, DialogSearchTreeError> {
         let count = entries.len() as u32;
-        let first_layout = entries
-            .first()
-            .map(|entry| entry.key.layout())
-            .ok_or_else(|| {
-                DialogSearchTreeError::Node("Attempted to encode an empty segment".into())
-            })?;
+        let Some(first_layout) = entries.first().map(|entry| entry.key.layout()) else {
+            // The empty tree's node: the manifest with no entries (and, being
+            // a leaf, no children or novelty). This is the persisted form of
+            // an empty tree under every manifest — the format must survive
+            // emptiness, or a session reopening the tree would silently
+            // continue under the defaults (the manifest-continuity bug the
+            // adversarial soak caught). The encoding is fixed — opaque
+            // layout, one empty arena column — so every replica's empty tree
+            // under a given manifest is byte-identical.
+            return Ok(Self::empty(header));
+        };
         let uniform = entries
             .iter()
             .all(|entry| entry.key.layout() == first_layout);
@@ -980,6 +997,25 @@ where
             columns,
             values,
         })
+    }
+
+    /// The canonical zero-entry segment: a tree node that carries the format
+    /// `header` and nothing else. See [`from_entries`](Self::from_entries) —
+    /// this is the empty tree's persisted representation under every
+    /// manifest. The column set mirrors the [`MIXED_LAYOUT`] opaque schema
+    /// (one whole-key arena column, here empty) so decode paths see the
+    /// arity they expect.
+    pub fn empty(header: Manifest) -> Self {
+        Self {
+            header,
+            count: 0,
+            layout: MIXED_LAYOUT,
+            columns: vec![ColumnData::Arena {
+                prefix: Vec::new(),
+                stream: Vec::new(),
+            }],
+            values: Vec::new(),
+        }
     }
 }
 
@@ -1076,7 +1112,9 @@ where
     }
 
     /// Builds a leaf segment node body from entries, stamping the tree's
-    /// format header.
+    /// format header. Zero entries build the empty tree's node — the
+    /// manifest-carrying format marker (see [`PersistentSegment::empty`]),
+    /// legitimate only as the root of an empty tree, never interior.
     pub fn segment_from_entries<Key>(
         entries: Vec<Entry<Key, Value>>,
         header: Manifest,
@@ -1084,11 +1122,6 @@ where
     where
         Key: self::Key,
     {
-        if entries.is_empty() {
-            return Err(DialogSearchTreeError::Node(
-                "Attempted to create a segment from zero entries".into(),
-            ));
-        }
         Ok(PersistentNodeBody::Segment(
             PersistentSegment::from_entries(entries, header)?,
         ))

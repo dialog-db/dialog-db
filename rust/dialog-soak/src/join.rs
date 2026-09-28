@@ -812,6 +812,9 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
 
     simulation::configure(None);
 
+    // Every tree in this run was created here, so they all carry the
+    // format a new tree takes in this process (which the sweep sets
+    // through the environment); the report labels the run with it.
     let manifest = dialog_search_tree::Manifest::default();
     let (latency_ms, auth_ms, bandwidth_mbps) = match &scenario.network {
         Some(shape) => (

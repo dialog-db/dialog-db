@@ -379,23 +379,24 @@ pub struct Novelty<Value> {
     /// Total buffered ops across every link, so capacity triggers read a
     /// number instead of scanning.
     total: usize,
-    /// Total buffered WEIGHT across every link (key bytes + value payload
-    /// weight per op, the same metering the frame ceiling uses), for the
+    /// Total buffered raw weight across every link (key bytes + value
+    /// payload weight per op; the per-op overhead is added from the
+    /// manifest when read, see [`weight`](Self::weight)), for the
     /// byte-capped flush trigger. `None` until first asked for (a spine
     /// opened from stored buffers computes it lazily by streaming the
     /// sealed columns); once computed, every mutator keeps it exact.
     weight: Option<usize>,
 }
 
-/// The weight one buffered op contributes toward the buffer byte cap: its
-/// key bytes plus its value's payload weight (a retract carries no value
-/// and is charged like [`State::Removed`]'s footprint).
+/// The raw weight one buffered op contributes toward the buffer byte cap:
+/// its key bytes plus its value's payload weight (a retract carries no value
+/// and is charged like [`State::Removed`]'s footprint). The per-op overhead
+/// ([`Manifest::entry_overhead`]) is added per op when the total is read.
 fn novelty_entry_weight<Value>(entry: &NoveltyEntry<Value>) -> usize
 where
     Value: self::Value,
 {
     entry.key.len()
-        + crate::entry::ENTRY_ENCODING_OVERHEAD
         + match &entry.op {
             NoveltyOp::Assert(value) => value.payload_weight(),
             NoveltyOp::Retract => 16,
@@ -522,11 +523,20 @@ where
         }
     }
 
-    /// Total buffered weight across every link (the byte-cap trigger's
-    /// quantity), computed lazily on first ask — a spine opened from stored
-    /// buffers streams their sealed columns once — and kept exact by every
-    /// mutator afterwards.
-    pub(crate) fn weight<K>(&mut self) -> Result<usize, DialogSearchTreeError>
+    /// Total buffered weight across every link under `manifest` (the
+    /// byte-cap trigger's quantity): the raw weight, computed lazily on
+    /// first ask — a spine opened from stored buffers streams their sealed
+    /// columns once — and kept exact by every mutator afterwards, plus the
+    /// manifest's per-op overhead for every buffered op.
+    pub(crate) fn weight<K>(&mut self, manifest: &Manifest) -> Result<usize, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        Ok(self.raw_weight::<K>()? + self.total * manifest.entry_overhead())
+    }
+
+    /// The buffered raw weight (no per-op overhead), cached.
+    fn raw_weight<K>(&mut self) -> Result<usize, DialogSearchTreeError>
     where
         K: self::Key,
     {
@@ -552,10 +562,12 @@ where
     }
 
     /// Per-link `(link, weight, ops)` for every non-empty link buffer, the
-    /// quantities a selective flush orders its shedding by. A sealed link
-    /// streams its encoded columns; nothing is lifted.
+    /// quantities a selective flush orders its shedding by, with weights
+    /// metered under `manifest`. A sealed link streams its encoded columns;
+    /// nothing is lifted.
     pub(crate) fn link_measures<K>(
         &self,
+        manifest: &Manifest,
     ) -> Result<Vec<(usize, usize, usize)>, DialogSearchTreeError>
     where
         K: self::Key,
@@ -577,7 +589,7 @@ where
                     entries.iter().map(novelty_entry_weight).sum()
                 }
             };
-            measures.push((at, weight, ops));
+            measures.push((at, weight + ops * manifest.entry_overhead(), ops));
         }
         Ok(measures)
     }
@@ -1121,7 +1133,8 @@ pub struct TransientSegment<Key, Value> {
     /// first key. Empty for the tree's global leftmost segment. This is the
     /// ground truth every index level above derives its separators from.
     pub separator: Vec<u8>,
-    /// Cached sum of the entries' weights ([`Entry::weight`]), `None` until
+    /// Cached sum of the entries' raw weights ([`Entry::raw_weight`]; the
+    /// per-entry overhead is added from the manifest when read), `None` until
     /// first queried or after a wholesale mutation invalidated it. The edit
     /// path's frame-ceiling gate reads this once per edit; without the cache
     /// it re-summed the whole leaf on every membership-changing edit, which
@@ -1177,20 +1190,22 @@ where
     Key: self::Key,
     Value: self::Value,
 {
-    /// The exact sum of the entries' weights ([`Entry::weight`]): the number
-    /// the frame-ceiling gate compares against `Manifest::frame_ceiling`.
-    /// Computed once per segment and maintained incrementally by
-    /// [`upsert`](Self::upsert) and [`delete`](Self::delete), so repeated
-    /// edits into the same leaf pay O(1) here instead of O(entries).
-    pub fn total_weight(&mut self) -> usize {
-        match self.weight {
+    /// The exact sum of the entries' weights under `manifest`
+    /// ([`Entry::weight`]): the number the frame-ceiling gate compares
+    /// against `Manifest::frame_ceiling`. The content part is computed once
+    /// per segment and maintained incrementally by [`upsert`](Self::upsert)
+    /// and [`delete`](Self::delete), so repeated edits into the same leaf
+    /// pay O(1) here instead of O(entries).
+    pub fn total_weight(&mut self, manifest: &Manifest) -> usize {
+        let raw = match self.weight {
             Some(weight) => weight,
             None => {
-                let weight = self.entries.iter().map(Entry::weight).sum();
+                let weight = self.entries.iter().map(Entry::raw_weight).sum();
                 self.weight = Some(weight);
                 weight
             }
-        }
+        };
+        raw + self.entries.len() * manifest.entry_overhead()
     }
 
     /// Inserts or replaces the entry for `entry.key`, keeping the cached
@@ -1200,13 +1215,13 @@ where
         match self.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
             Ok(at) => {
                 if let Some(weight) = self.weight.as_mut() {
-                    *weight = *weight + entry.weight() - self.entries[at].weight();
+                    *weight = *weight + entry.raw_weight() - self.entries[at].raw_weight();
                 }
                 self.entries[at].value = entry.value;
             }
             Err(at) => {
                 if let Some(weight) = self.weight.as_mut() {
-                    *weight += entry.weight();
+                    *weight += entry.raw_weight();
                 }
                 self.entries.insert(at, entry);
             }
@@ -1218,7 +1233,7 @@ where
     pub fn delete(&mut self, key: &Key) {
         if let Ok(at) = self.entries.binary_search_by(|e| e.key.cmp(key)) {
             if let Some(weight) = self.weight.as_mut() {
-                *weight -= self.entries[at].weight();
+                *weight -= self.entries[at].raw_weight();
             }
             self.entries.remove(at);
         }
@@ -1651,7 +1666,7 @@ where
         let ceiling = manifest.frame_ceiling();
         let mut weights = Vec::with_capacity(children.len());
         for child in &children {
-            weights.push(cap::link_weight(child.separator()?));
+            weights.push(cap::link_weight(child.separator()?, manifest));
         }
         let mut separators: Vec<&[u8]> = Vec::with_capacity(children.len());
         for child in &children {
@@ -1946,7 +1961,7 @@ where
     let weights: Vec<usize> = if manifest.max_segment == 0 {
         Vec::new()
     } else {
-        entries.iter().map(Entry::weight).collect()
+        entries.iter().map(|entry| entry.weight(manifest)).collect()
     };
     let key_refs: Vec<&Key> = entries.iter().map(|entry| &entry.key).collect();
     let (cut_after, forced_start) = cut_plan::<Key, D>(&key_refs, &weights, manifest);
@@ -1961,8 +1976,12 @@ where
     // exact total rides into the segment's weight cache: a freshly
     // regrouped leaf then answers the edit path's frame-ceiling gate
     // without re-summing its entries.
+    // The cache holds the raw part (see `TransientSegment::weight`), so the
+    // per-entry overhead the metered weights carry comes back off.
     let group_weight = |start: usize, end: usize| -> Option<usize> {
-        (manifest.max_segment > 0).then(|| weights[start..end].iter().sum())
+        (manifest.max_segment > 0).then(|| {
+            weights[start..end].iter().sum::<usize>() - (end - start) * manifest.entry_overhead()
+        })
     };
     let mut group_start = 0usize;
     for (at, entry) in entries.into_iter().enumerate() {
@@ -2065,8 +2084,8 @@ fn seal<Key, Value, D>(
     if let Some(weight) = weight {
         debug_assert_eq!(
             weight,
-            entries.iter().map(Entry::weight).sum::<usize>(),
-            "a sealed group's cached weight must equal the sum of its entry weights"
+            entries.iter().map(Entry::raw_weight).sum::<usize>(),
+            "a sealed group's cached weight must equal the sum of its entry raw weights"
         );
     }
     groups.push(
@@ -2094,7 +2113,10 @@ mod tests {
 
     /// The geometric rank of a `u32` key, hashed the same way the tree hashes it.
     fn rank_of(key: u32) -> Rank {
-        distribution::geometric::rank(&Blake3Hash::hash(&key.to_le_bytes()))
+        distribution::geometric::rank(
+            &Blake3Hash::hash(&key.to_le_bytes()),
+            &crate::Manifest::default(),
+        )
     }
 
     /// One regrouped leaf segment's worth of entries.

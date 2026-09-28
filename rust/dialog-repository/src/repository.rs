@@ -67,7 +67,8 @@ pub(crate) mod source;
 // without linking `dialog-query` or the storage/transport stack.
 // Re-exported here at their historical
 // `dialog_repository::{Revision, TreeReference}` paths.
-pub use dialog_artifacts::{EMPTY_TREE_HASH, Revision, TreeReference};
+pub use dialog_artifacts::{Revision, TreeReference};
+pub use dialog_search_tree::LEGACY_EMPTY_ROOT;
 
 /// A repository scoped to a specific subject.
 ///
@@ -2128,9 +2129,12 @@ mod tests {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
+                // The branch was created here, so its tree takes the format
+                // a new tree takes; the overlay is keyed under the same one.
+                let manifest = dialog_search_tree::Manifest::default();
                 Ok(items
                     .iter()
-                    .map(|view| view.sort_key())
+                    .map(|view| view.sort_key(&manifest))
                     .collect::<Result<Vec<_>, _>>()?)
             }
 

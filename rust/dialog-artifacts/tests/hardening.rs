@@ -10,10 +10,17 @@ use std::str::FromStr as _;
 use anyhow::Result;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStoreMutExt as _, ArtifactView, Artifacts, Attribute,
-    Cause, Entity, Instruction, Uri, Value, default_sort_key,
+    Cause, Entity, Instruction, SortKey, Uri, Value, sort_key,
 };
+use dialog_search_tree::Manifest;
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 use futures_util::TryStreamExt as _;
+
+/// The sort key under the format the stores here are created with: a new
+/// store's tree takes [`Manifest::default`].
+fn default_sort_key(artifact: &Artifact) -> SortKey {
+    sort_key(artifact, &Manifest::default())
+}
 
 fn entity(n: u32) -> Entity {
     Entity::from_str(&format!("entity:hardening-{n:04}")).expect("valid entity")
@@ -68,7 +75,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
     assert_eq!(rows.len(), probe_values().len(), "every fact must scan");
 
     for row in rows {
-        let from_bytes = row.sort_key()?;
+        let from_bytes = row.sort_key(&Manifest::default())?;
         let from_fields = default_sort_key(&row.to_owned()?);
         assert_eq!(
             from_bytes,
