@@ -1312,6 +1312,7 @@ dependencies = [
  "dialog-varsig",
  "ipld-core",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "wasm-bindgen-test",
