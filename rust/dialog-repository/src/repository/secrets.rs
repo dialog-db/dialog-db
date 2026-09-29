@@ -169,6 +169,38 @@ pub async fn keys_for<Env: RegistryEnv>(
     Ok(keys)
 }
 
+/// Forget the copies of `principal`'s key sealed to `holder`: the records
+/// naming them and the messages they pointed at. A copy `holder` already
+/// opened elsewhere stands, as a delegation it copied does.
+pub async fn revoke<Env: RegistryEnv>(
+    state: &Branch,
+    principal: &Did,
+    holder: &Did,
+    env: &Env,
+) -> Result<(), SecretError> {
+    let copies: Vec<SealedKey> = Box::pin(
+        state
+            .query()
+            .select(Query::<SealedKey> {
+                this: Term::var("this"),
+                key_of: principal.this().into(),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    let mut changes = Changes::new();
+    for copy in copies {
+        if let Some((to, sealed)) = message(state, &copy.this, env).await?
+            && to == *holder
+        {
+            sealed_message(holder, sealed).retract(&mut changes);
+            copy.retract(&mut changes);
+        }
+    }
+    Ok(apply(state, changes, env).await?)
+}
+
 /// The message `this`: who it is sealed to, and its ciphertext.
 pub async fn message<Env: RegistryEnv>(
     state: &Branch,

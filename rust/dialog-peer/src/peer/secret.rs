@@ -741,7 +741,9 @@ impl HandOver {
 /// A member removed keeps what it already had: the old key opens what was
 /// sealed to it before, and a delegation it copied elsewhere stands until
 /// it is revoked there. What is sealed to the vault from now on is not
-/// its to open.
+/// its to open, and the copy it kept of the key of a space held for the
+/// vault is forgotten: a peer removed from its account no longer signs
+/// as a space it created, except through the account.
 pub struct Rotate {
     vault: Vault,
     without: Vec<Did>,
@@ -787,6 +789,7 @@ impl Rotate {
             new.add(member.clone()).perform(peer).await?;
         }
         moved(&branch, &old, &new, &without, peer).await?;
+        unheld(&branch, &old, &without, peer).await?;
         rehold(&branch, &old, &new.did, peer).await?;
         redelegate(&old, &new, &without, peer).await?;
         secrets::replace_root(&branch, &new.did, &name, peer)
@@ -838,6 +841,31 @@ async fn moved<S: PeerSpace>(
             to.add(member).perform(peer).await?;
         }
         Box::pin(moved(branch, &from, &to, without, peer)).await?;
+    }
+    Ok(())
+}
+
+/// Forget the copies the members `without` keep for themselves of the key
+/// of each space held for `old`. A copy already opened elsewhere stands,
+/// as a delegation the member copied does.
+async fn unheld<S: PeerSpace>(
+    branch: &Branch,
+    old: &Vault,
+    without: &[Did],
+    peer: &Peer<S, Local>,
+) -> Result<(), CredentialError> {
+    for (space, held) in secrets::held_by(branch, &old.did, peer)
+        .await
+        .map_err(unavailable)?
+    {
+        if held.kind != spaces::SPACE {
+            continue;
+        }
+        for member in without {
+            secrets::revoke(branch, &space, member, peer)
+                .await
+                .map_err(unavailable)?;
+        }
     }
     Ok(())
 }
@@ -1738,6 +1766,49 @@ mod tests {
             .collect();
         assert!(audiences.contains(&peer.did()), "{audiences:?}");
         assert!(!audiences.contains(&removed.did()), "{audiences:?}");
+        Ok(())
+    }
+
+    /// A peer removed from the account no longer opens a space it
+    /// created through the copy it kept: rotating without it forgets the
+    /// copy, and the space opens only through the account, which the
+    /// custodian still guards.
+    #[dialog_common::test]
+    async fn it_forgets_a_removed_peers_copy_of_a_space_key() -> anyhow::Result<()> {
+        let peer = test_peer().await;
+        let custodian = test_custodian(&peer).await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+        assert_eq!(
+            peer.space_key(&created.did()).perform(&peer).await?.did(),
+            created.did()
+        );
+        let account = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await?;
+
+        account.rotate().without(peer.did()).perform(&peer).await?;
+
+        let refused = peer.space_key(&created.did()).perform(&peer).await;
+        assert!(
+            matches!(refused, Err(CredentialError::Withheld(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            peer.space_key(&created.did())
+                .via(&custodian)
+                .perform(&peer)
+                .await?
+                .did(),
+            created.did()
+        );
         Ok(())
     }
 
