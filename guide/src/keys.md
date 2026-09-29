@@ -306,124 +306,158 @@ The VAE key holds the same bytes in a different order. The tag is `02`, and the 
 
 ## Sorted, the list tells its own story
 
-Put Alice's keys in byte order and each index turns into a set of neat runs. The type bytes are left out here to keep the rows short, and part of the AEV index is elided:
+Put Alice's keys in byte order and each index turns into a set of neat runs. Part of the AEV index is elided:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 756 378" width="756" height="378" xmlns="http://www.w3.org/2000/svg" role="img">
-<rect class="shade" x="8" y="8" width="36" height="20"/>
-<text x="26.0" y="22.0" text-anchor="middle">00</text>
-<rect class="entity" x="48" y="8" width="176" height="20"/>
-<text class="entity" x="136.0" y="22.0" text-anchor="middle">item:1</text>
-<rect class="attribute" x="228" y="8" width="176" height="20"/>
-<text class="attribute" x="316.0" y="22.0" text-anchor="middle">demo.grocery/done</text>
-<rect class="value" x="408" y="8" width="176" height="20"/>
-<text class="value" x="496.0" y="22.0" text-anchor="middle">false</text>
-<text class="small muted" x="596" y="22.0">everything about item:1</text>
-<rect class="shade" x="8" y="34" width="36" height="20"/>
-<text x="26.0" y="48.0" text-anchor="middle">00</text>
-<rect class="entity" x="48" y="34" width="176" height="20"/>
-<text class="entity" x="136.0" y="48.0" text-anchor="middle">item:1</text>
-<rect class="attribute" x="228" y="34" width="176" height="20"/>
-<text class="attribute" x="316.0" y="48.0" text-anchor="middle">demo.grocery/name</text>
-<rect class="value" x="408" y="34" width="176" height="20"/>
-<text class="value" x="496.0" y="48.0" text-anchor="middle">&quot;Oat milk&quot;</text>
-<rect class="shade" x="8" y="60" width="36" height="20"/>
-<text x="26.0" y="74.0" text-anchor="middle">00</text>
-<rect class="entity" x="48" y="60" width="176" height="20"/>
-<text class="entity" x="136.0" y="74.0" text-anchor="middle">item:2</text>
-<rect class="attribute" x="228" y="60" width="176" height="20"/>
-<text class="attribute" x="316.0" y="74.0" text-anchor="middle">demo.grocery/done</text>
-<rect class="value" x="408" y="60" width="176" height="20"/>
-<text class="value" x="496.0" y="74.0" text-anchor="middle">false</text>
-<text class="small muted" x="596" y="74.0">everything about item:2</text>
-<rect class="shade" x="8" y="86" width="36" height="20"/>
-<text x="26.0" y="100.0" text-anchor="middle">00</text>
-<rect class="entity" x="48" y="86" width="176" height="20"/>
-<text class="entity" x="136.0" y="100.0" text-anchor="middle">item:2</text>
-<rect class="attribute" x="228" y="86" width="176" height="20"/>
-<text class="attribute" x="316.0" y="100.0" text-anchor="middle">demo.grocery/name</text>
-<rect class="value" x="408" y="86" width="176" height="20"/>
-<text class="value" x="496.0" y="100.0" text-anchor="middle">&quot;Eggs&quot;</text>
-<rect class="shade" x="8" y="112" width="36" height="20"/>
-<text x="26.0" y="126.0" text-anchor="middle">00</text>
-<rect class="entity" x="48" y="112" width="176" height="20"/>
-<text class="entity" x="136.0" y="126.0" text-anchor="middle">item:2</text>
-<rect class="attribute" x="228" y="112" width="176" height="20"/>
-<text class="attribute" x="316.0" y="126.0" text-anchor="middle">demo.grocery/tag</text>
-<rect class="value" x="408" y="112" width="176" height="20"/>
-<text class="value" x="496.0" y="126.0" text-anchor="middle">&quot;breakfast&quot;</text>
-<rect class="shade" x="8" y="138" width="36" height="20"/>
-<text x="26.0" y="152.0" text-anchor="middle">01</text>
-<rect class="attribute" x="48" y="138" width="176" height="20"/>
-<text class="attribute" x="136.0" y="152.0" text-anchor="middle">demo.grocery/done</text>
-<rect class="entity" x="228" y="138" width="176" height="20"/>
-<text class="entity" x="316.0" y="152.0" text-anchor="middle">item:1</text>
-<rect class="value" x="408" y="138" width="176" height="20"/>
-<text class="value" x="496.0" y="152.0" text-anchor="middle">false</text>
-<text class="small muted" x="596" y="152.0">every item&#x27;s done flag</text>
-<rect class="shade" x="8" y="164" width="36" height="20"/>
-<text x="26.0" y="178.0" text-anchor="middle">01</text>
-<rect class="attribute" x="48" y="164" width="176" height="20"/>
-<text class="attribute" x="136.0" y="178.0" text-anchor="middle">demo.grocery/done</text>
-<rect class="entity" x="228" y="164" width="176" height="20"/>
-<text class="entity" x="316.0" y="178.0" text-anchor="middle">item:2</text>
-<rect class="value" x="408" y="164" width="176" height="20"/>
-<text class="value" x="496.0" y="178.0" text-anchor="middle">false</text>
-<rect class="shade" x="8" y="190" width="36" height="20"/>
-<text x="26.0" y="204.0" text-anchor="middle">01</text>
-<rect class="attribute" x="48" y="190" width="176" height="20"/>
-<text class="attribute" x="136.0" y="204.0" text-anchor="middle">demo.grocery/name</text>
-<rect class="entity" x="228" y="190" width="176" height="20"/>
-<text class="entity" x="316.0" y="204.0" text-anchor="middle">item:1</text>
-<rect class="value" x="408" y="190" width="176" height="20"/>
-<text class="value" x="496.0" y="204.0" text-anchor="middle">&quot;Oat milk&quot;</text>
-<rect class="shade" x="228" y="216" width="176" height="20"/>
-<text x="316.0" y="230.0" text-anchor="middle">…</text>
-<rect class="shade" x="8" y="242" width="36" height="20"/>
-<text x="26.0" y="256.0" text-anchor="middle">02</text>
-<rect class="value" x="48" y="242" width="176" height="20"/>
-<text class="value" x="136.0" y="256.0" text-anchor="middle">false</text>
-<rect class="attribute" x="228" y="242" width="176" height="20"/>
-<text class="attribute" x="316.0" y="256.0" text-anchor="middle">demo.grocery/done</text>
-<rect class="entity" x="408" y="242" width="176" height="20"/>
-<text class="entity" x="496.0" y="256.0" text-anchor="middle">item:1</text>
-<text class="small muted" x="596" y="256.0">every item not yet done</text>
-<rect class="shade" x="8" y="268" width="36" height="20"/>
-<text x="26.0" y="282.0" text-anchor="middle">02</text>
-<rect class="value" x="48" y="268" width="176" height="20"/>
-<text class="value" x="136.0" y="282.0" text-anchor="middle">false</text>
-<rect class="attribute" x="228" y="268" width="176" height="20"/>
-<text class="attribute" x="316.0" y="282.0" text-anchor="middle">demo.grocery/done</text>
-<rect class="entity" x="408" y="268" width="176" height="20"/>
-<text class="entity" x="496.0" y="282.0" text-anchor="middle">item:2</text>
-<rect class="shade" x="8" y="294" width="36" height="20"/>
-<text x="26.0" y="308.0" text-anchor="middle">02</text>
-<rect class="value" x="48" y="294" width="176" height="20"/>
-<text class="value" x="136.0" y="308.0" text-anchor="middle">&quot;Eggs&quot;</text>
-<rect class="attribute" x="228" y="294" width="176" height="20"/>
-<text class="attribute" x="316.0" y="308.0" text-anchor="middle">demo.grocery/name</text>
-<rect class="entity" x="408" y="294" width="176" height="20"/>
-<text class="entity" x="496.0" y="308.0" text-anchor="middle">item:2</text>
-<rect class="shade" x="8" y="320" width="36" height="20"/>
-<text x="26.0" y="334.0" text-anchor="middle">02</text>
-<rect class="value" x="48" y="320" width="176" height="20"/>
-<text class="value" x="136.0" y="334.0" text-anchor="middle">&quot;Oat milk&quot;</text>
-<rect class="attribute" x="228" y="320" width="176" height="20"/>
-<text class="attribute" x="316.0" y="334.0" text-anchor="middle">demo.grocery/name</text>
-<rect class="entity" x="408" y="320" width="176" height="20"/>
-<text class="entity" x="496.0" y="334.0" text-anchor="middle">item:1</text>
-<rect class="shade" x="8" y="346" width="36" height="20"/>
-<text x="26.0" y="360.0" text-anchor="middle">02</text>
-<rect class="value" x="48" y="346" width="176" height="20"/>
-<text class="value" x="136.0" y="360.0" text-anchor="middle">&quot;breakfast&quot;</text>
-<rect class="attribute" x="228" y="346" width="176" height="20"/>
-<text class="attribute" x="316.0" y="360.0" text-anchor="middle">demo.grocery/tag</text>
-<rect class="entity" x="408" y="346" width="176" height="20"/>
-<text class="entity" x="496.0" y="360.0" text-anchor="middle">item:2</text>
+<svg class="dg" viewBox="0 0 684 400" width="684" height="400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Alice's keys in byte order, with each value's type byte">
+<text class="label small muted" x="8" y="17">value type byte:</text>
+<rect class="value vtype" x="112" y="4" width="34" height="18"/>
+<text x="129.0" y="17" text-anchor="middle" class="small">02</text>
+<text class="label small muted" x="152" y="17">Boolean</text>
+<rect class="value vtype" x="216" y="4" width="34" height="18"/>
+<text x="233.0" y="17" text-anchor="middle" class="small">03</text>
+<text class="label small muted" x="256" y="17">String</text>
+<rect class="shade" x="8" y="30" width="34" height="20"/>
+<text x="25.0" y="44.0" text-anchor="middle">00</text>
+<rect class="entity" x="46" y="30" width="84" height="20"/>
+<text class="entity" x="88.0" y="44.0" text-anchor="middle">item:1</text>
+<rect class="attribute" x="134" y="30" width="176" height="20"/>
+<text class="attribute" x="222.0" y="44.0" text-anchor="middle">demo.grocery/done</text>
+<rect class="value vtype" x="314" y="30" width="34" height="20"/>
+<text x="331.0" y="44.0" text-anchor="middle">02</text>
+<rect class="value" x="352" y="30" width="118" height="20"/>
+<text class="value" x="411.0" y="44.0" text-anchor="middle">false</text>
+<text class="small muted" x="484" y="44.0">everything about item:1</text>
+<rect class="shade" x="8" y="56" width="34" height="20"/>
+<text x="25.0" y="70.0" text-anchor="middle">00</text>
+<rect class="entity" x="46" y="56" width="84" height="20"/>
+<text class="entity" x="88.0" y="70.0" text-anchor="middle">item:1</text>
+<rect class="attribute" x="134" y="56" width="176" height="20"/>
+<text class="attribute" x="222.0" y="70.0" text-anchor="middle">demo.grocery/name</text>
+<rect class="value vtype" x="314" y="56" width="34" height="20"/>
+<text x="331.0" y="70.0" text-anchor="middle">03</text>
+<rect class="value" x="352" y="56" width="118" height="20"/>
+<text class="value" x="411.0" y="70.0" text-anchor="middle">&quot;Oat milk&quot;</text>
+<rect class="shade" x="8" y="82" width="34" height="20"/>
+<text x="25.0" y="96.0" text-anchor="middle">00</text>
+<rect class="entity" x="46" y="82" width="84" height="20"/>
+<text class="entity" x="88.0" y="96.0" text-anchor="middle">item:2</text>
+<rect class="attribute" x="134" y="82" width="176" height="20"/>
+<text class="attribute" x="222.0" y="96.0" text-anchor="middle">demo.grocery/done</text>
+<rect class="value vtype" x="314" y="82" width="34" height="20"/>
+<text x="331.0" y="96.0" text-anchor="middle">02</text>
+<rect class="value" x="352" y="82" width="118" height="20"/>
+<text class="value" x="411.0" y="96.0" text-anchor="middle">false</text>
+<text class="small muted" x="484" y="96.0">everything about item:2</text>
+<rect class="shade" x="8" y="108" width="34" height="20"/>
+<text x="25.0" y="122.0" text-anchor="middle">00</text>
+<rect class="entity" x="46" y="108" width="84" height="20"/>
+<text class="entity" x="88.0" y="122.0" text-anchor="middle">item:2</text>
+<rect class="attribute" x="134" y="108" width="176" height="20"/>
+<text class="attribute" x="222.0" y="122.0" text-anchor="middle">demo.grocery/name</text>
+<rect class="value vtype" x="314" y="108" width="34" height="20"/>
+<text x="331.0" y="122.0" text-anchor="middle">03</text>
+<rect class="value" x="352" y="108" width="118" height="20"/>
+<text class="value" x="411.0" y="122.0" text-anchor="middle">&quot;Eggs&quot;</text>
+<rect class="shade" x="8" y="134" width="34" height="20"/>
+<text x="25.0" y="148.0" text-anchor="middle">00</text>
+<rect class="entity" x="46" y="134" width="84" height="20"/>
+<text class="entity" x="88.0" y="148.0" text-anchor="middle">item:2</text>
+<rect class="attribute" x="134" y="134" width="176" height="20"/>
+<text class="attribute" x="222.0" y="148.0" text-anchor="middle">demo.grocery/tag</text>
+<rect class="value vtype" x="314" y="134" width="34" height="20"/>
+<text x="331.0" y="148.0" text-anchor="middle">03</text>
+<rect class="value" x="352" y="134" width="118" height="20"/>
+<text class="value" x="411.0" y="148.0" text-anchor="middle">&quot;breakfast&quot;</text>
+<rect class="shade" x="8" y="160" width="34" height="20"/>
+<text x="25.0" y="174.0" text-anchor="middle">01</text>
+<rect class="attribute" x="46" y="160" width="176" height="20"/>
+<text class="attribute" x="134.0" y="174.0" text-anchor="middle">demo.grocery/done</text>
+<rect class="entity" x="226" y="160" width="84" height="20"/>
+<text class="entity" x="268.0" y="174.0" text-anchor="middle">item:1</text>
+<rect class="value vtype" x="314" y="160" width="34" height="20"/>
+<text x="331.0" y="174.0" text-anchor="middle">02</text>
+<rect class="value" x="352" y="160" width="118" height="20"/>
+<text class="value" x="411.0" y="174.0" text-anchor="middle">false</text>
+<text class="small muted" x="484" y="174.0">every item&#x27;s done flag</text>
+<rect class="shade" x="8" y="186" width="34" height="20"/>
+<text x="25.0" y="200.0" text-anchor="middle">01</text>
+<rect class="attribute" x="46" y="186" width="176" height="20"/>
+<text class="attribute" x="134.0" y="200.0" text-anchor="middle">demo.grocery/done</text>
+<rect class="entity" x="226" y="186" width="84" height="20"/>
+<text class="entity" x="268.0" y="200.0" text-anchor="middle">item:2</text>
+<rect class="value vtype" x="314" y="186" width="34" height="20"/>
+<text x="331.0" y="200.0" text-anchor="middle">02</text>
+<rect class="value" x="352" y="186" width="118" height="20"/>
+<text class="value" x="411.0" y="200.0" text-anchor="middle">false</text>
+<rect class="shade" x="8" y="212" width="34" height="20"/>
+<text x="25.0" y="226.0" text-anchor="middle">01</text>
+<rect class="attribute" x="46" y="212" width="176" height="20"/>
+<text class="attribute" x="134.0" y="226.0" text-anchor="middle">demo.grocery/name</text>
+<rect class="entity" x="226" y="212" width="84" height="20"/>
+<text class="entity" x="268.0" y="226.0" text-anchor="middle">item:1</text>
+<rect class="value vtype" x="314" y="212" width="34" height="20"/>
+<text x="331.0" y="226.0" text-anchor="middle">03</text>
+<rect class="value" x="352" y="212" width="118" height="20"/>
+<text class="value" x="411.0" y="226.0" text-anchor="middle">&quot;Oat milk&quot;</text>
+<rect class="shade" x="209.0" y="238" width="60" height="20"/>
+<text x="239.0" y="252.0" text-anchor="middle">…</text>
+<rect class="shade" x="8" y="264" width="34" height="20"/>
+<text x="25.0" y="278.0" text-anchor="middle">02</text>
+<rect class="value vtype" x="46" y="264" width="34" height="20"/>
+<text x="63.0" y="278.0" text-anchor="middle">02</text>
+<rect class="value" x="84" y="264" width="118" height="20"/>
+<text class="value" x="143.0" y="278.0" text-anchor="middle">false</text>
+<rect class="attribute" x="206" y="264" width="176" height="20"/>
+<text class="attribute" x="294.0" y="278.0" text-anchor="middle">demo.grocery/done</text>
+<rect class="entity" x="386" y="264" width="84" height="20"/>
+<text class="entity" x="428.0" y="278.0" text-anchor="middle">item:1</text>
+<text class="small muted" x="484" y="278.0">every item not yet done</text>
+<rect class="shade" x="8" y="290" width="34" height="20"/>
+<text x="25.0" y="304.0" text-anchor="middle">02</text>
+<rect class="value vtype" x="46" y="290" width="34" height="20"/>
+<text x="63.0" y="304.0" text-anchor="middle">02</text>
+<rect class="value" x="84" y="290" width="118" height="20"/>
+<text class="value" x="143.0" y="304.0" text-anchor="middle">false</text>
+<rect class="attribute" x="206" y="290" width="176" height="20"/>
+<text class="attribute" x="294.0" y="304.0" text-anchor="middle">demo.grocery/done</text>
+<rect class="entity" x="386" y="290" width="84" height="20"/>
+<text class="entity" x="428.0" y="304.0" text-anchor="middle">item:2</text>
+<rect class="shade" x="8" y="316" width="34" height="20"/>
+<text x="25.0" y="330.0" text-anchor="middle">02</text>
+<rect class="value vtype" x="46" y="316" width="34" height="20"/>
+<text x="63.0" y="330.0" text-anchor="middle">03</text>
+<rect class="value" x="84" y="316" width="118" height="20"/>
+<text class="value" x="143.0" y="330.0" text-anchor="middle">&quot;Eggs&quot;</text>
+<rect class="attribute" x="206" y="316" width="176" height="20"/>
+<text class="attribute" x="294.0" y="330.0" text-anchor="middle">demo.grocery/name</text>
+<rect class="entity" x="386" y="316" width="84" height="20"/>
+<text class="entity" x="428.0" y="330.0" text-anchor="middle">item:2</text>
+<text class="small muted" x="484" y="330.0">then every string, in order</text>
+<rect class="shade" x="8" y="342" width="34" height="20"/>
+<text x="25.0" y="356.0" text-anchor="middle">02</text>
+<rect class="value vtype" x="46" y="342" width="34" height="20"/>
+<text x="63.0" y="356.0" text-anchor="middle">03</text>
+<rect class="value" x="84" y="342" width="118" height="20"/>
+<text class="value" x="143.0" y="356.0" text-anchor="middle">&quot;Oat milk&quot;</text>
+<rect class="attribute" x="206" y="342" width="176" height="20"/>
+<text class="attribute" x="294.0" y="356.0" text-anchor="middle">demo.grocery/name</text>
+<rect class="entity" x="386" y="342" width="84" height="20"/>
+<text class="entity" x="428.0" y="356.0" text-anchor="middle">item:1</text>
+<rect class="shade" x="8" y="368" width="34" height="20"/>
+<text x="25.0" y="382.0" text-anchor="middle">02</text>
+<rect class="value vtype" x="46" y="368" width="34" height="20"/>
+<text x="63.0" y="382.0" text-anchor="middle">03</text>
+<rect class="value" x="84" y="368" width="118" height="20"/>
+<text class="value" x="143.0" y="382.0" text-anchor="middle">&quot;breakfast&quot;</text>
+<rect class="attribute" x="206" y="368" width="176" height="20"/>
+<text class="attribute" x="294.0" y="382.0" text-anchor="middle">demo.grocery/tag</text>
+<rect class="entity" x="386" y="368" width="84" height="20"/>
+<text class="entity" x="428.0" y="382.0" text-anchor="middle">item:2</text>
 </svg>
 </figure>
 
-Every fact about `item:2` is one contiguous run in EAV. Every `demo.grocery/done` is one run in AEV. In VAE, `false` comes before every string, because Boolean is type `02` and String is type `03`. Among the strings, `"Eggs"` and `"Oat milk"` come before `"breakfast"`, because uppercase letters have smaller byte values than lowercase ones.
+Every fact about `item:2` is one contiguous run in EAV. Every `demo.grocery/done` is one run in AEV. In VAE the type byte comes right after the tag, so every Boolean sorts before every string: Boolean is type `02` and String is type `03`. Among the strings, `"Eggs"` and `"Oat milk"` come before `"breakfast"`, because uppercase letters have smaller byte values than lowercase ones.
 
 A query is mostly a matter of picking the index whose runs match the question, then reading one run.
 
