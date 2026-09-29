@@ -463,9 +463,11 @@ A query is mostly a matter of picking the index whose runs match the question, t
 
 ## The value lives in the key
 
-The value is part of every key, not stored beside it. That means a lookup by value in VAE finds the entity without reading anything else. It also means the tree never holds two entries for one fact in the same index: the same entity, attribute and value always give the same key.
+The value is part of every key, not stored beside it. That means a lookup by value in VAE finds the entity without reading anything else.
 
-Each key still has a small payload next to it. The payload holds no part of the fact, only its temporal information: the version or versions that asserted the fact, and the fact's optional `cause` (see [Commits and History](./history.md)).
+It also means a fact has exactly one place in each index. If Alice and Bob both assert that the eggs are done, both assertions build the same key, so each index holds one entry for that fact, not two.
+
+That entry has a small payload next to its key. The payload holds no part of the fact, only its temporal information: the versions that asserted it, here both Alice's and Bob's, and the fact's optional `cause` (see [Commits and History](./history.md)).
 
 ## Big values spill
 
