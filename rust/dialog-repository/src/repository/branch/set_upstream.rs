@@ -74,7 +74,10 @@ impl Branch {
 impl Branch {
     /// Stop pulling from and pushing to `target`: the relations
     /// [`set_upstream`](Self::set_upstream) recorded are retracted, and
-    /// every other upstream is kept.
+    /// every other upstream is kept. The tree this branch was last in
+    /// sync with `target` at stays recorded: it says where content the
+    /// branch adopted came from, and is the base to sync from should
+    /// `target` be set again.
     pub fn unset_upstream(&self, target: impl Into<UpstreamBranch>) -> UnsetUpstream<'_> {
         UnsetUpstream {
             branch: self,
