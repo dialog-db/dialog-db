@@ -1379,6 +1379,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-palette"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dialog-query"
 version = "0.1.0"
 dependencies = [

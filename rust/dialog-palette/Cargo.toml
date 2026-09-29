@@ -1,0 +1,13 @@
+[package]
+name = "dialog-palette"
+description = "A Ubiquity-style command line parser: grammars, nouns, verbs, scored parses"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
