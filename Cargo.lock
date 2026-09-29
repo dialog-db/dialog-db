@@ -1085,8 +1085,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
  "wasm-bindgen-test",
 ]
 
