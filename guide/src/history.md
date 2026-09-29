@@ -124,7 +124,7 @@ Bob's commit asserts `done true` on `item:2`. The done flag has one value, so th
 
 **A history record.** Under tag `03`, the commit writes one record for each fact it changed. The record's key starts with the origin and then the edition, so each writer's records sit together, in edition order. Its payload lists the versions this change supersedes. Bob's record says *"at (oB, 2), item 2's done became true, superseding what (oA, 1) wrote."* A retraction writes a record too, marked as a retraction.
 
-**A coverage record.** A record that removed something, a retraction, or an assertion that superseded at least one earlier version, is copied under tag `05`, keyed by version and by the hash of the value rather than the value itself. That keeps the question *"did this version remove anything?"* cheap to answer during a merge.
+**A coverage record.** A record that removed something, a retraction, or an assertion that superseded at least one earlier version, is copied under tag `05`, keyed by version and by the hash of the value rather than the value itself. The coverage region holds nothing but removals, so a replica can list every removal since it last synced without reading the much larger history of assertions. A graft merge (see [Sync](./sync.md#merge)) relies on exactly that.
 
 **A revision record.** Last, the commit writes one fact about itself: attribute `dialog.db/revision`, on an entity derived from the version. Its value is a signed record naming the commit's parent versions, its issuer, and links further back for fast ancestry walks. So the tree also holds the commit graph.
 

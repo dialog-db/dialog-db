@@ -96,7 +96,7 @@ When Bob pulls for the first time, he has no local changes, so he takes Alice's 
 
 When Alice's push is refused, she pulls and finds that both sides have changes. Her replica has to combine them.
 
-Dialog picks the cheaper direction. It takes the side with fewer changes since the two last agreed, and replays those changes onto the other side's tree. Here Alice made one commit and Bob made one, so she replays hers onto Bob's tree. When both sides have more than 8 commits the other has not seen, and they share a sync base, Dialog instead grafts whole subtrees from one tree into the other, which costs less than replaying every change.
+Dialog picks the cheaper direction. It takes the side with fewer changes since the two last agreed, and replays those changes onto the other side's tree. Here Alice made one commit and Bob made one, so she replays hers onto Bob's tree. When both sides have more than 8 commits the other has not seen, and they share a sync base, Dialog instead grafts whole subtrees from one tree into the other, which costs less than replaying every change. A grafted subtree can still hold facts the other side removed, so Dialog then lists every removal either side made since the sync base, from the coverage records described in [Commits and History](./history.md#what-a-commit-writes), and clears those facts from the merged tree.
 
 Replaying is not blind copying. Unless the two replicas have never seen a single commit from each other's origins, incoming changes are screened against what the receiving side has seen:
 
