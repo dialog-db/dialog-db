@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use dialog_palette::{
+use dialog_lingo::{
     Argument, Candidate, Context, Grammar, Memory, Noun, Parse, Registry, Selection, Value, Verb,
     parse,
 };

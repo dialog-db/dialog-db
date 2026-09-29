@@ -1,5 +1,5 @@
 [package]
-name = "dialog-palette"
+name = "dialog-lingo"
 description = "A Ubiquity-style command line parser: grammars, nouns, verbs, scored parses"
 edition.workspace = true
 version.workspace = true

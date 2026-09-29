@@ -27,7 +27,7 @@ pub enum Branching {
 /// `location` is introduced by "near", "on", "at" and "in".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Marker {
-    /// The role's name, as the `palette/role` instance names it.
+    /// The role's name, as the `lingo/role` instance names it.
     pub role: String,
     /// The word that introduces it.
     pub delimiter: String,

@@ -1306,6 +1306,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-lingo"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dialog-macros"
 version = "0.1.0"
 dependencies = [
@@ -1376,14 +1384,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
-]
-
-[[package]]
-name = "dialog-palette"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

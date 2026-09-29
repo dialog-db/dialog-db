@@ -1,7 +1,7 @@
 //! What the parser knows: verbs, their arguments, and the candidates
 //! each noun offers. All of it is plain data a host loads from its
-//! store (in tonk, from `palette/verb`, `palette/argument`,
-//! `palette/noun` rows and one subscription per noun concept), so the
+//! store (in tonk, from `lingo/verb`, `lingo/argument`,
+//! `lingo/noun` rows and the rows of each noun concept), so the
 //! parser itself does no IO.
 
 use std::collections::BTreeMap;
