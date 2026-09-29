@@ -91,6 +91,10 @@ pub struct TransactionBatch {
     /// The branch's shared memos, seeded at publish.
     records: Cache<Version, RevisionRecord>,
     contexts: ContextCache,
+    /// The transients rule heads emitted while inducing the staged
+    /// links, across every round of every link. See
+    /// [`induced`](Self::induced).
+    induced: Changes,
 }
 
 impl TransactionBatch {
@@ -112,6 +116,21 @@ impl TransactionBatch {
     /// head to.
     pub fn revision(&self) -> Revision {
         self.snapshot.revision()
+    }
+
+    /// The transient facts inductive rules concluded while this chain
+    /// was staged: every transient head emitted in any induction round
+    /// of any staged link. The transients the transactions dispatched
+    /// themselves are not included; the caller already holds those.
+    ///
+    /// Induction reads these as the next round's stimulus and then drops
+    /// them, so nothing is ever committed for them. A host that runs its
+    /// own handlers for a command (outside the rule system) reads them
+    /// here, before [`publish`](Self::publish) consumes the batch, and
+    /// runs them after the publish lands. Without that, a rule whose
+    /// head is such a command commits cleanly and nothing happens.
+    pub fn induced(&self) -> &Changes {
+        &self.induced
     }
 
     /// Start the next transaction on this chain. Its commit extends the
@@ -195,6 +214,7 @@ impl BatchPublish {
             context,
             records,
             contexts,
+            induced: _,
         } = self.batch;
         let tip = snapshot.revision();
 
@@ -367,7 +387,7 @@ impl TransactionCommit<&Branch> {
         let authority = Identify.perform(env).await?;
         let (line, _) = branch.commit_identity(authority.profile(), &authority.did());
 
-        let outcome = Box::pin(mint_link(
+        let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Branch(branch),
             base,
             |profile, issuer| branch.commit_identity(profile, issuer),
@@ -400,6 +420,7 @@ impl TransactionCommit<&Branch> {
                 context: None,
                 records: branch.records(),
                 contexts: branch.contexts(),
+                induced,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -421,6 +442,7 @@ impl TransactionCommit<&Branch> {
                     context: Some(context),
                     records: branch.records(),
                     contexts: branch.contexts(),
+                    induced,
                 }
             }
         })
@@ -450,7 +472,7 @@ impl TransactionCommit<TransactionBatch> {
         let (base, lineage) = batch.snapshot.head();
         let line = lineage.expect("a transaction batch's line is seeded at construction");
 
-        let outcome = Box::pin(mint_link(
+        let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Snapshot(&batch.snapshot),
             Some(base.clone()),
             |_, issuer| (line.clone(), origin_of(&line, issuer)),
@@ -461,6 +483,7 @@ impl TransactionCommit<TransactionBatch> {
             env,
         ))
         .await?;
+        induced.assert(&mut batch.induced);
 
         if let Outcome::Minted(minted) = outcome {
             let Minted {
@@ -490,7 +513,8 @@ impl TransactionCommit<TransactionBatch> {
 /// Mint one staged link: run commit-time induction over the batch, then
 /// [`Mint`] the settled changes on the line `line` names, carrying the
 /// trigger footprint forward. Nothing is published or adopted — the
-/// caller owns what happens to the [`Outcome`].
+/// caller owns what happens to the [`Outcome`] and to the transients
+/// induction emitted, returned alongside it.
 #[allow(clippy::too_many_arguments)]
 async fn mint_link<Env>(
     source: SourceRef<'_>,
@@ -501,7 +525,7 @@ async fn mint_link<Env>(
     allow_empty: bool,
     canonicalize: bool,
     env: &Env,
-) -> Result<Outcome, CommitError>
+) -> Result<(Outcome, Changes), CommitError>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -516,7 +540,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    induce(source, &mut changes, transients, env).await?;
+    let induced = induce(source, &mut changes, transients, env).await?;
     let touches = touches_rules(&changes);
     let previous = base.clone();
     let outcome = Mint {
@@ -535,7 +559,7 @@ where
     {
         carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
     }
-    Ok(outcome)
+    Ok((outcome, induced))
 }
 
 #[cfg(test)]
