@@ -1711,7 +1711,6 @@ dependencies = [
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",
- "sieve-cache",
  "signature",
  "tempfile",
  "thiserror 2.0.18",
