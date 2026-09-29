@@ -9,7 +9,6 @@ license.workspace = true
 helpers = [
   "tempfile",
   "anyhow",
-  "rand",
   "dialog-common/helpers",
   "dep:s3s",
   "dep:hyper",
@@ -44,10 +43,8 @@ hyper-util = { workspace = true, features = ["server", "tokio", "service"], opti
 parking_lot = { workspace = true }
 percent-encoding = { workspace = true }
 s3s = { workspace = true, optional = true }
-sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
-rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
