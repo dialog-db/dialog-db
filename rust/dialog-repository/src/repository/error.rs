@@ -498,6 +498,11 @@ pub enum CommitError {
     #[error("Failed to read the registry: {0}")]
     Registry(String),
 
+    /// An amend had nothing it could amend: no staged revision, or one
+    /// minted by another issuer.
+    #[error("Cannot amend: {0}")]
+    Amend(String),
+
     /// A write was attempted through a reference to a snapshot.
     ///
     /// A snapshot holds its revision by value, so nothing reached
