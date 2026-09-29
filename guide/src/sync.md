@@ -102,7 +102,7 @@ Replaying is not blind copying. Unless the two replicas have never seen a single
 
 - **A fact the receiver has already seen, and no longer holds, stays gone.** If Bob had retracted a fact and Alice's replica still held it, her copy's version would fall inside Bob's watermark: Bob saw it, and removed it. It is not brought back. This is how deletes survive a merge without tombstones.
 - **A removal only removes an entry that matches it exactly, down to the version that wrote it.** Alice's change to the milk's name removes the name `"Oat milk"` written at `(oA, 0)`. If the receiver holds a copy of a fact written by some other version, the removal leaves that copy alone.
-- **A record that replaced something retires what it replaced.** Bob's history record says his `done true` replaced `(oA, 1)`'s `done false`. After the merge, `done false` is gone on both sides, even on a replica that still held it.
+- **A record that superseded something retires what it superseded.** Bob's history record says his `done true` superseded `(oA, 1)`'s `done false`. After the merge, `done false` is gone on both sides, even on a replica that still held it.
 
 History records are merged before facts, so a removal always lands before an incoming fact could contest the slot it clears.
 
@@ -110,33 +110,33 @@ If the merged tree equals one of the two sides, that side's head is used as it i
 
 ## When both change the same thing
 
-Alice renamed the milk to `"Oat milk, 1 L"`. Bob, without seeing that, renamed it to `"Soy milk"`. Each used Replace, and each replaced only the `"Oat milk"` they had seen. Neither saw the other's value, so the merge keeps both:
+Alice renamed the milk to `"Oat milk, 1 L"`. Bob, without seeing that, renamed it to `"Soy milk"`. A name has one value, so each assertion superseded only the `"Oat milk"` its writer had seen. Neither saw the other's value, so the merge keeps both:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 760 118" width="760" height="118" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two concurrent names for the same item; a read elects one, the same way on every replica">
+<svg class="dg" viewBox="0 0 780 118" width="780" height="118" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two concurrent names for the same item; a read elects one, the same way on every replica">
 <defs><marker id="k-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="label small muted" x="10" y="16">in the merged tree: two names for item:1</text>
-<rect class="attribute" x="10" y="28" width="120" height="24"/><text class="attribute" x="70" y="44" text-anchor="middle">grocery/name</text>
-<rect class="entity" x="134" y="28" width="70" height="24"/><text class="entity" x="169" y="44" text-anchor="middle">item:1</text>
-<rect class="value" x="208" y="28" width="140" height="24"/><text class="value" x="278" y="44" text-anchor="middle">&quot;Oat milk, 1 L&quot;</text>
-<rect class="alice" x="352" y="28" width="70" height="24"/><text class="alice" x="387" y="44" text-anchor="middle">(oA, 2)</text>
-<rect class="attribute" x="10" y="58" width="120" height="24"/><text class="attribute" x="70" y="74" text-anchor="middle">grocery/name</text>
-<rect class="entity" x="134" y="58" width="70" height="24"/><text class="entity" x="169" y="74" text-anchor="middle">item:1</text>
-<rect class="value" x="208" y="58" width="140" height="24"/><text class="value" x="278" y="74" text-anchor="middle">&quot;Soy milk&quot;</text>
-<rect class="bob" x="352" y="58" width="70" height="24"/><text class="bob" x="387" y="74" text-anchor="middle">(oB, 2)</text>
-<line x1="426" y1="54" x2="480" y2="54" marker-end="url(#k-arrow)"/>
-<rect class="hash solid" x="484" y="40" width="90" height="28"/>
-<text class="small" x="529" y="58" text-anchor="middle" style="fill:var(--dg-paper)">elect</text>
-<line x1="574" y1="54" x2="610" y2="54" marker-end="url(#k-arrow)"/>
-<text class="label small" x="616" y="50">one name,</text>
-<text class="label small" x="616" y="64">the same everywhere</text>
+<rect class="attribute" x="10" y="28" width="170" height="24"/><text class="attribute" x="95" y="44" text-anchor="middle">example.grocery/name</text>
+<rect class="entity" x="184" y="28" width="70" height="24"/><text class="entity" x="219" y="44" text-anchor="middle">item:1</text>
+<rect class="value" x="258" y="28" width="140" height="24"/><text class="value" x="328" y="44" text-anchor="middle">&quot;Oat milk, 1 L&quot;</text>
+<rect class="alice" x="402" y="28" width="70" height="24"/><text class="alice" x="437" y="44" text-anchor="middle">(oA, 2)</text>
+<rect class="attribute" x="10" y="58" width="170" height="24"/><text class="attribute" x="95" y="74" text-anchor="middle">example.grocery/name</text>
+<rect class="entity" x="184" y="58" width="70" height="24"/><text class="entity" x="219" y="74" text-anchor="middle">item:1</text>
+<rect class="value" x="258" y="58" width="140" height="24"/><text class="value" x="328" y="74" text-anchor="middle">&quot;Soy milk&quot;</text>
+<rect class="bob" x="402" y="58" width="70" height="24"/><text class="bob" x="437" y="74" text-anchor="middle">(oB, 2)</text>
+<line x1="476" y1="54" x2="520" y2="54" marker-end="url(#k-arrow)"/>
+<rect class="hash solid" x="524" y="40" width="80" height="28"/>
+<text class="small" x="564" y="58" text-anchor="middle" style="fill:var(--dg-paper)">elect</text>
+<line x1="604" y1="54" x2="634" y2="54" marker-end="url(#k-arrow)"/>
+<text class="label small" x="640" y="50">one name,</text>
+<text class="label small" x="640" y="64">the same everywhere</text>
 <text class="label small muted" x="10" y="106">Deeper edition wins; a tie goes to the version hash. Both facts stay stored.</text>
 </svg>
 </figure>
 
 A name is meant to have one value, so a reader that asks for it with cardinality one sees an election between the two. The fact whose commit had seen more wins: the deeper edition. If the editions are equal, as they are here, the hash of the version decides. Every fact a commit wrote carries the same version, so a whole commit wins or loses together: a reader never sees half of Alice's edit and half of Bob's.
 
-The election is a function of the stored facts alone, so every replica elects the same name without talking to anyone. The losing value is not deleted. It stays in the store until someone replaces it, and an app that wants to show "edited on two devices" can ask for every value.
+The election is a function of the stored facts alone, so every replica elects the same name without talking to anyone. The losing value is not deleted. It stays in the store until someone asserts a new name, and an app that wants to show "edited on two devices" can ask for every value.
 
 ## After the merge
 

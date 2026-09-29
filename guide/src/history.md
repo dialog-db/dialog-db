@@ -2,7 +2,7 @@
 
 A tree root names one state of the facts. To go from one state to the next, an app makes a commit. This chapter follows Bob as he checks the eggs off the list, and looks at everything his commit leaves behind.
 
-Two questions drive the design. When Bob's change reaches Alice, how does her replica know whether it has already seen it? And when Bob replaces `done false` with `done true`, how does Alice know that her own copy of `done false` is the one he meant to remove, and not a newer one she wrote since? Both answers come from giving every change a version.
+Two questions drive the design. When Bob's change reaches Alice, how does her replica know whether it has already seen it? And when Bob asserts that the eggs are done, superseding `done false`, how does Alice know that her own copy of `done false` is the one his change removes, and not a newer one she wrote since? Both answers come from giving every change a version.
 
 ## Who is writing
 
@@ -91,40 +91,40 @@ Editions give a rough sense of order that every replica agrees on without a cloc
 
 ## What a commit writes
 
-Bob's commit replaces `done false` with `done true` on `item:2`. Every entry it writes carries its version, `(oB, 2)`. Here is all of it:
+Bob's commit asserts `done true` on `item:2`. The done flag has one value, so the assertion supersedes `done false`. Every entry the commit writes carries its version, `(oB, 2)`. Here is all of it:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 640 184" width="640" height="184" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="One commit writes fact keys, a history record, a coverage record and a revision record">
+<svg class="dg" viewBox="0 0 680 184" width="680" height="184" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="One commit writes fact keys, a history record, a coverage record and a revision record">
 <text class="label small muted" x="10" y="20">written into the tree by one commit</text>
 <rect class="shade" x="10" y="30" width="70" height="26"/>
 <text x="45" y="47" text-anchor="middle">00 01 02</text>
-<rect class="value" x="84" y="30" width="360" height="26"/>
-<text class="small" x="94" y="47">grocery/done of item:2 is true</text>
-<text class="small muted" x="456" y="47">version (oB, 2)</text>
+<rect class="value" x="84" y="30" width="400" height="26"/>
+<text class="small" x="94" y="47">example.grocery/done of item:2 is true</text>
+<text class="small muted" x="496" y="47">version (oB, 2)</text>
 <rect class="shade" x="10" y="62" width="70" height="26"/>
 <text x="45" y="79" text-anchor="middle">03</text>
-<rect class="hash" x="84" y="62" width="360" height="26"/>
-<text class="small" x="94" y="79">history: (oB, 2) item:2 grocery/done true</text>
-<text class="small muted" x="456" y="79">replaces (oA, 1)</text>
+<rect class="hash" x="84" y="62" width="400" height="26"/>
+<text class="small" x="94" y="79">history: (oB, 2) item:2 example.grocery/done true</text>
+<text class="small muted" x="496" y="79">supersedes (oA, 1)</text>
 <rect class="shade" x="10" y="94" width="70" height="26"/>
 <text x="45" y="111" text-anchor="middle">05</text>
-<rect class="hash" x="84" y="94" width="360" height="26"/>
-<text class="small" x="94" y="111">coverage: (oB, 2) item:2 grocery/done …</text>
-<text class="small muted" x="456" y="111">it covered something</text>
+<rect class="hash" x="84" y="94" width="400" height="26"/>
+<text class="small" x="94" y="111">coverage: (oB, 2) item:2 example.grocery/done …</text>
+<text class="small muted" x="496" y="111">it covered something</text>
 <rect class="shade" x="10" y="126" width="70" height="26"/>
 <text x="45" y="143" text-anchor="middle">00 01</text>
-<rect class="hash" x="84" y="126" width="360" height="26"/>
+<rect class="hash" x="84" y="126" width="400" height="26"/>
 <text class="small" x="94" y="143">dialog.db/revision of the version's entity</text>
-<text class="small muted" x="456" y="143">signed record</text>
+<text class="small muted" x="496" y="143">signed record</text>
 <text class="label small muted" x="10" y="172">then, outside the tree, the branch head cell moves to the new root</text>
 </svg>
 </figure>
 
 **The fact keys.** The new fact goes into EAV, AEV and VAE, as in the [Keys](./keys.md) chapter. Its payload records the version that wrote it. The old fact, `done false`, is removed from all three.
 
-**A history record.** Under tag `03`, the commit writes one record for each fact it changed. The record's key starts with the origin and then the edition, so each writer's records sit together, in edition order. Its payload lists the versions this change replaces. Bob's record says *"at (oB, 2), item 2's done became true, replacing what (oA, 1) wrote."* A retraction writes a record too, marked as a retraction.
+**A history record.** Under tag `03`, the commit writes one record for each fact it changed. The record's key starts with the origin and then the edition, so each writer's records sit together, in edition order. Its payload lists the versions this change supersedes. Bob's record says *"at (oB, 2), item 2's done became true, superseding what (oA, 1) wrote."* A retraction writes a record too, marked as a retraction.
 
-**A coverage record.** A record that removed something, a retraction or a replace that names at least one earlier version, is copied under tag `05`, keyed by version and by the hash of the value rather than the value itself. That keeps the question *"did this version remove anything?"* cheap to answer during a merge.
+**A coverage record.** A record that removed something, a retraction, or an assertion that superseded at least one earlier version, is copied under tag `05`, keyed by version and by the hash of the value rather than the value itself. That keeps the question *"did this version remove anything?"* cheap to answer during a merge.
 
 **A revision record.** Last, the commit writes one fact about itself: attribute `dialog.db/revision`, on an entity derived from the version. Its value is a signed record naming the commit's parent versions, its issuer, and links further back for fast ancestry walks. So the tree also holds the commit graph.
 

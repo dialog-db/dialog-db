@@ -3,22 +3,22 @@
 Everything Dialog stores is a fact. A fact is one small statement about one thing, and it always has the same three parts:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 640 120" width="640" height="120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A fact: the grocery/name of item:1 is Oat milk">
+<svg class="dg" viewBox="0 0 640 120" width="640" height="120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A fact: the example.grocery/name of item:1 is Oat milk">
 <text class="label muted" x="20" y="52">the</text>
-<rect class="attribute" x="50" y="30" width="170" height="34"/>
-<text class="attribute" x="135" y="52" text-anchor="middle">grocery/name</text>
-<text class="label muted" x="236" y="52">of</text>
-<rect class="entity" x="262" y="30" width="110" height="34"/>
-<text class="entity" x="317" y="52" text-anchor="middle">item:1</text>
-<text class="label muted" x="388" y="52">is</text>
-<rect class="value" x="410" y="30" width="150" height="34"/>
-<text class="value" x="485" y="52" text-anchor="middle">"Oat milk"</text>
-<path class="wire" d="M50,74 v4 H220 v-4"/>
-<text class="label small" x="135" y="96" text-anchor="middle">attribute</text>
-<path class="wire" d="M262,74 v4 H372 v-4"/>
-<text class="label small" x="317" y="96" text-anchor="middle">entity</text>
-<path class="wire" d="M410,74 v4 H560 v-4"/>
-<text class="label small" x="485" y="96" text-anchor="middle">value</text>
+<rect class="attribute" x="50" y="30" width="200" height="34"/>
+<text class="attribute" x="150" y="52" text-anchor="middle">example.grocery/name</text>
+<text class="label muted" x="266" y="52">of</text>
+<rect class="entity" x="292" y="30" width="100" height="34"/>
+<text class="entity" x="342" y="52" text-anchor="middle">item:1</text>
+<text class="label muted" x="408" y="52">is</text>
+<rect class="value" x="430" y="30" width="150" height="34"/>
+<text class="value" x="505" y="52" text-anchor="middle">"Oat milk"</text>
+<path class="wire" d="M50,74 v4 H250 v-4"/>
+<text class="label small" x="150" y="96" text-anchor="middle">attribute</text>
+<path class="wire" d="M292,74 v4 H392 v-4"/>
+<text class="label small" x="342" y="96" text-anchor="middle">entity</text>
+<path class="wire" d="M430,74 v4 H580 v-4"/>
+<text class="label small" x="505" y="96" text-anchor="middle">value</text>
 </svg>
 </figure>
 
@@ -28,25 +28,40 @@ A grocery list is a pile of such sentences. Alice's list, after she adds two ite
 
 | the | of | is |
 |---|---|---|
-| `grocery/name` | `item:1` | `"Oat milk"` |
-| `grocery/done` | `item:1` | `false` |
-| `grocery/name` | `item:2` | `"Eggs"` |
-| `grocery/done` | `item:2` | `false` |
-| `grocery/tag` | `item:2` | `"breakfast"` |
+| `example.grocery/name` | `item:1` | `"Oat milk"` |
+| `example.grocery/done` | `item:1` | `false` |
+| `example.grocery/name` | `item:2` | `"Eggs"` |
+| `example.grocery/done` | `item:2` | `false` |
+| `example.grocery/tag` | `item:2` | `"breakfast"` |
 
 There are no tables and no rows here. An item is whatever facts share its entity. Adding a new kind of information, a quantity say, means writing facts with a new attribute. Nothing else has to change first.
 
 ## Entities
 
-An entity is the thing a fact is about. It is named by a URI. Apps usually mint a fresh entity for each new thing with a random `did:key:` URI, like `did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK`. Those are long, so this guide writes short made-up URIs such as `item:1` instead. Any URI the standard URL parser accepts works as an entity, and Dialog stores it in its normalized form.
+An entity is the thing a fact is about. It is named by a URI. Dialog usually derives an entity from the data a thing starts out with: it hashes that data with BLAKE3 and writes the hash as a `did:key:z6Mk…` URI. It has the shape of a public key, but it is only a hash, and no one holds a private key for it. The same starting data always gives the same entity.
+
+Those URIs are long, so this guide writes short ones such as `item:1` instead. Any URI the standard URL parser accepts works as an entity, and Dialog stores it in its normalized form.
 
 An entity carries no data of its own. It exists only as long as some fact mentions it.
 
 ## Attributes
 
-An attribute says what a fact is about the entity. It is a `namespace/name` pair of at most 64 bytes, like `grocery/name` or `person/email`. The namespace keeps two apps that both say `name` from colliding.
+An attribute says what a fact is about the entity. It is written as a domain and a name, separated by a slash, like `example.grocery/name`:
 
-Attributes in the `dialog.` namespace belong to Dialog itself, which stores some of its own bookkeeping as facts. Apps cannot write there, except for rules and concepts (see [Queries](./queries.md)), which live under `dialog.rule/` and `dialog.concept/`.
+- **The domain** says whose vocabulary the attribute belongs to. It is written in reverse domain notation, the way Java names its packages: `example.grocery` stands for `grocery.example`. Two apps that both say `name` do not collide, because their domains differ. A domain is lowercase letters, digits, hyphens and dots.
+- **The name** is lowercase kebab-case: letters, digits and hyphens, starting with a letter, like `name` or `picked-up-at`.
+
+The whole attribute is at most 64 bytes. This guide uses the domain `example.grocery`, because `.example` is a top-level domain reserved for examples.
+
+An app declares every attribute it uses, and the declaration says more than the name:
+
+- a **description**, for people reading the data;
+- the **value type**, such as String or Boolean;
+- a **cardinality**: whether an entity has one value for the attribute, or many.
+
+A grocery item has one name and one done flag, and any number of tags.
+
+Attributes in the `dialog.` domains belong to Dialog itself, which stores some of its own bookkeeping as facts. Apps cannot write there, except for rules and concepts (see [Queries](./queries.md)), which live under `dialog.rule/` and `dialog.concept/`.
 
 ## Values
 
@@ -64,20 +79,21 @@ A value is one of nine types. Each type has a number, and that number is written
 | `07` | Record | opaque structured bytes |
 | `08` | Symbol | an attribute name used as a value |
 
-An Entity value is how facts link things together. If Bob adds `the grocery/store of item:2 is store:corner-shop`, the item now points at a store, and the store can have facts of its own.
+An Entity value is how facts link things together. If Bob adds `the example.grocery/store of item:2 is store:corner-shop`, the item now points at a store, and the store can have facts of its own.
 
-## Saying things: assert, replace, retract
+## Saying things: assert and retract
 
-An app never edits a fact in place. Facts cannot change. Instead, an app sends instructions, and each instruction adds or removes whole facts. There are three:
+An app never edits a fact in place. Facts cannot change. Instead, an app asserts and retracts whole facts:
 
-- **Assert** says *"this is also true."* It adds the fact and leaves every other fact alone.
-- **Replace** says *"this is now the only true value."* It removes every other value for the same entity and attribute, then adds the fact.
+- **Assert** says *"this is true."* It adds the fact.
 - **Retract** says *"this is no longer true."* It removes the fact.
 
-Here is item 2 changing under a few instructions. Each panel is the item's facts after the instruction above it:
+What an assertion does to the facts already there depends on the attribute's cardinality. If the attribute has many values, the new fact joins the others. If it has one value, the new fact supersedes the old one: asserting that the eggs are done removes the fact that they were not.
+
+Here is item 2 changing under two assertions and a retraction. Each panel shows the item's facts after the change above it:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 720 232" width="720" height="232" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Item 2 under assert, replace and retract">
+<svg class="dg" viewBox="0 0 720 232" width="720" height="232" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Item 2 under two assertions and a retraction">
 <text class="title" x="10" y="18">Assert tag "dairy-free"</text>
 <rect class="shade" x="10" y="30" width="220" height="150" rx="4"/>
 <text x="20" y="56">name  "Eggs"</text>
@@ -87,15 +103,15 @@ Here is item 2 changing under a few instructions. Each panel is the item's facts
 <text x="20" y="130">tag   "dairy-free"</text>
 <text class="small muted" x="20" y="200">Tags can have many values:</text>
 <text class="small muted" x="20" y="214">both stay.</text>
-<text class="title" x="250" y="18">Replace done true</text>
+<text class="title" x="250" y="18">Assert done true</text>
 <rect class="shade" x="250" y="30" width="220" height="150" rx="4"/>
 <text x="260" y="56">name  "Eggs"</text>
 <rect class="value" x="256" y="65" width="208" height="24"/>
 <text x="260" y="82">done  true</text>
 <text x="260" y="104">tag   "breakfast"</text>
 <text x="260" y="128">tag   "dairy-free"</text>
-<text class="small muted" x="260" y="200">The old value false is</text>
-<text class="small muted" x="260" y="214">removed first.</text>
+<text class="small muted" x="260" y="200">Done has one value:</text>
+<text class="small muted" x="260" y="214">false is superseded.</text>
 <text class="title" x="490" y="18">Retract tag "breakfast"</text>
 <rect class="shade" x="490" y="30" width="220" height="150" rx="4"/>
 <text x="500" y="56">name  "Eggs"</text>
@@ -106,26 +122,20 @@ Here is item 2 changing under a few instructions. Each panel is the item's facts
 </svg>
 </figure>
 
-Notice what is missing: there is no schema flag that says "an item has one `done`". Whether an attribute holds one value or many is decided by the instruction the app uses. A checkbox is written with Replace. A set of tags is written with Assert and Retract. The query layer lets an app declare this once, so it does not have to remember each time (see [Queries](./queries.md)).
+The stored facts carry no cardinality of their own. It comes from the attribute's declaration, and Dialog applies it twice: when an assertion is written, and again when a query reads the attribute (see [Queries](./queries.md)).
 
-Retracting a fact that is not there does nothing. Replacing a fact with the value it already has does nothing either. Asserting a fact that is already there does not make a second copy: two writers asserting the same entity, attribute and value share one stored fact.
+Retracting a fact that is not there does nothing. Asserting a fact that is already there does not make a second copy: two writers asserting the same entity, attribute and value share one stored fact.
 
 ## Nothing is ever null
 
-Storage holds only facts that exist. If Bob has not given the eggs a quantity, there is no `grocery/quantity` fact for `item:2`. There is no null, and nothing is written to say a value is missing. Absence is something a query can ask about, not something storage records.
+Storage holds only facts that exist. If Bob has not given the eggs a quantity, there is no `example.grocery/quantity` fact for `item:2`. There is no null, and nothing is written to say a value is missing. Absence is something a query can ask about, not something storage records.
 
-## What a fact carries along
+## When a fact became true
 
-The three parts above are the whole meaning of a fact. When a fact is stored, it also carries some bookkeeping: which version of the data wrote it. That is what lets two replicas tell whose change came first and which facts a retraction was meant to remove. It is covered in [Commits and History](./history.md).
-
-<div class="aside">
-
-**Implementations.** A fact is `Artifact` in [`dialog-artifacts/src/artifacts/artifact.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/artifact.rs). The value types are in [`artifacts/value.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/value.rs). The three instructions are `Instruction` in [`artifacts/instruction.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/instruction.rs), and their meaning is implemented once, in `write_instructions` in [`dialog-artifacts/src/tree.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/tree.rs).
-
-</div>
+The three parts above say what a fact means. A stored fact also carries temporal information: the version of the data that asserted it. That is what lets two replicas tell which change came first, and which facts a retraction or a superseding assertion was meant to remove. It is covered in [Commits and History](./history.md).
 
 <div class="aside">
 
-**An older field.** `Artifact` still has an optional `cause`: the hash of a fact this one was meant to replace. Older design notes lean on it heavily. Today Dialog uses it only to break ties that versions cannot order, and the real record of what replaced what lives in the history described in [Commits and History](./history.md).
+**An older field.** A stored fact can also have an optional `cause`: the hash of a fact this one was meant to supersede. Older design notes lean on it heavily. Today Dialog uses it only to break ties that versions cannot order, and the real record of what superseded what lives in the history described in [Commits and History](./history.md).
 
 </div>

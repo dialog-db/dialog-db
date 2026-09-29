@@ -65,8 +65,6 @@ The same list appears in every chapter, so the same facts, keys and hashes turn 
 - <span class="chip critical">critical</span> something a reader must understand, or refuse
 - <span class="chip alice">Alice</span> and <span class="chip bob">Bob</span> their replicas and everything they write
 
-The palette is the muted Bauhaus palette of tonk's Dialog diagnose view, which pairs each color with a shape: blue with the circle, yellow with the triangle, red with the square. Alice and Bob borrow two of those shapes as their marks.
-
 Bytes are drawn as boxes holding two hexadecimal digits. Where a byte is a printable character, the character is shown and its hex value sits beneath it. A bracket under a run of bytes names the field those bytes make up.
 
 </div>
