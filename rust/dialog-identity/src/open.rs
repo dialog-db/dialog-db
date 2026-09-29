@@ -334,8 +334,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     #[dialog_common::test]
     async fn it_forgets_a_credential_in_indexeddb() {
-        use dialog_storage::helpers::unique_name;
         use dialog_storage::provider::storage::WebSpace;
+        use dialog_storage::unique_name;
 
         let name = unique_name("dora");
         let storage = CredentialStore::<WebSpace>::new();
