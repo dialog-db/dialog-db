@@ -8,7 +8,7 @@ use std::str::FromStr as _;
 use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt as _, spill_cache};
 use dialog_artifacts::{Artifact, ArtifactSelector, Attribute, Entity, Value};
 use dialog_common::Blake3Hash;
-use dialog_storage::{MemoryStorageBackend, StorageBackend as _};
+use dialog_search_tree::MemoryBlocks;
 use futures_util::TryStreamExt as _;
 
 const FIXTURE: &str = include_str!("fixtures/legacy-artifact-nodes.txt");
@@ -40,20 +40,18 @@ fn expected(n: u32) -> Artifact {
 
 #[tokio::test]
 async fn it_reads_an_artifact_tree_written_in_the_legacy_layout() -> anyhow::Result<()> {
-    let mut store = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
+    let store = MemoryBlocks::new();
     let mut root = None;
     for line in FIXTURE.lines() {
         if let Some(hex) = line.strip_prefix("tree root=") {
             root = Some(Blake3Hash::try_from(unhex(hex)).expect("hash"));
         } else if let Some(hex) = line.strip_prefix("node ") {
             let node = unhex(hex);
-            store.set(*Blake3Hash::hash(&node).as_bytes(), node).await?;
+            store.store(node.into());
         }
     }
     let spill = "x".repeat(5000).into_bytes();
-    store
-        .set(*Blake3Hash::hash(&spill).as_bytes(), spill)
-        .await?;
+    store.store(spill.into());
 
     let tree = ArtifactTree::from_hash(root.expect("a root line"));
     for attribute in ["fixture/name", "fixture/bio"] {

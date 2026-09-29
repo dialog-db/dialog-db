@@ -2,24 +2,9 @@
 
 mod application;
 mod output;
-mod source;
 
 pub use application::*;
 pub use output::*;
-pub use source::*;
-
-use crate::artifact::ArtifactStoreMut;
-use dialog_common::ConditionalSend;
-
-/// A mutable artifact store that can be used for writes in a [`Session`](crate::Session).
-///
-/// This is a marker trait automatically implemented for any type that
-/// satisfies `ArtifactStoreMut + Clone + ConditionalSend`. It exists to
-/// give a shorter name to the full bound and to decouple `Session` from
-/// the specific artifact storage implementation.
-pub trait Store: ArtifactStoreMut + Clone + ConditionalSend {}
-/// Blanket implementation - any type that satisfies the bounds automatically implements QueryStore
-impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 
 #[cfg(test)]
 mod tests {

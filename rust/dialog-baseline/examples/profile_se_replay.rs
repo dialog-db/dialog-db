@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let mut store = DialogFacts::open(DialogMode::Memory).await?;
+        let store = DialogFacts::open(DialogMode::Memory).await?;
         let start = std::time::Instant::now();
         store.replay_se(&log).await?;
         eprintln!(

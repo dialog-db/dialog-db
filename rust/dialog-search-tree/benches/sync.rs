@@ -37,11 +37,12 @@ use std::sync::{
 
 use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, helpers::BenchData};
 use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, FlushPolicy, HitchhikerTree, PersistentTree,
+    Buffer, Delta, DialogSearchTreeError, FlushPolicy, HitchhikerTree, Load, MemoryBlocks,
+    PersistentTree,
 };
-use dialog_storage::{DialogStorageError, MemoryStorageBackend, StorageBackend};
 use futures_util::StreamExt;
 
 const BENCH_SEED: u64 = 42;
@@ -52,12 +53,11 @@ const BASE_SIZE: usize = 10_000;
 /// The per-node novelty capacity for the hitchhiker tree.
 const OP_BUF_SIZE: usize = 1024;
 
-/// A [`StorageBackend`] that counts `get` calls and the bytes they return,
-/// wrapping an in-memory backend. Each `get` models one block a remote would
+/// [`MemoryBlocks`] that count loads and the bytes they return. Each `get` models one block a remote would
 /// have to serve, so the count is the sync round-trip proxy.
 #[derive(Clone)]
 struct CountingBackend {
-    inner: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+    inner: MemoryBlocks,
     gets: Arc<AtomicU64>,
     get_bytes: Arc<AtomicU64>,
 }
@@ -65,7 +65,7 @@ struct CountingBackend {
 impl CountingBackend {
     fn new() -> Self {
         Self {
-            inner: MemoryStorageBackend::default(),
+            inner: MemoryBlocks::new(),
             gets: Arc::new(AtomicU64::new(0)),
             get_bytes: Arc::new(AtomicU64::new(0)),
         }
@@ -84,25 +84,21 @@ impl CountingBackend {
     fn get_bytes(&self) -> u64 {
         self.get_bytes.load(Ordering::Relaxed)
     }
+
+    fn store(&self, block: Buffer) {
+        self.inner.store(block);
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl StorageBackend for CountingBackend {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.inner.set(key, value).await
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let result = self.inner.get(key).await?;
+impl Provider<Load> for CountingBackend {
+    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        let result = self.inner.get(&hash);
         self.gets.fetch_add(1, Ordering::Relaxed);
         if let Some(bytes) = &result {
             self.get_bytes
-                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                .fetch_add(bytes.as_ref().len() as u64, Ordering::Relaxed);
         }
         Ok(result)
     }
@@ -115,16 +111,13 @@ type Tree = PersistentTree<[u8; 16], Vec<u8>>;
 async fn flush_counting(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Storage) -> u64 {
     let mut count = 0u64;
     for (_, buffer) in delta.flush() {
-        storage
-            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-            .await
-            .unwrap();
+        storage.store(buffer);
         count += 1;
     }
     count
 }
 
-type Storage = ContentAddressedStorage<CountingBackend>;
+type Storage = CountingBackend;
 
 /// Builds a shared base tree of `base_size` sequential entries, flushed into a
 /// fresh counting store, and returns the tree and its store.
@@ -132,7 +125,7 @@ async fn build_base(base_size: usize) -> (Tree, Storage) {
     let data = BenchData::new(BENCH_SEED);
     let keys = data.sequential_buffers::<16>(base_size);
 
-    let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+    let mut storage = CountingBackend::new();
     let mut tree = Tree::empty();
     let mut delta = Delta::zero();
     for key in &keys {
@@ -216,7 +209,7 @@ async fn sync_cost(
     to: &Tree,
     to_storage: &Storage,
 ) -> (u64, u64, u64) {
-    to_storage.backend().reset();
+    to_storage.reset();
 
     // Drive the entry-level differential, which runs the prune-expand walk over
     // both trees: this is what a pull does to find what changed.
@@ -226,8 +219,8 @@ async fn sync_cost(
         let _ = change.unwrap();
     }
 
-    let round_trips = to_storage.backend().gets();
-    let bytes = to_storage.backend().get_bytes();
+    let round_trips = to_storage.gets();
+    let bytes = to_storage.get_bytes();
 
     // Count the novel block set a push would transfer.
     let difference =

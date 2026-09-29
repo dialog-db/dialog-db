@@ -11,10 +11,10 @@ use std::{
     sync::mpsc::{Receiver, channel},
 };
 
-use dialog_artifacts::{Artifacts, Datum, Key, State};
-use dialog_storage::{Blake3Hash, MemoryStorageBackend};
+use dialog_artifacts::{Datum, Key, State};
+use dialog_storage::Blake3Hash;
 
-use crate::Promise;
+use crate::{Explored, Promise};
 
 use super::{
     ArtifactsCursor, ArtifactsHierarchy, ArtifactsTreeAnalysis, ArtifactsTreeStats, TreeNode,
@@ -81,13 +81,15 @@ pub struct DiagnoseStore {
 }
 
 impl DiagnoseStore {
-    /// Creates a new `DiagnoseStore` from the given artifacts database.
+    /// Creates a new `DiagnoseStore` over the given explored tree.
     ///
     /// This sets up all the background workers and channels for asynchronous
     /// data loading and initializes the internal caches.
-    pub async fn new(artifacts: Artifacts<MemoryStorageBackend<Blake3Hash, Vec<u8>>>) -> Self {
-        let tree = artifacts.index().read().await.clone();
-        let storage = artifacts.storage();
+    pub async fn new(explored: Explored) -> Self {
+        let Explored {
+            tree,
+            blocks: storage,
+        } = explored;
 
         let (tx, message_rx) = channel();
         let cursor = ArtifactsCursor::new(tree.clone(), storage.clone(), tx.clone());

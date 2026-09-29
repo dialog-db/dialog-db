@@ -10,18 +10,19 @@
 //! differential and names exactly the spilled value blocks newly referenced
 //! between two tree versions, so push can ship them alongside the novel nodes.
 
+use crate::ArchiveReader;
 use std::collections::HashSet;
 
 use async_stream::try_stream;
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Change, ContentAddressedStorage, Load, TreeDifference};
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_search_tree::{Change, Load, TreeDifference};
+use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use crate::{
     BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum, DialogArtifactsError, Key, State,
-    tree::{ArtifactTree, TreeStorageBridge},
+    tree::ArtifactTree,
 };
 
 /// One content-addressed block a push must ship to the remote before
@@ -165,12 +166,9 @@ pub fn spilled_refs<'s, S>(
     store: S,
 ) -> impl Stream<Item = Result<Blake3Hash, DialogArtifactsError>> + 's + ConditionalSend
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + ConditionalSync
-        + 's,
+    S: ArchiveReader + Clone + 's,
 {
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let storage = store;
     try_stream! {
         let difference = TreeDifference::compute(&base, &current, &storage, &storage).await?;
         let refs = shipment_refs(&difference);
@@ -189,23 +187,11 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::ArchiveDelta;
     use crate::tree::ArtifactTreeExt;
     use crate::{Artifact, Instruction, Value};
-    use dialog_search_tree::{Buffer, Delta};
-    use dialog_storage::MemoryStorageBackend;
+    use dialog_search_tree::MemoryBlocks;
     use futures_util::{TryStreamExt, stream};
-
-    async fn flush(
-        store: &mut MemoryStorageBackend<Blake3Hash, Vec<u8>>,
-        delta: &mut Delta<dialog_common::Blake3Hash, Buffer>,
-    ) -> Result<(), DialogArtifactsError> {
-        for (_, buffer) in delta.flush() {
-            store
-                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-        }
-        Ok(())
-    }
 
     #[dialog_common::test]
     async fn it_surfaces_each_spilled_value_once() -> Result<(), DialogArtifactsError> {
@@ -213,8 +199,8 @@ mod tests {
         let value = Value::String("z".repeat(inline_n + 1));
         let reference = value.to_reference();
 
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         // Base: empty.
         let base = ArtifactTree::empty();
@@ -223,7 +209,7 @@ mod tests {
         let mut current = base.clone();
         current
             .apply(
-                &mut store,
+                &store,
                 &mut delta,
                 stream::iter(vec![Instruction::Assert(Artifact {
                     the: "doc/body".parse().unwrap(),
@@ -233,7 +219,7 @@ mod tests {
                 })]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert_eq!(
@@ -260,29 +246,29 @@ mod tests {
             cause: None,
         };
 
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         // Base: the spilled fact is asserted.
         let mut base = ArtifactTree::empty();
         base.apply(
-            &mut store,
+            &store,
             &mut delta,
             stream::iter(vec![Instruction::Assert(artifact.clone())]),
         )
         .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         // Current: the fact is retracted (tombstones at the spilled keys).
         let mut current = base.clone();
         current
             .apply(
-                &mut store,
+                &store,
                 &mut delta,
                 stream::iter(vec![Instruction::Retract(artifact)]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert!(
@@ -316,8 +302,8 @@ mod tests {
         };
         let reference = artifact.is.to_reference();
 
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         // Base: what the remote already has — nothing.
         let base = ArtifactTree::empty();
@@ -327,22 +313,22 @@ mod tests {
         let mut current = base.clone();
         current
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(0))),
                 stream::iter(vec![Instruction::Assert(artifact.clone())]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
         current
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(1))),
                 stream::iter(vec![Instruction::Retract(artifact)]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert!(
@@ -374,30 +360,30 @@ mod tests {
             cause: None,
         };
 
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         let base = ArtifactTree::empty();
         let mut current = base.clone();
         current
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(0))),
                 stream::iter(vec![Instruction::Assert(artifact.clone())]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
         // A retraction mints the coverage entry that mirrors it.
         current
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(1))),
                 stream::iter(vec![Instruction::Retract(artifact)]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert!(
@@ -409,14 +395,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_ignores_inline_values() -> Result<(), DialogArtifactsError> {
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         let base = ArtifactTree::empty();
         let mut current = base.clone();
         current
             .apply(
-                &mut store,
+                &store,
                 &mut delta,
                 stream::iter(vec![Instruction::Assert(Artifact {
                     the: "user/name".parse().unwrap(),
@@ -426,7 +412,7 @@ mod tests {
                 })]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert!(refs.is_empty(), "inline values surface no spilled refs");

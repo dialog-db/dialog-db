@@ -12,10 +12,13 @@
 //! stored node carries beyond its canonical form is the byte cost of the
 //! buffered ops riding on it.
 
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
+use dialog_search_tree::Load;
 use std::env;
 
-use dialog_search_tree::{Buffer, Manifest, PersistentNode, PersistentNodeBody};
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_search_tree::{Manifest, PersistentNode, PersistentNodeBody};
+use dialog_storage::Blake3Hash;
 use rkyv::rancor::Error as RkyvError;
 use rkyv::{deserialize, to_bytes};
 
@@ -79,14 +82,15 @@ pub struct NodeStat {
 /// never touched.
 pub async fn capture<S>(root: &Blake3Hash, store: &S) -> Result<Vec<NodeStat>, DialogArtifactsError>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+    S: Provider<Load> + ConditionalSync,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
     if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {
         return Ok(Vec::new());
     }
     let unpersisted_empty = super::ArtifactTree::empty_root(&Manifest::default())?;
-    if root == unpersisted_empty.as_bytes() && store.get(root).await?.is_none() {
+    if root == unpersisted_empty.as_bytes() && store.execute(NodeHash::from(*root)).await?.is_none()
+    {
         return Ok(Vec::new());
     }
 
@@ -95,11 +99,11 @@ where
     while !frontier.is_empty() {
         let mut next = Vec::new();
         for hash in &frontier {
-            let bytes = store.get(hash).await?.ok_or_else(|| {
+            let bytes = store.execute(NodeHash::from(*hash)).await?.ok_or_else(|| {
                 DialogArtifactsError::Tree(format!("tree node missing from store at depth {depth}"))
             })?;
-            let size = bytes.len();
-            let node = PersistentNode::<Key, State<Datum>>::try_from(Buffer::from(bytes))?;
+            let size = bytes.as_ref().len();
+            let node = PersistentNode::<Key, State<Datum>>::try_from(bytes)?;
             let stat = if let Ok(index) = node.as_index() {
                 let bound = node.manifest()?.max_separator as usize;
                 let mut forced_links = 0usize;
@@ -333,14 +337,15 @@ mod tests {
 
     use super::*;
     use crate::tree::ArtifactTree;
-    use dialog_storage::MemoryStorageBackend;
+
+    use dialog_search_tree::MemoryBlocks;
 
     /// An empty tree has nothing persisted to measure, whichever root
     /// names it: the all-zero root earlier versions stored, or the root a
     /// new empty tree derives from its format before its first persist.
     #[dialog_common::test]
     async fn it_captures_nothing_for_an_unpersisted_empty_tree() -> anyhow::Result<()> {
-        let store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        let store = MemoryBlocks::new();
         assert!(capture(&[0u8; 32], &store).await?.is_empty());
         let empty = ArtifactTree::empty();
         assert_ne!(empty.root().as_bytes(), &[0u8; 32]);

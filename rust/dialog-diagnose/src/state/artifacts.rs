@@ -5,16 +5,12 @@ use std::{
     sync::{Arc, mpsc::Sender},
 };
 
-use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{CborEncoder, DialogArtifactsError, Index, Key, Storage};
-use dialog_search_tree::ContentAddressedStorage as TreeStorage;
-use dialog_storage::{Blake3Hash, MemoryStorageBackend};
+use dialog_artifacts::{DialogArtifactsError, Index, Key};
 use futures_util::{Stream, TryStreamExt};
 use tokio::sync::Mutex;
 
 use super::store::WorkerMessage;
-
-type DiagnoseStorage = Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+use crate::Blocks;
 
 /// Internal state for the artifacts cursor.
 ///
@@ -38,8 +34,8 @@ pub struct ArtifactsCursor {
     state: Arc<Mutex<ArtifactsCursorState>>,
     /// The prolly tree index containing the facts
     tree: Index,
-    /// The storage backend for tree operations
-    storage: DiagnoseStorage,
+    /// Where the tree's blocks load from
+    storage: Blocks,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -50,9 +46,9 @@ impl ArtifactsCursor {
     /// # Arguments
     ///
     /// * `tree` - The prolly tree index containing facts data
-    /// * `storage` - The storage backend for tree operations
+    /// * `storage` - Where the tree's blocks load from
     /// * `tx` - Channel sender for worker messages
-    pub fn new(tree: Index, storage: DiagnoseStorage, tx: Sender<WorkerMessage>) -> Self {
+    pub fn new(tree: Index, storage: Blocks, tx: Sender<WorkerMessage>) -> Self {
         Self {
             state: Default::default(),
             tree,
@@ -87,7 +83,7 @@ impl ArtifactsCursor {
                 return Ok(());
             }
 
-            let tree_storage = TreeStorage::new(TreeStorageBridge(storage));
+            let tree_storage = storage;
             let mut stream: Pin<Box<dyn Stream<Item = _> + Send>> = match state.last_key.clone() {
                 Some(key) => Box::pin(tree.stream_range(key.., &tree_storage)),
                 None => Box::pin(tree.stream(&tree_storage)),

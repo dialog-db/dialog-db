@@ -4,10 +4,9 @@
 
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_search_tree::{
-    ContentAddressedStorage, Delta, HitchhikerTree, LEGACY_LAYOUT, Manifest, PersistentNode,
-    PersistentTree, TAGGED_LAYOUT,
+    Delta, HitchhikerTree, LEGACY_LAYOUT, Manifest, MemoryBlocks, PersistentNode, PersistentTree,
+    TAGGED_LAYOUT,
 };
-use dialog_storage::MemoryStorageBackend;
 
 type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 type Node = PersistentNode<[u8; 4], Vec<u8>>;
@@ -30,13 +29,10 @@ struct Fixture {
     nodes: Vec<Vec<u8>>,
 }
 
-async fn load(
-    fixture: &Fixture,
-) -> anyhow::Result<ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>> {
-    let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+async fn load(fixture: &Fixture) -> anyhow::Result<MemoryBlocks> {
+    let storage = MemoryBlocks::new();
     for node in &fixture.nodes {
-        let hash = Blake3Hash::hash(node);
-        storage.store(node.clone(), &hash).await?;
+        storage.store(Buffer::from(node.clone()));
     }
     Ok(storage)
 }
@@ -131,7 +127,7 @@ fn keys(fixture: &Fixture) -> Vec<u32> {
 async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
     for fixture in fixtures() {
         for buffered in [false, true] {
-            let mut storage = load(&fixture).await?;
+            let storage = load(&fixture).await?;
             let tree = Tree::from_hash(fixture.root.clone());
             let added = [1000u32, 1001, 1002];
             let mut delta = Delta::zero();
@@ -152,14 +148,14 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                 }
                 edit.persist(&mut delta)?.root().clone()
             };
-            for (hash, buffer) in delta.flush() {
+            for (_hash, buffer) in delta.flush() {
                 assert_eq!(
                     Node::try_from(buffer.clone())?.layout_version(),
                     TAGGED_LAYOUT,
                     "{}: an edit writes tagged nodes",
                     fixture.name
                 );
-                storage.store(buffer.as_ref().to_vec(), &hash).await?;
+                storage.store(buffer);
             }
 
             let edited = Tree::from_hash(root);

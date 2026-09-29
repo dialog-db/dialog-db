@@ -69,7 +69,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::repository::fetch::Driven;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled, selector_range};
+use dialog_artifacts::tree::{fetch_spilled, selector_range};
 use dialog_artifacts::{
     Artifact, ArtifactSelector, AttributeKey, Entity, EntityKey, Key, Speculation, State, ValueKey,
 };
@@ -86,7 +86,7 @@ use dialog_query::concept::query::fixpoint::{Continuation, InMemoryAnswerTable};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output as _, Restriction};
 use dialog_query::source::SelectRules;
-use dialog_search_tree::{Change, ContentAddressedStorage};
+use dialog_search_tree::Change;
 use dialog_storage::Blake3Hash;
 use futures_util::TryStreamExt as _;
 
@@ -730,7 +730,7 @@ where
         );
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        let storage = store;
         let index_at = |hash: Option<Blake3Hash>| match hash {
             Some(hash) => {
                 Index::from_hash_with_cache(NodeHash::from(hash), self.branch.node_cache())

@@ -18,10 +18,8 @@
 use std::time::Instant;
 
 use dialog_common::Blake3Hash;
-use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, NodeBody, PersistentNode, PersistentTree,
-};
-use dialog_storage::{JournaledStorage, MemoryStorageBackend};
+use dialog_search_tree::helpers::JournaledBlocks;
+use dialog_search_tree::{Buffer, Delta, NodeBody, PersistentNode, PersistentTree};
 
 const KEY_LENGTH: usize = 162;
 const ENTITIES: usize = 5_000;
@@ -33,8 +31,7 @@ const BOUNDED_SCANS: usize = 200;
 const DELETES: usize = 1_000;
 
 type Key = [u8; KEY_LENGTH];
-type Backend = JournaledStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
-type Storage = ContentAddressedStorage<Backend>;
+type Storage = JournaledBlocks;
 type Tree = PersistentTree<Key, Vec<u8>>;
 
 /// Deterministic xorshift so both branches see byte-identical workloads.
@@ -158,10 +155,7 @@ async fn flush(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Storage) -> 
     for (_, buffer) in delta.flush() {
         nodes += 1;
         bytes += buffer.as_ref().len() as u64;
-        storage
-            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-            .await
-            .unwrap();
+        storage.store(buffer);
     }
     (nodes, bytes)
 }
@@ -172,14 +166,9 @@ async fn live_footprint(tree: &Tree, storage: &Storage) -> Footprint {
     let mut footprint = Footprint::default();
     let mut frontier = vec![(tree.root().clone(), 0usize)];
     while let Some((hash, level)) = frontier.pop() {
-        let bytes = storage
-            .retrieve(&hash)
-            .await
-            .unwrap()
-            .expect("live node present");
-        let size = bytes.len() as u64;
-        let node: PersistentNode<Key, Vec<u8>> =
-            PersistentNode::try_from(Buffer::from(bytes)).unwrap();
+        let bytes = storage.get(&hash).expect("live node present");
+        let size = bytes.as_ref().len() as u64;
+        let node: PersistentNode<Key, Vec<u8>> = PersistentNode::try_from(bytes).unwrap();
         match node.body() {
             NodeBody::Index(index) => {
                 footprint.index_nodes += 1;
@@ -225,7 +214,7 @@ impl Footprint {
 }
 
 fn reads(storage: &Storage) -> usize {
-    storage.backend().get_reads().len()
+    storage.get_reads().len()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -235,9 +224,8 @@ fn main() {}
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let Workload { facts } = workload();
-    let mut storage =
-        ContentAddressedStorage::new(JournaledStorage::new(MemoryStorageBackend::default()));
-    storage.backend().disable_journal();
+    let mut storage = JournaledBlocks::new();
+    storage.disable_journal();
 
     println!("workload: {FACTS} facts (EAV keys, {KEY_LENGTH}B), batches of {BATCH}");
     println!();
@@ -302,7 +290,7 @@ async fn main() {
     // Point lookups on a cold tree (fresh cache), counting storage reads.
     let mut rng = Rng::new(7);
     let cold = Tree::from_hash(tree.root().clone());
-    storage.backend().enable_journal();
+    storage.enable_journal();
     let reads_before = reads(&storage);
     let point = Instant::now();
     for _ in 0..POINT_LOOKUPS {
@@ -378,7 +366,7 @@ async fn main() {
     );
 
     // Deletes in one batch.
-    storage.backend().disable_journal();
+    storage.disable_journal();
     let mut delta = Delta::zero();
     let deletes = Instant::now();
     let mut edit = tree.edit();

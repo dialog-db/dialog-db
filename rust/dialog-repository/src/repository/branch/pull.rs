@@ -3,18 +3,17 @@ use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
+use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::FromKey as _;
 use dialog_artifacts::history::Context;
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 use futures_util::future::{Either, join_all};
 
 use super::fetch::fetch_one;
@@ -313,7 +312,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // when the upstream is remote, falls back to the remote
         // archive for blocks that haven't been replicated. With
         // `remote: None` it degrades to a plain local index.
-        let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
+        let store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
         // The three trees: last-sync base, the upstream revision we're
         // merging in, and the local tree the merge integrates onto — an
@@ -438,7 +437,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     .min(theirs.divergence(&local_context))
                     > SMALL_DIVERGENCE
             {
-                let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+                let tree_store = store.clone();
                 let base_tree = Index::from_hash_with_cache(
                     NodeHash::from(*base_sync.hash()),
                     branch.node_cache(),
@@ -628,8 +627,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     }
                 }
 
-                let mut delta = Delta::zero();
-                let mut merged = stitched.persist(&mut delta)?;
+                let mut delta = ArchiveDelta::zero();
+                let mut merged = stitched.persist(delta.blocks())?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // Head selection mirrors the other merge paths, so
@@ -677,7 +676,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
                 merged
-                    .record(&mut store, &mut delta, record.entries(&manifest)?)
+                    .record(&store, &mut delta, record.entries(&manifest)?)
                     .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 let mut context = local_context.clone();
@@ -690,7 +689,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 branch
                     .archive()
                     .index()
-                    .import(delta.flush().map(|(_, buffer)| buffer))
+                    .import(delta.flush_blocks().chain(delta.flush_blobs()))
                     .perform(env)
                     .await
                     .map_err(DialogArtifactsError::from)?;
@@ -740,7 +739,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             else if let Some(local) = &local_revision
                 && local_context.divergence(theirs) <= theirs.divergence(&local_context)
             {
-                let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+                let tree_store = store.clone();
                 let base_tree = index_at(base.as_ref());
                 let local_tree = Index::from_hash_with_cache(
                     NodeHash::from(*local.tree.hash()),
@@ -771,7 +770,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     &tree_store,
                     dialog_search_tree::Prefetch::Eager,
                 );
-                let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+                let screen_store = store.clone();
                 let screened_history = if unacquainted {
                     Either::Left(history_changes)
                 } else {
@@ -788,10 +787,10 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 };
                 let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
-                let mut delta = Delta::zero();
+                let mut delta = ArchiveDelta::zero();
                 merged = Box::pin(merged.edit().integrate(screened, &tree_store))
                     .await?
-                    .persist(&mut delta)?;
+                    .persist(delta.blocks())?;
                 let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
                 // The replay can degenerate, and the head selection must
@@ -849,7 +848,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
                 merged
-                    .record(&mut store, &mut delta, record.entries(&manifest)?)
+                    .record(&store, &mut delta, record.entries(&manifest)?)
                     .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 let mut context = local_context.clone();
@@ -862,7 +861,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 branch
                     .archive()
                     .index()
-                    .import(delta.flush().map(|(_, buffer)| buffer))
+                    .import(delta.flush_blocks().chain(delta.flush_blobs()))
                     .perform(env)
                     .await
                     .map_err(DialogArtifactsError::from)?;
@@ -886,8 +885,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // preserved by construction — the merge starts from the local
         // tree — and each differential only reads blocks on paths where
         // base and upstream actually differ within its region.
-        let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-        let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+        let tree_store = store.clone();
+        let screen_store = store.clone();
         let local_snapshot = index_at(local_tree.as_ref());
 
         // History changes are screened + emitted first, data changes
@@ -942,10 +941,10 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         };
         let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         merged = Box::pin(merged.edit().integrate(screened, &tree_store))
             .await?
-            .persist(&mut delta)?;
+            .persist(delta.blocks())?;
 
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
@@ -1023,7 +1022,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
                 merged
-                    .record(&mut store, &mut delta, record.entries(&manifest)?)
+                    .record(&store, &mut delta, record.entries(&manifest)?)
                     .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 // The minted head publishes its watermark: the merged
@@ -1063,7 +1062,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         branch
             .archive()
             .index()
-            .import(delta.flush().map(|(_, buffer)| buffer))
+            .import(delta.flush_blocks().chain(delta.flush_blobs()))
             .perform(env)
             .await
             .map_err(DialogArtifactsError::from)?;

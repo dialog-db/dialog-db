@@ -2,16 +2,11 @@
 
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
-use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Index, Key, State, Storage};
-use dialog_search_tree::{
-    Accessor, Cache, ContentAddressedStorage as TreeStorage, NodeBody, PersistentNode,
-};
-use dialog_storage::{Blake3Hash, MemoryStorageBackend};
+use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key, State};
+use dialog_search_tree::{Accessor, Cache, NodeBody, PersistentNode};
 
 use super::store::WorkerMessage;
-
-type DiagnoseStorage = Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+use crate::Blocks;
 
 /// Statistics about the structure and content of a prolly tree.
 ///
@@ -38,8 +33,8 @@ pub struct ArtifactsTreeStats {
 pub struct ArtifactsTreeAnalysis {
     /// The prolly tree index to analyze
     tree: Index,
-    /// The storage backend for tree operations
-    storage: DiagnoseStorage,
+    /// Where the tree's blocks load from
+    storage: Blocks,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -50,9 +45,9 @@ impl ArtifactsTreeAnalysis {
     /// # Arguments
     ///
     /// * `tree` - The prolly tree index to analyze
-    /// * `storage` - The storage backend for tree operations
+    /// * `storage` - Where the tree's blocks load from
     /// * `tx` - Channel sender for worker messages
-    pub fn new(tree: Index, storage: DiagnoseStorage, tx: Sender<WorkerMessage>) -> Self {
+    pub fn new(tree: Index, storage: Blocks, tx: Sender<WorkerMessage>) -> Self {
         Self { tree, storage, tx }
     }
 
@@ -72,8 +67,7 @@ impl ArtifactsTreeAnalysis {
         let tx = self.tx.clone();
 
         tokio::spawn(async move {
-            let tree_storage = TreeStorage::new(TreeStorageBridge(storage));
-            let accessor = Accessor::new(Cache::new(), &tree_storage);
+            let accessor = Accessor::new(Cache::new(), &storage);
 
             let mut stats = ArtifactsTreeStats::default();
             let mut levels = VecDeque::from([vec![root]]);

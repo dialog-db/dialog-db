@@ -1529,18 +1529,17 @@ where
 mod tests {
     #![allow(unexpected_cfgs)]
 
+    use crate::MemoryBlocks;
     use anyhow::Result;
     use dialog_common::Blake3Hash;
-    use dialog_storage::MemoryStorageBackend;
 
     use super::{FlushPolicy, FlushTrigger, HitchhikerTree};
     use crate::helpers::{
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
     use crate::{
-        Accessor, Buffer, Cache, Change, ContentAddressedStorage, Delta, Manifest, Node, NodeBody,
-        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientTree,
-        tree_spec,
+        Accessor, Buffer, Cache, Change, Delta, Manifest, Node, NodeBody, NoveltyEntry, NoveltyOp,
+        PersistentNode, PersistentTree, TransientNode, TransientTree, tree_spec,
     };
 
     /// The three flush policies, so an oracle can assert behavior is identical
@@ -1551,7 +1550,7 @@ mod tests {
         FlushPolicy::Immediate,
     ];
 
-    type TestStorage = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+    type TestStorage = MemoryBlocks;
     type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
     type TestHitchhiker = HitchhikerTree<[u8; 4], Vec<u8>>;
 
@@ -1603,9 +1602,7 @@ mod tests {
 
     async fn flush(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut TestStorage) -> Result<()> {
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(())
     }
@@ -1619,7 +1616,7 @@ mod tests {
     /// of sealed bytes (bead dialog-db-59).
     #[dialog_common::test]
     async fn it_keeps_untouched_children_persistent_through_a_cascade() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // A persisted canonical tree wide enough that one key's cascade
         // reaches a strict subset of the root's children.
@@ -1678,7 +1675,7 @@ mod tests {
     /// reusing the live spine across commits.
     #[dialog_common::test]
     async fn it_persists_identically_when_the_spine_stays_live() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // A canonical base wide enough for an index root with several
         // children, so cascades touch subsets and re-sealed buffers mix
@@ -1822,7 +1819,7 @@ mod tests {
     /// novelty — the interaction under test.
     #[dialog_common::test]
     async fn it_survives_buffered_commits_under_a_small_frame_ceiling() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
         let manifest = Manifest {
             fanout_n: 4,
             max_separator: 24,
@@ -1884,7 +1881,7 @@ mod tests {
     /// node — the manifest-carrying marker, not the bare null hash.
     #[dialog_common::test]
     async fn it_canonicalizes_empty_to_the_empty_node() -> Result<()> {
-        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut delta = Delta::zero();
         let canonical = TestHitchhiker::empty(Manifest::default())
             .canonicalize(&storage, &mut delta)
@@ -1901,7 +1898,7 @@ mod tests {
     /// equal a sequential build.
     #[dialog_common::test]
     async fn it_canonicalizes_root_buffered_writes_to_sequential() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let keys: Vec<u32> = (0..200).collect();
         let expected = sequential(&keys, &mut storage).await?;
@@ -1928,7 +1925,7 @@ mod tests {
     /// must still reproduce the sequential canonical root.
     #[dialog_common::test]
     async fn it_canonicalizes_cascaded_writes_to_sequential() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for &buf in &[1usize, 4, 16, 64] {
             let keys: Vec<u32> = (0..500).collect();
@@ -1963,7 +1960,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_retains_writes_across_persist_and_reopen_cycles() -> Result<()> {
         for &buf in &[1usize, 4, 16, 64] {
-            let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage = MemoryBlocks::new();
 
             // Each batch writes several scattered keys, the way a commit
             // touches three key orderings plus a history record.
@@ -2001,7 +1998,7 @@ mod tests {
     /// canonicalize, must match a sequential build of the union of both key sets.
     #[dialog_common::test]
     async fn it_canonicalizes_writes_over_a_persistent_base() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base_keys: Vec<u32> = (0..300).collect();
         let base = sequential(&base_keys, &mut storage).await?;
@@ -2032,7 +2029,7 @@ mod tests {
     /// same root as the sequential build, confirming history independence.
     #[dialog_common::test]
     async fn it_canonicalizes_random_order_to_sequential() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..50u64 {
             let mut keys: Vec<u32> = (0..300).collect();
@@ -2064,7 +2061,7 @@ mod tests {
     /// the survivors.
     #[dialog_common::test]
     async fn it_canonicalizes_with_buffered_deletes() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..50u64 {
             let keys: Vec<u32> = (0..300).collect();
@@ -2106,7 +2103,7 @@ mod tests {
     /// same op stream applied sequentially through the canonical edit path.
     #[dialog_common::test]
     async fn it_canonicalizes_interleaved_ops_to_sequential() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..50u64 {
             let mut rng = Rng::new(seed);
@@ -2166,7 +2163,7 @@ mod tests {
     /// present and absent keys.
     #[dialog_common::test]
     async fn it_reads_buffered_ops_like_canonicalized() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..50u64 {
             let mut rng = Rng::new(seed);
@@ -2230,7 +2227,7 @@ mod tests {
     /// a recent write only buffered.
     #[dialog_common::test]
     async fn it_scans_ranges_like_canonicalized() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..25u64 {
             let mut rng = Rng::new(seed);
@@ -2316,7 +2313,7 @@ mod tests {
     /// cardinality-one slot.
     #[dialog_common::test]
     async fn it_hides_a_buffered_delete_from_a_range_scan() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base_keys: Vec<u32> = (0..300).collect();
         let base = sequential(&base_keys, &mut storage).await?;
@@ -2362,7 +2359,7 @@ mod tests {
     /// re-insert shadowing a prior delete, all while the ops sit in buffers.
     #[dialog_common::test]
     async fn it_reads_last_op_wins_for_buffered_writes() -> Result<()> {
-        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
 
         // A large buffer keeps every op in the root buffer, so all collisions on
         // a key resolve purely within one node's novelty.
@@ -2403,7 +2400,7 @@ mod tests {
     /// be visible to `get` before any flush.
     #[dialog_common::test]
     async fn it_reads_buffered_ops_over_a_persistent_base() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base_keys: Vec<u32> = (0..300).collect();
         let base = sequential(&base_keys, &mut storage).await?;
@@ -2445,7 +2442,7 @@ mod tests {
     /// the fact set they represent.
     #[dialog_common::test]
     async fn it_is_correctness_equivalent_across_flush_policies() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..30u64 {
             let mut rng = Rng::new(seed);
@@ -2520,7 +2517,7 @@ mod tests {
     /// step needed. This pins that Immediate is the unbuffered baseline.
     #[dialog_common::test]
     async fn it_keeps_immediate_policy_canonical_without_flush() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let keys: Vec<u32> = (0..200).collect();
         let expected = sequential(&keys, &mut storage).await?;
@@ -2622,7 +2619,7 @@ mod tests {
     /// sequential build of the union of both replicas' fact sets.
     #[dialog_common::test]
     async fn it_reconciles_when_both_replicas_overflow() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // Shared base of 0..200.
         let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
@@ -2658,7 +2655,7 @@ mod tests {
     /// triggering a flush is the point of interest).
     #[dialog_common::test]
     async fn it_reconciles_when_only_the_merge_overflows() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
 
@@ -2694,7 +2691,7 @@ mod tests {
     /// merged root must equal a sequential build of (base + B's change) minus K.
     #[dialog_common::test]
     async fn it_does_not_resurrect_a_flushed_delete_on_catch_up() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // Base contains K = 50 along with 0..200.
         let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
@@ -2746,7 +2743,7 @@ mod tests {
     /// what lets a replica keep its writes buffered across syncs.
     #[dialog_common::test]
     async fn it_reconciles_a_buffered_replica_without_canonicalizing() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
 
@@ -2790,7 +2787,7 @@ mod tests {
     async fn it_reconciles_disjoint_replicas_order_independently() -> Result<()> {
         for seed in 0..12u64 {
             let mut rng = Rng::new(0x5851F42D4C957F2D ^ seed);
-            let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage = MemoryBlocks::new();
 
             let base_keys: Vec<u32> = (0..200).map(|_| rng.next_u32() % 4000).collect();
             let base = sequential(&base_keys, &mut storage).await?;
@@ -2857,7 +2854,7 @@ mod tests {
                 ops.push((!rng.next_u32().is_multiple_of(3), rng.next_u32() % 3_000));
             }
 
-            let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage = MemoryBlocks::new();
             let mut roots = Vec::new();
 
             for trigger in [
@@ -2911,9 +2908,7 @@ mod tests {
         storage: &mut SpecStorage,
     ) -> Result<()> {
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(())
     }
@@ -2923,10 +2918,9 @@ mod tests {
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<SpecKey, Vec<u8>>> {
         let bytes = storage
-            .retrieve(hash)
-            .await?
+            .get(hash)
             .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
-        Ok(PersistentNode::try_from(Buffer::from(bytes))?)
+        Ok(PersistentNode::try_from(bytes)?)
     }
 
     /// The buffered ops sealed into a stored node, owned.
@@ -3259,7 +3253,7 @@ mod tests {
     /// verbatim.
     #[dialog_common::test]
     async fn it_canonicalizes_a_reopened_buffered_tree() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let keys: Vec<u32> = (0..300).collect();
         let expected = sequential(&keys, &mut storage).await?;
@@ -3382,7 +3376,7 @@ mod tests {
             fanout_n: 2,
             ..Manifest::default()
         };
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let mut edit =
             TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
@@ -3420,7 +3414,7 @@ mod tests {
             fanout_n: 2,
             ..Manifest::default()
         };
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let mut edit =
             TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
@@ -3472,7 +3466,7 @@ mod tests {
             fanout_n: 2,
             ..Manifest::default()
         };
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // Fill a pinned session from empty, drain it back to empty, then
         // refill: every write into the empty tree must shape under the pin.
@@ -3525,7 +3519,7 @@ mod tests {
             fanout_n: 2,
             ..Manifest::default()
         };
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let mut edit =
             TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
@@ -3640,7 +3634,7 @@ mod tests {
             fanout_n: 2,
             ..Manifest::default()
         };
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // Build under the custom format, then empty.
         let mut edit =
@@ -3767,7 +3761,7 @@ mod tests {
     /// stored bytes may never depend on whether a link's buffer was touched.
     #[dialog_common::test]
     async fn it_persists_sealed_buffers_byte_identical_to_fresh_encodes() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // A tree with buffered novelty across several links: build a broad
         // base, then buffer scattered writes at the root and seal them. Pin a

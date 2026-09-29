@@ -20,7 +20,6 @@ use crate::{
     SiteAddress, SnapshotError, peer_did,
 };
 use anyhow::{Context as _, Result};
-use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State,
     Value,
@@ -63,9 +62,7 @@ use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_search_tree::NoveltyOp;
-use dialog_search_tree::{
-    ContentAddressedStorage as TreeStorage, NodeBody, Traversable as _, Visit, into_owned,
-};
+use dialog_search_tree::{NodeBody, Traversable as _, Visit, into_owned};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_storage::provider::storage::Storage;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -1983,7 +1980,7 @@ async fn assert_remote_closure_complete(
     // and the blob/spill references its entries carry (stored entries in
     // a segment, buffered ops in an index node — both are bytes of the
     // node that holds them).
-    let storage = TreeStorage::new(TreeStorageBridge(index));
+    let storage = index;
     let tree = Index::from_hash(head);
     let mut nodes: Vec<(NodeHash, Vec<NodeHash>, Vec<ShipmentRef>)> = Vec::new();
     let visits = tree.traverse_available(&storage);
@@ -3744,7 +3741,7 @@ async fn raw_spill_references<C: dialog_varsig::Principal>(
 ) -> Result<(HashSet<NodeHash>, HashSet<NodeHash>)> {
     let catalog = ArchiveScope::new(repository.subject()).index();
     let index = NetworkedIndex::new(env, catalog, None);
-    let storage = TreeStorage::new(TreeStorageBridge(index));
+    let storage = index;
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
 
     let mut current = HashSet::new();
@@ -4597,17 +4594,15 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     // how many fetches CANNOT overlap however wide the fan-out is.
     let head = NodeHash::from(*replica.revision().expect("pulled").tree.hash());
     let depth_index = NetworkedIndex::new(&replica_operator, replica.archive().index(), None);
-    let depth_storage = TreeStorage::new(TreeStorageBridge(depth_index));
+    let depth_storage = depth_index;
     let mut depth = 0usize;
     let mut at = Some(head);
     while let Some(hash) = at.take() {
-        let Some(bytes) = depth_storage.retrieve(&hash).await? else {
+        let Some(bytes) = depth_storage.load(&hash).await? else {
             break;
         };
         depth += 1;
-        let node = dialog_search_tree::PersistentNode::<Key, State<Datum>>::try_from(
-            dialog_search_tree::Buffer::from(bytes),
-        )?;
+        let node = dialog_search_tree::PersistentNode::<Key, State<Datum>>::try_from(bytes)?;
         if let NodeBody::Index(index) = node.body() {
             at = index.links()?.first().map(|link| link.node.clone());
         }

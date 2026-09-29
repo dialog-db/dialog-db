@@ -56,7 +56,6 @@ use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
 };
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
     ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, ShipmentRef,
     State, Statement, shipment_ref,
@@ -70,10 +69,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory;
 use dialog_query::query::Application;
-use dialog_search_tree::{
-    ContentAddressedStorage as TreeStorage, NodeBody, NoveltyOp, Traversable as _, Visit,
-    into_owned,
-};
+use dialog_search_tree::{NodeBody, NoveltyOp, Traversable as _, Visit, into_owned};
 use futures_util::future::Either;
 use futures_util::{Stream, StreamExt as _, stream};
 use parking_lot::RwLock;
@@ -654,7 +650,7 @@ impl SnapshotExport {
             // is cached; without one the index is exactly what this store
             // holds.
             let index = NetworkedIndex::new(env, catalog, upstream);
-            let storage = TreeStorage::new(TreeStorageBridge(index.clone()));
+            let storage = index.clone();
             let tree = Index::from_hash(root);
 
             let mut spills: HashSet<[u8; 32]> = HashSet::new();
@@ -746,7 +742,7 @@ impl SnapshotExport {
                     let storage = &storage;
                     async move {
                         let digest = NodeHash::from(reference);
-                        let bytes = storage.retrieve(&digest).await;
+                        let bytes = dialog_artifacts::load_blob(storage, &digest).await;
                         (digest, bytes)
                     }
                 },
@@ -755,7 +751,7 @@ impl SnapshotExport {
             while let Some((digest, bytes)) = spill_reads.next().await {
                 match bytes? {
                     Some(bytes) => {
-                        yield Item::Block(Block { digest, content: Buffer::from(bytes) });
+                        yield Item::Block(Block { digest, content: bytes });
                     }
                     None if sparse => {}
                     None => Err(SnapshotError::MissingBlock { digest })?,
