@@ -50,15 +50,16 @@ pub type FlakySpace = Space<Volatile, Flaky, Volatile, Volatile, Volatile>;
 pub async fn flaky_session_with_peer() -> (Peer<FlakySpace, Session>, Peer<FlakySpace>) {
     use dialog_capability::Subject;
     use dialog_effects::storage::Location;
-    use dialog_peer::helpers::{open_peer, unique_name};
+    use dialog_peer::helpers::{open_peer, test_owned, unique_name};
     let peer = open_peer(
-        Storage::<FlakySpace>::new(),
+        test_owned(Storage::<FlakySpace>::new()).await,
         Location::profile(unique_name("test")),
     )
     .await
     .expect("flaky_session_with_peer: failed to open peer");
     let session = peer
         .session(b"test")
+        .space(peer.state())
         .allow(Subject::any())
         .await
         .expect("flaky_session_with_peer: failed to build session");
