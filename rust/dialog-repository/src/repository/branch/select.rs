@@ -325,3 +325,6 @@ impl SelectOwned<'_> {
         self.0.execute_owned(store).await
     }
 }
+
+#[cfg(test)]
+mod tests;
