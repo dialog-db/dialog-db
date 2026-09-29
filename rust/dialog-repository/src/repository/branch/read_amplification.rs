@@ -354,7 +354,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
 ///   sync/publish point). This is the regime the buffer is designed for.
 async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     use dialog_artifacts::tree::ArtifactTreeExt as _;
-    use dialog_artifacts::tree::{WriteScope, write_instructions};
+    use dialog_artifacts::tree::{Stamp, WriteScope, write_instructions};
     use dialog_artifacts::{Instruction as I, apply_buffered};
 
     use dialog_search_tree::Delta;
@@ -434,7 +434,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
             deferred,
             &mut store,
             &storage,
-            None,
+            Stamp::Unversioned,
             // The bench tree carries the default manifest.
             &dialog_search_tree::Manifest::default(),
             stream::iter(batch(i)),

@@ -21,7 +21,7 @@
 
 use super::induce::induce;
 use super::{Transaction, TransactionCommit, carry_footprint, touches_rules, transaction_view};
-use crate::repository::branch::commit::{Mint, Minted, Outcome};
+use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -260,6 +260,20 @@ impl<'a> TransactionCommit<&'a Branch> {
 }
 
 impl TransactionCommit<TransactionBatch> {
+    /// Fold this link into the chain's tip instead of staging a new
+    /// commit after it: the tip keeps its version, and its tree grows to
+    /// include this link's changes. Committing a chain as one commit or as
+    /// a commit followed by amends records the same history, and after
+    /// canonicalizing the same tree.
+    ///
+    /// Only a staged revision is amended, one this batch minted and nobody
+    /// has seen: a published revision never changes under a version
+    /// others may hold. A batch with nothing staged commits as usual.
+    pub fn amend(mut self) -> Self {
+        self.amend = true;
+        self
+    }
+
     /// Commit this link and publish the whole staged chain in one step.
     pub fn publish(self) -> TransactionPublish<TransactionBatch> {
         TransactionPublish { commit: self }
@@ -375,6 +389,7 @@ impl TransactionCommit<&Branch> {
             self.transients,
             self.allow_empty,
             self.canonicalize,
+            None,
             env,
         ))
         .await?;
@@ -450,6 +465,18 @@ impl TransactionCommit<TransactionBatch> {
         let (base, lineage) = batch.snapshot.head();
         let line = lineage.expect("a transaction batch's line is seeded at construction");
 
+        // Amend only a staged revision: the chain's tip, which nobody has
+        // seen. A batch with nothing staged sits on the published head,
+        // which is never amended; its amend is an ordinary commit.
+        let amend = match (self.amend, batch.chain.last(), &batch.context) {
+            (true, Some((_, record)), Some(context)) => Some(Amended {
+                record: record.clone(),
+                context: context.clone(),
+            }),
+            _ => None,
+        };
+        let amending = amend.is_some();
+
         let outcome = Box::pin(mint_link(
             SourceRef::Snapshot(&batch.snapshot),
             Some(base.clone()),
@@ -458,6 +485,7 @@ impl TransactionCommit<TransactionBatch> {
             self.transients,
             self.allow_empty,
             self.canonicalize,
+            amend,
             env,
         ))
         .await?;
@@ -480,6 +508,11 @@ impl TransactionCommit<TransactionBatch> {
                 .caches()
                 .contexts
                 .insert(version, context.clone());
+            if amending {
+                // The amended tip keeps its version and record; the chain
+                // holds it once, as it would a single commit.
+                batch.chain.pop();
+            }
             batch.chain.push((version, record));
             batch.context = Some(context);
         }
@@ -500,6 +533,7 @@ async fn mint_link<Env>(
     transients: Changes,
     allow_empty: bool,
     canonicalize: bool,
+    amend: Option<Amended>,
     env: &Env,
 ) -> Result<Outcome, CommitError>
 where
@@ -527,6 +561,7 @@ where
         scope: WriteScope::Application,
         allow_empty,
         canonicalize,
+        amend,
     }
     .perform(env, line)
     .await?;
@@ -817,6 +852,197 @@ mod tests {
             "an empty batch from a stale view must not silently succeed; got {raced:?}"
         );
 
+        Ok(())
+    }
+
+    /// An amend folds into the staged tip: the tip keeps its version, and
+    /// publishing makes both links visible at that one version.
+    #[dialog_common::test]
+    async fn it_amends_the_staged_tip_in_place() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let seed = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let batch = branch
+            .transaction()
+            .assert(note("first")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let staged = batch.version();
+
+        let batch = batch
+            .assert(note("second")?)
+            .commit()
+            .amend()
+            .perform(&operator)
+            .await?;
+        assert_eq!(batch.version(), staged, "the amend keeps the tip's version");
+        assert_eq!(batch.version().edition, seed.version().edition.successor());
+        assert_eq!(branch.revision(), Some(seed), "nothing is published yet");
+
+        let head = batch.publish().perform(&operator).await?;
+        assert_eq!(head.version(), staged, "one version is published");
+        assert_eq!(
+            bodies(&branch, &operator).await?,
+            vec!["first", "second", "seed"]
+        );
+        Ok(())
+    }
+
+    /// Committing and then amending records what one commit of the same
+    /// changes records: canonicalized, the two trees are the same tree.
+    #[dialog_common::test]
+    async fn it_amends_to_the_tree_one_commit_would_have() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let (first, second) = (note("first")?, note("second")?);
+        let whole = branch
+            .transaction()
+            .assert(first.clone())
+            .assert(second.clone())
+            .commit()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+        let amended = branch
+            .transaction()
+            .assert(first)
+            .commit()
+            .perform(&operator)
+            .await?
+            .assert(second)
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(whole.version(), amended.version());
+        assert_eq!(
+            whole.revision().tree,
+            amended.revision().tree,
+            "one commit and a commit plus an amend make the same tree"
+        );
+        Ok(())
+    }
+
+    /// History recorded by an amend folds into what the amended commit
+    /// already recorded at the same history key, exactly as two writes of
+    /// one commit fold.
+    ///
+    /// Replacing a published value records a claim citing the version that
+    /// published it; retracting the replacement in an amend writes the same
+    /// history key and must keep that citation, as retracting it in the
+    /// same commit does, rather than overwrite it with a record citing
+    /// nothing.
+    #[dialog_common::test]
+    async fn it_folds_history_across_amends() -> Result<()> {
+        use dialog_artifacts::{Attribute, Changes, Update as _, Value};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let the: Attribute = "note/body".parse()?;
+        let of = dialog_artifacts::Entity::new()?;
+        let replace = |value: &str| {
+            let mut changes = Changes::new();
+            changes.associate_unique(the.clone(), of.clone(), Value::String(value.into()));
+            changes
+        };
+        let retract = |value: &str| {
+            let mut changes = Changes::new();
+            changes.dissociate(the.clone(), of.clone(), Value::String(value.into()));
+            changes
+        };
+
+        branch
+            .transaction()
+            .integrate(replace("a"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut both = replace("b");
+        both.dissociate(the.clone(), of.clone(), Value::String("b".into()));
+        let whole = branch
+            .transaction()
+            .integrate(both)
+            .commit()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+        let amended = branch
+            .transaction()
+            .integrate(replace("b"))
+            .commit()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .integrate(retract("b"))
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(whole.version(), amended.version());
+        assert_eq!(
+            whole.revision().tree,
+            amended.revision().tree,
+            "history folds across amends as it folds within a commit"
+        );
+        Ok(())
+    }
+
+    /// A batch with nothing staged sits on the published head, which is
+    /// never amended: its amend commits a new revision instead.
+    #[dialog_common::test]
+    async fn it_commits_an_amend_with_nothing_staged() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let seed = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let empty = branch.transaction().commit().perform(&operator).await?;
+        assert_eq!(empty.revision(), seed, "an empty commit stages nothing");
+
+        let batch = empty
+            .assert(note("next")?)
+            .commit()
+            .amend()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            batch.version().edition,
+            seed.version().edition.successor(),
+            "the published head is not amended; the amend commits"
+        );
         Ok(())
     }
 }

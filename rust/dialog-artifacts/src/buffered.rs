@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::history::{RecordEntries, Version};
 use crate::tree::{
-    ArtifactNodeCache, ArtifactTree, TreeStorageBridge, WriteScope, write_instructions,
+    ArtifactNodeCache, ArtifactTree, Stamp, TreeStorageBridge, WriteScope, write_instructions,
 };
 use crate::{Datum, DialogArtifactsError, Instruction, Key, State};
 
@@ -373,7 +373,7 @@ impl BufferedBatch {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
-        Self::open_batch(tree, store, version, instructions, scope, None).await
+        Self::open_batch(tree, store, version.into(), instructions, scope, None).await
     }
 
     /// [`apply`](Self::apply) with a live spine carried across commits.
@@ -404,7 +404,42 @@ impl BufferedBatch {
         Self::open_batch(
             tree,
             store,
-            version,
+            version.into(),
+            instructions,
+            scope,
+            Some(slot.clone()),
+        )
+        .await
+    }
+
+    /// [`apply_reusing`](Self::apply_reusing) amending `version`: `tree`
+    /// already carries writes under it (a commit being amended), and this
+    /// batch writes more under the same version.
+    ///
+    /// Datums are tagged with `version` as in any versioned batch; the
+    /// history each instruction records folds into what `tree` already
+    /// records under `version` at the same history key, exactly as two
+    /// writes within one batch fold. So applying a stream in two amending
+    /// passes records what applying it in one pass records.
+    #[tracing::instrument(skip_all, name = "amend_batch_reusing")]
+    pub async fn amend_reusing<S, I>(
+        slot: &SpineSlot,
+        tree: &ArtifactTree,
+        store: &mut S,
+        version: Version,
+        instructions: I,
+        scope: WriteScope,
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
+        Self::open_batch(
+            tree,
+            store,
+            Stamp::Amend(version),
             instructions,
             scope,
             Some(slot.clone()),
@@ -415,7 +450,7 @@ impl BufferedBatch {
     async fn open_batch<S, I>(
         tree: &ArtifactTree,
         store: &mut S,
-        version: Option<Version>,
+        stamp: Stamp,
         instructions: I,
         scope: WriteScope,
         slot: Option<SpineSlot>,
@@ -440,7 +475,7 @@ impl BufferedBatch {
             spine,
             store,
             &storage,
-            version,
+            stamp,
             &manifest,
             instructions,
             scope,
