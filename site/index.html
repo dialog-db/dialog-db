@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dialog</title>
 <meta name="description" content="Dialog is an embeddable database for local-first software: facts you own, synced through any storage, queried with Datalog.">
-<meta name="color-scheme" content="light">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3f0ea'/%3E%3Ccircle cx='18' cy='13' r='9' fill='%23c89a2b'/%3E%3Crect x='3' y='22' width='26' height='3' fill='%231c1b19'/%3E%3Crect x='5' y='5' width='5' height='5' fill='%23b94a3d'/%3E%3C/svg%3E">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600;700&display=swap">
@@ -16,8 +16,8 @@
    * color to shape pairing: the triangle is yellow, the square red, the
    * circle blue. The guide draws its diagrams with the same colors.
    *
-   * The page is printed on paper in every system theme, like the posters
-   * it borrows from: the black overlaps only read as black on paper.
+   * Where two shapes overlap they print black in both themes, so the dark
+   * theme uses a charcoal paper light enough for black to stand out on.
    */
   :root {
     --triangle: #c89a2b; /* muted ochre */
@@ -28,6 +28,15 @@
     --paper: #f3f0ea;
     --ink: #1c1b19;
     --quiet: #5f594f;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #2f2d29;
+      --ink: #ece6da;
+      --quiet: #b3ada2;
+      --overlap: #121110;
+    }
   }
 
   * { box-sizing: border-box; }
@@ -212,13 +221,13 @@
           The wordmark twice, one per replica, offset like the two circles:
           ochre over red, and ink wherever the two agree.
         -->
-        <svg class="wordmark" viewBox="0 0 600 280" role="img" aria-label="dialog">
+        <svg class="wordmark" viewBox="0 0 600 250" role="img" aria-label="dialog">
           <defs>
             <clipPath id="upper-word"><text x="0" y="150" textLength="592" lengthAdjust="spacingAndGlyphs">dialog</text></clipPath>
           </defs>
           <text x="0" y="150" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--triangle)">dialog</text>
-          <text x="0" y="215" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--square)">dialog</text>
-          <text x="0" y="215" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--overlap)" clip-path="url(#upper-word)">dialog</text>
+          <text x="0" y="182" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--square)">dialog</text>
+          <text x="0" y="182" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--overlap)" clip-path="url(#upper-word)">dialog</text>
         </svg>
       </h1>
       <p class="tagline">An embeddable database for local-first software. Facts you own, synced through <em>any</em> storage, queried with Datalog.</p>
