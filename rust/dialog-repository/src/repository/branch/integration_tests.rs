@@ -213,7 +213,7 @@ async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
             .secrets()
             .site(site)
             .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-            .perform(&operator)
+            .perform(&profile)
             .await?;
     }
 
@@ -322,7 +322,7 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
         .secrets()
         .site(&site)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator)
+        .perform(&profile)
         .await?;
     let origin = connect("origin", site, repo.did(), &operator).await?;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -433,7 +433,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_a)
+        .perform(&profile_a)
         .await?;
 
     let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
@@ -477,7 +477,7 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_b)
+        .perform(&profile_b)
         .await?;
 
     let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
@@ -546,7 +546,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_a)
+        .perform(&profile_a)
         .await?;
 
     let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
@@ -588,7 +588,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_b)
+        .perform(&profile_b)
         .await?;
     let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
@@ -663,7 +663,7 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
         .secrets()
         .site(&site_c)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_c)
+        .perform(&profile_c)
         .await?;
     let origin_c = connect("origin", site_c, repo_a.did(), &operator_c).await?;
     let branch_c = repo_c.branch("main").open().perform(&operator_c).await?;
@@ -735,7 +735,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_a)
+        .perform(&profile_a)
         .await?;
     let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
@@ -792,7 +792,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
         .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_b)
+        .perform(&profile_b)
         .await?;
     let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
@@ -927,7 +927,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_a)
+        .perform(&profile_a)
         .await?;
 
     let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
@@ -1003,7 +1003,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_b)
+        .perform(&profile_b)
         .await?;
 
     let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
@@ -1084,7 +1084,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_a)
+        .perform(&profile_a)
         .await?;
     let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
@@ -1121,7 +1121,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_b)
+        .perform(&profile_b)
         .await?;
     let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
@@ -1206,7 +1206,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .secrets()
         .site(&site_a)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_a)
+        .perform(&profile_a)
         .await?;
     let origin_a = connect("origin", site_a, repo_a.did(), &operator_a).await?;
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
@@ -1238,7 +1238,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .secrets()
         .site(&site_b)
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_b)
+        .perform(&profile_b)
         .await?;
     let origin_b = connect("origin", site_b, repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
@@ -3437,7 +3437,7 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> Result<()> {
         .secrets()
         .site(&site_address)
         .save(authorization)
-        .perform(&operator)
+        .perform(&profile)
         .await?;
 
     let origin = connect("origin", site_address, repo.did(), &operator).await?;
@@ -3496,7 +3496,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
         .secrets()
         .site(&site_address)
         .save(authorization)
-        .perform(&alice_operator)
+        .perform(&alice_profile)
         .await?;
 
     let alice_origin = connect("origin", site_address, alice_repo.did(), &alice_operator).await?;
@@ -3544,7 +3544,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
         .secrets()
         .site(&bob_site_address)
         .save(bob_authorization)
-        .perform(&bob_operator)
+        .perform(&bob_profile)
         .await?;
 
     let bob_origin = connect("origin", bob_site_address, alice_repo.did(), &bob_operator).await?;
@@ -4940,7 +4940,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
             .secrets()
             .site(&site)
             .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-            .perform(&operator)
+            .perform(&profile)
             .await?;
         Ok((operator, profile, repo))
     }
