@@ -219,15 +219,29 @@
       <h1>
         <!--
           The wordmark twice, one per replica, offset like the two circles:
-          ochre over red, and ink wherever the two agree.
+          ochre over red, black wherever the two agree. The i is dotless and
+          its dot is drawn as the same two circles as the poster and the
+          favicon.
         -->
-        <svg class="wordmark" viewBox="0 0 600 250" role="img" aria-label="dialog">
+        <svg class="wordmark" viewBox="0 -12 600 262" role="img" aria-label="dialog">
           <defs>
-            <clipPath id="upper-word"><text x="0" y="150" textLength="592" lengthAdjust="spacingAndGlyphs">dialog</text></clipPath>
+            <clipPath id="upper-word">
+              <text x="0" y="150" textLength="592" lengthAdjust="spacingAndGlyphs">d&#x131;alog</text>
+              <circle cx="154" cy="8" r="18"/>
+            </clipPath>
           </defs>
-          <text x="0" y="150" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--triangle)">dialog</text>
-          <text x="0" y="182" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--square)">dialog</text>
-          <text x="0" y="182" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--overlap)" clip-path="url(#upper-word)">dialog</text>
+          <g fill="var(--triangle)">
+            <text x="0" y="150" textLength="592" lengthAdjust="spacingAndGlyphs">d&#x131;alog</text>
+            <circle cx="154" cy="8" r="18"/>
+          </g>
+          <g fill="var(--square)">
+            <text x="0" y="182" textLength="592" lengthAdjust="spacingAndGlyphs">d&#x131;alog</text>
+            <circle cx="154" cy="29.18" r="18"/>
+          </g>
+          <g fill="var(--overlap)" clip-path="url(#upper-word)">
+            <text x="0" y="182" textLength="592" lengthAdjust="spacingAndGlyphs">d&#x131;alog</text>
+            <circle cx="154" cy="29.18" r="18"/>
+          </g>
         </svg>
       </h1>
       <p class="tagline">An embeddable database for local-first software. Facts you own, synced through <em>any</em> storage, queried with Datalog.</p>
