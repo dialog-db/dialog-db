@@ -838,9 +838,13 @@ mod tests {
     /// delegation the plain walk finds retained to the session itself.
     #[dialog_common::test]
     async fn it_proves_a_delegation_to_the_session_behind_a_failing_grant() -> Result<()> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         let profile = open_peer(storage.clone(), Location::profile(unique("direct-grant"))).await?;
-        let operator = profile.session(b"test").allow(Subject::any()).await?;
+        let operator = profile
+            .session(b"test")
+            .mount(profile.state())
+            .allow(Subject::any())
+            .await?;
 
         let space = Ed25519Signer::generate().await?;
         let delegation = DelegationBuilder::new()
