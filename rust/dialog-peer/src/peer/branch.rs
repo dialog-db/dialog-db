@@ -752,7 +752,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_keeps_the_registry_head_from_a_name_that_aliases_it_on_disk() -> anyhow::Result<()>
     {
-        use crate::helpers::{open_peer, unique_name};
+        use crate::helpers::{open_peer, test_owned, unique_name};
         use dialog_effects::storage::{Directory, Location};
         use dialog_repository::RepositoryExt as _;
         use dialog_storage::provider::storage::{NativeSpace, Storage};
@@ -760,11 +760,15 @@ mod tests {
         let root = tempfile::tempdir()?;
         let directory = Directory::At(root.path().to_string_lossy().into_owned());
         let peer = open_peer(
-            Storage::<NativeSpace>::new(),
+            test_owned(Storage::<NativeSpace>::new()).await,
             Location::new(directory, unique_name("test")),
         )
         .await?;
-        let operator = peer.session(b"test").allow(Subject::any()).await?;
+        let operator = peer
+            .session(b"test")
+            .mount(peer.state())
+            .allow(Subject::any())
+            .await?;
         let did = peer
             .space(unique_name("repo"))
             .open()

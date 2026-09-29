@@ -747,7 +747,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::helpers::test_peer;
+    use crate::helpers::{test_grant, test_peer, test_state, test_storage, unique_name};
     use anyhow::Result;
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_ucan_core::Delegation;
@@ -785,10 +785,17 @@ mod tests {
         assert_eq!(derived.did().to_string(), EXPECTED_SESSION_DID);
 
         // The session a peer opens for the context acts with that key.
-        let session = Peer::new(credential)
-            .storage(Storage::volatile())
-            .ephemeral()
+        let peer = Peer::new(credential.clone())
+            .at(Location::profile(unique_name("fixed")))
+            .mount(test_state(&credential.did()))
+            .with(test_storage().await)
+            .grant(test_grant().await)
+            .build()
+            .await?;
+        let session = peer
             .session(FIXTURE)
+            .mount(peer.state())
+            .allow(Subject::any())
             .await?;
         assert_eq!(session.did().to_string(), EXPECTED_SESSION_DID);
         Ok(())
