@@ -333,7 +333,7 @@ mod tests {
     /// these tests, which are about paths and parameters.
     fn head() -> Revision {
         Revision::new(
-            TreeReference::default(),
+            TreeReference::from([7u8; 32]),
             "did:key:zMain".parse::<Entity>().expect("valid entity"),
             did!("key:zIssuer"),
         )
