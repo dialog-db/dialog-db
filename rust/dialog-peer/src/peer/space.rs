@@ -404,9 +404,9 @@ mod tests {
     use crate::{ClaimExt as _, Peer};
     use dialog_capability::access::{Access, Prove};
     use dialog_capability::{Subject, did};
-    use dialog_credentials::key::KeyExport;
+    use dialog_credentials::key::{ExtractableKey, KeyExport};
     use dialog_credentials::secret::{Context, SealedSecret};
-    use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential};
+    use dialog_credentials::{Credential, Ed25519Signer, Extractable, Signer, SignerCredential};
     use dialog_effects::credential::{self as credential_fx, prelude::*};
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
     use dialog_identity::OpenCredential;
@@ -598,6 +598,19 @@ mod tests {
         Ok(())
     }
 
+    /// A key the way every space stored its own before keys were sealed:
+    /// imported from its seed, which in the browser stores it
+    /// extractable, as a generated key is not.
+    async fn legacy_key() -> anyhow::Result<Ed25519Signer> {
+        let generated = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await?;
+        // Other exports are features; without them this always holds.
+        #[allow(irrefutable_let_patterns)]
+        let KeyExport::Extractable(seed) = generated.export().await? else {
+            anyhow::bail!("an extractable key exports its seed");
+        };
+        Ok(Ed25519Signer::import(KeyExport::Extractable(seed)).await?)
+    }
+
     /// A space from before keys were sealed still holds its signing key.
     /// Loading it through a peer seals the key to the account, has the
     /// space delegate to it, and leaves only the verifier in the space.
@@ -612,8 +625,7 @@ mod tests {
 
         // Created the way every space was before: its key stored in it.
         let location = Location::new(Directory::At("/legacy".into()), name.as_str());
-        let repository =
-            Credential::Signer(SignerCredential::from(Ed25519Signer::generate().await?));
+        let repository = Credential::Signer(SignerCredential::from(legacy_key().await?));
         Subject::from(did!("local:storage"))
             .attenuate(storage_fx::Storage)
             .attenuate(location)
@@ -666,8 +678,7 @@ mod tests {
 
         // Stored where the peer looks, but never recorded.
         let location = Location::new(Directory::At("/base".into()), name.as_str());
-        let repository =
-            Credential::Signer(SignerCredential::from(Ed25519Signer::generate().await?));
+        let repository = Credential::Signer(SignerCredential::from(legacy_key().await?));
         Subject::from(did!("local:storage"))
             .attenuate(storage_fx::Storage)
             .attenuate(location.clone())
