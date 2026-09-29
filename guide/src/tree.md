@@ -311,7 +311,7 @@ The numbers used above, 65,536 and 512 and 3, the entry overhead 64 and the link
 
 ## Buffered writes
 
-Rewriting a whole 64 KiB leaf to add one small fact is wasteful when facts arrive one commit at a time. So by default, a commit does not push its changes all the way down. It parks them in a buffer on the link that leads toward where they belong:
+As [Changing the tree](#changing-the-tree) showed, changing one fact rewrites every node on the path from its leaf up to the root: each node on that spine gets a new hash, so each is written again. When facts arrive a few per commit, every commit pays for a whole spine, and a commit that touches facts in several places pays for several. So by default, a commit does not push its changes all the way down. It parks them in a buffer in the root, on the link that leads toward where they belong:
 
 <figure class="dg">
 <svg class="dg" viewBox="0 0 660 200" width="660" height="200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A buffered write sits on the root&#x27;s link to leaf 1 until the buffer is flushed">
@@ -338,7 +338,7 @@ Rewriting a whole 64 KiB leaf to add one small fact is wasteful when facts arriv
 </svg>
 </figure>
 
-Reads look at the buffers on the way down and merge what they find with what the leaves hold, so a buffered write is visible immediately. When the buffers on one node hold more than 256 operations, or more than 64 KiB of weight, the heaviest of them are pushed one level down until the node is back under half that limit. Over time, every operation reaches the leaves. Both limits come from the tree's format: 256 is 2<sup>8</sup>, the format's fanout setting, and 64 KiB is its node size target. Each commit then rewrites the root and a few index nodes near it, rather than a path of full leaves.
+Reads look at the buffers on the way down and merge what they find with what the leaves hold, so a buffered write is visible immediately. When the buffers on one node hold more than 256 operations, or more than 64 KiB of weight, the heaviest of them are pushed one level down until the node is back under half that limit. Over time, every operation reaches the leaves. Both limits come from the tree's format: 256 is 2<sup>8</sup>, the format's fanout setting, and 64 KiB is its node size target. A commit then rewrites the root, plus whatever nodes a flush reaches, instead of a whole spine for every change.
 
 A buffered tree gives up one thing: it is no longer the canonical tree for its keys. Two replicas with the same facts can hold them in different buffers and so have different roots. Nothing breaks when that happens. A node's hash still covers its buffers, so a root still names its content exactly, and the comparison described above still works. It just cannot stop early at the root, and does a little work to find that nothing differs.
 
