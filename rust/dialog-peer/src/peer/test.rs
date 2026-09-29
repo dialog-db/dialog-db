@@ -700,8 +700,8 @@ mod tests {
         }
     }
 
-    // A site secret is sealed to the peer, so only the peer, not a
-    // session of it, opens it to sign an S3 request.
+    // A site secret is sealed to the peer, which opens it to sign an S3
+    // request; a session of the peer signs with what the peer opens.
     mod s3_credential_tests {
         use super::*;
         use dialog_capability::Subject;

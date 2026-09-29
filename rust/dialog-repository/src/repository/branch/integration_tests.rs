@@ -93,13 +93,14 @@ async fn setup_repo_with_s3_remote(
 
     let site_address = s3_site_address(s3);
 
-    // Save S3 credentials so the Operator can authorize fork requests
+    // The peer keeps the S3 credential; its session syncs with it through
+    // the peer, which opens it.
     let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     profile
         .secrets()
         .site(&site_address)
         .save(authorization)
-        .perform(operator)
+        .perform(profile)
         .await?;
 
     let origin = connect("origin", site_address, repo.did(), operator).await?;

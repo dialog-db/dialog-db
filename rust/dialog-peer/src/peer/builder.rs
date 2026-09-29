@@ -23,6 +23,7 @@ use dialog_varsig::{Did, Principal as _};
 
 use parking_lot::Mutex;
 
+use super::secret::SiteSecrets;
 use super::upgrade::Step;
 use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
 
@@ -296,6 +297,9 @@ pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     /// each a `Step<S>` for the storage's space, type-erased until the
     /// storage is known.
     steps: Vec<Held>,
+    /// The live peer a session is built from, asked for its site secrets
+    /// (see [`Inner::sites`]).
+    sites: Option<Arc<dyn SiteSecrets>>,
     mode: PhantomData<M>,
 }
 
@@ -313,12 +317,13 @@ impl<M> PeerBuilder<Unset, Unset, M> {
             allowed: Vec::new(),
             held: Vec::new(),
             steps: Vec::new(),
+            sites: None,
             mode: PhantomData,
         }
     }
 }
 
-impl<S: Clone> PeerBuilder<PeerKey, Storage<S>, Session> {
+impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>, Session> {
     /// A session builder pre-filled from `peer`: its storage, network,
     /// runtime and base directory, with `peer` as the issuer of
     /// bare-capability grants. Its state branch is not assumed to be the
@@ -344,6 +349,7 @@ impl<S: Clone> PeerBuilder<PeerKey, Storage<S>, Session> {
                 .cloned()
                 .collect(),
             steps: Vec::new(),
+            sites: Some(Arc::new(peer.clone())),
             mode: PhantomData,
         }
     }
@@ -437,6 +443,7 @@ impl<St> PeerBuilder<PeerKey, St, Local> {
             allowed: self.allowed,
             held: self.held,
             steps: self.steps,
+            sites: self.sites,
             mode: PhantomData,
         }
     }
@@ -478,6 +485,7 @@ impl<St, M> PeerBuilder<Unset, St, M> {
             allowed: self.allowed,
             held: self.held,
             steps: self.steps,
+            sites: self.sites,
             mode: PhantomData,
         }
     }
@@ -508,6 +516,7 @@ impl<K, M, S: Clone> With<Storage<S>> for PeerBuilder<K, Unset, M> {
             allowed: self.allowed,
             held: self.held,
             steps: self.steps,
+            sites: self.sites,
             mode: PhantomData,
         }
     }
@@ -733,6 +742,7 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 grants,
                 holdings: Holdings::default(),
                 connections: Mutex::default(),
+                sites: self.sites,
             },
         );
 
