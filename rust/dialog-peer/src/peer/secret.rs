@@ -113,7 +113,7 @@ fn vouched(parent: &Did, name: &str, vault: &Did) -> Vec<u8> {
 }
 
 /// A vault's key seed, sealed to `member`.
-async fn seal_key(seed: &[u8], member: &Did) -> Result<Vec<u8>, CredentialError> {
+pub(crate) async fn seal_key(seed: &[u8], member: &Did) -> Result<Vec<u8>, CredentialError> {
     Ok(sealable(member)?
         .secret(KEY)
         .conceal(seed)
@@ -981,6 +981,79 @@ impl ForgetSecret {
         secrets::forget_secret(&branch, &vault.did, &self.secret.name, peer)
             .await
             .map_err(unavailable)
+    }
+}
+
+impl<S: PeerSpace, M: Mode> Peer<S, M> {
+    /// The key of the space `space`, to sign as it.
+    pub fn space_key(&self, space: &Did) -> SpaceKey {
+        SpaceKey {
+            space: space.clone(),
+            via: None,
+        }
+    }
+}
+
+/// Open the key of a space. Created by [`Peer::space_key`].
+pub struct SpaceKey {
+    space: Did,
+    via: Option<SignerCredential>,
+}
+
+impl SpaceKey {
+    /// Open it through the account, whose vault `custodian` guards, when
+    /// the peer holds no copy of its own.
+    pub fn via(mut self, custodian: &SignerCredential) -> Self {
+        self.via = Some(custodian.clone());
+        self
+    }
+
+    /// Open the key: through the copy the peer kept of a space it created
+    /// or adopted, or through the copy held for the account, opened with
+    /// the account's key its custodian reaches.
+    pub async fn perform<S: PeerSpace, M: Mode>(
+        self,
+        peer: &Peer<S, M>,
+    ) -> Result<Ed25519Signer, CredentialError> {
+        let SpaceKey { space, via } = self;
+        let branch = opened(&BranchReference::from(peer.state()), peer).await?;
+        if let Some(seed) = copy(&branch, &space, peer.credential(), peer).await? {
+            return Ed25519Signer::import(&seed).await.map_err(unavailable);
+        }
+        let Some(custodian) = via else {
+            return Err(CredentialError::Withheld(format!(
+                "{} holds no key of {space}",
+                peer.did()
+            )));
+        };
+        let held = secrets::held_principal(&branch, &space, peer)
+            .await
+            .map_err(unavailable)?
+            .filter(|held| held.kind == spaces::SPACE)
+            .ok_or_else(|| CredentialError::NotFound(format!("no key held for {space}")))?;
+        let account = branch
+            .vault(ACCOUNT)
+            .load()
+            .via(&custodian)
+            .perform(peer)
+            .await?;
+        if held.to != account.did {
+            return Err(CredentialError::Withheld(format!(
+                "the key of {space} is held for {}, not the account",
+                held.to
+            )));
+        }
+        let seed = account
+            .key()
+            .await?
+            .secret(SPACE_KEY)
+            .reveal(&SealedSecret::from_bytes(&held.sealed).map_err(unopened)?)
+            .await
+            .map_err(unopened)?;
+        let seed: [u8; 32] = seed
+            .try_into()
+            .map_err(|_| unopened(format!("the key held for {space} is not a key")))?;
+        Ed25519Signer::import(&seed).await.map_err(unavailable)
     }
 }
 
