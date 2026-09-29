@@ -22,8 +22,11 @@ thiserror = { workspace = true }
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
-dialog-storage = { workspace = true }
+dialog-storage = { workspace = true, features = ["helpers"] }
 wasm-bindgen-test = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
