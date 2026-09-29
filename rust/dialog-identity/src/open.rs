@@ -248,7 +248,10 @@ mod tests {
     }
 
     /// A forgotten credential is gone: loading it fails, and opening it
-    /// again creates a new key.
+    /// again creates a new key. The volatile store keys by name alone;
+    /// `it_forgets_a_credential_on_the_filesystem` and
+    /// `it_forgets_a_credential_in_indexeddb` pin the same where the
+    /// key's space outlives the key.
     #[dialog_common::test]
     async fn it_forgets_a_credential() {
         let storage = CredentialStore::<VolatileSpace>::new();
@@ -275,6 +278,100 @@ mod tests {
             .perform(&storage)
             .await
             .unwrap();
+    }
+
+    /// On the filesystem the key is a file in the store's directory for
+    /// the name, and the directory outlives the key: forgetting removes
+    /// the key, the name is free for the next, and a fresh handle on the
+    /// store reads the new key.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_forgets_a_credential_on_the_filesystem() {
+        use dialog_storage::provider::storage::NativeSpace;
+
+        let root = tempfile::tempdir().unwrap();
+        let at = Directory::At(root.path().to_string_lossy().into_owned());
+        let storage = CredentialStore::<NativeSpace>::new();
+
+        let first = OpenCredential::open("dora")
+            .at(at.clone())
+            .perform(&storage)
+            .await
+            .unwrap();
+        OpenCredential::forget("dora")
+            .at(at.clone())
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            OpenCredential::load("dora")
+                .at(at.clone())
+                .perform(&storage)
+                .await,
+            Err(IdentityError::NotFound)
+        ));
+        let second = OpenCredential::open("dora")
+            .at(at.clone())
+            .perform(&storage)
+            .await
+            .unwrap();
+        assert_ne!(first.did(), second.did());
+
+        let reopened = CredentialStore::<NativeSpace>::new();
+        let loaded = OpenCredential::load("dora")
+            .at(at)
+            .perform(&reopened)
+            .await
+            .unwrap();
+        assert_eq!(loaded.did(), second.did());
+    }
+
+    /// In the browser the key is a row in the store's database for the
+    /// name, and the database outlives the key: forgetting removes the
+    /// row, the name is free for the next, and a fresh handle on the
+    /// store reads the new key.
+    #[cfg(target_arch = "wasm32")]
+    #[dialog_common::test]
+    async fn it_forgets_a_credential_in_indexeddb() {
+        use dialog_storage::helpers::unique_name;
+        use dialog_storage::provider::storage::WebSpace;
+
+        let name = unique_name("dora");
+        let storage = CredentialStore::<WebSpace>::new();
+
+        let first = OpenCredential::open(name.clone())
+            .at(Directory::Temp)
+            .perform(&storage)
+            .await
+            .unwrap();
+        OpenCredential::forget(name.clone())
+            .at(Directory::Temp)
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            OpenCredential::load(name.clone())
+                .at(Directory::Temp)
+                .perform(&storage)
+                .await,
+            Err(IdentityError::NotFound)
+        ));
+        let second = OpenCredential::open(name.clone())
+            .at(Directory::Temp)
+            .perform(&storage)
+            .await
+            .unwrap();
+        assert_ne!(first.did(), second.did());
+
+        let reopened = CredentialStore::<WebSpace>::new();
+        let loaded = OpenCredential::load(name)
+            .at(Directory::Temp)
+            .perform(&reopened)
+            .await
+            .unwrap();
+        assert_eq!(loaded.did(), second.did());
     }
 
     #[dialog_common::test]
