@@ -74,8 +74,8 @@ pub use builder::{
 pub use mode::{Local, Mode, Session};
 pub use runtime::Runtime;
 pub use secret::{
-    Add, Conceal, Delegate, ForgetSecret, KeepSecret, OpenVault, Reveal, RevealSecret, Rotate,
-    SecretReference, SpaceKey, SpaceVaultExt, Vault, VaultReference,
+    Add, Conceal, Delegate, ForgetSecret, HandOver, KeepSecret, OpenVault, Reveal, RevealSecret,
+    Rotate, SecretReference, SpaceKey, SpaceVaultExt, Vault, VaultReference,
 };
 pub use upgrade::{Step, StepBound, StepFuture, Upgraded};
 

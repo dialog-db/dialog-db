@@ -318,6 +318,16 @@ impl Vault {
         }
     }
 
+    /// Hand this top-level vault over to `owner`, a key its owner holds
+    /// elsewhere: the vault becomes the one `owner` names, and only that
+    /// key opens it from then on.
+    pub fn hand_over(&self, owner: Did) -> HandOver {
+        HandOver {
+            vault: self.clone(),
+            owner,
+        }
+    }
+
     /// Replace this top-level vault's key with one generated inside,
     /// leaving out the members [removed](Rotate::without): what the old
     /// key reached is moved to the new one.
@@ -562,13 +572,29 @@ async fn resolve<S: PeerSpace, M: Mode>(
 }
 
 /// The seed of `vault`'s key from a copy `branch` records sealed to
-/// `opener`.
+/// `opener`, or the opener's own when it is the vault's key: an account
+/// handed over to a key its owner holds opens with that key.
 async fn copy<S: PeerSpace, M: Mode>(
     branch: &Branch,
     vault: &Did,
     opener: &SignerCredential,
     peer: &Peer<S, M>,
 ) -> Result<Option<[u8; 32]>, CredentialError> {
+    if opener.did() == *vault {
+        let key = opener.signer().as_ed25519().ok_or_else(|| {
+            CredentialError::Withheld(format!("{vault} is not a key a vault can be"))
+        })?;
+        // Only the browser has a second, opaque kind of export.
+        #[allow(irrefutable_let_patterns)]
+        let KeyExport::Extractable(seed) = key.export().await.map_err(unavailable)? else {
+            return Err(CredentialError::Withheld(format!(
+                "the key of {vault} is not extractable"
+            )));
+        };
+        return Ok(Some(seed.as_slice().try_into().map_err(|_| {
+            unopened(format!("the key of {vault} is not a key"))
+        })?));
+    }
     let copies = secrets::keys_of(branch, vault, &opener.did(), peer)
         .await
         .map_err(unavailable)?;
@@ -599,6 +625,77 @@ impl Add {
     }
 }
 
+/// Hand a top-level vault over to a key its owner holds. Created by
+/// [`Vault::hand_over`].
+///
+/// Needs only the owner's DID: the secrets the vault keeps are sealed to
+/// the owner, a space whose key is held sealed to the vault is held sealed
+/// to the owner and delegates to it, and every delegation the vault issued
+/// is retracted where the peer proves from, as is a space's to it. The
+/// owner delegates for itself. Last of all the vault is recorded under its
+/// name as the owner, so a handover that stops part-way leaves the vault
+/// as it was. A vault with vaults below it is refused before anything is
+/// written: they are derived from its key, which the owner's replaces.
+pub struct HandOver {
+    vault: Vault,
+    owner: Did,
+}
+
+impl HandOver {
+    /// Hand the vault over. The peer's own act, with the vault opened
+    /// through its custodian.
+    pub async fn perform<S: PeerSpace>(self, peer: &Peer<S, Local>) -> Result<(), CredentialError> {
+        let HandOver { vault: old, owner } = self;
+        let Some(name) = old.name.clone() else {
+            return Err(unavailable(format!(
+                "{} is below another vault and is handed over with it",
+                old.did
+            )));
+        };
+        if owner == old.did {
+            return Ok(());
+        }
+        let branch = opened(&old.space, peer).await?;
+        if !secrets::children_of(&branch, &old.did, peer)
+            .await
+            .map_err(unavailable)?
+            .is_empty()
+        {
+            return Err(unavailable(format!(
+                "{} has vaults below it, derived from the key {owner} replaces",
+                old.did
+            )));
+        }
+        for (secret, sealed) in secrets::secrets_of(&branch, &old.did, peer)
+            .await
+            .map_err(unavailable)?
+        {
+            let revealed = old.reveal(sealed).perform(peer).await?;
+            let sealed = sealable(&owner)?
+                .secret(SECRET)
+                .conceal(&revealed)
+                .await
+                .map_err(unavailable)?;
+            secrets::keep_secret(
+                &branch,
+                &owner,
+                &secret,
+                secrets::sealed_message(&owner, sealed.to_bytes()),
+                peer,
+            )
+            .await
+            .map_err(unavailable)?;
+        }
+        rehold(&branch, &old, &owner, peer).await?;
+        for delegation in peer.issued_by(&old.did).await.map_err(unavailable)? {
+            peer.retract(delegation).await.map_err(unavailable)?;
+        }
+        secrets::replace_root(&branch, &owner, &name, peer)
+            .await
+            .map_err(unavailable)
+    }
+}
+
 /// Replace a top-level vault's key with one generated inside.
 ///
 /// The new key is sealed to every member of the old vault but those
@@ -614,7 +711,8 @@ impl Add {
 ///
 /// The old key is opened through a custodian's copy, and the new one is
 /// never handed out: handing an account over means adding the new
-/// custodian as a member and rotating without the old one.
+/// custodian as a member and rotating without the old one, or
+/// [handing it over](Vault::hand_over) to a key its owner holds.
 ///
 /// A member removed keeps what it already had: the old key opens what was
 /// sealed to it before, and a delegation it copied elsewhere stands until
@@ -665,7 +763,7 @@ impl Rotate {
             new.add(member.clone()).perform(peer).await?;
         }
         moved(&branch, &old, &new, &without, peer).await?;
-        rehold(&branch, &old, &new, peer).await?;
+        rehold(&branch, &old, &new.did, peer).await?;
         redelegate(&old, &new, &without, peer).await?;
         secrets::replace_root(&branch, &new.did, &name, peer)
             .await
@@ -725,7 +823,7 @@ async fn moved<S: PeerSpace>(
 async fn rehold<S: PeerSpace>(
     branch: &Branch,
     old: &Vault,
-    new: &Vault,
+    new: &Did,
     peer: &Peer<S, Local>,
 ) -> Result<(), CredentialError> {
     let opener = old.key().await?;
@@ -748,7 +846,7 @@ async fn rehold<S: PeerSpace>(
         if signer.did() != space {
             return Err(unopened(format!("the key held for {space} is not its key")));
         }
-        let sealed = sealable(&new.did)?
+        let sealed = sealable(new)?
             .secret(SPACE_KEY)
             .conceal(&seed)
             .await
@@ -757,14 +855,14 @@ async fn rehold<S: PeerSpace>(
             branch,
             &space,
             spaces::SPACE,
-            secrets::sealed_message(&new.did, sealed.to_bytes()),
+            secrets::sealed_message(new, sealed.to_bytes()),
             peer,
         )
         .await
         .map_err(unavailable)?;
         let delegation = DelegationBuilder::new()
             .issuer(Signer::from(signer))
-            .audience(&new.did)
+            .audience(new)
             .subject(UcanSubject::Specific(space.clone()))
             .command(Vec::new())
             .try_build()
