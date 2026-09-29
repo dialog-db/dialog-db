@@ -48,7 +48,7 @@ An entity carries no data of its own. It exists only as long as some fact mentio
 
 An attribute says what a fact is about the entity. It is written as a domain and a name, separated by a slash, like `demo.grocery/name`:
 
-- **The domain** says whose vocabulary the attribute belongs to. It is written in reverse domain notation, the way Java names its packages: `demo.grocery` stands for `grocery.example`. Two apps that both say `name` do not collide, because their domains differ. A domain is lowercase letters, digits, hyphens and dots.
+- **The domain** says whose vocabulary the attribute belongs to. It is written in reverse domain notation, like the domain authority of an [AT Protocol NSID](https://atproto.com/specs/nsid): `demo.grocery` stands for `grocery.demo`. Two apps that both say `name` do not collide, because their domains differ. A domain is lowercase letters, digits, hyphens and dots.
 - **The name** is lowercase kebab-case: letters, digits and hyphens, starting with a letter, like `name` or `picked-up-at`.
 
 The whole attribute is at most 64 bytes. This guide uses the domain `demo.grocery`.
