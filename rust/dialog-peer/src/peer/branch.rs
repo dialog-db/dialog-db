@@ -752,29 +752,21 @@ mod tests {
     #[dialog_common::test]
     async fn it_keeps_the_registry_head_from_a_name_that_aliases_it_on_disk() -> anyhow::Result<()>
     {
-        use crate::helpers::unique_name;
-        use crate::{DeriveOperator as _, Profile};
-        use dialog_effects::storage::Directory;
-        use dialog_network::Network;
+        use crate::helpers::{open_peer, unique_name};
+        use dialog_effects::storage::{Directory, Location};
         use dialog_repository::RepositoryExt as _;
         use dialog_storage::provider::storage::{NativeSpace, Storage};
 
         let root = tempfile::tempdir()?;
         let directory = Directory::At(root.path().to_string_lossy().into_owned());
-        let storage = Storage::<NativeSpace>::new();
-        let profile = Profile::open(unique_name("test"))
-            .at(directory.clone())
-            .perform(&storage)
-            .await?;
-        let operator = profile
-            .derive(b"test")
-            .allow(Subject::any())
-            .network(Network::default())
-            .base(directory)
-            .build(storage)
-            .await?;
-        let did = profile
-            .repository(unique_name("repo"))
+        let peer = open_peer(
+            Storage::<NativeSpace>::new(),
+            Location::new(directory, unique_name("test")),
+        )
+        .await?;
+        let operator = peer.session(b"test").allow(Subject::any()).await?;
+        let did = peer
+            .space(unique_name("repo"))
             .open()
             .perform(&operator)
             .await?
@@ -893,7 +885,7 @@ mod tests {
     /// that stopped part-way and has a fact left to retract.
     #[dialog_common::test]
     async fn it_refuses_to_delete_a_branch_that_does_not_exist() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let did = repo.did();
         let source = commit(&operator, &did, "main").await?;
