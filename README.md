@@ -32,6 +32,7 @@ Expect fundamental details to break over time (binary encoding, index constructi
 
 ## Project Layout
 
+- **[`./guide`](/guide)**: _How Dialog Works_, a guided tour of the design from facts to sync, published at <https://dialog.foundation/guide/>.
 - **[`./rust`](/rust)**: the core implementation of Dialog.
 - **[`./typescript`](/typescript)**: packages for using Dialog in TypeScript and/or React.
 - **[`./adr`](/adr)**: architectural design records
