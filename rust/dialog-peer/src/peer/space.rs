@@ -214,6 +214,11 @@ where
     /// key replaced by its verifier: a load that stops part-way finds the
     /// key still there and does it again. The home is never touched, since
     /// its key is this peer's own identity.
+    ///
+    /// In the browser a stored key restores as a `CryptoKey` that gives no
+    /// seed back, so there is nothing to seal: the key is left where it
+    /// was, as every space kept its own before, for the upgrade step that
+    /// adopts it into the credential store.
     async fn adopted(&self, credential: Credential) -> Result<Credential, storage_fx::StorageError>
     where
         S: ConditionalSend + ConditionalSync + 'static,
@@ -232,11 +237,11 @@ where
         let Signer::Ed25519(ed25519) = &signer else {
             return Err(failed("only an Ed25519 space key can be sealed"));
         };
-        // Natively every export is the seed; in the browser a key that
-        // was stored whole was stored extractable.
+        // Natively every export is the seed; in the browser a restored key
+        // exports opaque handles, and stays where it was.
         #[allow(irrefutable_let_patterns)]
         let KeyExport::Extractable(seed) = ed25519.export().await.map_err(failed)? else {
-            return Err(failed("the space's stored key is not extractable"));
+            return Ok(handed::<M>(credential));
         };
         let sealed = self.seal_to_account(&seed).await?;
         self.delegate_to_account(&signer).await?;
@@ -404,9 +409,9 @@ mod tests {
     use crate::{ClaimExt as _, Peer};
     use dialog_capability::access::{Access, Prove};
     use dialog_capability::{Subject, did};
-    use dialog_credentials::key::{ExtractableKey, KeyExport};
+    use dialog_credentials::key::KeyExport;
     use dialog_credentials::secret::{Context, SealedSecret};
-    use dialog_credentials::{Credential, Ed25519Signer, Extractable, Signer, SignerCredential};
+    use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential};
     use dialog_effects::credential::{self as credential_fx, prelude::*};
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
     use dialog_identity::OpenCredential;
@@ -598,18 +603,40 @@ mod tests {
         Ok(())
     }
 
-    /// A key the way every space stored its own before keys were sealed:
-    /// whole, and in the browser extractable, which neither a generated
-    /// nor an imported sealed key is there. The extractable key is used as
-    /// it is, under the sealed marker a stored key carries.
+    /// A space's key stored the way every space stored its own before
+    /// keys were sealed: whole. How it was made does not matter: in the
+    /// browser a stored key restores from the storage non-extractable
+    /// whichever way it was made.
     async fn legacy_key() -> anyhow::Result<Ed25519Signer> {
-        let generated = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await?;
-        Ok(Ed25519Signer::from(generated.signing_key().clone()))
+        Ok(Ed25519Signer::generate().await?)
+    }
+
+    /// A space created the way every space was before keys were sealed,
+    /// with its key stored in it, under `directory` in `storage`.
+    async fn legacy_space(
+        storage: &Storage<VolatileSpace>,
+        directory: &str,
+        name: &str,
+    ) -> anyhow::Result<Credential> {
+        let location = Location::new(Directory::At(directory.into()), name);
+        let repository = Credential::Signer(SignerCredential::from(legacy_key().await?));
+        Subject::from(did!("local:storage"))
+            .attenuate(storage_fx::Storage)
+            .attenuate(location)
+            .create(repository.clone())
+            .perform(storage)
+            .await?;
+        Ok(repository)
     }
 
     /// A space from before keys were sealed still holds its signing key.
     /// Loading it through a peer seals the key to the account, has the
     /// space delegate to it, and leaves only the verifier in the space.
+    ///
+    /// Native only: a key restored from the storage gives its seed back
+    /// only there. In the browser the key is left where it was, which
+    /// `it_leaves_the_key_of_a_legacy_space_it_cannot_read_back` pins.
+    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_seals_the_key_of_a_space_from_before_keys_were_sealed() -> anyhow::Result<()> {
         let storage = test_storage().await;
@@ -618,16 +645,7 @@ mod tests {
             .await?;
         let peer = peer_at(&storage, &credential, "/legacy").await?;
         let name = unique_name("notes");
-
-        // Created the way every space was before: its key stored in it.
-        let location = Location::new(Directory::At("/legacy".into()), name.as_str());
-        let repository = Credential::Signer(SignerCredential::from(legacy_key().await?));
-        Subject::from(did!("local:storage"))
-            .attenuate(storage_fx::Storage)
-            .attenuate(location)
-            .create(repository.clone())
-            .perform(&storage)
-            .await?;
+        let repository = legacy_space(&storage, "/legacy", &name).await?;
 
         let loaded = peer.space(name).load().perform(&peer).await?;
         assert_eq!(loaded.did(), repository.did());
@@ -661,6 +679,44 @@ mod tests {
         Ok(())
     }
 
+    /// In the browser a key restored from the storage gives no seed back,
+    /// so a space from before keys were sealed loads with its key left
+    /// where it was, unsealed, for the upgrade step that adopts it. The
+    /// native peer seals it on load instead, which
+    /// `it_seals_the_key_of_a_space_from_before_keys_were_sealed` pins.
+    #[cfg(target_arch = "wasm32")]
+    #[dialog_common::test]
+    async fn it_leaves_the_key_of_a_legacy_space_it_cannot_read_back() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&storage)
+            .await?;
+        let peer = peer_at(&storage, &credential, "/legacy").await?;
+        let name = unique_name("notes");
+        let repository = legacy_space(&storage, "/legacy", &name).await?;
+
+        let loaded = peer.space(name).load().perform(&peer).await?;
+        assert_eq!(loaded.did(), repository.did());
+
+        let stored = Subject::from(repository.did())
+            .credential()
+            .key(credential_fx::SELF)
+            .load()
+            .perform(&storage)
+            .await?;
+        assert!(
+            matches!(stored, Credential::Signer(_)),
+            "the key was moved out of the space"
+        );
+        assert!(
+            spaces::sealed(peer.state(), &repository.did(), &peer)
+                .await?
+                .is_none(),
+            "a key that gives no seed back was sealed"
+        );
+        Ok(())
+    }
+
     /// A repository found in the base directory, with no record of its
     /// name, is recorded the first time it is loaded.
     #[dialog_common::test]
@@ -674,13 +730,7 @@ mod tests {
 
         // Stored where the peer looks, but never recorded.
         let location = Location::new(Directory::At("/base".into()), name.as_str());
-        let repository = Credential::Signer(SignerCredential::from(legacy_key().await?));
-        Subject::from(did!("local:storage"))
-            .attenuate(storage_fx::Storage)
-            .attenuate(location.clone())
-            .create(repository.clone())
-            .perform(&storage)
-            .await?;
+        let repository = legacy_space(&storage, "/base", &name).await?;
 
         let state = peer.state();
         assert!(spaces::find(state, &name, &peer).await?.is_empty());
