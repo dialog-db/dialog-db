@@ -3672,7 +3672,7 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
         .secrets()
         .site(s3_site_address(&s3))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_b)
+        .perform(&profile_b)
         .await?;
     let origin_b = connect("origin", s3_site_address(&s3), repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
@@ -3835,7 +3835,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         .secrets()
         .site(s3_site_address(&s3))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator_b)
+        .perform(&profile_b)
         .await?;
     let origin_b = connect("origin", s3_site_address(&s3), repo_a.did(), &operator_b).await?;
     let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
