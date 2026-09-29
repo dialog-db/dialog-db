@@ -140,7 +140,7 @@ Every number in the prelude is written as a [bijou64](https://www.inkandswitch.c
 | `fa` | 4 | 66,040 to 16,843,255 |
 | `fb` to `ff` | 5 to 9 | larger, up to 2<sup>64</sup> − 1 |
 
-The ranges are offset so they never overlap: `f8 00` means 248, not 0. So every number has exactly one encoding. That matters more than it looks. A node is named by the hash of its bytes (see [Blocks and Storage](./storage.md)), so if the same number could be written two ways, the same node could have two names. LEB128, the more common varint, allows padded encodings unless every reader checks for them. (Inside the body, the key columns do use LEB128 lengths.)
+The ranges are offset so they never overlap: `f8 00` means 248, not 0. So every number has exactly one encoding. That matters more than it looks. A node is named by the hash of its bytes (see [Blocks and Storage](./storage.md)), so if the same number could be written two ways, the same node could have two names.
 
 ## The manifest fields
 
