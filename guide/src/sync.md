@@ -116,11 +116,11 @@ Alice renamed the milk to `"Oat milk, 1 L"`. Bob, without seeing that, renamed i
 <svg class="dg" viewBox="0 0 780 118" width="780" height="118" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two concurrent names for the same item; a read elects one, the same way on every replica">
 <defs><marker id="k-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="label small muted" x="10" y="16">in the merged tree: two names for item:1</text>
-<rect class="attribute" x="10" y="28" width="170" height="24"/><text class="attribute" x="95" y="44" text-anchor="middle">example.grocery/name</text>
+<rect class="attribute" x="10" y="28" width="170" height="24"/><text class="attribute" x="95" y="44" text-anchor="middle">demo.grocery/name</text>
 <rect class="entity" x="184" y="28" width="70" height="24"/><text class="entity" x="219" y="44" text-anchor="middle">item:1</text>
 <rect class="value" x="258" y="28" width="140" height="24"/><text class="value" x="328" y="44" text-anchor="middle">&quot;Oat milk, 1 L&quot;</text>
 <rect class="alice" x="402" y="28" width="70" height="24"/><text class="alice" x="437" y="44" text-anchor="middle">(oA, 2)</text>
-<rect class="attribute" x="10" y="58" width="170" height="24"/><text class="attribute" x="95" y="74" text-anchor="middle">example.grocery/name</text>
+<rect class="attribute" x="10" y="58" width="170" height="24"/><text class="attribute" x="95" y="74" text-anchor="middle">demo.grocery/name</text>
 <rect class="entity" x="184" y="58" width="70" height="24"/><text class="entity" x="219" y="74" text-anchor="middle">item:1</text>
 <rect class="value" x="258" y="58" width="140" height="24"/><text class="value" x="328" y="74" text-anchor="middle">&quot;Soy milk&quot;</text>
 <rect class="bob" x="402" y="58" width="70" height="24"/><text class="bob" x="437" y="74" text-anchor="middle">(oB, 2)</text>

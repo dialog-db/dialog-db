@@ -14,12 +14,12 @@ An app rarely writes patterns one at a time. It declares a **concept**: a named 
 mod grocery {
     /// The name of a grocery item.
     #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    #[domain("example.grocery")]
+    #[domain("demo.grocery")]
     pub struct Name(pub String);
 
     /// Whether the item has been picked up.
     #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    #[domain("example.grocery")]
+    #[domain("demo.grocery")]
     pub struct Done(pub bool);
 }
 
@@ -31,7 +31,7 @@ pub struct Item {
 }
 ```
 
-The domain comes from `#[domain]` and the name from the type, kebab-cased, so `grocery::Name` is the attribute `example.grocery/name`. The doc comment becomes its description, the wrapped type its value type, and its cardinality is one unless it says `#[cardinality(many)]`. Each field of the concept is one pattern, and `this` is the entity they share. Writing an `Item` asserts its facts. Querying for `Item` with blanks in every field asks for every item:
+The domain comes from `#[domain]` and the name from the type, kebab-cased, so `grocery::Name` is the attribute `demo.grocery/name`. The doc comment becomes its description, the wrapped type its value type, and its cardinality is one unless it says `#[cardinality(many)]`. Each field of the concept is one pattern, and `this` is the entity they share. Writing an `Item` asserts its facts. Querying for `Item` with blanks in every field asks for every item:
 
 ```rust
 use dialog_query::query::Output;
@@ -48,7 +48,7 @@ let items: Vec<Item> = branch
     .await?;
 ```
 
-A concept is a way of reading facts, not a table. The facts do not know which concepts they belong to. Any entity with a `example.grocery/name` and a `example.grocery/done` is an `Item`, and a second app can declare its own concept over the same attributes without asking the first.
+A concept is a way of reading facts, not a table. The facts do not know which concepts they belong to. Any entity with a `demo.grocery/name` and a `demo.grocery/done` is an `Item`, and a second app can declare its own concept over the same attributes without asking the first.
 
 ## Planning
 
@@ -61,8 +61,8 @@ Which index a pattern reads follows directly from the [Keys](./keys.md) chapter:
 <defs><marker id="p-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="title" x="10" y="20">1. two scans of AEV, both sorted by entity</text>
 <text class="title" x="400" y="20"></text>
-<text class="small muted" x="10" y="40">01 example.grocery/name …</text>
-<text class="small muted" x="420" y="40">01 example.grocery/done …</text>
+<text class="small muted" x="10" y="40">01 demo.grocery/name …</text>
+<text class="small muted" x="420" y="40">01 demo.grocery/done …</text>
 <rect class="entity" x="10" y="50" width="70" height="22"/>
 <text class="entity" x="45.0" y="65" text-anchor="middle">item:1</text>
 <rect class="value" x="84" y="50" width="130" height="22"/>
@@ -108,7 +108,7 @@ When one pattern is much narrower than the other, say `done` pinned to `false`, 
 
 ## Cardinality
 
-An attribute is declared as having one value or many. `example.grocery/name` has one, which is the default, and `example.grocery/tag` could be declared with `#[cardinality(many)]`. For a one-valued attribute, a query that finds two values runs the election from the [Sync](./sync.md) chapter and returns one. Every replica elects the same value. For a many-valued attribute, a query returns every value.
+An attribute is declared as having one value or many. `demo.grocery/name` has one, which is the default, and `demo.grocery/tag` could be declared with `#[cardinality(many)]`. For a one-valued attribute, a query that finds two values runs the election from the [Sync](./sync.md) chapter and returns one. Every replica elects the same value. For a many-valued attribute, a query returns every value.
 
 ## Optional fields
 

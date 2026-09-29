@@ -99,17 +99,17 @@ Bob's commit asserts `done true` on `item:2`. The done flag has one value, so th
 <rect class="shade" x="10" y="30" width="70" height="26"/>
 <text x="45" y="47" text-anchor="middle">00 01 02</text>
 <rect class="value" x="84" y="30" width="400" height="26"/>
-<text class="small" x="94" y="47">example.grocery/done of item:2 is true</text>
+<text class="small" x="94" y="47">demo.grocery/done of item:2 is true</text>
 <text class="small muted" x="496" y="47">version (oB, 2)</text>
 <rect class="shade" x="10" y="62" width="70" height="26"/>
 <text x="45" y="79" text-anchor="middle">03</text>
 <rect class="hash" x="84" y="62" width="400" height="26"/>
-<text class="small" x="94" y="79">history: (oB, 2) item:2 example.grocery/done true</text>
+<text class="small" x="94" y="79">history: (oB, 2) item:2 demo.grocery/done true</text>
 <text class="small muted" x="496" y="79">supersedes (oA, 1)</text>
 <rect class="shade" x="10" y="94" width="70" height="26"/>
 <text x="45" y="111" text-anchor="middle">05</text>
 <rect class="hash" x="84" y="94" width="400" height="26"/>
-<text class="small" x="94" y="111">coverage: (oB, 2) item:2 example.grocery/done …</text>
+<text class="small" x="94" y="111">coverage: (oB, 2) item:2 demo.grocery/done …</text>
 <text class="small muted" x="496" y="111">it covered something</text>
 <rect class="shade" x="10" y="126" width="70" height="26"/>
 <text x="45" y="143" text-anchor="middle">00 01</text>

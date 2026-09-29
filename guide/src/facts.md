@@ -3,10 +3,10 @@
 Everything Dialog stores is a fact. A fact is one small statement about one thing, and it always has the same three parts:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 640 120" width="640" height="120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A fact: the example.grocery/name of item:1 is Oat milk">
+<svg class="dg" viewBox="0 0 640 120" width="640" height="120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A fact: the demo.grocery/name of item:1 is Oat milk">
 <text class="label muted" x="20" y="52">the</text>
 <rect class="attribute" x="50" y="30" width="200" height="34"/>
-<text class="attribute" x="150" y="52" text-anchor="middle">example.grocery/name</text>
+<text class="attribute" x="150" y="52" text-anchor="middle">demo.grocery/name</text>
 <text class="label muted" x="266" y="52">of</text>
 <rect class="entity" x="292" y="30" width="100" height="34"/>
 <text class="entity" x="342" y="52" text-anchor="middle">item:1</text>
@@ -28,11 +28,11 @@ A grocery list is a pile of such sentences. Alice's list, after she adds two ite
 
 | the | of | is |
 |---|---|---|
-| `example.grocery/name` | `item:1` | `"Oat milk"` |
-| `example.grocery/done` | `item:1` | `false` |
-| `example.grocery/name` | `item:2` | `"Eggs"` |
-| `example.grocery/done` | `item:2` | `false` |
-| `example.grocery/tag` | `item:2` | `"breakfast"` |
+| `demo.grocery/name` | `item:1` | `"Oat milk"` |
+| `demo.grocery/done` | `item:1` | `false` |
+| `demo.grocery/name` | `item:2` | `"Eggs"` |
+| `demo.grocery/done` | `item:2` | `false` |
+| `demo.grocery/tag` | `item:2` | `"breakfast"` |
 
 There are no tables and no rows here. An item is whatever facts share its entity. Adding a new kind of information, a quantity say, means writing facts with a new attribute. Nothing else has to change first.
 
@@ -46,12 +46,12 @@ An entity carries no data of its own. It exists only as long as some fact mentio
 
 ## Attributes
 
-An attribute says what a fact is about the entity. It is written as a domain and a name, separated by a slash, like `example.grocery/name`:
+An attribute says what a fact is about the entity. It is written as a domain and a name, separated by a slash, like `demo.grocery/name`:
 
-- **The domain** says whose vocabulary the attribute belongs to. It is written in reverse domain notation, the way Java names its packages: `example.grocery` stands for `grocery.example`. Two apps that both say `name` do not collide, because their domains differ. A domain is lowercase letters, digits, hyphens and dots.
+- **The domain** says whose vocabulary the attribute belongs to. It is written in reverse domain notation, the way Java names its packages: `demo.grocery` stands for `grocery.example`. Two apps that both say `name` do not collide, because their domains differ. A domain is lowercase letters, digits, hyphens and dots.
 - **The name** is lowercase kebab-case: letters, digits and hyphens, starting with a letter, like `name` or `picked-up-at`.
 
-The whole attribute is at most 64 bytes. This guide uses the domain `example.grocery`, because `.example` is a top-level domain reserved for examples.
+The whole attribute is at most 64 bytes. This guide uses the domain `demo.grocery`.
 
 An app declares every attribute it uses, and the declaration says more than the name:
 
@@ -79,7 +79,7 @@ A value is one of nine types. Each type has a number, and that number is written
 | `07` | Record | opaque structured bytes |
 | `08` | Symbol | an attribute name used as a value |
 
-An Entity value is how facts link things together. If Bob adds `the example.grocery/store of item:2 is store:corner-shop`, the item now points at a store, and the store can have facts of its own.
+An Entity value is how facts link things together. If Bob adds `the demo.grocery/store of item:2 is store:corner-shop`, the item now points at a store, and the store can have facts of its own.
 
 ## Saying things: assert and retract
 
@@ -128,7 +128,7 @@ Retracting a fact that is not there does nothing. Asserting a fact that is alrea
 
 ## Nothing is ever null
 
-Storage holds only facts that exist. If Bob has not given the eggs a quantity, there is no `example.grocery/quantity` fact for `item:2`. There is no null, and nothing is written to say a value is missing. Absence is something a query can ask about, not something storage records.
+Storage holds only facts that exist. If Bob has not given the eggs a quantity, there is no `demo.grocery/quantity` fact for `item:2`. There is no null, and nothing is written to say a value is missing. Absence is something a query can ask about, not something storage records.
 
 ## When a fact became true
 

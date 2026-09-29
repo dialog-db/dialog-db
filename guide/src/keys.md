@@ -1,6 +1,6 @@
 # Keys
 
-Dialog keeps its facts in a sorted tree, and a sorted tree can only find things by the order of their keys. A fact gets looked up in three different ways, though. An app shows one grocery item, and needs every fact about `item:1`. It shows the whole list, and needs every `example.grocery/name`. It asks which items are tagged `"breakfast"`, and needs to start from a value.
+Dialog keeps its facts in a sorted tree, and a sorted tree can only find things by the order of their keys. A fact gets looked up in three different ways, though. An app shows one grocery item, and needs every fact about `item:1`. It shows the whole list, and needs every `demo.grocery/name`. It asks which items are tagged `"breakfast"`, and needs to start from a value.
 
 No single sort order serves all three. So Dialog writes every fact three times, each time with its parts in a different order:
 
@@ -10,13 +10,13 @@ No single sort order serves all three. So Dialog writes every fact three times, 
 <rect class="entity" x="100" y="8" width="176" height="22"/>
 <text class="entity" x="188.0" y="23.0" text-anchor="middle">item:1</text>
 <rect class="attribute" x="280" y="8" width="176" height="22"/>
-<text class="attribute" x="368.0" y="23.0" text-anchor="middle">example.grocery/name</text>
+<text class="attribute" x="368.0" y="23.0" text-anchor="middle">demo.grocery/name</text>
 <rect class="value" x="460" y="8" width="176" height="22"/>
 <text class="value" x="548.0" y="23.0" text-anchor="middle">&quot;Oat milk&quot;</text>
 <text class="small muted" x="648" y="23.0">find by entity</text>
 <text class="label small muted" x="8" y="54.0">AEV  tag 01</text>
 <rect class="attribute" x="100" y="36" width="176" height="22"/>
-<text class="attribute" x="188.0" y="51.0" text-anchor="middle">example.grocery/name</text>
+<text class="attribute" x="188.0" y="51.0" text-anchor="middle">demo.grocery/name</text>
 <rect class="entity" x="280" y="36" width="176" height="22"/>
 <text class="entity" x="368.0" y="51.0" text-anchor="middle">item:1</text>
 <rect class="value" x="460" y="36" width="176" height="22"/>
@@ -26,7 +26,7 @@ No single sort order serves all three. So Dialog writes every fact three times, 
 <rect class="value" x="100" y="64" width="176" height="22"/>
 <text class="value" x="188.0" y="79.0" text-anchor="middle">&quot;Oat milk&quot;</text>
 <rect class="attribute" x="280" y="64" width="176" height="22"/>
-<text class="attribute" x="368.0" y="79.0" text-anchor="middle">example.grocery/name</text>
+<text class="attribute" x="368.0" y="79.0" text-anchor="middle">demo.grocery/name</text>
 <rect class="entity" x="460" y="64" width="176" height="22"/>
 <text class="entity" x="548.0" y="79.0" text-anchor="middle">item:1</text>
 <text class="small muted" x="648" y="79.0">find by value</text>
@@ -75,105 +75,96 @@ Here is the EAV key for *the grocery name of item 1 is "Oat milk"*:
 <rect class="entity" x="204" y="6" width="26" height="38"/>
 <text x="217.0" y="23" text-anchor="middle">00</text>
 <rect class="attribute" x="232" y="6" width="26" height="38"/>
-<text x="245.0" y="23" text-anchor="middle">e</text>
-<text class="small muted" x="245.0" y="38" text-anchor="middle">65</text>
+<text x="245.0" y="23" text-anchor="middle">d</text>
+<text class="small muted" x="245.0" y="38" text-anchor="middle">64</text>
 <rect class="attribute" x="260" y="6" width="26" height="38"/>
-<text x="273.0" y="23" text-anchor="middle">x</text>
-<text class="small muted" x="273.0" y="38" text-anchor="middle">78</text>
+<text x="273.0" y="23" text-anchor="middle">e</text>
+<text class="small muted" x="273.0" y="38" text-anchor="middle">65</text>
 <rect class="attribute" x="288" y="6" width="26" height="38"/>
-<text x="301.0" y="23" text-anchor="middle">a</text>
-<text class="small muted" x="301.0" y="38" text-anchor="middle">61</text>
+<text x="301.0" y="23" text-anchor="middle">m</text>
+<text class="small muted" x="301.0" y="38" text-anchor="middle">6d</text>
 <rect class="attribute" x="316" y="6" width="26" height="38"/>
-<text x="329.0" y="23" text-anchor="middle">m</text>
-<text class="small muted" x="329.0" y="38" text-anchor="middle">6d</text>
+<text x="329.0" y="23" text-anchor="middle">o</text>
+<text class="small muted" x="329.0" y="38" text-anchor="middle">6f</text>
 <rect class="attribute" x="344" y="6" width="26" height="38"/>
-<text x="357.0" y="23" text-anchor="middle">p</text>
-<text class="small muted" x="357.0" y="38" text-anchor="middle">70</text>
+<text x="357.0" y="23" text-anchor="middle">.</text>
+<text class="small muted" x="357.0" y="38" text-anchor="middle">2e</text>
 <rect class="attribute" x="372" y="6" width="26" height="38"/>
-<text x="385.0" y="23" text-anchor="middle">l</text>
-<text class="small muted" x="385.0" y="38" text-anchor="middle">6c</text>
+<text x="385.0" y="23" text-anchor="middle">g</text>
+<text class="small muted" x="385.0" y="38" text-anchor="middle">67</text>
 <rect class="attribute" x="400" y="6" width="26" height="38"/>
-<text x="413.0" y="23" text-anchor="middle">e</text>
-<text class="small muted" x="413.0" y="38" text-anchor="middle">65</text>
+<text x="413.0" y="23" text-anchor="middle">r</text>
+<text class="small muted" x="413.0" y="38" text-anchor="middle">72</text>
 <rect class="attribute" x="428" y="6" width="26" height="38"/>
-<text x="441.0" y="23" text-anchor="middle">.</text>
-<text class="small muted" x="441.0" y="38" text-anchor="middle">2e</text>
+<text x="441.0" y="23" text-anchor="middle">o</text>
+<text class="small muted" x="441.0" y="38" text-anchor="middle">6f</text>
 <rect class="attribute" x="456" y="6" width="26" height="38"/>
-<text x="469.0" y="23" text-anchor="middle">g</text>
-<text class="small muted" x="469.0" y="38" text-anchor="middle">67</text>
+<text x="469.0" y="23" text-anchor="middle">c</text>
+<text class="small muted" x="469.0" y="38" text-anchor="middle">63</text>
 <rect class="attribute" x="484" y="6" width="26" height="38"/>
-<text x="497.0" y="23" text-anchor="middle">r</text>
-<text class="small muted" x="497.0" y="38" text-anchor="middle">72</text>
+<text x="497.0" y="23" text-anchor="middle">e</text>
+<text class="small muted" x="497.0" y="38" text-anchor="middle">65</text>
 <rect class="attribute" x="512" y="6" width="26" height="38"/>
-<text x="525.0" y="23" text-anchor="middle">o</text>
-<text class="small muted" x="525.0" y="38" text-anchor="middle">6f</text>
+<text x="525.0" y="23" text-anchor="middle">r</text>
+<text class="small muted" x="525.0" y="38" text-anchor="middle">72</text>
 <rect class="attribute" x="540" y="6" width="26" height="38"/>
-<text x="553.0" y="23" text-anchor="middle">c</text>
-<text class="small muted" x="553.0" y="38" text-anchor="middle">63</text>
+<text x="553.0" y="23" text-anchor="middle">y</text>
+<text class="small muted" x="553.0" y="38" text-anchor="middle">79</text>
 <rect class="attribute" x="8" y="89" width="26" height="38"/>
-<text x="21.0" y="106" text-anchor="middle">e</text>
-<text class="small muted" x="21.0" y="121" text-anchor="middle">65</text>
+<text x="21.0" y="106" text-anchor="middle">/</text>
+<text class="small muted" x="21.0" y="121" text-anchor="middle">2f</text>
 <rect class="attribute" x="36" y="89" width="26" height="38"/>
-<text x="49.0" y="106" text-anchor="middle">r</text>
-<text class="small muted" x="49.0" y="121" text-anchor="middle">72</text>
+<text x="49.0" y="106" text-anchor="middle">n</text>
+<text class="small muted" x="49.0" y="121" text-anchor="middle">6e</text>
 <rect class="attribute" x="64" y="89" width="26" height="38"/>
-<text x="77.0" y="106" text-anchor="middle">y</text>
-<text class="small muted" x="77.0" y="121" text-anchor="middle">79</text>
+<text x="77.0" y="106" text-anchor="middle">a</text>
+<text class="small muted" x="77.0" y="121" text-anchor="middle">61</text>
 <rect class="attribute" x="92" y="89" width="26" height="38"/>
-<text x="105.0" y="106" text-anchor="middle">/</text>
-<text class="small muted" x="105.0" y="121" text-anchor="middle">2f</text>
+<text x="105.0" y="106" text-anchor="middle">m</text>
+<text class="small muted" x="105.0" y="121" text-anchor="middle">6d</text>
 <rect class="attribute" x="120" y="89" width="26" height="38"/>
-<text x="133.0" y="106" text-anchor="middle">n</text>
-<text class="small muted" x="133.0" y="121" text-anchor="middle">6e</text>
+<text x="133.0" y="106" text-anchor="middle">e</text>
+<text class="small muted" x="133.0" y="121" text-anchor="middle">65</text>
 <rect class="attribute" x="148" y="89" width="26" height="38"/>
-<text x="161.0" y="106" text-anchor="middle">a</text>
-<text class="small muted" x="161.0" y="121" text-anchor="middle">61</text>
-<rect class="attribute" x="176" y="89" width="26" height="38"/>
-<text x="189.0" y="106" text-anchor="middle">m</text>
-<text class="small muted" x="189.0" y="121" text-anchor="middle">6d</text>
-<rect class="attribute" x="204" y="89" width="26" height="38"/>
-<text x="217.0" y="106" text-anchor="middle">e</text>
-<text class="small muted" x="217.0" y="121" text-anchor="middle">65</text>
-<rect class="attribute" x="232" y="89" width="26" height="38"/>
-<text x="245.0" y="106" text-anchor="middle">00</text>
-<rect class="value vtype" x="260" y="89" width="26" height="38"/>
-<text x="273.0" y="106" text-anchor="middle">03</text>
+<text x="161.0" y="106" text-anchor="middle">00</text>
+<rect class="value vtype" x="176" y="89" width="26" height="38"/>
+<text x="189.0" y="106" text-anchor="middle">03</text>
+<rect class="value" x="204" y="89" width="26" height="38"/>
+<text x="217.0" y="106" text-anchor="middle">O</text>
+<text class="small muted" x="217.0" y="121" text-anchor="middle">4f</text>
+<rect class="value" x="232" y="89" width="26" height="38"/>
+<text x="245.0" y="106" text-anchor="middle">a</text>
+<text class="small muted" x="245.0" y="121" text-anchor="middle">61</text>
+<rect class="value" x="260" y="89" width="26" height="38"/>
+<text x="273.0" y="106" text-anchor="middle">t</text>
+<text class="small muted" x="273.0" y="121" text-anchor="middle">74</text>
 <rect class="value" x="288" y="89" width="26" height="38"/>
-<text x="301.0" y="106" text-anchor="middle">O</text>
-<text class="small muted" x="301.0" y="121" text-anchor="middle">4f</text>
+<text x="301.0" y="106" text-anchor="middle">20</text>
 <rect class="value" x="316" y="89" width="26" height="38"/>
-<text x="329.0" y="106" text-anchor="middle">a</text>
-<text class="small muted" x="329.0" y="121" text-anchor="middle">61</text>
+<text x="329.0" y="106" text-anchor="middle">m</text>
+<text class="small muted" x="329.0" y="121" text-anchor="middle">6d</text>
 <rect class="value" x="344" y="89" width="26" height="38"/>
-<text x="357.0" y="106" text-anchor="middle">t</text>
-<text class="small muted" x="357.0" y="121" text-anchor="middle">74</text>
+<text x="357.0" y="106" text-anchor="middle">i</text>
+<text class="small muted" x="357.0" y="121" text-anchor="middle">69</text>
 <rect class="value" x="372" y="89" width="26" height="38"/>
-<text x="385.0" y="106" text-anchor="middle">20</text>
+<text x="385.0" y="106" text-anchor="middle">l</text>
+<text class="small muted" x="385.0" y="121" text-anchor="middle">6c</text>
 <rect class="value" x="400" y="89" width="26" height="38"/>
-<text x="413.0" y="106" text-anchor="middle">m</text>
-<text class="small muted" x="413.0" y="121" text-anchor="middle">6d</text>
+<text x="413.0" y="106" text-anchor="middle">k</text>
+<text class="small muted" x="413.0" y="121" text-anchor="middle">6b</text>
 <rect class="value" x="428" y="89" width="26" height="38"/>
-<text x="441.0" y="106" text-anchor="middle">i</text>
-<text class="small muted" x="441.0" y="121" text-anchor="middle">69</text>
-<rect class="value" x="456" y="89" width="26" height="38"/>
-<text x="469.0" y="106" text-anchor="middle">l</text>
-<text class="small muted" x="469.0" y="121" text-anchor="middle">6c</text>
-<rect class="value" x="484" y="89" width="26" height="38"/>
-<text x="497.0" y="106" text-anchor="middle">k</text>
-<text class="small muted" x="497.0" y="121" text-anchor="middle">6b</text>
-<rect class="value" x="512" y="89" width="26" height="38"/>
-<text x="525.0" y="106" text-anchor="middle">00</text>
+<text x="441.0" y="106" text-anchor="middle">00</text>
 <path class="wire" d="M9,49 v4 H33 v-4"/>
 <text class="label small" x="21.0" y="67" text-anchor="middle">tag</text>
 <path class="wire" d="M37,49 v4 H229 v-4"/>
 <text class="label small" x="133.0" y="67" text-anchor="middle">entity</text>
 <path class="wire" d="M233,49 v4 H565 v-4"/>
 <text class="label small" x="399.0" y="67" text-anchor="middle">attribute</text>
-<path class="wire" d="M9,132 v4 H257 v-4"/>
-<path class="wire" d="M261,132 v4 H285 v-4"/>
-<text class="label small" x="273.0" y="150" text-anchor="middle">type</text>
-<path class="wire" d="M289,132 v4 H537 v-4"/>
-<text class="label small" x="413.0" y="150" text-anchor="middle">value</text>
+<path class="wire" d="M9,132 v4 H173 v-4"/>
+<path class="wire" d="M177,132 v4 H201 v-4"/>
+<text class="label small" x="189.0" y="150" text-anchor="middle">type</text>
+<path class="wire" d="M205,132 v4 H453 v-4"/>
+<text class="label small" x="329.0" y="150" text-anchor="middle">value</text>
 </svg>
 </figure>
 
@@ -226,87 +217,78 @@ The VAE key holds the same bytes in a different order. The tag is `02`, and the 
 <rect class="value" x="288" y="6" width="26" height="38"/>
 <text x="301.0" y="23" text-anchor="middle">00</text>
 <rect class="attribute" x="316" y="6" width="26" height="38"/>
-<text x="329.0" y="23" text-anchor="middle">e</text>
-<text class="small muted" x="329.0" y="38" text-anchor="middle">65</text>
+<text x="329.0" y="23" text-anchor="middle">d</text>
+<text class="small muted" x="329.0" y="38" text-anchor="middle">64</text>
 <rect class="attribute" x="344" y="6" width="26" height="38"/>
-<text x="357.0" y="23" text-anchor="middle">x</text>
-<text class="small muted" x="357.0" y="38" text-anchor="middle">78</text>
+<text x="357.0" y="23" text-anchor="middle">e</text>
+<text class="small muted" x="357.0" y="38" text-anchor="middle">65</text>
 <rect class="attribute" x="372" y="6" width="26" height="38"/>
-<text x="385.0" y="23" text-anchor="middle">a</text>
-<text class="small muted" x="385.0" y="38" text-anchor="middle">61</text>
+<text x="385.0" y="23" text-anchor="middle">m</text>
+<text class="small muted" x="385.0" y="38" text-anchor="middle">6d</text>
 <rect class="attribute" x="400" y="6" width="26" height="38"/>
-<text x="413.0" y="23" text-anchor="middle">m</text>
-<text class="small muted" x="413.0" y="38" text-anchor="middle">6d</text>
+<text x="413.0" y="23" text-anchor="middle">o</text>
+<text class="small muted" x="413.0" y="38" text-anchor="middle">6f</text>
 <rect class="attribute" x="428" y="6" width="26" height="38"/>
-<text x="441.0" y="23" text-anchor="middle">p</text>
-<text class="small muted" x="441.0" y="38" text-anchor="middle">70</text>
+<text x="441.0" y="23" text-anchor="middle">.</text>
+<text class="small muted" x="441.0" y="38" text-anchor="middle">2e</text>
 <rect class="attribute" x="456" y="6" width="26" height="38"/>
-<text x="469.0" y="23" text-anchor="middle">l</text>
-<text class="small muted" x="469.0" y="38" text-anchor="middle">6c</text>
+<text x="469.0" y="23" text-anchor="middle">g</text>
+<text class="small muted" x="469.0" y="38" text-anchor="middle">67</text>
 <rect class="attribute" x="484" y="6" width="26" height="38"/>
-<text x="497.0" y="23" text-anchor="middle">e</text>
-<text class="small muted" x="497.0" y="38" text-anchor="middle">65</text>
+<text x="497.0" y="23" text-anchor="middle">r</text>
+<text class="small muted" x="497.0" y="38" text-anchor="middle">72</text>
 <rect class="attribute" x="512" y="6" width="26" height="38"/>
-<text x="525.0" y="23" text-anchor="middle">.</text>
-<text class="small muted" x="525.0" y="38" text-anchor="middle">2e</text>
+<text x="525.0" y="23" text-anchor="middle">o</text>
+<text class="small muted" x="525.0" y="38" text-anchor="middle">6f</text>
 <rect class="attribute" x="540" y="6" width="26" height="38"/>
-<text x="553.0" y="23" text-anchor="middle">g</text>
-<text class="small muted" x="553.0" y="38" text-anchor="middle">67</text>
+<text x="553.0" y="23" text-anchor="middle">c</text>
+<text class="small muted" x="553.0" y="38" text-anchor="middle">63</text>
 <rect class="attribute" x="8" y="104" width="26" height="38"/>
-<text x="21.0" y="121" text-anchor="middle">r</text>
-<text class="small muted" x="21.0" y="136" text-anchor="middle">72</text>
+<text x="21.0" y="121" text-anchor="middle">e</text>
+<text class="small muted" x="21.0" y="136" text-anchor="middle">65</text>
 <rect class="attribute" x="36" y="104" width="26" height="38"/>
-<text x="49.0" y="121" text-anchor="middle">o</text>
-<text class="small muted" x="49.0" y="136" text-anchor="middle">6f</text>
+<text x="49.0" y="121" text-anchor="middle">r</text>
+<text class="small muted" x="49.0" y="136" text-anchor="middle">72</text>
 <rect class="attribute" x="64" y="104" width="26" height="38"/>
-<text x="77.0" y="121" text-anchor="middle">c</text>
-<text class="small muted" x="77.0" y="136" text-anchor="middle">63</text>
+<text x="77.0" y="121" text-anchor="middle">y</text>
+<text class="small muted" x="77.0" y="136" text-anchor="middle">79</text>
 <rect class="attribute" x="92" y="104" width="26" height="38"/>
-<text x="105.0" y="121" text-anchor="middle">e</text>
-<text class="small muted" x="105.0" y="136" text-anchor="middle">65</text>
+<text x="105.0" y="121" text-anchor="middle">/</text>
+<text class="small muted" x="105.0" y="136" text-anchor="middle">2f</text>
 <rect class="attribute" x="120" y="104" width="26" height="38"/>
-<text x="133.0" y="121" text-anchor="middle">r</text>
-<text class="small muted" x="133.0" y="136" text-anchor="middle">72</text>
+<text x="133.0" y="121" text-anchor="middle">n</text>
+<text class="small muted" x="133.0" y="136" text-anchor="middle">6e</text>
 <rect class="attribute" x="148" y="104" width="26" height="38"/>
-<text x="161.0" y="121" text-anchor="middle">y</text>
-<text class="small muted" x="161.0" y="136" text-anchor="middle">79</text>
+<text x="161.0" y="121" text-anchor="middle">a</text>
+<text class="small muted" x="161.0" y="136" text-anchor="middle">61</text>
 <rect class="attribute" x="176" y="104" width="26" height="38"/>
-<text x="189.0" y="121" text-anchor="middle">/</text>
-<text class="small muted" x="189.0" y="136" text-anchor="middle">2f</text>
+<text x="189.0" y="121" text-anchor="middle">m</text>
+<text class="small muted" x="189.0" y="136" text-anchor="middle">6d</text>
 <rect class="attribute" x="204" y="104" width="26" height="38"/>
-<text x="217.0" y="121" text-anchor="middle">n</text>
-<text class="small muted" x="217.0" y="136" text-anchor="middle">6e</text>
+<text x="217.0" y="121" text-anchor="middle">e</text>
+<text class="small muted" x="217.0" y="136" text-anchor="middle">65</text>
 <rect class="attribute" x="232" y="104" width="26" height="38"/>
-<text x="245.0" y="121" text-anchor="middle">a</text>
-<text class="small muted" x="245.0" y="136" text-anchor="middle">61</text>
-<rect class="attribute" x="260" y="104" width="26" height="38"/>
-<text x="273.0" y="121" text-anchor="middle">m</text>
-<text class="small muted" x="273.0" y="136" text-anchor="middle">6d</text>
-<rect class="attribute" x="288" y="104" width="26" height="38"/>
-<text x="301.0" y="121" text-anchor="middle">e</text>
-<text class="small muted" x="301.0" y="136" text-anchor="middle">65</text>
-<rect class="attribute" x="316" y="104" width="26" height="38"/>
-<text x="329.0" y="121" text-anchor="middle">00</text>
+<text x="245.0" y="121" text-anchor="middle">00</text>
+<rect class="entity" x="260" y="104" width="26" height="38"/>
+<text x="273.0" y="121" text-anchor="middle">i</text>
+<text class="small muted" x="273.0" y="136" text-anchor="middle">69</text>
+<rect class="entity" x="288" y="104" width="26" height="38"/>
+<text x="301.0" y="121" text-anchor="middle">t</text>
+<text class="small muted" x="301.0" y="136" text-anchor="middle">74</text>
+<rect class="entity" x="316" y="104" width="26" height="38"/>
+<text x="329.0" y="121" text-anchor="middle">e</text>
+<text class="small muted" x="329.0" y="136" text-anchor="middle">65</text>
 <rect class="entity" x="344" y="104" width="26" height="38"/>
-<text x="357.0" y="121" text-anchor="middle">i</text>
-<text class="small muted" x="357.0" y="136" text-anchor="middle">69</text>
+<text x="357.0" y="121" text-anchor="middle">m</text>
+<text class="small muted" x="357.0" y="136" text-anchor="middle">6d</text>
 <rect class="entity" x="372" y="104" width="26" height="38"/>
-<text x="385.0" y="121" text-anchor="middle">t</text>
-<text class="small muted" x="385.0" y="136" text-anchor="middle">74</text>
+<text x="385.0" y="121" text-anchor="middle">:</text>
+<text class="small muted" x="385.0" y="136" text-anchor="middle">3a</text>
 <rect class="entity" x="400" y="104" width="26" height="38"/>
-<text x="413.0" y="121" text-anchor="middle">e</text>
-<text class="small muted" x="413.0" y="136" text-anchor="middle">65</text>
+<text x="413.0" y="121" text-anchor="middle">1</text>
+<text class="small muted" x="413.0" y="136" text-anchor="middle">31</text>
 <rect class="entity" x="428" y="104" width="26" height="38"/>
-<text x="441.0" y="121" text-anchor="middle">m</text>
-<text class="small muted" x="441.0" y="136" text-anchor="middle">6d</text>
-<rect class="entity" x="456" y="104" width="26" height="38"/>
-<text x="469.0" y="121" text-anchor="middle">:</text>
-<text class="small muted" x="469.0" y="136" text-anchor="middle">3a</text>
-<rect class="entity" x="484" y="104" width="26" height="38"/>
-<text x="497.0" y="121" text-anchor="middle">1</text>
-<text class="small muted" x="497.0" y="136" text-anchor="middle">31</text>
-<rect class="entity" x="512" y="104" width="26" height="38"/>
-<text x="525.0" y="121" text-anchor="middle">00</text>
+<text x="441.0" y="121" text-anchor="middle">00</text>
 <path class="wire" d="M9,49 v4 H33 v-4"/>
 <text class="label small" x="21.0" y="67" text-anchor="middle">tag</text>
 <path class="wire" d="M37,49 v4 H61 v-4"/>
@@ -316,9 +298,9 @@ The VAE key holds the same bytes in a different order. The tag is `02`, and the 
 <text class="label small" x="189.0" y="67" text-anchor="middle">value</text>
 <path class="wire" d="M317,49 v4 H565 v-4"/>
 <text class="label small" x="441.0" y="67" text-anchor="middle">attribute</text>
-<path class="wire" d="M9,147 v4 H341 v-4"/>
-<path class="wire" d="M345,147 v4 H537 v-4"/>
-<text class="label small" x="441.0" y="165" text-anchor="middle">entity</text>
+<path class="wire" d="M9,147 v4 H257 v-4"/>
+<path class="wire" d="M261,147 v4 H453 v-4"/>
+<text class="label small" x="357.0" y="165" text-anchor="middle">entity</text>
 </svg>
 </figure>
 
@@ -333,7 +315,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="entity" x="48" y="8" width="176" height="20"/>
 <text class="entity" x="136.0" y="22.0" text-anchor="middle">item:1</text>
 <rect class="attribute" x="228" y="8" width="176" height="20"/>
-<text class="attribute" x="316.0" y="22.0" text-anchor="middle">example.grocery/done</text>
+<text class="attribute" x="316.0" y="22.0" text-anchor="middle">demo.grocery/done</text>
 <rect class="value" x="408" y="8" width="176" height="20"/>
 <text class="value" x="496.0" y="22.0" text-anchor="middle">false</text>
 <text class="small muted" x="596" y="22.0">everything about item:1</text>
@@ -342,7 +324,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="entity" x="48" y="34" width="176" height="20"/>
 <text class="entity" x="136.0" y="48.0" text-anchor="middle">item:1</text>
 <rect class="attribute" x="228" y="34" width="176" height="20"/>
-<text class="attribute" x="316.0" y="48.0" text-anchor="middle">example.grocery/name</text>
+<text class="attribute" x="316.0" y="48.0" text-anchor="middle">demo.grocery/name</text>
 <rect class="value" x="408" y="34" width="176" height="20"/>
 <text class="value" x="496.0" y="48.0" text-anchor="middle">&quot;Oat milk&quot;</text>
 <rect class="shade" x="8" y="60" width="36" height="20"/>
@@ -350,7 +332,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="entity" x="48" y="60" width="176" height="20"/>
 <text class="entity" x="136.0" y="74.0" text-anchor="middle">item:2</text>
 <rect class="attribute" x="228" y="60" width="176" height="20"/>
-<text class="attribute" x="316.0" y="74.0" text-anchor="middle">example.grocery/done</text>
+<text class="attribute" x="316.0" y="74.0" text-anchor="middle">demo.grocery/done</text>
 <rect class="value" x="408" y="60" width="176" height="20"/>
 <text class="value" x="496.0" y="74.0" text-anchor="middle">false</text>
 <text class="small muted" x="596" y="74.0">everything about item:2</text>
@@ -359,7 +341,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="entity" x="48" y="86" width="176" height="20"/>
 <text class="entity" x="136.0" y="100.0" text-anchor="middle">item:2</text>
 <rect class="attribute" x="228" y="86" width="176" height="20"/>
-<text class="attribute" x="316.0" y="100.0" text-anchor="middle">example.grocery/name</text>
+<text class="attribute" x="316.0" y="100.0" text-anchor="middle">demo.grocery/name</text>
 <rect class="value" x="408" y="86" width="176" height="20"/>
 <text class="value" x="496.0" y="100.0" text-anchor="middle">&quot;Eggs&quot;</text>
 <rect class="shade" x="8" y="112" width="36" height="20"/>
@@ -367,13 +349,13 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="entity" x="48" y="112" width="176" height="20"/>
 <text class="entity" x="136.0" y="126.0" text-anchor="middle">item:2</text>
 <rect class="attribute" x="228" y="112" width="176" height="20"/>
-<text class="attribute" x="316.0" y="126.0" text-anchor="middle">example.grocery/tag</text>
+<text class="attribute" x="316.0" y="126.0" text-anchor="middle">demo.grocery/tag</text>
 <rect class="value" x="408" y="112" width="176" height="20"/>
 <text class="value" x="496.0" y="126.0" text-anchor="middle">&quot;breakfast&quot;</text>
 <rect class="shade" x="8" y="138" width="36" height="20"/>
 <text x="26.0" y="152.0" text-anchor="middle">01</text>
 <rect class="attribute" x="48" y="138" width="176" height="20"/>
-<text class="attribute" x="136.0" y="152.0" text-anchor="middle">example.grocery/done</text>
+<text class="attribute" x="136.0" y="152.0" text-anchor="middle">demo.grocery/done</text>
 <rect class="entity" x="228" y="138" width="176" height="20"/>
 <text class="entity" x="316.0" y="152.0" text-anchor="middle">item:1</text>
 <rect class="value" x="408" y="138" width="176" height="20"/>
@@ -382,7 +364,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="shade" x="8" y="164" width="36" height="20"/>
 <text x="26.0" y="178.0" text-anchor="middle">01</text>
 <rect class="attribute" x="48" y="164" width="176" height="20"/>
-<text class="attribute" x="136.0" y="178.0" text-anchor="middle">example.grocery/done</text>
+<text class="attribute" x="136.0" y="178.0" text-anchor="middle">demo.grocery/done</text>
 <rect class="entity" x="228" y="164" width="176" height="20"/>
 <text class="entity" x="316.0" y="178.0" text-anchor="middle">item:2</text>
 <rect class="value" x="408" y="164" width="176" height="20"/>
@@ -390,7 +372,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="shade" x="8" y="190" width="36" height="20"/>
 <text x="26.0" y="204.0" text-anchor="middle">01</text>
 <rect class="attribute" x="48" y="190" width="176" height="20"/>
-<text class="attribute" x="136.0" y="204.0" text-anchor="middle">example.grocery/name</text>
+<text class="attribute" x="136.0" y="204.0" text-anchor="middle">demo.grocery/name</text>
 <rect class="entity" x="228" y="190" width="176" height="20"/>
 <text class="entity" x="316.0" y="204.0" text-anchor="middle">item:1</text>
 <rect class="value" x="408" y="190" width="176" height="20"/>
@@ -402,7 +384,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="value" x="48" y="242" width="176" height="20"/>
 <text class="value" x="136.0" y="256.0" text-anchor="middle">false</text>
 <rect class="attribute" x="228" y="242" width="176" height="20"/>
-<text class="attribute" x="316.0" y="256.0" text-anchor="middle">example.grocery/done</text>
+<text class="attribute" x="316.0" y="256.0" text-anchor="middle">demo.grocery/done</text>
 <rect class="entity" x="408" y="242" width="176" height="20"/>
 <text class="entity" x="496.0" y="256.0" text-anchor="middle">item:1</text>
 <text class="small muted" x="596" y="256.0">every item not yet done</text>
@@ -411,7 +393,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="value" x="48" y="268" width="176" height="20"/>
 <text class="value" x="136.0" y="282.0" text-anchor="middle">false</text>
 <rect class="attribute" x="228" y="268" width="176" height="20"/>
-<text class="attribute" x="316.0" y="282.0" text-anchor="middle">example.grocery/done</text>
+<text class="attribute" x="316.0" y="282.0" text-anchor="middle">demo.grocery/done</text>
 <rect class="entity" x="408" y="268" width="176" height="20"/>
 <text class="entity" x="496.0" y="282.0" text-anchor="middle">item:2</text>
 <rect class="shade" x="8" y="294" width="36" height="20"/>
@@ -419,7 +401,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="value" x="48" y="294" width="176" height="20"/>
 <text class="value" x="136.0" y="308.0" text-anchor="middle">&quot;Eggs&quot;</text>
 <rect class="attribute" x="228" y="294" width="176" height="20"/>
-<text class="attribute" x="316.0" y="308.0" text-anchor="middle">example.grocery/name</text>
+<text class="attribute" x="316.0" y="308.0" text-anchor="middle">demo.grocery/name</text>
 <rect class="entity" x="408" y="294" width="176" height="20"/>
 <text class="entity" x="496.0" y="308.0" text-anchor="middle">item:2</text>
 <rect class="shade" x="8" y="320" width="36" height="20"/>
@@ -427,7 +409,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="value" x="48" y="320" width="176" height="20"/>
 <text class="value" x="136.0" y="334.0" text-anchor="middle">&quot;Oat milk&quot;</text>
 <rect class="attribute" x="228" y="320" width="176" height="20"/>
-<text class="attribute" x="316.0" y="334.0" text-anchor="middle">example.grocery/name</text>
+<text class="attribute" x="316.0" y="334.0" text-anchor="middle">demo.grocery/name</text>
 <rect class="entity" x="408" y="320" width="176" height="20"/>
 <text class="entity" x="496.0" y="334.0" text-anchor="middle">item:1</text>
 <rect class="shade" x="8" y="346" width="36" height="20"/>
@@ -435,13 +417,13 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. The
 <rect class="value" x="48" y="346" width="176" height="20"/>
 <text class="value" x="136.0" y="360.0" text-anchor="middle">&quot;breakfast&quot;</text>
 <rect class="attribute" x="228" y="346" width="176" height="20"/>
-<text class="attribute" x="316.0" y="360.0" text-anchor="middle">example.grocery/tag</text>
+<text class="attribute" x="316.0" y="360.0" text-anchor="middle">demo.grocery/tag</text>
 <rect class="entity" x="408" y="346" width="176" height="20"/>
 <text class="entity" x="496.0" y="360.0" text-anchor="middle">item:2</text>
 </svg>
 </figure>
 
-Every fact about `item:2` is one contiguous run in EAV. Every `example.grocery/done` is one run in AEV. In VAE, `false` comes before every string, because Boolean is type `02` and String is type `03`. Among the strings, `"Eggs"` and `"Oat milk"` come before `"breakfast"`, because uppercase letters have smaller byte values than lowercase ones.
+Every fact about `item:2` is one contiguous run in EAV. Every `demo.grocery/done` is one run in AEV. In VAE, `false` comes before every string, because Boolean is type `02` and String is type `03`. Among the strings, `"Eggs"` and `"Oat milk"` come before `"breakfast"`, because uppercase letters have smaller byte values than lowercase ones.
 
 A query is mostly a matter of picking the index whose runs match the question, then reading one run.
 
@@ -464,7 +446,7 @@ A key holding a whole photo would make a terrible key. So a value whose encoded 
 <rect class="entity" x="38" y="34" width="90" height="30"/>
 <text class="entity" x="83" y="54" text-anchor="middle">item:3</text>
 <rect class="attribute" x="130" y="34" width="170" height="30"/>
-<text class="attribute" x="215" y="54" text-anchor="middle">example.grocery/note</text>
+<text class="attribute" x="215" y="54" text-anchor="middle">demo.grocery/note</text>
 <rect class="shade" x="302" y="34" width="26" height="30"/>
 <text x="315" y="54" text-anchor="middle">03</text>
 <rect class="value" x="330" y="34" width="180" height="30"/>
