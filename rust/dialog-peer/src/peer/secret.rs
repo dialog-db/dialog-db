@@ -1144,6 +1144,22 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
     }
 }
 
+impl<S: PeerSpace, M: Mode> Peer<S, M> {
+    /// Whether the peer this handle acts for keeps a copy of the key of
+    /// the space `space`: it created or adopted the space, and has not
+    /// been rotated out of its account since. A key held for the account
+    /// alone is not counted, since only the account's custodian opens
+    /// that. A session answers for the peer it was built from, whose
+    /// copy it cannot open.
+    pub async fn holds_key(&self, space: &Did) -> Result<bool, CredentialError> {
+        let branch = opened(&BranchReference::from(self.state()), self).await?;
+        let copies = secrets::keys_of(&branch, space, &self.holder(), self)
+            .await
+            .map_err(unavailable)?;
+        Ok(!copies.is_empty())
+    }
+}
+
 /// Open the key of a space. Created by [`Peer::space_key`].
 pub struct SpaceKey {
     space: Did,
