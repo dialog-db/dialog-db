@@ -59,7 +59,7 @@ pub async fn flaky_session_with_peer() -> (Peer<FlakySpace, Session>, Peer<Flaky
     .expect("flaky_session_with_peer: failed to open peer");
     let session = peer
         .session(b"test")
-        .mount(peer.state())
+        .space(peer.state())
         .allow(Subject::any())
         .await
         .expect("flaky_session_with_peer: failed to build session");
