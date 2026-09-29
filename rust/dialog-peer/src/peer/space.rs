@@ -280,14 +280,10 @@ where
 
 impl<S: Clone, M: Mode> Peer<S, M> {
     /// The peer this handle acts for, whose records of spaces it reads:
-    /// itself when it holds its key, and the peer whose home it shares
-    /// when it is a session.
+    /// itself when it holds its key, and the peer it was built from when
+    /// it is a session (see [`Inner::holder`](super::Inner)).
     pub(crate) fn holder(&self) -> Did {
-        if M::HOLDS_KEYS {
-            self.did()
-        } else {
-            self.home().clone()
-        }
+        self.inner.holder.clone()
     }
 
     /// `seed`, sealed to `account`.
@@ -823,6 +819,43 @@ mod tests {
             anyhow::bail!("not extractable");
         };
         Ok(seed.as_slice().try_into()?)
+    }
+
+    /// A session finds a space by the name its peer recorded it under,
+    /// whichever repository the peer's key names: the record is the
+    /// peer's, not the home's, and a session of the peer reads the
+    /// peer's.
+    #[dialog_common::test]
+    async fn it_resolves_a_sessions_names_through_its_peer() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let alice = peer_at(&storage, &credential, "/shared").await?;
+        let bob = OpenCredential::open(unique_name("bob"))
+            .perform(&test_credential_store())
+            .await?;
+        let bob = Peer::new(bob)
+            .space(BranchReference::from(alice.state()))
+            .with(storage.clone())
+            .grant(test_grant().await)
+            .await?;
+        assert_ne!(bob.did(), *bob.home(), "bob's key names alice's home");
+        let name = unique_name("notes");
+        let created = bob.space(name.clone()).create().perform(&bob).await?;
+
+        let session = bob
+            .session(b"worker")
+            .space(bob.state())
+            .allow(Subject::any())
+            .await?;
+        let loaded = session.space(name.clone()).load().perform(&session).await?;
+        assert_eq!(loaded.did(), created.did());
+        assert!(
+            alice.space(name).load().perform(&alice).await.is_err(),
+            "alice knows no space by bob's name"
+        );
+        Ok(())
     }
 
     /// The peer that creates a space keeps its own copy of the space's
