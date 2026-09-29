@@ -599,16 +599,12 @@ mod tests {
     }
 
     /// A key the way every space stored its own before keys were sealed:
-    /// imported from its seed, which in the browser stores it
-    /// extractable, as a generated key is not.
+    /// whole, and in the browser extractable, which neither a generated
+    /// nor an imported sealed key is there. The extractable key is used as
+    /// it is, under the sealed marker a stored key carries.
     async fn legacy_key() -> anyhow::Result<Ed25519Signer> {
         let generated = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await?;
-        // Other exports are features; without them this always holds.
-        #[allow(irrefutable_let_patterns)]
-        let KeyExport::Extractable(seed) = generated.export().await? else {
-            anyhow::bail!("an extractable key exports its seed");
-        };
-        Ok(Ed25519Signer::import(KeyExport::Extractable(seed)).await?)
+        Ok(Ed25519Signer::from(generated.signing_key().clone()))
     }
 
     /// A space from before keys were sealed still holds its signing key.
