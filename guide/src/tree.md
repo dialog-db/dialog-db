@@ -348,6 +348,50 @@ When the canonical form matters, a commit can ask for it, and Dialog pushes ever
 
 </div>
 
+## Why buffer by default
+
+Giving up the canonical form sounds like a steep price, since it is what lets two replicas holding the same facts recognize each other at the root. But that is rarely how replicas meet. It is unlikely that two peers start from nothing, insert the same facts in different orders, and then sync. The usual case is the grocery list: Alice and Bob start from the same tree, each adds a few facts of their own, and then they reconcile.
+
+In that case what matters is how many blocks differ between their trees, because every differing block has to be exchanged. With canonical edits, each new fact rewrites the spine from its leaf to the root, and facts that land in different parts of the tree rewrite different spines. With buffering, the new facts sit in the root, and everything below it is still the base both replicas started from. Here Bob adds two facts that belong in different leaves:
+
+<figure class="dg">
+<svg class="dg" viewBox="0 0 670 220" width="670" height="220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two new facts in different leaves: canonical edits make five new blocks, buffered edits make one">
+<text class="title" x="160" y="18" text-anchor="middle">canonical</text>
+<line x1="160.0" y1="60" x2="80.0" y2="96"/>
+<line x1="80.0" y1="120" x2="47.0" y2="156"/>
+<line x1="80.0" y1="120" x2="122.0" y2="156"/>
+<line x1="160.0" y1="60" x2="240.0" y2="96"/>
+<line x1="240.0" y1="120" x2="197.0" y2="156"/>
+<line x1="240.0" y1="120" x2="272.0" y2="156"/>
+<rect class="critical" x="130" y="34" width="60" height="26"/>
+<rect class="critical" x="50" y="96" width="60" height="24"/>
+<rect class="critical" x="210" y="96" width="60" height="24"/>
+<rect class="shade" x="15" y="156" width="64" height="22"/>
+<rect class="critical" x="90" y="156" width="64" height="22"/>
+<rect class="critical" x="165" y="156" width="64" height="22"/>
+<rect class="shade" x="240" y="156" width="64" height="22"/>
+<text class="label small muted" x="160" y="206" text-anchor="middle">5 new blocks: two spines</text>
+<text class="title" x="500" y="18" text-anchor="middle">buffered</text>
+<line x1="500.0" y1="60" x2="420.0" y2="96"/>
+<line x1="420.0" y1="120" x2="387.0" y2="156"/>
+<line x1="420.0" y1="120" x2="462.0" y2="156"/>
+<line x1="500.0" y1="60" x2="580.0" y2="96"/>
+<line x1="580.0" y1="120" x2="537.0" y2="156"/>
+<line x1="580.0" y1="120" x2="612.0" y2="156"/>
+<rect class="critical" x="470" y="34" width="60" height="26"/>
+<rect class="shade" x="390" y="96" width="60" height="24"/>
+<rect class="shade" x="550" y="96" width="60" height="24"/>
+<rect class="shade" x="355" y="156" width="64" height="22"/>
+<rect class="shade" x="430" y="156" width="64" height="22"/>
+<rect class="shade" x="505" y="156" width="64" height="22"/>
+<rect class="shade" x="580" y="156" width="64" height="22"/>
+<text class="small critical" x="500.0" y="51" text-anchor="middle">+2</text>
+<text class="label small muted" x="500" y="206" text-anchor="middle">1 new block: the root</text>
+</svg>
+</figure>
+
+So replicas that have diverged a little sync by exchanging a root or two, rather than a path of nodes for every change. The rare case where replicas diverge a lot, such as importing a large dataset, is where the canonical form earns its keep: a bulk import pushes every buffer down once when it finishes, and an app can ask for the canonical form on any commit that needs it.
+
 <div class="aside">
 
 **Implementations.** The tree is [`dialog-search-tree`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-search-tree). The coins and separators are in [`src/distribution.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/distribution.rs) (`weight_paced_cut`, `weight_paced_seam_rank`, `shortest_separator`). Canonical edits are `TransientTree` in [`src/tree/transient.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/tree/transient.rs). Buffered writes are `HitchhikerTree` in [`src/hitchhiker.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/hitchhiker.rs). Comparing two trees is `TreeDifference` in [`src/differential.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/differential.rs).
