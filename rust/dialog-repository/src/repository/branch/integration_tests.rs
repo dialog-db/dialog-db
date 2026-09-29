@@ -1758,7 +1758,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
         .secrets()
         .site(s3_site_address(&b_address))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator)
+        .perform(&profile)
         .await?;
     let bridge_repo = profile
         .space(unique_name("bridge"))
@@ -2223,7 +2223,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
         .secrets()
         .site(s3_site_address(&b_address))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator)
+        .perform(&profile)
         .await?;
     let bridge_repo = profile
         .space(unique_name("abort-bridge"))
@@ -2331,7 +2331,7 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
         .secrets()
         .site(s3_site_address(&b_address))
         .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&operator)
+        .perform(&profile)
         .await?;
     let device_repo = profile
         .space(unique_name("launder-device"))
