@@ -340,9 +340,13 @@ As [Changing the tree](#changing-the-tree) showed, changing one fact rewrites ev
 
 Reads look at the buffers on the way down and merge what they find with what the leaves hold, so a buffered write is visible immediately. When the buffers on one node hold more than 256 operations, or more than 64 KiB of weight, the heaviest of them are pushed one level down until the node is back under half that limit. Over time, every operation reaches the leaves. Both limits come from the tree's format: 256 is 2<sup>8</sup>, the format's fanout setting, and 64 KiB is its node size target. A commit then rewrites the root, plus whatever nodes a flush reaches, instead of a whole spine for every change.
 
-A buffered tree gives up one thing: it is no longer the canonical tree for its keys. Two replicas with the same facts can hold them in different buffers and so have different roots. Nothing breaks when that happens. A node's hash still covers its buffers, so a root still names its content exactly, and the comparison described above still works. It just cannot stop early at the root, and does a little work to find that nothing differs.
+<div class="aside caveat">
+
+**A buffered tree is not canonical.** Two replicas with the same facts can hold them in different buffers and so have different roots. Nothing breaks when that happens. A node's hash still covers its buffers, so a root still names its content exactly, and the comparison described above still works. It just cannot stop early at the root, and does a little work to find that nothing differs.
 
 When the canonical form matters, a commit can ask for it, and Dialog pushes every buffer down before sealing the tree. Bulk imports do this once at the end. Ordinary commits and sync do not.
+
+</div>
 
 <div class="aside">
 
