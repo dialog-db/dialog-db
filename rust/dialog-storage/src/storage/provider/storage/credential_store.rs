@@ -241,7 +241,15 @@ where
         &self,
         input: Capability<credential::Retract<Credential>>,
     ) -> Result<(), credential::CredentialError> {
-        input.perform(&self.router).await
+        let subject = input.subject().clone();
+        let own = credential::Key::of(&input).address == credential::SELF;
+        input.perform(&self.router).await?;
+        // A space whose own key is gone names nothing: its location is
+        // free for the next key created under the same name.
+        if own {
+            self.loader.unmount(&subject);
+        }
+        Ok(())
     }
 }
 

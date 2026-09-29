@@ -58,6 +58,13 @@ impl<S> Loader<S> {
     fn lookup(&self, key: &String) -> Option<Did> {
         self.mounts.get(key)
     }
+
+    /// Forget the space mounted as `did`, and every location it was
+    /// mounted at, so its location can be created anew.
+    pub(crate) fn unmount(&self, did: &Did) {
+        self.spaces.remove(did);
+        self.mounts.retain(|_, mounted| mounted != did);
+    }
 }
 
 fn location_key(location: &Location) -> String {
