@@ -1,4 +1,4 @@
-use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled};
+use dialog_artifacts::tree::fetch_spilled;
 use dialog_artifacts::{
     Artifact, DialogArtifactsError, EntityKey, Exporter, Key, KeyViewConstruct, State,
 };
@@ -8,7 +8,6 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
-use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use futures_util::TryStreamExt;
 
 use crate::{Branch, Index, NetworkedIndex, RemoteSite};
@@ -57,7 +56,7 @@ impl<E: Exporter> Export<'_, E> {
         // Keep the raw backend to fetch spilled value blocks by reference; the
         // bridge below only reads tree nodes.
         let raw_store = store.clone();
-        let tree_store = TreeStorage::new(TreeStorageBridge(store));
+        let tree_store = store;
         let stream = tree.stream_range(range, &tree_store);
         tokio::pin!(stream);
 

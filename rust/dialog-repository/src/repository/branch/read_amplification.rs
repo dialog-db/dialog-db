@@ -22,11 +22,10 @@ use anyhow::Result;
 use futures_util::stream;
 
 use dialog_artifacts::history::{Context, context_of};
-use dialog_artifacts::{Artifact, Instruction, Value};
+use dialog_artifacts::{ArchiveDelta, Artifact, Instruction, Value};
 
 use crate::RepositoryExt as _;
 use crate::helpers::Counting;
-use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 
 fn assert_fact(entity: usize, value: &str) -> Instruction {
@@ -305,7 +304,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
     let root = main.revision().expect("committed").tree;
     let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
     let tree = crate::Index::from_hash(dialog_common::Blake3Hash::from(*root.hash()));
-    let tree_store = dialog_search_tree::ContentAddressedStorage::new(TreeStorageBridge(store));
+    let tree_store = store;
 
     let entries = {
         use futures_util::StreamExt as _;
@@ -357,8 +356,6 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     use dialog_artifacts::tree::{Stamp, WriteScope, write_instructions};
     use dialog_artifacts::{Instruction as I, apply_buffered};
 
-    use dialog_search_tree::Delta;
-
     let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
     let repo = profile
@@ -387,20 +384,20 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
         ($delta:expr) => {
             main.archive()
                 .index()
-                .import($delta.flush().map(|(_, buffer)| buffer))
+                .import($delta.flush_blocks().chain($delta.flush_blobs()))
                 .perform(&env)
                 .await?
         };
     }
 
     // Canonical: reshape per batch, exactly what the commit path does today.
-    let mut store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
+    let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
     let mut canonical = base.clone();
     let started = Instant::now();
     for i in 0..batches {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         canonical
-            .apply_versioned(&mut store, &mut delta, None, stream::iter(batch(i)))
+            .apply_versioned(&store, &mut delta, None, stream::iter(batch(i)))
             .await?;
         persist!(delta);
     }
@@ -410,10 +407,10 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     let mut per_batch = base.clone();
     let started = Instant::now();
     for i in 0..batches {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         apply_buffered(
             &mut per_batch,
-            &mut store,
+            &store,
             &mut delta,
             None,
             stream::iter(batch(i)),
@@ -425,15 +422,15 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     let per_batch_ms = started.elapsed().as_millis();
 
     // Buffered, flushed once at the end: the regime buffering is built for.
-    let storage =
-        dialog_search_tree::ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let mut delta = ArchiveDelta::zero();
+    let staged = dialog_artifacts::DeltaOverlay::new(&delta, &store);
     let mut deferred = dialog_search_tree::HitchhikerTree::open(&base);
     let started = Instant::now();
     for i in 0..batches {
         let (next, _) = write_instructions(
             deferred,
-            &mut store,
-            &storage,
+            &staged,
+            &mut delta,
             Stamp::Unversioned,
             // The bench tree carries the default manifest.
             &dialog_search_tree::Manifest::default(),
@@ -443,8 +440,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
         .await?;
         deferred = next;
     }
-    let mut delta = Delta::zero();
-    let _ = deferred.canonicalize(&storage, &mut delta).await?;
+    let _ = deferred.canonicalize(&staged, delta.blocks()).await?;
     let deferred_ms = started.elapsed().as_millis();
     persist!(delta);
 

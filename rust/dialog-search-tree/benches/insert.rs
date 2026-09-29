@@ -1,7 +1,6 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{ContentAddressedStorage, Delta, PersistentTree};
-use dialog_storage::MemoryStorageBackend;
+use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
 
 const BENCH_SEED: u64 = 42;
 
@@ -16,7 +15,7 @@ fn bench_insert_sequential(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _size| {
             b.to_async(tokio::runtime::Runtime::new().unwrap())
                 .iter(|| async {
-                    let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+                    let storage = MemoryBlocks::new();
                     let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
                     let mut delta = Delta::zero();
 
@@ -30,10 +29,7 @@ fn bench_insert_sequential(c: &mut Criterion) {
                             .unwrap();
                         // Flush after each persist so the next edit can load the nodes this persist created.
                         for (_, buffer) in delta.flush() {
-                            storage
-                                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                                .await
-                                .unwrap();
+                            storage.store(buffer);
                         }
                     }
                 });
@@ -54,7 +50,7 @@ fn bench_insert_random(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, move |b, _size| {
             b.to_async(tokio::runtime::Runtime::new().unwrap())
                 .iter(|| async {
-                    let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+                    let storage = MemoryBlocks::new();
                     let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
                     let mut delta = Delta::zero();
 
@@ -68,10 +64,7 @@ fn bench_insert_random(c: &mut Criterion) {
                             .unwrap();
                         // Flush after each persist so the next edit can load the nodes this persist created.
                         for (_, buffer) in delta.flush() {
-                            storage
-                                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                                .await
-                                .unwrap();
+                            storage.store(buffer);
                         }
                     }
                 });

@@ -329,12 +329,7 @@ impl ProveDelegation<'_> {
         subject: &Did,
     ) -> Result<Option<Candidate>, AuthorizeError>
     where
-        S: dialog_storage::StorageBackend<
-                Key = dialog_storage::Blake3Hash,
-                Value = Vec<u8>,
-                Error = dialog_storage::DialogStorageError,
-            > + Clone
-            + ConditionalSync,
+        S: dialog_artifacts::ArchiveReader + Clone,
     {
         let facts = Select::new(branch, ArtifactSelector::new().of(entity.clone()))
             .execute(store.clone())

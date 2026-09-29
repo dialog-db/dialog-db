@@ -268,10 +268,10 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use dialog_artifacts::ArchiveDelta;
     use dialog_artifacts::tree::ArtifactTree;
     use dialog_artifacts::{DialogArtifactsError, Entity, Instruction, Update as _, Value};
-    use dialog_search_tree::{Cache, Delta};
-    use dialog_storage::MemoryStorageBackend;
+    use dialog_search_tree::{Cache, MemoryBlocks};
 
     fn artifact(of: &str, the: &str, is: &str) -> Artifact {
         Artifact {
@@ -382,22 +382,19 @@ mod tests {
     async fn tree_under(
         manifest: Manifest,
         facts: Vec<Artifact>,
-    ) -> anyhow::Result<(ArtifactTree, MemoryStorageBackend<[u8; 32], Vec<u8>>)> {
+    ) -> anyhow::Result<(ArtifactTree, MemoryBlocks)> {
         use dialog_artifacts::tree::ArtifactTreeExt as _;
-        use dialog_storage::StorageBackend as _;
 
-        let mut store = MemoryStorageBackend::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
         let mut tree = ArtifactTree::empty_with_manifest(manifest, Cache::new());
         tree.apply(
-            &mut store,
+            &store,
             &mut delta,
             stream::iter(facts.into_iter().map(Instruction::Assert)),
         )
         .await?;
-        for (digest, buffer) in delta.flush() {
-            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-        }
+        delta.flush_into(&store);
         Ok((tree, store))
     }
 

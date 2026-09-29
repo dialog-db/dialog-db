@@ -21,8 +21,8 @@ use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
-use dialog_search_tree::{Buffer, Manifest, PersistentNode};
-use dialog_storage::{Blake3Hash, StorageBackend};
+use dialog_search_tree::{Manifest, PersistentNode};
+use dialog_storage::Blake3Hash;
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
 use std::sync::Arc;
@@ -777,13 +777,13 @@ where
             if let Some(node) = cache.get_cached(&hash) {
                 return Ok(Some(node.buffer().as_ref().to_vec()));
             }
-            if let Some(bytes) = StorageBackend::get(&store, hash.as_bytes()).await? {
+            if let Some(bytes) = store.load(&hash).await? {
                 // A block that checks as a node joins the cache; any other
                 // block is returned as it is, for the caller to read.
-                if let Ok(node) = PersistentNode::try_from(Buffer::from(bytes.as_slice())) {
+                if let Ok(node) = PersistentNode::try_from(bytes.clone()) {
                     cache.insert(hash, node);
                 }
-                return Ok(Some(bytes));
+                return Ok(Some(bytes.into_vec()));
             }
         }
         Ok(None)

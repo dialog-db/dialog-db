@@ -1,39 +1,29 @@
 //! Delta-debugging shrinker for the convergence break: reduces an SE
-//! transaction prefix to a minimal subsequence on which two commit
-//! groupings still canonicalize to different roots, then dumps the
-//! surviving instructions so the divergence can be pinned as a
-//! deterministic unit test.
+//! transaction prefix to a minimal subsequence on which one amended chain
+//! canonicalized after every link and the same chain canonicalized only
+//! after its last reach different trees, then dumps the surviving
+//! instructions so the divergence can be pinned as a deterministic unit
+//! test.
 //!
 //! ```sh
 //! DIALOG_SE_CSV=... cargo run --release -p dialog-baseline \
 //!   --example converge_shrink -- 200
 //! ```
 
-use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Instruction};
-use dialog_baseline::se::{SeFact, SeLog, se_instructions};
-use dialog_storage::{Blake3Hash, MemoryStorageBackend};
-use futures_util::stream;
+use dialog_baseline::repo::DialogRepo;
+use dialog_baseline::se::{SeFact, SeLog};
 
-async fn replay(transactions: &[Vec<SeFact>], group: usize) -> anyhow::Result<Blake3Hash> {
-    let backend = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-    let mut store = Artifacts::anonymous(backend).await?;
-    let mut pending: Vec<Instruction> = Vec::new();
-    for (at, commit) in transactions.iter().enumerate() {
-        pending.extend(se_instructions(commit)?);
-        if (at + 1) % group == 0 {
-            store
-                .commit(stream::iter(std::mem::take(&mut pending)))
-                .await?;
-        }
-    }
-    if !pending.is_empty() {
-        store.commit(stream::iter(pending)).await?;
-    }
-    Ok(store.canonicalize().await?)
-}
-
+/// Whether canonicalizing after every link and only after the last reach
+/// different trees over `transactions`. Both chains stage on the same
+/// head, so they mint the same version.
 async fn diverges(transactions: &[Vec<SeFact>]) -> anyhow::Result<bool> {
-    Ok(replay(transactions, 1).await? != replay(transactions, 5).await?)
+    let log = SeLog {
+        transactions: transactions.to_vec(),
+    };
+    let repo = DialogRepo::volatile().await?;
+    let every = repo.stage_se(&log, 1).await?;
+    let last = repo.stage_se(&log, usize::MAX).await?;
+    Ok(every.revision().tree != last.revision().tree)
 }
 
 fn main() -> anyhow::Result<()> {

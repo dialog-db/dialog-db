@@ -35,10 +35,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::Blake3Hash;
 use dialog_common::helpers::BenchData;
 use dialog_search_tree::helpers::{Traversable as _, TraversalOrder};
-use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, Distribution, PersistentNode, PersistentTree, Rank,
-};
-use dialog_storage::MemoryStorageBackend;
+use dialog_search_tree::{Delta, Distribution, MemoryBlocks, PersistentNode, PersistentTree, Rank};
 use futures_util::StreamExt;
 
 const BENCH_SEED: u64 = 42;
@@ -116,8 +113,7 @@ impl<const M: u64> Distribution for Threshold<M> {
     }
 }
 
-type Backend = MemoryStorageBackend<Blake3Hash, Vec<u8>>;
-type Storage = ContentAddressedStorage<Backend>;
+type Storage = MemoryBlocks;
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Runtime::new().unwrap()
@@ -134,7 +130,7 @@ where
     let keys = data.random_buffers::<16>(size);
     let values = data.random_buffers::<32>(size);
 
-    let mut storage = ContentAddressedStorage::new(Backend::default());
+    let storage = MemoryBlocks::new();
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     let mut delta = Delta::zero();
 
@@ -148,10 +144,7 @@ where
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await
-                .unwrap();
+            storage.store(buffer);
         }
     }
 
@@ -164,7 +157,7 @@ async fn insert_all<D>(keys: &[[u8; 16]], values: &[Vec<u8>])
 where
     D: Distribution,
 {
-    let mut storage = ContentAddressedStorage::new(Backend::default());
+    let storage = MemoryBlocks::new();
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     let mut delta = Delta::zero();
     for (key, value) in keys.iter().zip(values.iter()) {
@@ -177,10 +170,7 @@ where
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await
-                .unwrap();
+            storage.store(buffer);
         }
     }
 }
@@ -347,9 +337,8 @@ where
             let mut node_count = 0usize;
 
             for hash in &frontier {
-                let bytes = storage.retrieve(hash).await.unwrap().unwrap();
-                let node =
-                    PersistentNode::<[u8; 16], Vec<u8>>::try_from(Buffer::from(bytes)).unwrap();
+                let bytes = storage.get(hash).unwrap();
+                let node = PersistentNode::<[u8; 16], Vec<u8>>::try_from(bytes).unwrap();
                 node_count += 1;
                 match node.as_index() {
                     Ok(index) => {

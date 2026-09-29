@@ -1223,10 +1223,16 @@ name = "dialog-diagnose"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base58",
  "clap",
  "dialog-artifacts",
+ "dialog-capability",
  "dialog-common",
+ "dialog-csv",
+ "dialog-effects",
+ "dialog-peer",
+ "dialog-repository",
  "dialog-search-tree",
  "dialog-storage",
  "futures-util",

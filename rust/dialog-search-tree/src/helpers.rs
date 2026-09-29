@@ -39,7 +39,6 @@ use std::{
 use async_stream::try_stream;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_storage::{DialogStorageError, JournaledStorage, MemoryStorageBackend, StorageBackend};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use parking_lot::Mutex;
@@ -53,9 +52,12 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
+mod blocks;
+pub use blocks::*;
+
 use crate::{
-    ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution, Key, Load, Manifest,
-    NodeBody, PersistentNode, PersistentTree, Rank, Value, load,
+    Delta, DialogSearchTreeError, Distribution, Key, Load, Manifest, MemoryBlocks, NodeBody,
+    PersistentNode, PersistentTree, Rank, Value, load,
 };
 
 /// Traversal order for tree iteration.
@@ -264,18 +266,15 @@ pub const SPEC_KEY_LENGTH: usize = 8;
 /// separator is a whole spec key and both bytes are always present in it.
 pub type SpecKey = [u8; SPEC_KEY_LENGTH];
 
-/// Type alias for the journaled storage backend used in tree specs.
-pub type JournaledBackend = JournaledStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
-
 /// Type alias for the storage type used in tree specs.
-pub type TestStorage = ContentAddressedStorage<JournaledBackend>;
+pub type TestStorage = JournaledBlocks;
 
 /// Type alias for the tree type used in tree specs.
 pub type TestTree = PersistentTree<SpecKey, Vec<u8>, DistributionSimulator>;
 
 /// Creates an empty journaled [`TestStorage`].
 pub fn test_storage() -> TestStorage {
-    ContentAddressedStorage::new(JournaledStorage::new(MemoryStorageBackend::default()))
+    JournaledBlocks::new()
 }
 
 /// Yields to the executor exactly once, giving work polled alongside the
@@ -295,7 +294,7 @@ pub async fn yield_once() {
     .await
 }
 
-/// A storage backend that records the reads that reach it, in order, and how
+/// [`MemoryBlocks`] that record the loads that reach them, in order, and how
 /// many of them were in flight at once.
 ///
 /// Every read yields once before it is answered, so reads issued by work that
@@ -304,8 +303,8 @@ pub async fn yield_once() {
 /// ordered log in [`read_log`](Self::read_log) says which nodes a read path
 /// touched, in the order it touched them, and how often.
 #[derive(Clone, Default)]
-pub struct ObservingBackend {
-    backend: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+pub struct ObservingBlocks {
+    blocks: MemoryBlocks,
     reads: Arc<Mutex<Reads>>,
     /// Reads admitted at once; `0` is unlimited. See
     /// [`with_capacity`](Self::with_capacity).
@@ -333,7 +332,7 @@ struct Reads {
     events: Vec<(Blake3Hash, ReadEvent)>,
 }
 
-impl ObservingBackend {
+impl ObservingBlocks {
     /// An unlimited backend that records every read.
     pub fn new() -> Self {
         Self::default()
@@ -352,7 +351,7 @@ impl ObservingBackend {
     /// tell the two apart.)
     pub fn with_capacity(slots: usize) -> Self {
         Self {
-            backend: Default::default(),
+            blocks: Default::default(),
             reads: Default::default(),
             capacity: slots,
         }
@@ -464,12 +463,10 @@ impl ObservingBackend {
         while !level.is_empty() {
             let mut next = Vec::new();
             for hash in &level {
-                let Some(bytes) = self.backend.get(hash).await? else {
+                let Some(block) = self.blocks.get(hash) else {
                     anyhow::bail!("node {hash} is not stored");
                 };
-                let node = crate::PersistentNode::<Key, Value>::try_from(
-                    dialog_common::Buffer::from(bytes),
-                )?;
+                let node = crate::PersistentNode::<Key, Value>::try_from(block)?;
                 if let crate::NodeBody::Index(index) = node.body() {
                     for link in index.links()? {
                         next.push(link.node);
@@ -483,28 +480,40 @@ impl ObservingBackend {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl StorageBackend for ObservingBackend {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.backend.set(key, value).await
+impl ObservingBlocks {
+    /// Keeps `block` under its content hash, without observing it.
+    pub fn store(&self, block: dialog_common::Buffer) {
+        self.blocks.store(block);
     }
 
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+    /// Keeps every block `delta` holds, emptying it, without observing it.
+    pub fn flush(&self, delta: &mut Delta<Blake3Hash, dialog_common::Buffer>) {
+        self.blocks.flush(delta);
+    }
+
+    /// The block stored under `hash`, if any, without observing the read.
+    pub fn get(&self, hash: &Blake3Hash) -> Option<dialog_common::Buffer> {
+        self.blocks.get(hash)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<Load> for ObservingBlocks {
+    async fn execute(
+        &self,
+        hash: Blake3Hash,
+    ) -> Result<Option<dialog_common::Buffer>, DialogSearchTreeError> {
         self.reads
             .lock()
             .events
-            .push((key.clone(), ReadEvent::Requested));
+            .push((hash.clone(), ReadEvent::Requested));
         // Wait for a slot under a cap, then take it.
         loop {
             {
                 let mut reads = self.reads.lock();
                 if self.capacity == 0 || reads.in_flight < self.capacity {
-                    reads.log.push(key.clone());
+                    reads.log.push(hash.clone());
                     reads.in_flight += 1;
                     reads.peak_in_flight = reads.peak_in_flight.max(reads.in_flight);
                     break;
@@ -514,15 +523,15 @@ impl StorageBackend for ObservingBackend {
         }
 
         yield_once().await;
-        let value = self.backend.get(key).await;
+        let block = self.blocks.get(&hash);
 
         {
             let mut reads = self.reads.lock();
             reads.in_flight -= 1;
-            reads.events.push((key.clone(), ReadEvent::Completed));
+            reads.events.push((hash, ReadEvent::Completed));
         }
 
-        value
+        Ok(block)
     }
 }
 
@@ -768,7 +777,7 @@ impl TreeDescriptor {
     /// for asserting read patterns during differential operations.
     pub async fn build(
         self,
-        mut storage: TestStorage,
+        storage: TestStorage,
     ) -> Result<TreeSpec, Box<dyn std::error::Error + Send + Sync>> {
         // Validate the tree structure first
         self.validate()?;
@@ -784,7 +793,7 @@ impl TreeDescriptor {
 
         // Disable journaling during tree building to avoid polluting with
         // build reads
-        storage.backend().disable_journal();
+        storage.disable_journal();
 
         // First, collect metadata to build the tree
         let mut all_segments = Vec::new();
@@ -870,11 +879,7 @@ impl TreeDescriptor {
             // Flush after each persist so the next edit (and the differentials
             // that read afterwards) can load the nodes this persist created: a
             // persist writes new nodes only into the delta, never into storage.
-            for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
-            }
+            storage.flush(&mut delta);
         }
 
         let root = tree.root().clone();
@@ -892,7 +897,7 @@ impl TreeDescriptor {
         // differentials (the build tree's node cache is dropped with it), and
         // re-enable journaling to track root and differential reads.
         let tree = TestTree::from_hash(root);
-        storage.backend().enable_journal();
+        storage.enable_journal();
 
         Ok(TreeSpec {
             spec,
@@ -1052,7 +1057,7 @@ impl TreeSpec {
     /// polluting read tracking.
     #[allow(dead_code)]
     pub async fn visualize(&self) -> String {
-        self.storage.backend().disable_journal();
+        self.storage.disable_journal();
 
         let mut output = String::new();
 
@@ -1062,7 +1067,7 @@ impl TreeSpec {
             output.push_str("(empty tree)\n");
         }
 
-        self.storage.backend().enable_journal();
+        self.storage.enable_journal();
 
         output
     }
@@ -1137,7 +1142,7 @@ impl TreeSpec {
     /// Panics with a detailed diff if the pattern doesn't match.
     #[track_caller]
     pub fn assert(&self) {
-        let reads = self.storage.backend().get_reads();
+        let reads = self.storage.get_reads();
 
         // Build a set of hashes that were read
         let reads_set: HashSet<Blake3Hash> = reads.iter().cloned().collect();

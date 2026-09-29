@@ -1,18 +1,16 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::{ArtifactTreeExt as _, TreeStorageBridge};
+use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, DialogArtifactsError,
+    ArchiveReader, Artifact, ArtifactSelector, ArtifactStream, ArtifactView, DialogArtifactsError,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
-use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, DialogSearchTreeError, Manifest, PersistentNode,
-};
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_search_tree::{DialogSearchTreeError, Manifest, PersistentNode};
+use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
@@ -76,7 +74,7 @@ where
     };
     let remote = source.fallback();
     let store = NetworkedIndex::new(env, ArchiveScope::new(source.subject()).index(), remote);
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let storage = store;
     Ok(tree.manifest(&storage).await?)
 }
 
@@ -133,8 +131,7 @@ impl Select<'_> {
     /// The tree this select scans, with its root block probed eagerly.
     async fn probed_tree<S>(&self, store: &S) -> Result<Index, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: ArchiveReader + ConditionalSync,
     {
         // Tree hydration is lazy (nodes load on demand during the scan),
         // but unreachable branches should fail here rather than midway
@@ -155,10 +152,9 @@ impl Select<'_> {
             Some(tree_hash) => {
                 node_cache
                     .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
-                        store
-                            .get(hash.as_bytes())
+                        dialog_search_tree::load(store, hash)
                             .await?
-                            .map(|bytes| PersistentNode::try_from(Buffer::from(bytes)))
+                            .map(PersistentNode::try_from)
                             .transpose()
                     })
                     .await?
@@ -189,10 +185,7 @@ impl Select<'_> {
         DialogSearchTreeError,
     >
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + Clone + ConditionalSync + 's,
     {
         let tree = self.probed_tree(&store).await?;
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
@@ -211,10 +204,7 @@ impl Select<'_> {
         store: S,
     ) -> Result<ArtifactStream<'s>, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + Clone + ConditionalSync + 's,
     {
         let tree = self.probed_tree(&store).await?;
         Ok(Box::pin(tree.scan(
@@ -253,9 +243,7 @@ impl Select<'_> {
     /// needs. Returns `None` for an empty tree.
     pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone + ConditionalSync,
     {
         let Some(tree_hash) = self.tree_hash() else {
             return Ok(None);
@@ -276,10 +264,7 @@ impl Select<'_> {
         DialogSearchTreeError,
     >
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + Clone + ConditionalSync + 's,
     {
         let tree = self.probed_tree(&store).await?;
         Ok(tree.scan_owned(store, self.source.spill_cache(), self.selector))
@@ -335,10 +320,7 @@ impl SelectOwned<'_> {
         DialogSearchTreeError,
     >
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + Clone + ConditionalSync + 's,
     {
         self.0.execute_owned(store).await
     }

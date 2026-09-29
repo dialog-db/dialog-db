@@ -120,8 +120,7 @@ mod tests {
     use futures_util::future::join_all;
 
     use crate::{
-        Accessor, Buffer, Cache, ContentAddressedStorage, Delta, PersistentNode, PersistentTree,
-        helpers::ObservingBackend,
+        Accessor, Buffer, Cache, Delta, PersistentNode, PersistentTree, helpers::ObservingBlocks,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -132,8 +131,8 @@ mod tests {
     /// served from the cache.
     #[dialog_common::test]
     async fn it_reads_a_node_once_it_has_landed_from_the_cache() -> Result<()> {
-        let backend = ObservingBackend::new();
-        let mut storage = ContentAddressedStorage::new(backend.clone());
+        let backend = ObservingBlocks::new();
+        let storage = backend.clone();
 
         // A node can only be built from bytes that survive validation, so
         // the stored bytes must be a genuinely persisted node.
@@ -144,9 +143,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         let hash = tree.root().clone();
 
@@ -174,11 +171,11 @@ mod tests {
     /// them goes back to storage and fails again, and none is served a node.
     #[dialog_common::test]
     async fn it_does_not_cache_bytes_that_fail_the_check() -> Result<()> {
-        let backend = ObservingBackend::new();
-        let mut storage = ContentAddressedStorage::new(backend.clone());
+        let backend = ObservingBlocks::new();
+        let storage = backend.clone();
         let garbage = Buffer::from(vec![0xFF; 7]);
         let hash = garbage.blake3_hash().clone();
-        storage.store(garbage.as_ref().to_vec(), &hash).await?;
+        storage.store(garbage);
 
         let accessor = Accessor::<[u8; 4], Vec<u8>, _>::new(Cache::new(), &storage);
         backend.reset();

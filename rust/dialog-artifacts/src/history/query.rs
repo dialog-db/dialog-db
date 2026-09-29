@@ -1,16 +1,15 @@
+use crate::ArchiveReader;
 use std::ops::Bound;
 use std::str::FromStr;
 
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
-use dialog_search_tree::ContentAddressedStorage as NodeStorage;
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_common::Blake3Hash as NodeHash;
+use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use crate::Value;
 use crate::tree::ArtifactTreeExt as _;
 use crate::tree::{
-    ArtifactNodeCache, ArtifactTree, SPILL_LOOKAHEAD, SpillCache, TreeStorageBridge,
-    fetch_spilled_cached, spill_cache,
+    ArtifactNodeCache, ArtifactTree, SPILL_LOOKAHEAD, SpillCache, fetch_spilled_cached, spill_cache,
 };
 use crate::{
     Attribute, DialogArtifactsError, Entity, Key, State, history_claim_range, history_key_version,
@@ -56,12 +55,11 @@ impl From<&Version> for HistorySelector {
 /// merging trees unions their histories.
 pub struct TreeHistory<S>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    S: ArchiveReader + Clone,
 {
     tree: ArtifactTree,
     store: S,
-    storage: NodeStorage<TreeStorageBridge<S>>,
+    storage: S,
     /// Memoized verified records, keyed by version. A version's record
     /// is immutable (two records claiming one version is protocol
     /// corruption), so entries never invalidate; a hit skips the tree
@@ -76,8 +74,7 @@ where
 
 impl<S> TreeHistory<S>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    S: ArchiveReader + Clone,
 {
     /// Read history from the given artifact tree
     pub fn new(tree: ArtifactTree, store: S) -> Self
@@ -88,7 +85,7 @@ where
             records: dialog_search_tree::Cache::new(),
             tree,
             store: store.clone(),
-            storage: NodeStorage::new(TreeStorageBridge(store)),
+            storage: store,
             spill: spill_cache(),
         }
     }
@@ -213,9 +210,7 @@ where
 
 impl<S> History for TreeHistory<S>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + ConditionalSync,
+    S: ArchiveReader + Clone,
 {
     async fn claims_at(
         &self,

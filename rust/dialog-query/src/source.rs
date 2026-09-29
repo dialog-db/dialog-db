@@ -25,8 +25,8 @@ pub(crate) mod test {
     use dialog_capability::Provider;
     use dialog_peer::Peer as DialogOperator;
     use dialog_repository::{Branch, NetworkedIndex};
+    use dialog_storage::Blake3Hash;
     use dialog_storage::provider::storage::VolatileSpace;
-    use dialog_storage::{Blake3Hash, StorageBackend};
 
     type Operator = DialogOperator<VolatileSpace, dialog_peer::Session>;
 
@@ -107,7 +107,10 @@ pub(crate) mod test {
             input: Blake3Hash,
         ) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
             let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
-            Ok(StorageBackend::get(&store, &input).await?)
+            Ok(store
+                .load(&input.into())
+                .await?
+                .map(dialog_common::Buffer::into_vec))
         }
     }
 }

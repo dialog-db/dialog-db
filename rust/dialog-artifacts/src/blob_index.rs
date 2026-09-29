@@ -12,17 +12,18 @@
 //! [`BlobRecord`]'s conversions so callers deal in `{version, size}`, not raw
 //! `Datum` fields, and a leading version byte lets the record grow.
 
+use crate::{ArchiveDelta, ArchiveReader};
 use async_stream::try_stream;
 use async_trait::async_trait;
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Buffer, ContentAddressedStorage, Delta, TreeDifference};
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_common::ConditionalSend;
+use dialog_search_tree::TreeDifference;
+use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use crate::{
     BlobKey, Datum, DialogArtifactsError, State,
     spill::{ShipmentRef, shipment_refs},
-    tree::{ArtifactTree, TreeStorageBridge},
+    tree::ArtifactTree,
 };
 
 /// Current [`BlobRecord`] encoding version.
@@ -146,12 +147,9 @@ pub fn blob_changes<'s, S>(
     store: S,
 ) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + 's + ConditionalSend
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + ConditionalSync
-        + 's,
+    S: ArchiveReader + Clone + 's,
 {
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let storage = store;
     try_stream! {
         let difference = TreeDifference::compute(&checkpoint, &current, &storage, &storage).await?;
         let refs = shipment_refs(&difference);
@@ -180,15 +178,13 @@ pub trait BlobIndexExt {
     /// `(hash, record)` is a no-op write).
     async fn put_blob<S>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         hash: &Blake3Hash,
         record: BlobRecord,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
+        S: ArchiveReader + Clone;
 
     /// Retract a blob reference from the index.
     ///
@@ -202,14 +198,12 @@ pub trait BlobIndexExt {
     /// A later [`put_blob`](BlobIndexExt::put_blob) re-references the blob.
     async fn retract_blob<S>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         hash: &Blake3Hash,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
+        S: ArchiveReader + Clone;
 
     /// Look up a blob's record, or `None` if it is not in the index.
     async fn get_blob<S>(
@@ -218,16 +212,12 @@ pub trait BlobIndexExt {
         hash: &Blake3Hash,
     ) -> Result<Option<BlobRecord>, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
+        S: ArchiveReader + Clone;
 
     /// Whether the index references a blob.
     async fn has_blob<S>(&self, store: &S, hash: &Blake3Hash) -> Result<bool, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
         Ok(self.get_blob(store, hash).await?.is_some())
     }
@@ -242,10 +232,7 @@ pub trait BlobIndexExt {
     ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's;
+        S: ArchiveReader + Clone + 's;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -253,41 +240,37 @@ pub trait BlobIndexExt {
 impl BlobIndexExt for ArtifactTree {
     async fn put_blob<S>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         hash: &Blake3Hash,
         record: BlobRecord,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        let storage = store.clone();
         let key = BlobKey::new(hash).into_key();
         let transient = self
             .edit()
             .insert(key, record.into_state(), &storage)
             .await?;
-        *self = transient.persist(delta)?;
+        *self = transient.persist(delta.blocks())?;
         Ok(())
     }
 
     async fn retract_blob<S>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         hash: &Blake3Hash,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        let storage = store.clone();
         let key = BlobKey::new(hash).into_key();
         let transient = self.edit().insert(key, State::Removed, &storage).await?;
-        *self = transient.persist(delta)?;
+        *self = transient.persist(delta.blocks())?;
         Ok(())
     }
 
@@ -297,11 +280,9 @@ impl BlobIndexExt for ArtifactTree {
         hash: &Blake3Hash,
     ) -> Result<Option<BlobRecord>, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        let storage = store.clone();
         let key = BlobKey::new(hash).into_key();
         match self.get(&key, &storage).await? {
             Some(state) => BlobRecord::from_state(&state),
@@ -315,13 +296,10 @@ impl BlobIndexExt for ArtifactTree {
     ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + Clone + 's,
     {
         let tree: ArtifactTree = self;
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        let storage = store;
         try_stream! {
             let range = BlobKey::min().into_key()..=BlobKey::max().into_key();
             let stream = tree.stream_range(range, &storage);
@@ -343,7 +321,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_storage::MemoryStorageBackend;
+    use crate::ArchiveDelta;
+    use dialog_search_tree::MemoryBlocks;
+
     use futures_util::TryStreamExt;
 
     fn hash(seed: u8) -> Blake3Hash {
@@ -352,17 +332,13 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_round_trips_a_blob_record() -> Result<(), DialogArtifactsError> {
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
         let mut tree = ArtifactTree::empty();
 
-        tree.put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(4096))
+        tree.put_blob(&store, &mut delta, &hash(1), BlobRecord::new(4096))
             .await?;
-        for (_, buffer) in delta.flush() {
-            store
-                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-        }
+        delta.flush_into(&store);
 
         assert_eq!(
             tree.get_blob(&store, &hash(1)).await?,
@@ -376,23 +352,19 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_lists_blobs_in_hash_order() -> Result<(), DialogArtifactsError> {
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
         let mut tree = ArtifactTree::empty();
 
         for seed in [3u8, 1, 2] {
             tree.put_blob(
-                &mut store,
+                &store,
                 &mut delta,
                 &hash(seed),
                 BlobRecord::new(seed as u64),
             )
             .await?;
-            for (_, buffer) in delta.flush() {
-                store
-                    .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                    .await?;
-            }
+            delta.flush_into(&store);
         }
 
         let listed: Vec<_> = tree.list_blobs(store).try_collect().await?;
@@ -409,31 +381,23 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_a_blob_reference() -> Result<(), DialogArtifactsError> {
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
         let mut tree = ArtifactTree::empty();
 
         for seed in [1u8, 2] {
             tree.put_blob(
-                &mut store,
+                &store,
                 &mut delta,
                 &hash(seed),
                 BlobRecord::new(seed as u64),
             )
             .await?;
-            for (_, buffer) in delta.flush() {
-                store
-                    .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                    .await?;
-            }
+            delta.flush_into(&store);
         }
 
-        tree.retract_blob(&mut store, &mut delta, &hash(1)).await?;
-        for (_, buffer) in delta.flush() {
-            store
-                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-        }
+        tree.retract_blob(&store, &mut delta, &hash(1)).await?;
+        delta.flush_into(&store);
 
         assert_eq!(tree.get_blob(&store, &hash(1)).await?, None);
         assert!(!tree.has_blob(&store, &hash(1)).await?);
@@ -450,32 +414,18 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_re_references_a_blob_after_retraction() -> Result<(), DialogArtifactsError> {
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
         let mut tree = ArtifactTree::empty();
 
-        let flush = |store: &mut MemoryStorageBackend<Blake3Hash, Vec<u8>>,
-                     delta: &mut Delta<NodeHash, Buffer>| {
-            let buffers: Vec<_> = delta.flush().collect();
-            let mut store = store.clone();
-            async move {
-                for (_, buffer) in buffers {
-                    store
-                        .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                        .await?;
-                }
-                Ok::<_, DialogArtifactsError>(())
-            }
-        };
-
-        tree.put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(10))
+        tree.put_blob(&store, &mut delta, &hash(1), BlobRecord::new(10))
             .await?;
-        flush(&mut store, &mut delta).await?;
-        tree.retract_blob(&mut store, &mut delta, &hash(1)).await?;
-        flush(&mut store, &mut delta).await?;
-        tree.put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(10))
+        delta.flush_into(&store);
+        tree.retract_blob(&store, &mut delta, &hash(1)).await?;
+        delta.flush_into(&store);
+        tree.put_blob(&store, &mut delta, &hash(1), BlobRecord::new(10))
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         assert_eq!(
             tree.get_blob(&store, &hash(1)).await?,
@@ -487,34 +437,18 @@ mod tests {
     #[dialog_common::test]
     async fn it_surfaces_a_retraction_as_removed_in_the_differential()
     -> Result<(), DialogArtifactsError> {
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
-
-        let flush = |store: &mut MemoryStorageBackend<Blake3Hash, Vec<u8>>,
-                     delta: &mut Delta<NodeHash, Buffer>| {
-            let buffers: Vec<_> = delta.flush().collect();
-            let mut store = store.clone();
-            async move {
-                for (_, buffer) in buffers {
-                    store
-                        .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                        .await?;
-                }
-                Ok::<_, DialogArtifactsError>(())
-            }
-        };
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         let mut checkpoint = ArtifactTree::empty();
         checkpoint
-            .put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(10))
+            .put_blob(&store, &mut delta, &hash(1), BlobRecord::new(10))
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let mut current = checkpoint.clone();
-        current
-            .retract_blob(&mut store, &mut delta, &hash(1))
-            .await?;
-        flush(&mut store, &mut delta).await?;
+        current.retract_blob(&store, &mut delta, &hash(1)).await?;
+        delta.flush_into(&store);
 
         let changes: Vec<_> = blob_changes(checkpoint, current, store)
             .try_collect()
@@ -530,19 +464,13 @@ mod tests {
     #[dialog_common::test]
     async fn it_ships_nothing_for_a_retraction_of_an_unreferenced_blob()
     -> Result<(), DialogArtifactsError> {
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         let checkpoint = ArtifactTree::empty();
         let mut current = checkpoint.clone();
-        current
-            .retract_blob(&mut store, &mut delta, &hash(9))
-            .await?;
-        for (_, buffer) in delta.flush() {
-            store
-                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-        }
+        current.retract_blob(&store, &mut delta, &hash(9)).await?;
+        delta.flush_into(&store);
 
         assert_eq!(current.get_blob(&store, &hash(9)).await?, None);
         let changes: Vec<_> = blob_changes(checkpoint, current, store)
@@ -555,37 +483,22 @@ mod tests {
     #[dialog_common::test]
     async fn it_detects_newly_referenced_blobs_from_the_differential()
     -> Result<(), DialogArtifactsError> {
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
-
-        let persist = |store: &mut MemoryStorageBackend<Blake3Hash, Vec<u8>>,
-                       delta: &mut Delta<NodeHash, Buffer>| {
-            let buffers: Vec<_> = delta.flush().collect();
-            let store = store.clone();
-            async move {
-                let mut store = store;
-                for (_, buffer) in buffers {
-                    store
-                        .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                        .await?;
-                }
-                Ok::<_, DialogArtifactsError>(())
-            }
-        };
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         // Checkpoint references blob A.
         let mut checkpoint = ArtifactTree::empty();
         checkpoint
-            .put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(10))
+            .put_blob(&store, &mut delta, &hash(1), BlobRecord::new(10))
             .await?;
-        persist(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         // Current adds blob B and keeps A.
         let mut current = checkpoint.clone();
         current
-            .put_blob(&mut store, &mut delta, &hash(2), BlobRecord::new(20))
+            .put_blob(&store, &mut delta, &hash(2), BlobRecord::new(20))
             .await?;
-        persist(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let changes: Vec<_> = blob_changes(checkpoint, current, store)
             .try_collect()

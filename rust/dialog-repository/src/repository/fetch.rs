@@ -39,13 +39,10 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
 use async_trait::async_trait;
-use dialog_artifacts::tree::{ArtifactNodeCache, TreeStorageBridge, selector_range};
+use dialog_artifacts::tree::{ArtifactNodeCache, selector_range};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_effects::archive::prelude::ArchiveScope;
-use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, DialogSearchTreeError, PersistentNode, Traversable as _,
-};
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_search_tree::{Buffer, DialogSearchTreeError, Load, PersistentNode, Traversable as _};
 
 use crate::repository::source::Source;
 use crate::{Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite};
@@ -255,7 +252,7 @@ where
         cache: source.as_ref().node_cache(),
         store,
     };
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let storage = store;
     let tree = Index::from_hash(NodeHash::from(root));
 
     let manifest = tree.manifest(&storage).await?;
@@ -275,7 +272,7 @@ where
     Ok(())
 }
 
-/// The node cache in front of a hydrating store, as a raw block backend:
+/// The node cache in front of a hydrating store, as a [`Load`] provider:
 /// the traversal's reads hit the line's shared cache first (a job whose
 /// spine a peer already warmed re-reads nothing), and every miss that
 /// checks as a node lands in it, so the demand read that follows a warm is
@@ -296,33 +293,24 @@ impl<Env> Clone for CacheThrough<'_, Env> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> StorageBackend for CacheThrough<'_, Env>
+impl<Env> Provider<Load> for CacheThrough<'_, Env>
 where
-    Env: Provider<Get> + Provider<Put> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        StorageBackend::set(&mut self.store, key, value).await
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let hash = NodeHash::from(*key);
+    async fn execute(&self, hash: NodeHash) -> Result<Option<Buffer>, DialogSearchTreeError> {
         if let Some(node) = self.cache.get_cached(&hash) {
-            return Ok(Some(node.buffer().as_ref().to_vec()));
+            return Ok(Some(node.buffer().clone()));
         }
-        let bytes = self.store.get(hash.as_bytes()).await?;
+        let block = Provider::<Load>::execute(&self.store, hash.clone()).await?;
         // Bytes that do not check as a node stay out of the cache; the
         // traversal reading them reports the failure.
-        if let Some(node) = bytes
+        if let Some(node) = block
             .as_ref()
-            .and_then(|bytes| PersistentNode::try_from(Buffer::from(bytes.as_slice())).ok())
+            .and_then(|block| PersistentNode::try_from(block.clone()).ok())
         {
             self.cache.insert(hash, node);
         }
-        Ok(bytes)
+        Ok(block)
     }
 }
 

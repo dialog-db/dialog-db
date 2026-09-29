@@ -741,10 +741,10 @@ where
         + ConditionalSync
         + 'static,
 {
-    use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled};
+    use dialog_artifacts::tree::fetch_spilled;
     use dialog_artifacts::{EntityKey, Key, KeyViewConstruct, State};
     use dialog_common::Blake3Hash as NodeHash;
-    use dialog_search_tree::{Change as TreeChange, ContentAddressedStorage};
+    use dialog_search_tree::Change as TreeChange;
 
     let SourceRef::Branch(branch) = source else {
         return Ok(Vec::new());
@@ -769,7 +769,7 @@ where
     let remote = source.fallback();
     let store = crate::NetworkedIndex::new(env, branch.archive().index(), remote);
     let raw_store = store.clone();
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let storage = store;
     let previous = crate::Index::from_hash_with_cache(
         NodeHash::from(*watermark.tree.hash()),
         branch.node_cache(),

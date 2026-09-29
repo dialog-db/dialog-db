@@ -26,7 +26,7 @@ impl Command for Load {
 ///
 /// A corrupt block raises rather than reading as absent, so `None` means
 /// the block is genuinely not reachable.
-pub(crate) async fn load<Env>(
+pub async fn load<Env>(
     env: &Env,
     hash: &Blake3Hash,
 ) -> Result<Option<Buffer>, DialogSearchTreeError>
