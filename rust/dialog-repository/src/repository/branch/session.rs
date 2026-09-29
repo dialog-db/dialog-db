@@ -1070,7 +1070,7 @@ mod rule_tests {
 
     use super::*;
     use crate::Branch;
-    use crate::helpers::{Counting, test_repo};
+    use crate::helpers::{Counting, connect, test_repo};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
@@ -1277,7 +1277,7 @@ mod rule_tests {
             .region("us-east-1")
             .bucket("bucket")
             .build()?;
-        let origin = repo.remote("origin").create(site).perform(&env).await?;
+        let origin = connect("origin", site, repo.did(), &env).await?;
         let remote_main = origin.branch("main").open().perform(&env).await?;
         branch.set_upstream(&remote_main).perform(&env).await?;
         let branch = repo.branch("main").open().perform(&env).await?;
@@ -1302,7 +1302,7 @@ mod rule_tests {
     /// resolves the same.
     #[dialog_common::test]
     async fn it_takes_no_hints_over_local_lines() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let env = Counting::new(operator);
         let branch = repo.branch("main").open().perform(&env).await?;

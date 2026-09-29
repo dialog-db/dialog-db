@@ -593,7 +593,7 @@ mod tests {
     /// each bound entity's own values and nothing else.
     #[dialog_common::test]
     async fn it_folds_rows_that_bind_the_join_variable() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
