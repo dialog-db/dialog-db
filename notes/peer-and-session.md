@@ -19,8 +19,11 @@ note was written while a derived peer was called a *worker* and built with
 - A session holds no key and writes nothing to the peer's own space. The
   peer's key is withheld from it, a repository it loads comes without its
   signing key, the peer's raw storage is not reachable through it, and it
-  creates no vault and keeps no site secret. What it may do elsewhere is
-  proven from its grants, the grant covering the claim's subject.
+  creates no vault and keeps no site secret. A session built from a live
+  peer syncs with a site through the secret that peer opens for it, until
+  site secrets are sealed to a network principal instead. What it may do
+  elsewhere is proven from its grants, the grant covering the claim's
+  subject.
 - The peer's own key lives in a **credential store** (a `.credentials`
   space beside the storage) in non-extractable form; a storage hands out
   no signing key, and a key a legacy space kept at its `self` slot moves

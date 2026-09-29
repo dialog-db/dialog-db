@@ -41,7 +41,8 @@
 //! reached from the space opens the opener's own copy, or fails. A child
 //! record its parent did not sign is ignored. A session of a peer holds no
 //! copy of any key and creates no vault: it opens what was sealed to its
-//! own key, and nothing else.
+//! own key, and nothing else. A site secret a session syncs with is
+//! opened by the peer it was built from, on the session's behalf.
 
 use core::fmt::{self, Debug, Display};
 
@@ -49,6 +50,7 @@ use super::space::SPACE_KEY;
 use super::{Local, Mode, Peer, PeerSpace};
 use dialog_capability::access::{Access, Retain};
 use dialog_capability::{Capability, Policy, Provider, Subject};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::key::{ExtractableKey, KeyExport};
 use dialog_credentials::secret::{Context, SealedSecret, SecretExtractableDerive};
 use dialog_credentials::{Ed25519Signer, Ed25519Verifier, Extractable, Signer, SignerCredential};
@@ -1013,10 +1015,38 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
     }
 }
 
+/// What a session built from a live peer asks that peer for: a site
+/// secret, opened by the peer and handed over as the secret alone. This
+/// stands in until site secrets are sealed to a network principal the
+/// connection carries, so nothing of the peer's is handed to a session
+/// then: a session built from a key alone gets nothing now either.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub(crate) trait SiteSecrets: ConditionalSend + ConditionalSync {
+    /// The secret `load` names, as the peer opens it: the load is the
+    /// session's, checked against the peer's home as the peer's own
+    /// would be.
+    async fn site_secret(
+        &self,
+        load: Capability<credential::Load<SiteSecret>>,
+    ) -> Result<SiteSecret, CredentialError>;
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S: PeerSpace> SiteSecrets for Peer<S, Local> {
+    async fn site_secret(
+        &self,
+        load: Capability<credential::Load<SiteSecret>>,
+    ) -> Result<SiteSecret, CredentialError> {
+        Provider::<credential::Load<SiteSecret>>::execute(self, load).await
+    }
+}
+
 /// A site's credential is sealed to the peer itself and kept in its
 /// space under the site's name: the peer, which does the syncing, opens
 /// it, and nothing else does. A session is refused: it writes nothing to
-/// its peer's space and is handed no secret of its peer's.
+/// its peer's space and is handed no key of its peer's.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<credential::Save<SiteSecret>> for Peer<S, M>
@@ -1059,11 +1089,16 @@ where
         input: Capability<credential::Load<SiteSecret>>,
     ) -> Result<SiteSecret, CredentialError> {
         self.keeps(input.subject())?;
+        // A session syncs with the secret its peer opens for it, when it
+        // was built from that peer. Its own key opens nothing kept here.
         if !M::HOLDS_KEYS {
-            return Err(CredentialError::Withheld(format!(
-                "{} is a session: its peer's site secrets are not handed to it",
-                self.did()
-            )));
+            return match &self.inner.sites {
+                Some(peer) => peer.site_secret(input).await,
+                None => Err(CredentialError::Withheld(format!(
+                    "{} is a session of no peer at hand: its peer's site secrets are not handed to it",
+                    self.did()
+                ))),
+            };
         }
         let site = credential::Site::of(&input).address.to_string();
         let state = self.state();
@@ -1541,9 +1576,11 @@ mod tests {
         Ok(())
     }
 
-    /// A session neither keeps nor reads its peer's site secrets.
+    /// A session keeps no site secret of its peer's, and forgets none:
+    /// the peer's space is not its to write. It reads one through the
+    /// peer it was built from, which opens it and hands over the secret.
     #[dialog_common::test]
-    async fn it_withholds_site_secrets_from_a_session() -> anyhow::Result<()> {
+    async fn it_lets_a_session_keep_no_site_secret() -> anyhow::Result<()> {
         let (session, peer) = test_session_with_peer().await;
         peer.secrets()
             .site("example.com")
@@ -1561,15 +1598,36 @@ mod tests {
             matches!(saved, Err(CredentialError::Withheld(_))),
             "{saved:?}"
         );
-        let loaded = peer
+        let missing = peer
+            .secrets()
+            .site("other.example")
+            .load::<Secret>()
+            .perform(&peer)
+            .await;
+        assert!(
+            matches!(missing, Err(CredentialError::NotFound(_))),
+            "the refused save left a secret behind: {missing:?}"
+        );
+
+        let retracted = peer
             .secrets()
             .site("example.com")
-            .load::<Secret>()
+            .retract()
             .perform(&session)
             .await;
         assert!(
-            matches!(loaded, Err(CredentialError::Withheld(_))),
-            "{loaded:?}"
+            matches!(retracted, Err(CredentialError::Withheld(_))),
+            "{retracted:?}"
+        );
+        assert_eq!(
+            peer.secrets()
+                .site("example.com")
+                .load::<Secret>()
+                .perform(&session)
+                .await?
+                .as_bytes(),
+            &[4u8, 5, 6],
+            "the session reads the secret its peer opens for it"
         );
         Ok(())
     }

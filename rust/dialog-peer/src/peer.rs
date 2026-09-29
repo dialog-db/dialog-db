@@ -267,6 +267,12 @@ pub(crate) struct Inner {
     /// shares what its connection has learned. A connection is dropped
     /// when the peer's addresses change.
     connections: Mutex<HashMap<Entity, PeerConnection>>,
+    /// Where a session built from a live peer turns for that peer's site
+    /// secrets: the peer itself, which opens what is sealed to it and
+    /// answers the secret, never the key it was opened with. A session
+    /// built from a key alone has no peer to ask, and a peer acting as
+    /// itself opens its own.
+    sites: Option<Arc<dyn secret::SiteSecrets>>,
 }
 
 impl<S: Clone, M: Mode> fmt::Debug for Peer<S, M> {
@@ -454,7 +460,9 @@ impl<S: Clone> Peer<S, Local> {
     pub fn storage(&self) -> &Storage<S> {
         &self.storage
     }
+}
 
+impl<S: PeerSpace> Peer<S, Local> {
     /// Start a session of this peer: the same peer, acting with a key
     /// derived from this one and `context`, sharing this peer's storage,
     /// network, runtime and state branch, within the grants the builder
@@ -675,11 +683,12 @@ mod tests {
         Ok(())
     }
 
-    /// A session of a peer reads none of the peer's site secrets: the
-    /// peer does the syncing they are for, and a session is handed
-    /// nothing sealed to its peer.
+    /// A session built from a live peer reads that peer's site secrets
+    /// through it, so it syncs with the sites the peer has credentials
+    /// for; a session built from a key alone has no peer to ask, and is
+    /// handed nothing sealed to one. The peer's key is in neither.
     #[dialog_common::test]
-    async fn it_withholds_a_peers_site_secret_from_its_sessions() -> Result<()> {
+    async fn it_opens_a_peers_site_secret_only_for_a_session_of_it() -> Result<()> {
         let peer = test_peer().await;
         peer.secrets()
             .site("https://s3.example/bucket")
@@ -692,15 +701,22 @@ mod tests {
             .space(peer.state())
             .allow(Subject::any())
             .await?;
-        let read = peer
+        let read: Vec<u8> = peer
             .secrets()
             .site("https://s3.example/bucket")
+            .load()
+            .perform(&session)
+            .await?;
+        assert_eq!(read, b"access");
+        let missing = peer
+            .secrets()
+            .site("https://s3.example/other")
             .load::<Vec<u8>>()
             .perform(&session)
             .await;
         assert!(
-            matches!(read, Err(credential_fx::CredentialError::Withheld(_))),
-            "{read:?}"
+            matches!(missing, Err(credential_fx::CredentialError::NotFound(_))),
+            "{missing:?}"
         );
 
         let session = Peer::operator(Ed25519Signer::generate().await?)
