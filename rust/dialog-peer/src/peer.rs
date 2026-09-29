@@ -897,7 +897,7 @@ mod tests {
             .await?;
         let peer = Peer::new(credential.clone())
             .storage(storage.clone())
-            .branch("account/test")
+            .branch("account-test")
             .await?;
         let space = Ed25519Signer::generate().await?;
         retain(&peer, &peer.did(), &space).await;
