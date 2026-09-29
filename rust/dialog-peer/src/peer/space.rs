@@ -905,6 +905,71 @@ mod tests {
         Ok(())
     }
 
+    /// A peer says whether it keeps a copy of a space's key: it does for
+    /// a space it created, as does a session of it, and not for one it
+    /// never made or one another peer created over the same records.
+    /// Rotating the account without the peer forgets the copy, and the
+    /// key held for the account, which the custodian still opens, does
+    /// not count.
+    #[dialog_common::test]
+    async fn it_says_whether_it_holds_a_spaces_key() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/holds").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+        assert!(peer.holds_key(&created.did()).await?);
+        assert!(
+            !peer
+                .holds_key(&did!(
+                    "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+                ))
+                .await?
+        );
+
+        let session = peer
+            .session(b"holds")
+            .space(peer.state())
+            .allow(Subject::any())
+            .await?;
+        assert!(session.holds_key(&created.did()).await?);
+
+        let other = OpenCredential::open(unique_name("bob"))
+            .perform(&test_credential_store())
+            .await?;
+        let other = Peer::new(other)
+            .space(BranchReference::from(peer.state()))
+            .with(storage.clone())
+            .grant(test_grant().await)
+            .await?;
+        assert!(!other.holds_key(&created.did()).await?);
+
+        let custodian = test_custodian(&peer).await?;
+        let account = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await?;
+        account.rotate().without(peer.did()).perform(&peer).await?;
+        assert!(!peer.holds_key(&created.did()).await?);
+        assert_eq!(
+            peer.space_key(&created.did())
+                .via(&custodian)
+                .perform(&peer)
+                .await?
+                .did(),
+            created.did()
+        );
+        Ok(())
+    }
+
     /// A space's key is kept only sealed to its account, and the account
     /// opens it: the key it reveals is the one the space is named by.
     #[dialog_common::test]
