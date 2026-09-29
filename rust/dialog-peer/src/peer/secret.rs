@@ -643,10 +643,17 @@ impl Add {
 /// the owner, a space whose key is held sealed to the vault is held sealed
 /// to the owner and delegates to it, and every delegation the vault issued
 /// is retracted where the peer proves from, as is a space's to it. The
-/// owner delegates for itself. Last of all the vault is recorded under its
-/// name as the owner, so a handover that stops part-way leaves the vault
-/// as it was. A vault with vaults below it is refused before anything is
-/// written: they are derived from its key, which the owner's replaces.
+/// owner delegates for itself. The vault is recorded under its name as
+/// the owner before the delegations it issued are retracted: a handover
+/// that stops before that leaves the vault as it was, and one that stops
+/// after it leaves the owner's vault with the old key's delegations
+/// standing until they are retracted, never a vault without them. A copy
+/// of a space's key a peer keeps for itself stays with the peer.
+///
+/// A vault with vaults below it is refused before anything is written:
+/// they are derived from its key, which the owner's replaces. An account
+/// is handed over to the key signed in with before any vault is opened
+/// below it.
 pub struct HandOver {
     vault: Vault,
     owner: Did,
@@ -698,12 +705,18 @@ impl HandOver {
             .map_err(unavailable)?;
         }
         rehold(&branch, &old, &owner, peer).await?;
+        // The owner is recorded before the old key's delegations go: a
+        // handover that stops before this leaves the account as it was,
+        // and one that stops after it leaves the owner's account with
+        // delegations the old key issued still standing, which the peer
+        // proves through until they are retracted.
+        secrets::replace_root(&branch, &owner, &name, peer)
+            .await
+            .map_err(unavailable)?;
         for delegation in peer.issued_by(&old.did).await.map_err(unavailable)? {
             peer.retract(delegation).await.map_err(unavailable)?;
         }
-        secrets::replace_root(&branch, &owner, &name, peer)
-            .await
-            .map_err(unavailable)
+        Ok(())
     }
 }
 
@@ -1334,14 +1347,21 @@ mod tests {
     use super::SpaceVaultExt as _;
     use crate::Peer;
     use crate::helpers::{
-        test_custodian, test_grant, test_peer, test_session_with_peer, test_storage, unique_name,
+        onboard, test_credential_store, test_custodian, test_grant, test_owned, test_peer,
+        test_session_with_peer, test_storage, unique_name,
     };
     use dialog_credentials::{Ed25519Signer, SignerCredential};
     use dialog_effects::credential::{CredentialError, Secret};
     use dialog_effects::storage::Location;
-    use dialog_repository::{BranchReference, Repository, secrets};
+    use dialog_identity::OpenCredential;
+    use dialog_repository::{BranchReference, Repository, RepositoryExt as _, secrets};
+    use dialog_storage::Flaky;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
+    use dialog_storage::provider::{Space, Volatile};
     use dialog_varsig::Principal as _;
+
+    /// A volatile space whose memory loses the publishes it is told to.
+    type FlakySpace = Space<Volatile, Flaky, Volatile, Volatile, Volatile>;
 
     /// A peer keeping its records in `space`, holding no vault key.
     async fn peer_on(
@@ -1718,6 +1738,90 @@ mod tests {
             .collect();
         assert!(audiences.contains(&peer.did()), "{audiences:?}");
         assert!(!audiences.contains(&removed.did()), "{audiences:?}");
+        Ok(())
+    }
+
+    /// A handover that stops before the owner is recorded leaves the
+    /// account as it was: the custodian still opens it, the owner does
+    /// not, the account still holds the peer's spaces, and the account's
+    /// delegation to the peer stands.
+    #[dialog_common::test]
+    async fn it_leaves_the_account_as_it_was_when_a_handover_stops_part_way() -> anyhow::Result<()>
+    {
+        let storage = test_owned(Storage::<FlakySpace>::new()).await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = Peer::new(credential.clone())
+            .at(Location::profile(unique_name("flaky")))
+            .space(Repository::from(credential.did()).branch("main"))
+            .with(storage.clone())
+            .grant(test_grant().await)
+            .await?;
+        let custodian = onboard(&peer).await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+        let account = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await?;
+        account
+            .secret("token")
+            .conceal(b"kept".to_vec())
+            .perform(&peer)
+            .await?;
+        let owner = SignerCredential::from(Ed25519Signer::generate().await?);
+
+        // The first commit of the handover reseals the secret to the
+        // owner; every commit after it is lost, so the handover stops
+        // before the owner is recorded.
+        let memory = storage.space(peer.home()).expect("mounted").memory;
+        memory.lose_publishes("branch/main", "revision", 1..);
+        let stopped = account.hand_over(owner.did()).perform(&peer).await;
+        assert!(stopped.is_err(), "the handover went through");
+        memory.lose_publishes("branch/main", "revision", 0..0);
+
+        assert_eq!(peer.authority().await?, *account.did());
+        let reopened = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await?;
+        assert_eq!(reopened.did(), account.did());
+        let refused = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&owner)
+            .perform(&peer)
+            .await;
+        assert!(
+            matches!(refused, Err(CredentialError::Withheld(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            peer.space_key(&created.did())
+                .via(&custodian)
+                .perform(&peer)
+                .await?
+                .did(),
+            created.did()
+        );
+        let audiences: Vec<_> = peer
+            .issued_by(account.did())
+            .await?
+            .into_iter()
+            .map(|delegation| delegation.chain().audience().clone())
+            .collect();
+        assert!(audiences.contains(&peer.did()), "{audiences:?}");
         Ok(())
     }
 
