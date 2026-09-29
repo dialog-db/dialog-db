@@ -248,7 +248,17 @@ pub struct Vault {
     /// its own to rotate by.
     name: Option<String>,
     did: Did,
-    seed: [u8; 32],
+    key: VaultKey,
+}
+
+/// A vault's key: its seed, opened from a copy sealed to the opener, or a
+/// handle on the key itself when the opener is the vault's owner. A held
+/// key opens and signs, and may be one the platform never gives out, so
+/// it is never sealed to anyone else.
+#[derive(Clone)]
+enum VaultKey {
+    Seed([u8; 32]),
+    Held(Box<Ed25519Signer>),
 }
 
 impl Debug for Vault {
@@ -340,7 +350,10 @@ impl Vault {
 
     /// The vault's key.
     pub(crate) async fn key(&self) -> Result<Ed25519Signer, CredentialError> {
-        Ed25519Signer::import(&self.seed).await.map_err(unavailable)
+        match &self.key {
+            VaultKey::Seed(seed) => Ed25519Signer::import(seed).await.map_err(unavailable),
+            VaultKey::Held(key) => Ok((**key).clone()),
+        }
     }
 
     /// The child `name` derived from this vault's key, recorded with this
@@ -375,7 +388,7 @@ impl Vault {
             space: self.space.clone(),
             name: None,
             did,
-            seed: seed_of(&child).await?,
+            key: VaultKey::Seed(seed_of(&child).await?),
         })
     }
 }
@@ -484,13 +497,13 @@ async fn obtain<S: PeerSpace, M: Mode>(
     let start = base.as_ref().map(|vault| vault.did.clone());
     let recorded = resolve(branch, start.as_ref(), names, peer).await?;
     if let Some(did) = &recorded
-        && let Some(seed) = copy(branch, did, opener, peer).await?
+        && let Some(key) = copy(branch, did, opener, peer).await?
     {
         return Ok(Some(Vault {
             space: space.clone(),
             name: (above.is_empty() && base.is_none()).then(|| last.clone()),
             did: did.clone(),
-            seed,
+            key,
         }));
     }
     if above.is_empty() && base.is_none() {
@@ -508,7 +521,7 @@ async fn obtain<S: PeerSpace, M: Mode>(
             space: space.clone(),
             name: Some(last.clone()),
             did,
-            seed: seed_of(&key).await?,
+            key: VaultKey::Seed(seed_of(&key).await?),
         }));
     }
     let Some(parent) = Box::pin(obtain(branch, space, base, above, create, opener, peer)).await?
@@ -571,29 +584,21 @@ async fn resolve<S: PeerSpace, M: Mode>(
     Ok(Some(did))
 }
 
-/// The seed of `vault`'s key from a copy `branch` records sealed to
-/// `opener`, or the opener's own when it is the vault's key: an account
-/// handed over to a key its owner holds opens with that key.
+/// The key of `vault` from a copy `branch` records sealed to `opener`, or
+/// the opener's own when it is the vault's key: an account handed over to
+/// a key its owner holds opens with that key, which is held, never read
+/// out.
 async fn copy<S: PeerSpace, M: Mode>(
     branch: &Branch,
     vault: &Did,
     opener: &SignerCredential,
     peer: &Peer<S, M>,
-) -> Result<Option<[u8; 32]>, CredentialError> {
+) -> Result<Option<VaultKey>, CredentialError> {
     if opener.did() == *vault {
         let key = opener.signer().as_ed25519().ok_or_else(|| {
             CredentialError::Withheld(format!("{vault} is not a key a vault can be"))
         })?;
-        // Only the browser has a second, opaque kind of export.
-        #[allow(irrefutable_let_patterns)]
-        let KeyExport::Extractable(seed) = key.export().await.map_err(unavailable)? else {
-            return Err(CredentialError::Withheld(format!(
-                "the key of {vault} is not extractable"
-            )));
-        };
-        return Ok(Some(seed.as_slice().try_into().map_err(|_| {
-            unopened(format!("the key of {vault} is not a key"))
-        })?));
+        return Ok(Some(VaultKey::Held(Box::new(key.clone()))));
     }
     let copies = secrets::keys_of(branch, vault, &opener.did(), peer)
         .await
@@ -602,9 +607,9 @@ async fn copy<S: PeerSpace, M: Mode>(
         return Ok(None);
     };
     let seed = open_key(opener, &copy).await?;
-    Ok(Some(seed.try_into().map_err(|_| {
+    Ok(Some(VaultKey::Seed(seed.try_into().map_err(|_| {
         unopened(format!("the key of {vault} is not a key"))
-    })?))
+    })?)))
 }
 
 /// Make a principal a member of a vault.
@@ -618,7 +623,13 @@ impl Add {
     /// makes no one a member.
     pub async fn perform<S: PeerSpace>(self, peer: &Peer<S, Local>) -> Result<(), CredentialError> {
         let branch = opened(&self.vault.space, peer).await?;
-        let sealed = seal_key(&self.vault.seed, &self.member).await?;
+        let VaultKey::Seed(seed) = &self.vault.key else {
+            return Err(CredentialError::Withheld(format!(
+                "the key of {} is its owner's and is sealed to no one else",
+                self.vault.did
+            )));
+        };
+        let sealed = seal_key(seed, &self.member).await?;
         secrets::grant(&branch, &self.vault.did, &self.member, sealed, peer)
             .await
             .map_err(unavailable)
@@ -753,7 +764,7 @@ impl Rotate {
             space: old.space.clone(),
             name: Some(name.clone()),
             did: key.did(),
-            seed: seed_of(&key).await?,
+            key: VaultKey::Seed(seed_of(&key).await?),
         };
         let branch = opened(&old.space, peer).await?;
         let members = secrets::members(&branch, &old.did, peer)
@@ -1115,8 +1126,12 @@ impl SpaceKey {
     ) -> Result<Ed25519Signer, CredentialError> {
         let SpaceKey { space, via } = self;
         let branch = opened(&BranchReference::from(peer.state()), peer).await?;
-        if let Some(seed) = copy(&branch, &space, peer.credential(), peer).await? {
-            return Ed25519Signer::import(&seed).await.map_err(unavailable);
+        match copy(&branch, &space, peer.credential(), peer).await? {
+            Some(VaultKey::Seed(seed)) => {
+                return Ed25519Signer::import(&seed).await.map_err(unavailable);
+            }
+            Some(VaultKey::Held(key)) => return Ok(*key),
+            None => {}
         }
         let Some(custodian) = via else {
             return Err(CredentialError::Withheld(format!(
