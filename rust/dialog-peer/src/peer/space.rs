@@ -789,6 +789,11 @@ mod tests {
             .perform(&peer)
             .await?;
         assert_eq!(*opened.did(), owner.did());
+        let sealed = opened.add(peer.did()).perform(&peer).await;
+        assert!(
+            matches!(sealed, Err(CredentialError::Withheld(_))),
+            "the owner's key is sealed to no one else: {sealed:?}"
+        );
         assert_eq!(
             peer.space_key(&created.did())
                 .via(&owner)
