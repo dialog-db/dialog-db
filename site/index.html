@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dialog</title>
+<meta name="description" content="Dialog is an embeddable database for local-first software: facts you own, synced through any storage, queried with Datalog.">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3f0ea'/%3E%3Ccircle cx='18' cy='13' r='9' fill='%23c89a2b'/%3E%3Crect x='3' y='22' width='26' height='3' fill='%231c1b19'/%3E%3Crect x='5' y='5' width='5' height='5' fill='%23b94a3d'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600;700&display=swap">
+<style>
+  /*
+   * The palette is tonk's muted Bauhaus palette, named by Kandinsky's
+   * color to shape pairing: the triangle is yellow, the square red, the
+   * circle blue. The guide draws its diagrams with the same colors.
+   *
+   * The page is printed on paper in every system theme, like the posters
+   * it borrows from: the black overlaps only read as black on paper.
+   */
+  :root {
+    --triangle: #c89a2b; /* muted ochre */
+    --square: #b94a3d; /* muted brick */
+    --circle: #3d6da8; /* muted slate-blue */
+    --closure: #7a7268; /* warm neutral ground */
+    --overlap: #1c1b19; /* where replicas agree */
+    --paper: #f3f0ea;
+    --ink: #1c1b19;
+    --quiet: #5f594f;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { background: var(--paper); color: var(--ink); }
+
+  body {
+    margin: 0;
+    font-family: "Jost", Futura, "Century Gothic", "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+    font-size: 18px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: inherit; }
+
+  .page {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 40px 48px 56px;
+  }
+
+  header.masthead {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding-bottom: 14px;
+    border-bottom: 2px solid var(--ink);
+    font-size: 15px;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+  }
+
+  header.masthead span:last-child { letter-spacing: 0.18em; }
+
+  .hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+    gap: 56px;
+    align-items: end;
+    padding: 56px 0 48px;
+  }
+
+  h1 { margin: 0; line-height: 0; }
+
+  .wordmark {
+    width: 100%;
+    max-width: 520px;
+    height: auto;
+    display: block;
+    font-family: "Jost", Futura, "Century Gothic", "Avenir Next", sans-serif;
+    font-weight: 700;
+    font-size: 200px;
+  }
+
+  .tagline {
+    margin: 28px 0 0;
+    max-width: 22em;
+    font-size: 26px;
+    line-height: 1.3;
+  }
+
+  .tagline em { font-style: normal; color: var(--square); }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-top: 40px;
+  }
+
+  .actions a {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 22px 12px 14px;
+    border: 2px solid var(--ink);
+    text-decoration: none;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 15px;
+    transition: background 120ms, color 120ms;
+  }
+
+  .actions a:hover,
+  .actions a:focus-visible {
+    background: var(--ink);
+    color: var(--paper);
+    outline: none;
+  }
+
+  .actions a svg { width: 18px; height: 18px; flex: none; }
+
+  .poster {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+
+  .poster .ink { fill: var(--ink); }
+  .poster .stroke { stroke: var(--ink); }
+  .poster .paper { fill: var(--paper); }
+  .poster .caption { font-size: 22px; letter-spacing: 0.06em; }
+
+  .principles {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-top: 2px solid var(--ink);
+  }
+
+  .principles section {
+    padding: 28px 24px 8px 0;
+  }
+
+  .principles section + section {
+    padding-left: 24px;
+    border-left: 1px solid var(--ink);
+  }
+
+  .principles svg { width: 34px; height: 34px; display: block; margin-bottom: 18px; }
+
+  .principles h2 {
+    margin: 0 0 10px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+  }
+
+  .principles p { margin: 0; font-size: 17px; color: var(--quiet); }
+
+  footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 12px 32px;
+    margin-top: 56px;
+    padding-top: 14px;
+    border-top: 2px solid var(--ink);
+    font-size: 14px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--quiet);
+  }
+
+  footer a { text-decoration: none; border-bottom: 1px solid currentColor; }
+  footer nav { display: flex; gap: 24px; flex-wrap: wrap; }
+
+  @media (max-width: 900px) {
+    .page { padding: 24px 16px 40px; }
+    .hero { grid-template-columns: 1fr; gap: 36px; padding-top: 36px; }
+    .hero .poster-wrap { order: -1; max-width: 520px; }
+    .tagline { font-size: 22px; }
+    .principles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .principles section:nth-child(3) { padding-left: 0; border-left: 0; }
+    .principles section:nth-child(n+3) { border-top: 1px solid var(--ink); }
+    header.masthead { font-size: 12px; letter-spacing: 0.24em; }
+  }
+
+  @media (max-width: 520px) {
+    .principles { grid-template-columns: 1fr; }
+    .principles section,
+    .principles section + section { padding-left: 0; border-left: 0; }
+    .principles section + section { border-top: 1px solid var(--ink); }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="masthead">
+  <span>Dialog</span>
+  <span>Local-first database</span>
+</header>
+
+<main>
+  <div class="hero">
+    <div>
+      <h1>
+        <!--
+          The wordmark twice, one per replica, offset like the two circles:
+          ochre over red, and ink wherever the two agree.
+        -->
+        <svg class="wordmark" viewBox="0 0 600 280" role="img" aria-label="dialog">
+          <defs>
+            <clipPath id="upper-word"><text x="0" y="150" textLength="592" lengthAdjust="spacingAndGlyphs">dialog</text></clipPath>
+          </defs>
+          <text x="0" y="150" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--triangle)">dialog</text>
+          <text x="0" y="215" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--square)">dialog</text>
+          <text x="0" y="215" textLength="592" lengthAdjust="spacingAndGlyphs" fill="var(--overlap)" clip-path="url(#upper-word)">dialog</text>
+        </svg>
+      </h1>
+      <p class="tagline">An embeddable database for local-first software. Facts you own, synced through <em>any</em> storage, queried with Datalog.</p>
+      <div class="actions">
+        <a href="guide/">
+          <svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="9" fill="var(--circle)"/></svg>
+          Read the guide
+        </a>
+        <a href="https://github.com/dialog-db/dialog-db">
+          <svg viewBox="0 0 18 18" aria-hidden="true"><rect width="18" height="18" fill="var(--square)"/></svg>
+          Code
+        </a>
+      </div>
+    </div>
+
+    <div class="poster-wrap">
+      <!--
+        Two replicas, Alice's and Bob's, drawn as two circles. Where they
+        overlap is what both hold: the facts they agree on.
+      -->
+      <svg class="poster" viewBox="0 0 560 640" role="img" aria-label="Two overlapping circles, ochre and red, their shared part in black: two replicas and the facts they agree on">
+        <defs>
+          <clipPath id="upper-replica"><circle cx="280" cy="210" r="170"/></clipPath>
+        </defs>
+        <circle cx="280" cy="210" r="170" fill="var(--triangle)"/>
+        <circle cx="280" cy="410" r="170" fill="var(--square)"/>
+        <circle cx="280" cy="410" r="170" fill="var(--overlap)" clip-path="url(#upper-replica)"/>
+        <rect class="ink" x="170" y="604" width="390" height="2"/>
+        <text class="ink caption" x="560" y="632" text-anchor="end">cooperative system</text>
+      </svg>
+    </div>
+  </div>
+
+  <div class="principles">
+    <section>
+      <svg viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="17" fill="var(--circle)"/></svg>
+      <h2>Facts</h2>
+      <p>Everything is a small statement about a thing. No tables and no migrations: a new kind of data is a new attribute.</p>
+    </section>
+    <section>
+      <svg viewBox="0 0 34 34" aria-hidden="true"><polygon points="17,0 34,34 0,34" fill="var(--triangle)"/></svg>
+      <h2>Local first</h2>
+      <p>Every device keeps its own replica. Reads and writes never wait on a network, and replicas converge when they sync.</p>
+    </section>
+    <section>
+      <svg viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" fill="var(--square)"/></svg>
+      <h2>Yours</h2>
+      <p>Everyone is a key. Access is a signed capability, not an account on someone's server.</p>
+    </section>
+    <section>
+      <svg viewBox="0 0 34 34" aria-hidden="true"><rect x="0" y="14" width="34" height="6" fill="var(--ink)"/><rect x="14" y="0" width="6" height="34" fill="var(--ink)"/></svg>
+      <h2>Everywhere</h2>
+      <p>One Rust core, native and in the browser, with a query language in the family of Datalog.</p>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <span>MPL-2.0</span>
+  <nav>
+    <a href="guide/">Guide</a>
+    <a href="https://github.com/dialog-db/dialog-db">Code</a>
+    <a href="https://github.com/dialog-db/dialog-db/tree/main/notes">Design notes</a>
+  </nav>
+</footer>
+
+</div>
+</body>
+</html>

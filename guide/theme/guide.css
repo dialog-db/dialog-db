@@ -1,0 +1,273 @@
+@import url("https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600&display=swap");
+
+/*
+ * The guide's look, shared with the landing page in site/.
+ *
+ * The palette is tonk's muted Bauhaus palette (rust/tonk-ui/styles.css in
+ * tonk), named by Kandinsky's color to shape pairing, on cream paper with
+ * near-black ink. There are two grounds: paper for the light themes and a
+ * dark paper for the dark ones, so every mdBook theme lands on one of them.
+ *
+ * Every diagram is inline SVG drawn with the classes below. Roles follow
+ * the dialog:diagnose view:
+ *
+ *   entity     circle   (blue)    the thing a fact is about
+ *   attribute  triangle (yellow)  what is said about it
+ *   value      square   (red)     what is said; its type byte is dimmed
+ *   hash       closure  (grey)    content addresses, digests, signatures
+ *   critical   alarm              what a reader must understand or refuse
+ *   alice      triangle, marked with a triangle
+ *   bob        circle, marked with a circle
+ *
+ * Shapes are filled with a quiet tint of their color, outlined and labeled
+ * in the full color, the way diagnose colors key segments.
+ */
+
+:root {
+  --dg-triangle: #c89a2b; /* muted ochre */
+  --dg-square: #b94a3d; /* muted brick */
+  --dg-circle: #3d6da8; /* muted slate-blue */
+  --dg-closure: #7a7268; /* warm neutral ground */
+  --dg-alarm: #a8302a; /* hotter than the square red */
+}
+
+html.light,
+html.rust,
+html:not(.js) {
+  --dg-paper: #f3f0ea;
+  --dg-ink: #1c1b19;
+  --dg-muted: #5f594f;
+  --dg-line: #8a857d;
+  --dg-tint: 18%;
+  --dg-well: #e9e5dc;
+  --dg-link: var(--dg-circle);
+
+  --bg: var(--dg-paper);
+  --fg: var(--dg-ink);
+  --sidebar-bg: var(--dg-well);
+  --sidebar-fg: var(--dg-ink);
+  --sidebar-non-existant: var(--dg-muted);
+  --sidebar-active: var(--dg-square);
+  --sidebar-spacer: var(--dg-line);
+  --sidebar-header-border-color: var(--dg-ink);
+  --scrollbar: var(--dg-line);
+  --icons: var(--dg-muted);
+  --icons-hover: var(--dg-ink);
+  --links: var(--dg-link);
+  --inline-code-color: var(--dg-ink);
+  --theme-popup-bg: var(--dg-paper);
+  --theme-popup-border: var(--dg-ink);
+  --theme-hover: var(--dg-well);
+  --quote-bg: var(--dg-well);
+  --quote-border: var(--dg-line);
+  --warning-border: var(--dg-triangle);
+  --table-border-color: var(--dg-line);
+  --table-header-bg: var(--dg-well);
+  --table-alternate-bg: color-mix(in srgb, var(--dg-well) 45%, var(--dg-paper));
+  --searchbar-border-color: var(--dg-ink);
+  --searchbar-bg: var(--dg-paper);
+  --searchbar-fg: var(--dg-ink);
+  --searchbar-shadow-color: transparent;
+  --searchresults-header-fg: var(--dg-muted);
+  --searchresults-border-color: var(--dg-line);
+  --searchresults-li-bg: var(--dg-well);
+  --search-mark-bg: color-mix(in srgb, var(--dg-triangle) 45%, var(--dg-paper));
+  --footnote-highlight: var(--dg-triangle);
+  --color-scheme: light;
+}
+
+html.coal,
+html.navy,
+html.ayu {
+  --dg-paper: #1a1917;
+  --dg-ink: #ece3d0;
+  --dg-muted: #a39d92;
+  --dg-line: #7a7268;
+  --dg-tint: 26%;
+  --dg-well: #24221f;
+  --dg-link: color-mix(in srgb, var(--dg-circle) 60%, #ffffff);
+
+  --bg: var(--dg-paper);
+  --fg: var(--dg-ink);
+  --sidebar-bg: var(--dg-well);
+  --sidebar-fg: var(--dg-ink);
+  --sidebar-non-existant: var(--dg-muted);
+  --sidebar-active: color-mix(in srgb, var(--dg-square) 70%, #ffffff);
+  --sidebar-spacer: var(--dg-line);
+  --sidebar-header-border-color: var(--dg-ink);
+  --scrollbar: var(--dg-line);
+  --icons: var(--dg-muted);
+  --icons-hover: var(--dg-ink);
+  --links: var(--dg-link);
+  --inline-code-color: var(--dg-ink);
+  --theme-popup-bg: var(--dg-well);
+  --theme-popup-border: var(--dg-ink);
+  --theme-hover: var(--dg-paper);
+  --quote-bg: var(--dg-well);
+  --quote-border: var(--dg-line);
+  --warning-border: var(--dg-triangle);
+  --table-border-color: var(--dg-line);
+  --table-header-bg: var(--dg-well);
+  --table-alternate-bg: color-mix(in srgb, var(--dg-well) 45%, var(--dg-paper));
+  --searchbar-border-color: var(--dg-ink);
+  --searchbar-bg: var(--dg-well);
+  --searchbar-fg: var(--dg-ink);
+  --searchbar-shadow-color: transparent;
+  --searchresults-header-fg: var(--dg-muted);
+  --searchresults-border-color: var(--dg-line);
+  --searchresults-li-bg: var(--dg-well);
+  --search-mark-bg: color-mix(in srgb, var(--dg-triangle) 45%, var(--dg-paper));
+  --footnote-highlight: var(--dg-triangle);
+  --color-scheme: dark;
+}
+
+html {
+  font-family: "Jost", Futura, "Century Gothic", "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+}
+
+.content { font-size: 1.7rem; line-height: 1.6; }
+
+.content h1,
+.content h2,
+.content h3 {
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.content h1 {
+  font-size: 3.6rem;
+  padding-bottom: 0.25em;
+  border-bottom: 2px solid var(--fg);
+}
+
+.content h2 {
+  margin-top: 2em;
+  padding-top: 0.6em;
+  border-top: 1px solid var(--fg);
+}
+
+.content a:link,
+.content a:visited { color: var(--links); }
+
+.menu-title {
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.3em;
+  font-size: 1.6rem;
+}
+
+#mdbook-menu-bar,
+.menu-bar { border-bottom: 2px solid var(--fg); }
+
+.chapter li.chapter-item a.active,
+.chapter li a.active { font-weight: 600; }
+
+/* Code on a quiet well of the same paper, never on a foreign ground. */
+.hljs,
+pre > code,
+pre { background: var(--dg-well) !important; color: var(--fg); }
+
+:not(pre) > code,
+:not(pre) > .hljs {
+  background: color-mix(in srgb, var(--dg-well) 80%, var(--dg-paper)) !important;
+}
+
+table thead th { font-weight: 600; letter-spacing: 0.04em; }
+
+figure.dg {
+  margin: 2em 0;
+  text-align: center;
+  overflow-x: auto;
+}
+
+figure.dg svg {
+  max-width: 100%;
+  height: auto;
+  font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, monospace;
+  font-size: 13px;
+}
+
+.dg text { fill: var(--dg-ink); }
+.dg text.muted { fill: var(--dg-muted); }
+.dg text.small { font-size: 11px; }
+.dg text.label { font-family: "Open Sans", "Helvetica Neue", Arial, sans-serif; }
+.dg text.title { font-family: "Open Sans", "Helvetica Neue", Arial, sans-serif; font-weight: 600; }
+
+.dg rect,
+.dg circle,
+.dg polygon {
+  stroke: var(--dg-line);
+  stroke-width: 1;
+  fill: var(--dg-paper);
+}
+
+.dg line,
+.dg path.wire,
+.dg polyline {
+  stroke: var(--dg-line);
+  stroke-width: 1.2;
+  fill: none;
+}
+
+.dg .dashed { stroke-dasharray: 4 3; }
+.dg marker path { fill: var(--dg-line); stroke: none; }
+
+.dg .shade { fill: color-mix(in srgb, var(--dg-closure) 10%, var(--dg-paper)); }
+.dg .ghost { fill: none; stroke: var(--dg-line); stroke-dasharray: 4 3; opacity: 0.6; }
+.dg .faded { opacity: 0.45; }
+
+.dg .entity, .dg .bob { --role: var(--dg-circle); }
+.dg .attribute, .dg .alice { --role: var(--dg-triangle); }
+.dg .value { --role: var(--dg-square); }
+.dg .hash { --role: var(--dg-closure); }
+.dg .critical, .dg .cause { --role: var(--dg-alarm); }
+
+.dg rect:is(.entity, .attribute, .value, .hash, .critical, .cause, .alice, .bob),
+.dg circle:is(.entity, .attribute, .value, .hash, .critical, .cause, .alice, .bob),
+.dg polygon:is(.entity, .attribute, .value, .hash, .critical, .cause, .alice, .bob) {
+  fill: color-mix(in srgb, var(--role) var(--dg-tint), var(--dg-paper));
+  stroke: var(--role);
+}
+.dg :is(rect, circle, polygon).solid { fill: var(--role); }
+.dg text:is(.entity, .attribute, .value, .hash, .critical, .cause, .alice, .bob) {
+  fill: color-mix(in srgb, var(--role), var(--dg-ink) 30%);
+  font-weight: 600;
+}
+.dg :is(line, path.wire):is(.entity, .attribute, .value, .hash, .critical, .cause, .alice, .bob) {
+  stroke: var(--role);
+}
+.dg .vtype { opacity: 0.7; }
+
+/* Inline chips in prose that match the diagram colors. */
+.chip {
+  padding: 0 0.35em;
+  border-radius: 2px;
+  border: 1px solid var(--role);
+  background: color-mix(in srgb, var(--role) var(--dg-tint), var(--dg-paper));
+  color: color-mix(in srgb, var(--role), var(--dg-ink) 30%);
+  font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, monospace;
+  font-size: 0.875em;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.chip.entity, .chip.bob { --role: var(--dg-circle); }
+.chip.attribute, .chip.alice { --role: var(--dg-triangle); }
+.chip.value { --role: var(--dg-square); }
+.chip.hash { --role: var(--dg-closure); }
+.chip.critical { --role: var(--dg-alarm); }
+.chip.alice::before { content: "\25B2\2009"; }
+.chip.bob::before { content: "\25CF\2009"; }
+
+/* A short bold title above a figure, in place of a caption below it. */
+.figtitle { margin-bottom: 0.4em; }
+
+/* An aside the reader can skip: definitions, notation, code pointers. */
+.aside {
+  margin: 1.5em 0;
+  padding: 0.8em 1.2em;
+  border-left: 4px solid var(--fg);
+  background: var(--dg-well);
+  font-size: 0.92em;
+}
+.aside > :first-child { margin-top: 0; }
+.aside > :last-child { margin-bottom: 0; }
