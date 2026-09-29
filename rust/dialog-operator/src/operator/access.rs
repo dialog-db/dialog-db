@@ -641,7 +641,7 @@ mod tests {
         let operator = profile
             .derive(b"test")
             .network(Network::default())
-            .access_branch("account/test")
+            .access_branch("account-test")
             .build(storage)
             .await?;
 
@@ -655,7 +655,7 @@ mod tests {
             .expect("the operator proves from the branch it retained into");
 
         let configured = Repository::from(&profile)
-            .branch("account/test")
+            .branch("account-test")
             .open()
             .perform(&operator)
             .await?;
