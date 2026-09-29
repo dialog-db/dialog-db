@@ -785,10 +785,23 @@ mod tests {
         assert_eq!(derived.did().to_string(), EXPECTED_SESSION_DID);
 
         // The session a peer opens for the context acts with that key.
+        // The peer's home is created at its location with the key's
+        // verifier, as opening a credential there would; the peer then
+        // opens over it with the key in hand.
+        let storage = test_storage().await;
+        let location = Location::profile(unique_name("fixed"));
+        Subject::from(did!("local:storage"))
+            .attenuate(storage_fx::Storage)
+            .attenuate(location.clone())
+            .create(dialog_credentials::Credential::from(
+                credential.signer().verifier(),
+            ))
+            .perform(&storage)
+            .await?;
         let peer = Peer::new(credential.clone())
-            .at(Location::profile(unique_name("fixed")))
+            .at(location)
             .mount(test_state(&credential.did()))
-            .with(test_storage().await)
+            .with(storage)
             .grant(test_grant().await)
             .build()
             .await?;
@@ -839,13 +852,19 @@ mod tests {
         let tampered: Delegation<AnySignature> = serde_ipld_dagcbor::from_slice(&bytes)?;
         assert_eq!(tampered.issuer(), delegation.issuer());
 
-        let Err(refused) = peer.session(CONTEXT).grant(UcanCertificate(tampered)).await else {
+        let Err(refused) = peer
+            .session(CONTEXT)
+            .mount(peer.state())
+            .grant(UcanCertificate(tampered))
+            .await
+        else {
             panic!("a tampered certificate is refused");
         };
         assert!(matches!(refused, PeerError::Certificate(_)), "{refused:?}");
 
         // The untampered certificate is the peer's authority.
         peer.session(CONTEXT)
+            .mount(peer.state())
             .grant(UcanCertificate(delegation))
             .await?;
         Ok(())
@@ -861,6 +880,7 @@ mod tests {
 
         let Err(refused) = peer
             .session(CONTEXT)
+            .mount(peer.state())
             .grant(UcanCertificate(delegation))
             .await
         else {
