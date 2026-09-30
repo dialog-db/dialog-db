@@ -9,13 +9,13 @@ Two questions drive the design. When Bob's change reaches Alice, how does her re
 Every commit is written by someone, on some branch, of some replica. Dialog names each of these with a hash of the level above:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 848 210" width="848" height="210" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="repository and profile hash to a replica; replica and name to a branch; branch and session key to an origin">
+<svg class="dg" viewBox="0 0 848 210" width="848" height="210" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="repository and peer hash to a replica; replica and name to a branch; branch and session key to an origin">
 <defs><marker id="l-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <rect class="shade" x="10" y="10" width="160" height="40"/>
 <text class="label" x="90.0" y="27" text-anchor="middle">repository</text>
 <text class="small muted" x="90.0" y="42" text-anchor="middle">did:key:zR…</text>
 <rect class="alice" x="10" y="60" width="160" height="40"/>
-<text class="label" x="90.0" y="77" text-anchor="middle">Alice's profile</text>
+<text class="label" x="90.0" y="77" text-anchor="middle">Alice's peer</text>
 <text class="small muted" x="90.0" y="92" text-anchor="middle">did:key:zA…</text>
 <path class="wire" d="M170,30 H190 V62" /><path class="wire" d="M170,80 H190 V78"/>
 <rect class="hash solid" x="196" y="57" width="60" height="26"/>
@@ -47,7 +47,7 @@ Every commit is written by someone, on some branch, of some replica. Dialog name
 </svg>
 </figure>
 
-- A **replica** is one person's copy of a repository: the hash of the repository's DID and the profile's DID.
+- A **replica** is one peer's copy of a repository: the hash of the repository's DID and the peer's DID.
 - A **branch** is a named line of work in a replica, like `main`: the hash of the replica and the name.
 - An **origin** is one writer on one branch: the hash of the branch and the key that signs the commits.
 

@@ -89,9 +89,9 @@ The two-byte prefix `ed 01` says what kind of key follows. The 34 bytes are writ
 Several kinds of things are keys:
 
 - **A repository** has its own key. Its DID is the repository's name everywhere: in storage paths, in permissions, and in the branch identity a signed head carries.
-- **An account** is a person. It is the key Alice's devices act for.
-- **A device**, such as Alice's laptop, has a key that never leaves it. In a browser the key is a non-extractable WebCrypto key, so even the page that uses it cannot read its secret half.
-- **A session** is a separate key, usually derived from the device's key for one app or one purpose. It acts under a permission from the device, so the app never holds the device key.
+- **An account** is a person. It is the key Alice's peers act for.
+- **A peer** is one running copy of Dialog, such as the one on Alice's laptop. Its key never leaves it. In a browser the key is a non-extractable WebCrypto key, so even the page that uses it cannot read its secret half.
+- **A session** is a separate key, usually derived from the peer's key for one app or one purpose. It acts under a permission from the peer, so the app never holds the peer's key.
 
 When Alice's laptop creates the grocery list repository, it makes a fresh key for it. It seals the secret half so that only Alice's account can open it. The repository's key then signs one permission, to Alice's account, allowing everything. Storage keeps only the public half. From then on, the repository is Alice's because the repository itself said so.
 
@@ -126,10 +126,10 @@ Here is a typical chain that lets the session on Alice's laptop store a block in
 <text class="label" x="295" y="40" text-anchor="middle">Alice's account</text>
 <text class="small muted" x="295" y="57" text-anchor="middle">did:key:zAc…</text>
 <rect class="alice" x="440" y="20" width="140" height="46"/>
-<text class="label" x="510" y="40" text-anchor="middle">Alice's laptop</text>
-<text class="small muted" x="510" y="57" text-anchor="middle">did:key:zL…</text>
+<text class="label" x="510" y="40" text-anchor="middle">Alice's peer</text>
+<text class="small muted" x="510" y="57" text-anchor="middle">her laptop</text>
 <rect class="alice" x="655" y="20" width="140" height="46"/>
-<text class="label" x="725" y="40" text-anchor="middle">laptop session</text>
+<text class="label" x="725" y="40" text-anchor="middle">peer session</text>
 <text class="small muted" x="725" y="57" text-anchor="middle">did:key:zS…</text>
 <line x1="150" y1="43" x2="221" y2="43" marker-end="url(#c-arrow)"/>
 <text class="small" x="185.5" y="36" text-anchor="middle">may do /</text>

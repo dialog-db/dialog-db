@@ -1,6 +1,6 @@
 # How Dialog Works
 
-Dialog is an embeddable database for local-first software. Each participant, usually one per device, keeps its own working copy of a repository, called a replica. An app reads and writes its replica directly, with no server in the way. When two replicas can both reach a storage service they share, they exchange what changed through it and end up agreeing.
+Dialog is an embeddable database for local-first software. Each peer, usually one per device, keeps its own working copy of a repository, called a replica. An app reads and writes its replica directly, with no server in the way. When two replicas can both reach a storage service they share, they exchange what changed through it and end up agreeing.
 
 This guide follows one piece of data through the whole system. It starts when an app writes a fact, follows that fact into a sorted tree of keys and down to the bytes on disk, and then carries it to another device, where it is merged and queried. Each chapter picks up where the previous one left off.
 
