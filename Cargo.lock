@@ -1674,6 +1674,7 @@ dependencies = [
  "dialog-repository",
  "dialog-search-tree",
  "dialog-storage",
+ "dialog-varsig",
  "futures-util",
  "serde",
  "serde_json",

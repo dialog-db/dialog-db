@@ -17,7 +17,7 @@
 use anyhow::Result;
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_capability::Subject;
-use dialog_credentials::{Credential, SignerCredential};
+use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::*;
 use dialog_effects::credential::prelude::*;
@@ -29,6 +29,7 @@ use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, con
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource;
+use dialog_varsig::{Did, Principal};
 use futures_util::{StreamExt, stream};
 
 #[cfg(target_arch = "wasm32")]
@@ -77,7 +78,7 @@ async fn setup_repo_with_fs_remote(
 
     let origin = {
         let site = SiteAddress::Fs(address);
-        contact(&dialog_repository::peer_did(&site)?)
+        contact(&vault_peer().await?)
             .add_address(site)
             .name("origin")
             .perform(operator)
@@ -145,9 +146,8 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
 async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
     // Two repos point at the same vault directory: Alice pushes, Bob pulls.
     let (operator, profile) = test_session_with_peer().await;
-    let (alice_repo, location, alice_branch) =
+    let (alice_repo, _location, alice_branch) =
         setup_repo_with_fs_remote(&operator, &profile, "fs-share-a").await?;
-    let address = FsAddress::new(location);
 
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(artifact(
@@ -175,20 +175,14 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
         .await?;
     profile.access().save(chain).perform(&operator).await?;
 
-    let bob_origin = {
-        let site = SiteAddress::Fs(address);
-        contact(&dialog_repository::peer_did(&site)?)
-            .add_address(site)
-            .name("origin")
-            .perform(&operator)
-            .await?;
-        contact("origin")
-            .connect()
-            .repository(alice_repo.did())
-            .open()
-            .perform(&operator)
-            .await?
-    };
+    // The vault is already the host's contact `origin`: Bob reaches
+    // Alice's replica there through it.
+    let bob_origin = contact("origin")
+        .connect()
+        .repository(alice_repo.did())
+        .open()
+        .perform(&operator)
+        .await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = bob_origin.branch("main").open().perform(&operator).await?;
@@ -220,9 +214,8 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
     // Two repos share a vault. The first push advances the remote head; a
     // second push that hasn't seen that advance must fail the memory CAS.
     let (operator, profile) = test_session_with_peer().await;
-    let (alice_repo, location, alice_branch) =
+    let (alice_repo, _location, alice_branch) =
         setup_repo_with_fs_remote(&operator, &profile, "fs-cas-a").await?;
-    let address = FsAddress::new(location);
 
     // Bob shares Alice's vault and subject, tracking the same remote branch.
     let bob_repo = profile
@@ -237,20 +230,14 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
         .perform(&operator)
         .await?;
     profile.access().save(chain).perform(&operator).await?;
-    let bob_origin = {
-        let site = SiteAddress::Fs(address);
-        contact(&dialog_repository::peer_did(&site)?)
-            .add_address(site)
-            .name("origin")
-            .perform(&operator)
-            .await?;
-        contact("origin")
-            .connect()
-            .repository(alice_repo.did())
-            .open()
-            .perform(&operator)
-            .await?
-    };
+    // The vault is already the host's contact `origin`: Bob reaches
+    // Alice's replica there through it.
+    let bob_origin = contact("origin")
+        .connect()
+        .repository(alice_repo.did())
+        .open()
+        .perform(&operator)
+        .await?;
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let bob_remote = bob_origin.branch("main").open().perform(&operator).await?;
     bob_branch
@@ -483,4 +470,11 @@ async fn it_denies_when_subject_is_not_the_directory() -> Result<()> {
         "a vault for a different subject must be denied"
     );
     Ok(())
+}
+
+/// A DID to name the peer a vault directory is by. A directory has no DID
+/// of its own, so the test gives it one, as an application names a peer
+/// by the DID it was given.
+async fn vault_peer() -> Result<Did> {
+    Ok(Principal::did(&Ed25519Signer::generate().await?))
 }

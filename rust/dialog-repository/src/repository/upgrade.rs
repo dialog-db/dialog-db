@@ -257,8 +257,24 @@ where
     // Contacts are the host's, and every repository's remote is usually
     // named origin: a name another peer already has is not given again,
     // so looking a peer up by it stays unambiguous.
+    //
+    // A peer holds one name, and remotes served under different paths of
+    // one origin are one peer: the first by name keeps it, since a later
+    // one would replace it, whatever order the remotes were listed in. The
+    // others stay reachable through the upstream routes that record them
+    // by name.
+    peers.sort_by(|one, other| one.name.cmp(&other.name));
+    let mut named: Vec<Entity> = Vec::new();
     for carried in peers {
         let entity = carried.peer.this();
+        if named.contains(&entity) {
+            contact(&carried.peer)
+                .add_address(carried.site)
+                .perform(env)
+                .await?;
+            continue;
+        }
+        named.push(entity.clone());
         let known = host(env)
             .await?
             .reader()
@@ -536,7 +552,7 @@ mod tests {
             .find("origin")
             .perform(&operator)
             .await?;
-        let origin = did!("web:tonk.network:ucan");
+        let origin = did!("web:tonk.network");
         assert_eq!(named, vec![origin.this()], "one remote, one contact");
         let connection = host
             .reader()
@@ -902,6 +918,66 @@ mod tests {
             .perform(&operator)
             .await?;
         assert_eq!(named.len(), 1, "one peer is known as origin: {named:?}");
+        Ok(())
+    }
+
+    /// Two remotes served under different paths of one origin are one
+    /// peer, the origin's, reached at both addresses. A peer holds one
+    /// name, so the first remote by name keeps it and the other does not
+    /// replace it.
+    #[dialog_common::test]
+    async fn it_carries_remotes_on_one_origin_to_one_peer() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        unversion(&repo, &operator).await?;
+        for (name, endpoint) in [
+            ("origin", "https://tonk.network/ucan/"),
+            ("staging", "https://tonk.network/staging/"),
+        ] {
+            let cell: Cell<RemoteAddress> =
+                SpaceScope::new(Subject::from(repo.did()), format!("remote/{name}"))
+                    .cell("address")
+                    .into();
+            cell.publish(RemoteAddress {
+                address: UcanAddress::new(endpoint).into(),
+                subject: repo.did(),
+            })
+            .perform(&operator)
+            .await?;
+        }
+        repo.upgrade().perform(&operator).await?;
+
+        let peer = did!("web:tonk.network");
+        let host = crate::host(&operator).await?;
+        for (name, expected) in [("origin", vec![peer.this()]), ("staging", vec![])] {
+            let named = host
+                .clone()
+                .reader()
+                .peers()
+                .find(name)
+                .perform(&operator)
+                .await?;
+            assert_eq!(named, expected, "the peer known as {name}");
+        }
+        let connection = host
+            .reader()
+            .peers()
+            .connect(peer.this())
+            .perform(&operator)
+            .await?;
+        let mut sites = connection
+            .addresses()
+            .iter()
+            .map(site_address)
+            .collect::<Result<Vec<_>, _>>()?;
+        sites.sort_by_key(|site| format!("{site:?}"));
+        assert_eq!(
+            sites,
+            vec![
+                SiteAddress::from(UcanAddress::new("https://tonk.network/staging/")),
+                SiteAddress::from(UcanAddress::new("https://tonk.network/ucan/")),
+            ]
+        );
         Ok(())
     }
 }

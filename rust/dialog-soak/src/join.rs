@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
-use dialog_credentials::{Credential, SignerCredential};
+use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::Peer;
@@ -59,6 +59,7 @@ use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, con
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource as _;
+use dialog_varsig::{Did, Principal};
 use futures_util::{StreamExt as _, stream};
 
 use crate::report::{PhaseReport, Report};
@@ -326,7 +327,7 @@ async fn mount_client(
         .await?;
     let origin = {
         let site = SiteAddress::Fs(address.clone());
-        contact(&dialog_repository::peer_did(&site)?)
+        contact(&vault_peer().await?)
             .add_address(site)
             .name("origin")
             .perform(operator)
@@ -467,7 +468,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
 
     let origin = {
         let site = SiteAddress::Fs(address.clone());
-        contact(&dialog_repository::peer_did(&site)?)
+        contact(&vault_peer().await?)
             .add_address(site)
             .name("origin")
             .perform(&operator)
@@ -854,4 +855,11 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         vault_bytes,
         phases,
     })
+}
+
+/// A DID to name the peer a vault directory is by. A directory has no DID
+/// of its own, so the soak gives it one, as an application names a peer
+/// by the DID it was given.
+async fn vault_peer() -> Result<Did> {
+    Ok(Principal::did(&Ed25519Signer::generate().await?))
 }
