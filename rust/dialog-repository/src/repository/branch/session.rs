@@ -4,7 +4,7 @@ use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select,
+    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey,
     Speculation, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
@@ -28,17 +28,17 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
 use crate::REGISTRY;
-use crate::layer::{Hidden, filter_hidden, merge_grouped};
+use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
-    assemble, builtin, conclusion_attr, conclusion_selector, hydrate, rule_entities, source_attr,
-    source_bytes, source_selector,
+    assemble, builtin, conclusion_attr, conclusion_selector, hydrate, overlay_rules, rule_entities,
+    source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
-use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
+use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -295,17 +295,10 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
 
+            let overlay = layer.overlay(&operator);
             let sources: Vec<Source> =
                 layer.sources.iter().map(|source| source.to_source()).collect();
-            // Caller changes are writes, held so reading them is a range
-            // read; the injected metadata is a handful of asserts, which
-            // a scan serves as well without building anything per query.
-            let layers = if layer.changes.is_empty() {
-                Vec::new()
-            } else {
-                vec![Staged::from(layer.changes.clone())]
-            };
-            let query_env = QueryEnv::new(sources.clone(), layers, layer.metadata(&operator), env);
+            let query_env = QueryEnv::new(sources.clone(), overlay, env);
             let results = Box::pin(query.perform(&query_env));
             // The query's own stream drives the env's preload queue:
             // evaluator hints (its own and any concurrent evaluation's)
@@ -335,24 +328,18 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
-    /// The per-query staged layers — a transaction's writes, its
-    /// dispatched transients, caller-asserted facts — each read by
-    /// range, above every line.
-    layers: Vec<Staged>,
-    /// The auto-injected schema metadata: a handful of asserts, never a
-    /// rule, so it is scanned rather than held (see
-    /// `Provider<Select> for Changes`).
-    metadata: Changes,
-    /// What the layers retract. Each line's session overlay stream is
-    /// filtered against these before the merge so a staged retract
-    /// suppresses a session fact. Cells a replace claimed are not: the
-    /// session's facts outlive the commit, so they show over it.
-    staged: Hidden,
-    /// What the layers hide in the tree — their retracts and the cells
-    /// their replaces claimed — plus every line's session tombstones.
-    /// Each line's tree stream is filtered against these before the
-    /// merge, so a read sees the tree as the commit will leave it.
-    hidden: Hidden,
+    /// All overlay facts — caller-asserted + auto-injected metadata —
+    /// merged into one batch. Queried via `Provider<Select> for Changes`.
+    changes: Changes,
+    /// `sort_key`s of every retracted fact in `changes`. Each line's
+    /// session overlay stream is filtered against these before the
+    /// merge so a staged retract suppresses a session fact.
+    staged: Arc<HashSet<SortKey>>,
+    /// `staged` plus every line's session tombstones. Each line's tree
+    /// stream is filtered against these before the merge so retracts
+    /// in the per-query changes and session tombstones suppress
+    /// matching facts in the tree.
+    tombstones: Arc<HashSet<SortKey>>,
     /// When present, every selector this environment executes —
     /// fact scans and rule-discovery reads alike — records its
     /// demanded range here. Subscriptions use the recorded cover to
@@ -379,31 +366,26 @@ impl<'a, Env> QueryEnv<'a, Env> {
     /// Deductive-rule resolution is built in (a durable layer per line,
     /// its session overlay, and the per-query changes as a transient
     /// layer), so the paths can never diverge on it.
-    pub(crate) fn new(
-        sources: Vec<Source>,
-        layers: Vec<Staged>,
-        metadata: Changes,
-        env: &'a Env,
-    ) -> Self {
-        // Every set is shared, never merged, so this costs nothing per
-        // query however much the layers or the sessions hold.
-        let mut staged = Hidden::default();
-        for layer in &layers {
-            staged = staged.facts(layer.tombstones());
-        }
-        let mut hidden = staged.clone();
-        for layer in &layers {
-            hidden = hidden.cells(layer.cells());
-        }
-        for source in &sources {
-            hidden = hidden.facts(source.as_ref().overlay().tombstones());
-        }
+    pub(crate) fn new(sources: Vec<Source>, changes: Changes, env: &'a Env) -> Self {
+        let staged = tombstones_from(&changes);
+        // The common case, one line and nothing staged, shares the
+        // overlay's own set rather than copying it per query.
+        let tombstones = match sources.as_slice() {
+            [only] if staged.is_empty() => only.as_ref().overlay().tombstones(),
+            _ => {
+                let mut tombstones = staged.clone();
+                for source in &sources {
+                    let session = source.as_ref().overlay().tombstones();
+                    tombstones.extend(session.iter().cloned());
+                }
+                Arc::new(tombstones)
+            }
+        };
         Self {
             sources,
-            layers,
-            metadata,
-            staged,
-            hidden,
+            changes,
+            staged: Arc::new(staged),
+            tombstones,
             demand: None,
             fixpoint: None,
             env,
@@ -438,10 +420,9 @@ impl<Env> Clone for QueryEnv<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             sources: self.sources.clone(),
-            layers: self.layers.clone(),
-            metadata: self.metadata.clone(),
+            changes: self.changes.clone(),
             staged: self.staged.clone(),
-            hidden: self.hidden.clone(),
+            tombstones: self.tombstones.clone(),
             demand: self.demand.clone(),
             fixpoint: self.fixpoint.clone(),
             env: self.env,
@@ -517,14 +498,14 @@ where
         self.record_demand(&input);
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
 
-        // Line streams — each filtered by what the layers hide, so a
-        // `tx.retract(x)` (or any user-asserted retract in `with(..)`)
-        // suppresses matching source facts and a replace suppresses the
-        // cell's other values, and by the line's session tombstones.
-        // Each owns its line clone and borrows only `self.env`.
+        // Line streams — each filtered by tombstones from the
+        // overlay's retracts so a `tx.retract(x)` (or any user-asserted
+        // retract in `with(..)`) suppresses matching source facts, and
+        // by the line's session tombstones. Each owns its line clone
+        // and borrows only `self.env`.
         for source in &self.sources {
             let raw = select_from_source(source.clone(), self.env, input.clone());
-            streams.push(filter_hidden(raw, self.hidden.clone()));
+            streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
         // Each line's session overlay, read live. Filtered by the
@@ -536,28 +517,24 @@ where
                 Provider::<Select<'a>>::execute(source.as_ref().overlay(), input.clone()).await?;
             if let Some(first) = futures_util::StreamExt::next(&mut session).await {
                 let rows: ArtifactStream<'a> = Box::pin(stream::iter(vec![first]).chain(session));
-                streams.push(filter_hidden(rows, self.staged.clone()));
+                streams.push(filter_tombstones(rows, self.staged.clone()));
             }
         }
 
-        // Layer streams — each a range read, in tree order — and the
-        // metadata. They MATCH the typical fact selector rarely: a
-        // join's inner premise probes one entity per outer binding, and
-        // pushing an empty stream anyway forced the k-way merge (and its
-        // per-row sort keys) on every one of those probes. Push each
-        // only when it has rows, so the single-source common case flows
-        // through `merge_grouped`'s passthrough arm.
-        for layer in &self.layers {
-            let rows = layer.scan(&input);
-            if !rows.is_empty() {
-                streams.push(Box::pin(stream::iter(
-                    rows.into_iter().map(|fact| Ok(fact.into())),
-                )));
+        // Overlay stream — Changes itself is a Provider<Select>. The
+        // overlay always carries facts (session metadata at minimum), but
+        // MATCHES the typical fact selector rarely: a join's inner premise
+        // probes one entity per outer binding, and pushing an empty overlay
+        // stream anyway forced the k-way merge (and its per-row sort keys)
+        // on every one of those probes. Peek the overlay's materialized
+        // result and push it only when it has rows, so the single-source
+        // common case flows through `merge_grouped`'s passthrough arm.
+        let mut overlay = Provider::<Select<'a>>::execute(&self.changes, input).await?;
+        match futures_util::StreamExt::next(&mut overlay).await {
+            None => {}
+            Some(first) => {
+                streams.push(Box::pin(stream::iter(vec![first]).chain(overlay)));
             }
-        }
-        let mut metadata = Provider::<Select<'a>>::execute(&self.metadata, input).await?;
-        if let Some(first) = futures_util::StreamExt::next(&mut metadata).await {
-            streams.push(Box::pin(stream::iter(vec![first]).chain(metadata)));
         }
 
         Ok(merge_grouped(streams))
@@ -662,23 +639,6 @@ where
         }
         Ok(None)
     }
-}
-
-/// The rules a staged layer holds concluding `concept`: two range
-/// reads, as a session's are. The layer is per query, so it is read
-/// fresh and records no demand; a body that does not hydrate is
-/// skipped, as it would not resolve once committed either.
-fn staged_rules(layer: &Staged, concept: &Entity) -> Vec<DeductiveRule> {
-    let entities = rule_entities(layer.scan(&conclusion_selector(concept)));
-    let mut rules = Vec::with_capacity(entities.len());
-    for rule_entity in entities {
-        if let Some(bytes) = source_bytes(layer.scan(&source_selector(&rule_entity)))
-            && let Ok(rule) = hydrate(&bytes)
-        {
-            rules.push(rule);
-        }
-    }
-    rules
 }
 
 impl<'a, Env> QueryEnv<'a, Env>
@@ -871,10 +831,8 @@ where
             rules.extend(self.durable_rules(source, &concept).await?);
             rules.extend(self.session_rules(source, &concept)?);
         }
-        // Staged layers — the per-query writes, read fresh.
-        for layer in &self.layers {
-            rules.extend(staged_rules(layer, &concept));
-        }
+        // Transient layer — the per-query overlay, read fresh.
+        rules.extend(overlay_rules(&self.changes, &concept));
 
         // Plan cache rides a line (peers share content-addressed plans;
         // any line's cache is correct). The overlay-only query has no
@@ -969,9 +927,7 @@ where
                         rules.extend(self.durable_rules(source, &entity).await?);
                         rules.extend(self.session_rules(source, &entity)?);
                     }
-                    for layer in &self.layers {
-                        rules.extend(staged_rules(layer, &entity));
-                    }
+                    rules.extend(overlay_rules(&self.changes, &entity));
                     let bundle = assemble(&descriptor, rules, PlanCache::default());
                     Ok::<_, EvaluationError>((entity, bundle))
                 }))

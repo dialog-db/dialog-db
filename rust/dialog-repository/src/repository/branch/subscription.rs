@@ -847,13 +847,9 @@ where
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
-                let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                    vec![Source::Branch(self.branch.clone())],
-                    Vec::new(),
-                    overlay,
-                    env,
-                )
-                .with_demand(self.demand.clone());
+                let query_env: QueryEnv<'a, Env> =
+                    QueryEnv::new(vec![Source::Branch(self.branch.clone())], overlay, env)
+                        .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
                     // Fixpoint continuation: deletions retract via DRed,
@@ -969,13 +965,9 @@ where
             demand.anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let mut query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![Source::Branch(self.branch.clone())],
-                Vec::new(),
-                overlay,
-                env,
-            )
-            .with_demand(demand.clone());
+            let mut query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(vec![Source::Branch(self.branch.clone())], overlay, env)
+                    .with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -1037,17 +1029,13 @@ where
                 .anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a, Env> = QueryEnv::new(
-                vec![Source::Branch(self.branch.clone())],
-                Vec::new(),
-                overlay,
-                env,
-            )
-            .with_demand(self.demand.clone())
-            .with_fixpoint(
-                concept.this(),
-                Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
-            );
+            let query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(vec![Source::Branch(self.branch.clone())], overlay, env)
+                    .with_demand(self.demand.clone())
+                    .with_fixpoint(
+                        concept.this(),
+                        Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
+                    );
             // Driven for the same reason `evaluate` is: the
             // continuation's reads warm through the ambient queue.
             let queue = Provider::<Speculation>::execute(env, ()).await;

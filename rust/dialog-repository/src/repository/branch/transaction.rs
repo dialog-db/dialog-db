@@ -7,8 +7,8 @@ pub use query::{TransactionQuery, TransactionSelectQuery};
 use crate::Commit;
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
-use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
-use dialog_artifacts::{Changes, Statement};
+use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot};
+use dialog_artifacts::{Changes, Instruction, Statement, Update};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
@@ -45,30 +45,31 @@ use dialog_effects::memory::{Publish, Resolve};
 /// round and leave no trace in the committed tree.
 pub struct Transaction<Line> {
     line: Line,
-    /// The durable writes, held so reading them is a range read (see
-    /// [`Staged`]); exported to a [`Changes`] batch once, at commit.
-    changes: Staged,
-    transients: Staged,
+    changes: Changes,
+    transients: Changes,
 }
 
 impl<Line> Transaction<Line> {
     pub(crate) fn on(line: Line) -> Self {
         Transaction {
             line,
-            changes: Staged::default(),
-            transients: Staged::default(),
+            changes: Changes::new(),
+            transients: Changes::new(),
         }
     }
 
     /// Assert a claim into this transaction.
     pub fn assert<C: Statement>(mut self, claim: C) -> Self {
-        self.changes.assert(claim);
+        // Disambiguate from `Statement::assert` (which Changes now
+        // implements) by calling the claim's own assert into our
+        // changes buffer directly.
+        claim.assert(&mut self.changes);
         self
     }
 
     /// Retract a claim from this transaction.
     pub fn retract<C: Statement>(mut self, claim: C) -> Self {
-        self.changes.retract(claim);
+        claim.retract(&mut self.changes);
         self
     }
 
@@ -76,7 +77,7 @@ impl<Line> Transaction<Line> {
     /// reads and to inductive-rule bodies during this commit, seeding
     /// commit-time induction, but never committed to the branch.
     pub fn dispatch<C: Statement>(mut self, claim: C) -> Self {
-        self.transients.assert(claim);
+        claim.assert(&mut self.transients);
         self
     }
 
@@ -89,7 +90,19 @@ impl<Line> Transaction<Line> {
     /// (e.g. a reactor accumulating effect outputs across rounds) and
     /// need to merge it into a running transaction.
     pub fn integrate(mut self, changes: Changes) -> Self {
-        self.changes.apply(changes);
+        for instruction in changes.into_instructions() {
+            match instruction {
+                Instruction::Assert(a) => {
+                    Update::associate(&mut self.changes, a.the, a.of, a.is);
+                }
+                Instruction::Replace(a) => {
+                    Update::associate_unique(&mut self.changes, a.the, a.of, a.is);
+                }
+                Instruction::Retract(a) => {
+                    Update::dissociate(&mut self.changes, a.the, a.of, a.is);
+                }
+            }
+        }
         self
     }
 
@@ -105,24 +118,20 @@ impl<Line> Transaction<Line> {
     pub fn commit(self) -> TransactionCommit<Line> {
         TransactionCommit {
             line: self.line,
-            changes: self.changes.export(),
-            transients: self.transients.export(),
+            changes: self.changes,
+            transients: self.transients,
             allow_empty: false,
             canonicalize: false,
         }
     }
 }
 
-impl<Line> Transaction<Line> {
-    /// The staged layers [`Transaction::query`] reads over the line:
-    /// the durable writes, then the transients. Shared, not copied.
-    fn layers(&self) -> Vec<Staged> {
-        [&self.changes, &self.transients]
-            .into_iter()
-            .filter(|layer| !layer.is_empty())
-            .cloned()
-            .collect()
-    }
+/// The "as-if committed" view over `changes` + `transients` that
+/// [`Transaction::query`] serves on every line kind.
+fn transaction_view(changes: &Changes, transients: &Changes) -> Changes {
+    let mut view = changes.clone();
+    transients.clone().assert(&mut view);
+    view
 }
 
 impl<'a> Transaction<&'a Branch> {
@@ -135,7 +144,10 @@ impl<'a> Transaction<&'a Branch> {
     /// stream before the merge. Dispatched transients are part of the
     /// view too. The transaction itself stays open and committable.
     pub fn query(&self) -> TransactionQuery<'a> {
-        TransactionQuery::new(SourceRef::Branch(self.line), self.layers())
+        TransactionQuery::new(
+            SourceRef::Branch(self.line),
+            &transaction_view(&self.changes, &self.transients),
+        )
     }
 }
 
@@ -143,7 +155,10 @@ impl<'a> Transaction<&'a Snapshot> {
     /// Run queries against this transaction's "as-if committed" view of
     /// the snapshot. See [`Transaction::<&Branch>::query`].
     pub fn query(&self) -> TransactionQuery<'a> {
-        TransactionQuery::new(SourceRef::Snapshot(self.line), self.layers())
+        TransactionQuery::new(
+            SourceRef::Snapshot(self.line),
+            &transaction_view(&self.changes, &self.transients),
+        )
     }
 }
 

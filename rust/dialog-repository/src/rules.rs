@@ -38,7 +38,9 @@ use std::sync::{Arc, OnceLock};
 
 use dialog_artifacts::history::REVISION_ATTRIBUTE;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{Artifact, ArtifactSelector, Attribute, Entity, Statement, Update, Value};
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, Attribute, Changes, Entity, Statement, Update, Value,
+};
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
@@ -432,6 +434,46 @@ pub(crate) fn assemble(
         concept_rules.install(rule);
     }
     concept_rules
+}
+
+/// Read rules from an overlay [`Changes`] batch concluding `concept`.
+///
+/// The overlay is in-memory, so this is cheap and done fresh every
+/// query (never cached). Walks the batch for `dialog.rule/conclusion`
+/// pointing at `concept`, then their `dialog.rule/source` bodies.
+pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<DeductiveRule> {
+    use dialog_artifacts::Change;
+
+    let conclusion = conclusion_attr();
+    let source = source_attr();
+
+    // rule entities whose conclusion is `concept`, asserted in the overlay.
+    let mut rule_entities: Vec<Entity> = Vec::new();
+    for (entity, attribute, change) in changes.iter() {
+        if *attribute == conclusion
+            && let Change::Assert(Value::Entity(c)) | Change::Replace(Value::Entity(c)) = change
+            && c == concept
+        {
+            rule_entities.push(entity.clone());
+        }
+    }
+
+    // each rule entity's source body, hydrated.
+    let mut out = Vec::new();
+    for rule_entity in rule_entities {
+        for (entity, attribute, change) in changes.iter() {
+            if *entity == rule_entity
+                && *attribute == source
+                && let Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) =
+                    change
+                && let Ok(rule) = hydrate(bytes)
+            {
+                out.push(rule);
+                break;
+            }
+        }
+    }
+    out
 }
 
 // Re-export a shared cache handle type alias for the branch to hold.
