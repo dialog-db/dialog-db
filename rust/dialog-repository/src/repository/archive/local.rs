@@ -150,8 +150,13 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use dialog_capability::Subject;
+    use dialog_effects::archive::Put;
     use dialog_effects::archive::prelude::ArchiveScope;
-    use dialog_storage::provider::Volatile;
+    use dialog_effects::blob::Import as BlobImport;
+    use dialog_effects::storage::{Directory, Location};
+    use dialog_peer::helpers::unique_name;
+    use dialog_storage::provider::{FileSystem, Volatile};
+    use dialog_storage::resource::Resource as _;
     use dialog_varsig::did;
 
     fn test_catalog(name: &str) -> CatalogScope {
@@ -163,16 +168,30 @@ mod tests {
         Ok(())
     }
 
+    /// A local store the spill-lane tests run against: an archive catalog
+    /// beside a blob store.
+    trait Store: Provider<Get> + Provider<Put> + Provider<BlobRead> + Provider<BlobImport> {}
+    impl<T> Store for T where
+        T: Provider<Get> + Provider<Put> + Provider<BlobRead> + Provider<BlobImport>
+    {
+    }
+
+    /// A filesystem store in a fresh temp directory; OPFS on the web.
+    async fn filesystem(name: &str) -> Result<FileSystem> {
+        Ok(FileSystem::open(&Location::new(Directory::Temp, unique_name(name))).await?)
+    }
+
     /// A value spilled before values moved to the blob store is a block in
     /// the catalog, and still loads as a spill.
-    #[dialog_common::test]
-    async fn it_loads_a_stored_block_through_both_lanes() -> Result<()> {
-        let env = Volatile::new();
+    async fn loads_a_legacy_spill_block<Env>(env: &Env) -> Result<()>
+    where
+        Env: Store + ConditionalSync + 'static,
+    {
         let catalog = test_catalog("index");
         let block = Buffer::from(b"a block".to_vec());
-        put(&env, &catalog, &block).await?;
+        catalog.clone().put(block.clone()).perform(env).await?;
 
-        let index = LocalIndex::new(&env, catalog);
+        let index = LocalIndex::new(env, catalog);
         let node = LoadBlock::new(block.blake3_hash().clone())
             .perform(&index)
             .await?;
@@ -185,11 +204,22 @@ mod tests {
         Ok(())
     }
 
+    #[dialog_common::test]
+    async fn it_loads_a_stored_block_through_both_lanes() -> Result<()> {
+        loads_a_legacy_spill_block(&Volatile::new()).await
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_a_stored_block_through_both_lanes_on_the_filesystem() -> Result<()> {
+        loads_a_legacy_spill_block(&filesystem("legacy-spill").await?).await
+    }
+
     /// A spilled value in the blob store loads as a spill but is not a tree
     /// node: the blob store and the block catalog are separate lanes.
-    #[dialog_common::test]
-    async fn it_loads_a_spill_from_the_blob_store() -> Result<()> {
-        let env = Volatile::new();
+    async fn loads_a_spill_from_the_blob_store<Env>(env: &Env) -> Result<()>
+    where
+        Env: Store + ConditionalSync + 'static,
+    {
         let catalog = test_catalog("index");
         let value = Buffer::from(b"a spilled value".to_vec());
         let digest = value.blake3_hash().clone();
@@ -197,18 +227,28 @@ mod tests {
             .archive()
             .blob()
             .import(digest.clone(), value.as_ref().len() as u64)
-            .perform(&env)
+            .perform(env)
             .await?;
         writer.write_all(value.as_ref()).await?;
         writer.finish().await?;
 
-        let index = LocalIndex::new(&env, catalog);
+        let index = LocalIndex::new(env, catalog);
         let blob = LoadBlob::new(digest.clone()).perform(&index).await?;
         let node = LoadBlock::new(digest).perform(&index).await?;
 
         assert_eq!(blob, Some(value));
         assert!(node.is_none(), "a spill is not a tree node");
         Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_a_spill_from_the_blob_store() -> Result<()> {
+        loads_a_spill_from_the_blob_store(&Volatile::new()).await
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_a_spill_from_the_blob_store_on_the_filesystem() -> Result<()> {
+        loads_a_spill_from_the_blob_store(&filesystem("blob-spill").await?).await
     }
 
     #[dialog_common::test]
