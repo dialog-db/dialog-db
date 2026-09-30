@@ -72,6 +72,8 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Write as BlobWrite;
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_ucan::{UcanCertificate, UcanDelegation};
@@ -218,7 +220,9 @@ impl RetainDelegation<'_> {
     /// mints no revision).
     pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Entity>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -311,7 +315,9 @@ impl RetractDelegation<'_> {
     /// holds — or is about to stop referencing — is idempotent.)
     pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Entity>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>

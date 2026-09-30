@@ -4,6 +4,7 @@ use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::{ArchiveError, Get};
+use dialog_effects::blob::{BlobError, BlobReader, Read as BlobRead};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 
 /// Local content-addressed index backed by archive capabilities.
@@ -61,6 +62,52 @@ where
     }
 }
 
+impl<Env> LocalIndex<'_, Env>
+where
+    Env: Provider<Get> + Provider<BlobRead> + ConditionalSync + 'static,
+{
+    /// The spilled value stored under `hash` locally, if any.
+    ///
+    /// Spilled values live in the archive's blob store. Values spilled before
+    /// they moved there are still blocks in this catalog, so a blob-store
+    /// miss falls back to it.
+    pub async fn load_blob(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
+        match self
+            .catalog
+            .archive()
+            .blob()
+            .read(hash.clone())
+            .perform(self.env)
+            .await
+        {
+            Ok(reader) => Ok(Some(Buffer::from(
+                read_all(reader).await.map_err(archive_error)?,
+            ))),
+            Err(BlobError::NotFound(_)) => self.load(hash).await,
+            Err(error) => Err(archive_error(error)),
+        }
+    }
+}
+
+/// Every byte `reader` yields, in order.
+pub(crate) async fn read_all(mut reader: BlobReader) -> Result<Vec<u8>, BlobError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        bytes.extend(chunk);
+    }
+    Ok(bytes)
+}
+
+/// A blob-store failure as the archive failure a reader of this archive
+/// reports, keeping authorization and rejection decisions intact.
+pub(crate) fn archive_error(error: BlobError) -> ArchiveError {
+    match error {
+        BlobError::Authorization(error) => ArchiveError::Authorization(error),
+        BlobError::Rejected(error) => ArchiveError::Rejected(error),
+        error => ArchiveError::Storage(error.to_string()),
+    }
+}
+
 /// Tree nodes load from the local archive.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -78,19 +125,19 @@ where
     }
 }
 
-/// Spilled values load from the local archive, where commits write them
-/// beside the tree's nodes.
+/// Spilled values load from the local blob store, falling back to the
+/// block catalog for values spilled before they moved to blobs.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlob> for LocalIndex<'_, Env>
 where
-    Env: Provider<Get> + ConditionalSync + 'static,
+    Env: Provider<Get> + Provider<BlobRead> + ConditionalSync + 'static,
 {
     async fn execute(
         &self,
         LoadBlob { hash }: LoadBlob,
     ) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(self.load(&hash).await?)
+        Ok(self.load_blob(&hash).await?)
     }
 }
 
@@ -116,6 +163,8 @@ mod tests {
         Ok(())
     }
 
+    /// A value spilled before values moved to the blob store is a block in
+    /// the catalog, and still loads as a spill.
     #[dialog_common::test]
     async fn it_loads_a_stored_block_through_both_lanes() -> Result<()> {
         let env = Volatile::new();
@@ -133,6 +182,32 @@ mod tests {
 
         assert_eq!(node, Some(block.clone()));
         assert_eq!(blob, Some(block));
+        Ok(())
+    }
+
+    /// A spilled value in the blob store loads as a spill but is not a tree
+    /// node: the blob store and the block catalog are separate lanes.
+    #[dialog_common::test]
+    async fn it_loads_a_spill_from_the_blob_store() -> Result<()> {
+        let env = Volatile::new();
+        let catalog = test_catalog("index");
+        let value = Buffer::from(b"a spilled value".to_vec());
+        let digest = value.blake3_hash().clone();
+        let mut writer = catalog
+            .archive()
+            .blob()
+            .import(digest.clone(), value.as_ref().len() as u64)
+            .perform(&env)
+            .await?;
+        writer.write_all(value.as_ref()).await?;
+        writer.finish().await?;
+
+        let index = LocalIndex::new(&env, catalog);
+        let blob = LoadBlob::new(digest.clone()).perform(&index).await?;
+        let node = LoadBlock::new(digest).perform(&index).await?;
+
+        assert_eq!(blob, Some(value));
+        assert!(node.is_none(), "a spill is not a tree node");
         Ok(())
     }
 

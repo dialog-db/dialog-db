@@ -181,7 +181,13 @@ where
 impl<S, M: Mode> Provider<dialog_repository::Hydrate> for AccessEnv<S, M>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Self: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
+    Self: Provider<Get>
+        + Provider<Put>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
 {
     async fn execute(
         &self,

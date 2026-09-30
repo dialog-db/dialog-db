@@ -1,5 +1,6 @@
 use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::prelude::GetBlockExt as _;
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use std::sync::Arc;
 
 use crate::RemoteSite;
@@ -10,12 +11,15 @@ use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
+use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 use std::fmt::Display;
 
-pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
+use dialog_capability::Did;
+use dialog_network::NetworkAddress;
+pub use dialog_network::{Hydrate, HydrationLane, HydrationRequest, HydrationScheduler};
 
-use super::local::LocalIndex;
+use super::local::{LocalIndex, archive_error, read_all};
 use crate::ConnectedReplica;
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::CatalogScope;
@@ -145,7 +149,16 @@ where
         if let Some(block) = self.local.load(hash).await? {
             return Ok(Some(block));
         }
+        self.hydrate(hash, HydrationLane::Block).await
+    }
 
+    /// Fetch `hash` from the tracked remote through the env's [`Hydrate`],
+    /// into `lane`'s local store.
+    async fn hydrate(
+        &self,
+        hash: &Blake3Hash,
+        lane: HydrationLane,
+    ) -> Result<Option<Buffer>, ArchiveError> {
         let remote = match &self.remote {
             RemoteFallback::Remote(remote) => remote,
             RemoteFallback::None => return Ok(None),
@@ -173,10 +186,27 @@ where
             subject: route.subject,
             catalog: self.local.catalog().clone(),
             digest: hash.clone(),
+            lane,
             priority: self.priority,
         };
         let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
         Ok(hydrated.map(|bytes| Buffer::from(bytes.as_ref().clone())))
+    }
+}
+
+impl<Env> NetworkedIndex<'_, Env>
+where
+    Env: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
+{
+    /// The spilled value stored under `hash`: the local copy (blob store,
+    /// then the block catalog for values spilled before they moved to
+    /// blobs), or else the tracked remote's, hydrated into the local blob
+    /// store as it is read.
+    pub async fn load_blob(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
+        if let Some(blob) = self.local.load_blob(hash).await? {
+            return Ok(Some(blob));
+        }
+        self.hydrate(hash, HydrationLane::Blob).await
     }
 }
 
@@ -198,19 +228,20 @@ where
     }
 }
 
-/// Spilled values load the way nodes do: they live beside them in the
-/// local archive and hydrate from the same remote.
+/// Spilled values load from the local blob store (falling back to the
+/// block catalog for values spilled before they moved to blobs), and
+/// hydrate from the tracked remote's blob store.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlob> for NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
 {
     async fn execute(
         &self,
         LoadBlob { hash }: LoadBlob,
     ) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(self.load(&hash).await?)
+        Ok(self.load_blob(&hash).await?)
     }
 }
 
@@ -231,16 +262,26 @@ pub async fn hydrate<Env>(
     request: HydrationRequest,
 ) -> Result<Option<Arc<Vec<u8>>>, ArchiveError>
 where
-    Env:
-        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
 {
     let HydrationRequest {
         address,
         subject,
         catalog,
         digest,
+        lane,
         priority: _,
     } = request;
+    if lane == HydrationLane::Blob {
+        return hydrate_blob(env, address, subject, catalog, digest).await;
+    }
 
     if let Some(bytes) = catalog.clone().get(digest.clone()).perform(env).await? {
         return Ok(Some(Arc::new(bytes)));
@@ -281,6 +322,101 @@ where
         }
         None => Ok(None),
     }
+}
+
+/// The [`HydrationLane::Blob`] half of [`hydrate`]: a spilled value, re-checked
+/// locally (blob store, then the block catalog for values spilled before
+/// they moved to blobs), then fetched from the remote the same way, and
+/// written back into the local blob store.
+async fn hydrate_blob<Env>(
+    env: &Env,
+    address: NetworkAddress,
+    subject: Did,
+    catalog: CatalogScope,
+    digest: Blake3Hash,
+) -> Result<Option<Arc<Vec<u8>>>, ArchiveError>
+where
+    Env: Provider<Get>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
+{
+    let local = LocalIndex::new(env, catalog.clone());
+    if let Some(blob) = local.load_blob(&digest).await? {
+        return Ok(Some(Arc::new(blob.into_vec())));
+    }
+
+    let remote_blob = subject
+        .clone()
+        .reader()
+        .archive()
+        .blob()
+        .read(digest.clone())
+        .fork(&address)
+        .perform(env)
+        .await;
+    let bytes = match remote_blob {
+        Ok(reader) => read_all(reader).await.map_err(archive_error)?,
+        Err(BlobError::NotFound(_)) => {
+            match subject
+                .reader()
+                .archive()
+                .catalog("index")
+                .get(digest.clone())
+                .fork(&address)
+                .perform(env)
+                .await?
+            {
+                Some(bytes) => bytes,
+                None => return Ok(None),
+            }
+        }
+        Err(error) => return Err(archive_error(error)),
+    };
+
+    tracing::debug!(
+        target: "dialog::sync::hydrate",
+        blob = %digest,
+        bytes = bytes.len(),
+        "hydrated spilled value from remote"
+    );
+    // The import verifies the bytes against the digest; a failed write-back
+    // is not a failed read (the reader verifies what it loads), only a
+    // future remote round trip, so it is traced rather than raised.
+    if let Err(error) = write_blob(env, &catalog, &digest, &bytes).await {
+        tracing::debug!(
+            target: "dialog::sync::hydrate",
+            blob = %digest,
+            %error,
+            "failed to cache hydrated spilled value locally"
+        );
+    }
+    Ok(Some(Arc::new(bytes)))
+}
+
+/// Write `bytes` into `catalog`'s archive's blob store under `digest`,
+/// verified against it.
+pub(crate) async fn write_blob<Env>(
+    env: &Env,
+    catalog: &CatalogScope,
+    digest: &Blake3Hash,
+    bytes: &[u8],
+) -> Result<(), BlobError>
+where
+    Env: Provider<BlobImport> + ConditionalSync + 'static,
+{
+    let mut sink = catalog
+        .archive()
+        .blob()
+        .import(digest.clone(), bytes.len() as u64)
+        .perform(env)
+        .await?;
+    sink.write_all(bytes).await?;
+    sink.finish().await?;
+    Ok(())
 }
 
 #[cfg(test)]

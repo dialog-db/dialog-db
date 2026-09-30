@@ -8,6 +8,7 @@ use anyhow::Result;
 use dialog_artifacts::history::History as _;
 use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Value};
 use dialog_effects::blob::BlobError;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::query::Output;
 use dialog_query::{Concept, Query, Term, the};
@@ -54,7 +55,8 @@ fn person(id: &str, name: &str) -> Person {
 /// artifact index (the lowest read path there is).
 async fn names<'a, Env>(source: impl Into<SourceRef<'a>>, env: &Env) -> Result<Vec<String>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -92,7 +94,8 @@ async fn session_branches<Env>(
     env: &Env,
 ) -> Result<Vec<schema::SessionBranch>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
@@ -116,7 +119,8 @@ where
 /// Every `Person` a query layer yields, by name, sorted.
 async fn people<Env>(layer: QueryLayer<'_>, env: &Env) -> Result<Vec<String>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>

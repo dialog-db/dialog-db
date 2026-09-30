@@ -54,6 +54,7 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
 
@@ -116,7 +117,8 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
     /// `BranchMetadata` visible mid-transaction.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>

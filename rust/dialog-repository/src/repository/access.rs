@@ -49,7 +49,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Write as BlobWrite;
-use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
+use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_identity::Authority;
 use dialog_identity::access::Access;
@@ -157,6 +157,21 @@ where
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<Fork<RemoteSite, BlobRead>> for MigrateEnv<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: ConditionalSync,
+{
+    async fn execute(
+        &self,
+        _input: <Fork<RemoteSite, BlobRead> as Command>::Input,
+    ) -> <Fork<RemoteSite, BlobRead> as Command>::Output {
+        Err(BlobError::NotFound("migration reads no remote".to_string()))
+    }
+}
+
 // Hydration under migration is the plain, unshared read: the local
 // check runs, and the remote leg degrades to the fork stub above
 // (migration is a local operation).
@@ -165,7 +180,12 @@ where
 impl<S> Provider<crate::Hydrate> for MigrateEnv<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Self: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
+    Self: Provider<Get>
+        + Provider<Put>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + ConditionalSync
+        + 'static,
 {
     async fn execute(
         &self,

@@ -8,7 +8,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use dialog_effects::storage::Location;
 
 use dialog_effects::MethodExt as _;
-use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveScope};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use std::collections::HashSet;
 
@@ -28,14 +28,13 @@ use dialog_artifacts::{
 use dialog_artifacts::{Asset, Changes, Entity, Update as _};
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
+use dialog_common::Buffer;
 use dialog_credentials::SignerCredential;
+use dialog_effects::blob::BlobError;
 use dialog_effects::peer::prelude::*;
 use dialog_peer::helpers::{
     open_peer, test_grant, test_session_with_peer, test_state, test_storage, unique_name,
 };
-// Only the native-only tests below construct one.
-#[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::blob::BlobError;
 // The first-contact rig builds its sites on temp storage; native-only
 // like every test that does.
 #[cfg(not(feature = "web-integration-tests"))]
@@ -49,7 +48,7 @@ use dialog_artifacts::{ShipmentRef, shipment_ref};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_capability::{Fork, Provider};
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _, GetBlockExt as _};
+use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -1181,15 +1180,15 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
-/// Push ships a spilling scalar value's block to the remote before publishing.
+/// Push ships a spilling scalar value's bytes to the remote before publishing.
 ///
 /// A value larger than the tree's inline threshold does not travel in the key
-/// or the fact payload; its bytes are a content-addressed block in the archive,
-/// keyed by the value's 32-byte reference. The push spilled-ref differential
-/// must surface that block so it lands on the remote alongside the tree nodes.
+/// or the fact payload; its bytes are a blob in the archive, keyed by the
+/// value's 32-byte reference. The push spilled-ref differential must surface
+/// that blob so it lands on the remote alongside the tree nodes.
 ///
-/// Proven two ways: (1) the block is directly readable from the remote archive
-/// under its value reference, byte-equal to the value's bytes; and (2) a second
+/// Proven two ways: (1) the bytes are directly readable from the remote blob
+/// store under its value reference, byte-equal to the value's bytes; and (2) a second
 /// site with an entirely separate local store pulls the revision and selects
 /// the fact back, reconstructing the exact `Value` it never wrote locally —
 /// only possible if the spilled block reached the remote. A same-store local
@@ -1275,8 +1274,25 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     assert_eq!(local.len(), 1, "site A should read its own spilled fact");
     assert_eq!(local[0].is, value, "local select reconstructs the value");
 
-    // The spilled block itself is present on the REMOTE archive, byte-equal to
-    // the value's bytes, under the value's 32-byte reference.
+    // The spilled value itself is in the REMOTE blob store, byte-equal to the
+    // value's bytes, under the value's 32-byte reference, and not beside the
+    // tree nodes in its block catalog.
+    let mut reader = Subject::from(origin_a.did())
+        .reader()
+        .archive()
+        .blob()
+        .read(NodeHash::from(reference))
+        .perform(&origin_a.connection(&operator_a))
+        .await?;
+    let mut remote_bytes = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        remote_bytes.extend(chunk);
+    }
+    assert_eq!(
+        remote_bytes,
+        value.to_bytes(),
+        "the spilled value must be in the remote blob store after push"
+    );
     let remote_block = origin_a
         .archive()
         .index()
@@ -1284,9 +1300,8 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         .perform(&operator_a)
         .await?;
     assert_eq!(
-        remote_block,
-        Some(value.to_bytes()),
-        "the spilled value block must be on the remote after push"
+        remote_block, None,
+        "a spilled value is not shipped as a block"
     );
 
     // --- Site B: same remote subject, separate local store; pull then select. ---
@@ -2247,6 +2262,7 @@ delegate_provider!(
     dialog_effects::memory::Resolve,
     dialog_effects::memory::Publish,
     dialog_effects::blob::Read,
+    dialog_effects::blob::Import,
     crate::Hydrate,
     Fork<RemoteSite, dialog_effects::archive::Get>,
     Fork<RemoteSite, dialog_effects::archive::Put>,
@@ -2393,20 +2409,25 @@ async fn assert_remote_closure_complete(
                 }
                 ShipmentRef::SpilledValue(reference) => {
                     let reference = NodeHash::from(*reference);
-                    let found: Option<Vec<u8>> = address
+                    let probe = address
                         .subject
                         .clone()
                         .reader()
                         .archive()
-                        .catalog("index")
-                        .get(reference.clone())
-                        .fork(&address.address)
+                        .blob()
+                        .read(reference.clone())
+                        .fork(address.site())
                         .perform(operator)
-                        .await?;
+                        .await;
+                    let on_remote = match probe {
+                        Ok(_) => true,
+                        Err(BlobError::NotFound(_)) => false,
+                        Err(error) => return Err(error.into()),
+                    };
                     assert!(
-                        found.is_some(),
+                        on_remote,
                         "closure violated: node {hash} is on the remote but \
-                         spilled value block {reference} is not"
+                         spilled value {reference} is not"
                     );
                 }
                 ShipmentRef::BlobRemoved(_) => {}
@@ -4183,7 +4204,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
     );
 
     // Without reaching for the remote, a complete export must refuse: it
-    // cannot read a block it does not hold, and silently omitting it would
+    // cannot read a spilled value it does not hold, and silently omitting it would
     // only surface at the destination, at read time.
     let refused = drain(
         repo_b
@@ -4194,11 +4215,11 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
     .await;
     assert!(
         refused.is_err(),
-        "a complete export must not omit the spilled block it cannot read"
+        "a complete export must not omit the spilled value it cannot read"
     );
 
-    // With `download`, the export must carry every referenced block,
-    // fetching the spilled value through the upstream.
+    // With `download`, the export must carry every referenced spilled value
+    // as a blob, fetching it through the upstream.
     let upstream = contact("origin")
         .connect()
         .repository(repo_a.did())
@@ -4213,8 +4234,8 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
     let mut exported = HashSet::new();
     futures_util::pin_mut!(items);
     while let Some(item) = items.next().await {
-        if let Item::Block(block) = item? {
-            exported.insert(block.digest);
+        if let Item::Blob { digest, .. } = item? {
+            exported.insert(digest);
         }
     }
     for reference in referenced {
@@ -5815,5 +5836,148 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
     bob_branch.pull().perform(&operator).await?;
     bob_branch.push().perform(&operator).await?;
 
+    Ok(())
+}
+
+/// A remote written before spilled values moved to the blob store holds
+/// them as blocks beside the tree's nodes. A replica pulling from it still
+/// reads the value: hydration misses the remote blob store, falls back to
+/// its block catalog, and lands the bytes in the local blob store.
+#[dialog_common::test]
+async fn it_hydrates_a_spill_a_legacy_remote_holds_as_a_block(s3: S3Address) -> Result<()> {
+    // --- Site A: commit a spilling fact, then write the remote the way a
+    // replica did before spills moved to blobs. ---
+    let (operator_a, profile_a) = test_session_with_peer().await;
+    let (repo_a, branch_a) =
+        setup_repo_with_s3_remote(&operator_a, &profile_a, &s3, "legacy-a").await?;
+    let value = Value::String("legacy".repeat(1024));
+    let spilled = NodeHash::from(value.to_reference());
+    branch_a
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "doc/body".parse()?,
+            of: "doc:1".parse()?,
+            is: value.clone(),
+            cause: None,
+        })]))
+        .perform(&operator_a)
+        .await?;
+    let revision = branch_a.revision().expect("site A has a revision");
+
+    let origin_a = contact("origin")
+        .connect()
+        .repository(repo_a.did())
+        .open()
+        .perform(&operator_a)
+        .await?;
+    let items = repo_a
+        .snapshot(revision.clone())
+        .export()
+        .perform(&operator_a);
+    futures_util::pin_mut!(items);
+    while let Some(item) = items.next().await {
+        // Every node and every spilled value as a block in the catalog.
+        let content = match item? {
+            Item::Block(block) => block.content,
+            Item::Blob { mut chunks, .. } => {
+                let mut bytes = Vec::new();
+                while let Some(chunk) = chunks.next().await? {
+                    bytes.extend(chunk);
+                }
+                Buffer::from(bytes)
+            }
+        };
+        origin_a
+            .archive()
+            .index()
+            .put(content)
+            .perform(&operator_a)
+            .await?;
+    }
+    origin_a
+        .branch("main")
+        .open()
+        .perform(&operator_a)
+        .await?
+        .publish(revision)
+        .perform(&operator_a)
+        .await?;
+
+    let probe = Subject::from(origin_a.did())
+        .reader()
+        .archive()
+        .blob()
+        .read(spilled.clone())
+        .perform(&origin_a.connection(&operator_a))
+        .await;
+    assert!(
+        matches!(probe, Err(BlobError::NotFound(_))),
+        "the legacy remote holds the spill only as a block"
+    );
+
+    // --- Site B: same remote, empty local store; pull then select. ---
+    let storage_b = test_storage().await;
+    let profile_b = open_peer(
+        storage_b.clone(),
+        Location::profile(unique_name("legacy-b")),
+    )
+    .await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .space(profile_b.state())
+        .allow(Subject::any())
+        .await?;
+    let repo_b = profile_b
+        .space(unique_name("legacy-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    profile_b
+        .secrets()
+        .site(s3_site_address(&s3))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile_b)
+        .await?;
+    let origin_b = connect("origin", s3_site_address(&s3), repo_a.did(), &operator_b).await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+    branch_b.pull().perform(&operator_b).await?;
+
+    let rows: Vec<_> = branch_b
+        .claims()
+        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .to_owned()
+        .perform(&operator_b)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(rows.len(), 1, "site B reads the pulled fact");
+    assert_eq!(
+        rows[0].is, value,
+        "site B reconstructs the spilled value from the legacy block"
+    );
+
+    let mut reader = branch_b
+        .archive()
+        .index()
+        .archive()
+        .blob()
+        .read(spilled)
+        .perform(&operator_b)
+        .await?;
+    let mut local = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        local.extend(chunk);
+    }
+    assert_eq!(
+        local,
+        value.to_bytes(),
+        "the hydrated spill lands in the local blob store"
+    );
     Ok(())
 }

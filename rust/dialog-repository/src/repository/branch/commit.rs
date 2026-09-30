@@ -1,4 +1,5 @@
 use super::merge::merge_with_winner;
+use crate::repository::archive::persist;
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, Index, NetworkedIndex, PublishError, RemoteSite, RepositoryMemoryExt as _,
@@ -15,6 +16,8 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
 use futures_util::{Stream, stream};
 
@@ -177,7 +180,9 @@ where
     #[tracing::instrument(skip_all, name = "commit")]
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -203,7 +208,9 @@ where
         env: &Env,
     ) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -325,7 +332,9 @@ where
         env: &Env,
     ) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -468,7 +477,9 @@ where
         line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
     ) -> Result<Outcome, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -639,13 +650,7 @@ where
             };
             let batch = batch.record(&store, self.entries).await?;
             tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
-            source
-                .archive()
-                .index()
-                .import(delta.flush_blocks().chain(delta.flush_blobs()))
-                .perform(env)
-                .await
-                .map_err(DialogArtifactsError::from)?;
+            persist(&source.archive().index(), &mut delta, env).await?;
             revision.tree = TreeReference::from(*tree.root().as_bytes());
             revision.signature = Attest::new(revision.payload()).perform(env).await?;
             return Ok(Outcome::Minted(Box::new(Minted {
@@ -759,13 +764,7 @@ where
         // reference-counted, so nothing is copied on the way in, and
         // providers with native batching persist it in a single round trip
         // (one IndexedDB transaction).
-        source
-            .archive()
-            .index()
-            .import(delta.flush_blocks().chain(delta.flush_blobs()))
-            .perform(env)
-            .await
-            .map_err(DialogArtifactsError::from)?;
+        persist(&source.archive().index(), &mut delta, env).await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
         revision.context = Some(context.clone());
