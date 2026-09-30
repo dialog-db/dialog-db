@@ -122,6 +122,7 @@ impl<Line> Transaction<Line> {
             transients: self.transients,
             allow_empty: false,
             canonicalize: false,
+            amend: false,
         }
     }
 }
@@ -204,6 +205,7 @@ pub struct TransactionCommit<Line> {
     pub(super) transients: Changes,
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
+    pub(super) amend: bool,
 }
 
 impl<Line> TransactionCommit<Line> {

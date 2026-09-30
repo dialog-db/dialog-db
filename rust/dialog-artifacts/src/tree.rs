@@ -845,7 +845,7 @@ impl ArtifactTreeExt for ArtifactTree {
             transient,
             store,
             &storage,
-            version,
+            version.into(),
             &manifest,
             instructions,
             WriteScope::Application,
@@ -1376,6 +1376,63 @@ pub enum WriteScope {
     Machinery,
 }
 
+/// What a batch stamps its writes with.
+///
+/// A versioned batch tags every datum it writes with its [`Version`] and
+/// records each instruction's history under it. A batch normally writes
+/// under a version nothing in the tree carries yet; an amending batch
+/// writes more under a version the tree already carries (an amended
+/// commit), so what it records folds into what is recorded there, exactly
+/// as two writes of one batch fold into each other.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Stamp {
+    /// Unversioned writes: no history is recorded.
+    Unversioned,
+    /// Writes under a version the tree carries nothing under yet.
+    Fresh(Version),
+    /// More writes under a version the tree already carries writes under.
+    Amend(Version),
+}
+
+impl Stamp {
+    /// The version writes are tagged with, if any.
+    pub fn version(&self) -> Option<Version> {
+        match self {
+            Stamp::Unversioned => None,
+            Stamp::Fresh(version) | Stamp::Amend(version) => Some(*version),
+        }
+    }
+}
+
+impl From<Option<Version>> for Stamp {
+    fn from(version: Option<Version>) -> Self {
+        match version {
+            None => Stamp::Unversioned,
+            Some(version) => Stamp::Fresh(version),
+        }
+    }
+}
+
+/// Folds a later history record into the versions an earlier record at the
+/// same history key superseded: the later record's polarity, citing both
+/// records' superseded versions, earlier first.
+fn fold_record(earlier: &[Version], later: Record) -> Record {
+    if earlier.is_empty() {
+        return later;
+    }
+    let mut versions = earlier.to_vec();
+    versions.extend_from_slice(later.claim().cause.versions());
+    let claim = Claim {
+        cause: HistoryCause::new(versions),
+        ..later.claim().clone()
+    };
+    if later.is_assertion() {
+        Record::Assert(claim)
+    } else {
+        Record::Retract(claim)
+    }
+}
+
 /// Applies an instruction stream to any [`ArtifactWriter`], returning the
 /// written target and whether the batch changed the indexes.
 ///
@@ -1411,7 +1468,7 @@ pub async fn write_instructions<W, S, I>(
     mut transient: W,
     store: &mut S,
     storage: &ContentAddressedStorage<TreeStorageBridge<S>>,
-    version: Option<Version>,
+    stamp: Stamp,
     manifest: &Manifest,
     instructions: I,
     scope: WriteScope,
@@ -1434,29 +1491,16 @@ where
     // a stale peer's copy while the graft path did. The fold keeps the
     // later record's polarity and unions the superseded versions: a
     // re-assert citing what it overrode.
+    let version = stamp.version();
     let mut history_records: BTreeMap<Key, Record> = BTreeMap::new();
     let mut changed = false;
     let buffer_record = |records: &mut BTreeMap<Key, Record>, record: Record, version: &Version| {
         let key = record.key(version, manifest);
-        match records.remove(&key) {
-            None => {
-                records.insert(key, record);
-            }
-            Some(earlier) => {
-                let mut versions = earlier.claim().cause.versions().to_vec();
-                versions.extend_from_slice(record.claim().cause.versions());
-                let claim = Claim {
-                    cause: HistoryCause::new(versions),
-                    ..record.claim().clone()
-                };
-                let folded = if record.is_assertion() {
-                    Record::Assert(claim)
-                } else {
-                    Record::Retract(claim)
-                };
-                records.insert(key, folded);
-            }
-        }
+        let record = match records.remove(&key) {
+            None => record,
+            Some(earlier) => fold_record(earlier.claim().cause.versions(), record),
+        };
+        records.insert(key, record);
     };
 
     tokio::pin!(instructions);
@@ -1748,6 +1792,17 @@ where
     if let Some(version) = &version {
         let mut entries = Vec::with_capacity(history_records.len() * 2);
         for (key, record) in history_records {
+            // An amended version already has history recorded under it:
+            // fold into the record at this key the way two writes of one
+            // batch fold, so amending a commit records exactly what one
+            // commit making both sets of writes would have.
+            let record = match stamp {
+                Stamp::Amend(_) => match transient.read(&key, storage).await? {
+                    Some(State::Added(stored)) => fold_record(&stored.supersedes, record),
+                    _ => record,
+                },
+                Stamp::Fresh(_) | Stamp::Unversioned => record,
+            };
             if let Some(coverage) = record.coverage_entry(version) {
                 entries.push(coverage);
             }

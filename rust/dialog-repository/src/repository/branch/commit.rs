@@ -249,6 +249,7 @@ where
             scope: self.scope,
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
+            amend: None,
         }
         .perform(env, |profile, issuer| {
             branch.commit_identity(profile, issuer)
@@ -342,6 +343,7 @@ where
             scope: self.scope,
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
+            amend: None,
         }
         .perform(env, |_, issuer| {
             (lineage.clone(), origin_of(&lineage, issuer))
@@ -421,6 +423,20 @@ pub(crate) struct Mint<'a, Changes> {
     pub(crate) allow_empty: bool,
     /// Flush buffers to the leaves first. See [`Commit::canonicalize`].
     pub(crate) canonicalize: bool,
+    /// Fold the batch into `base` instead of minting its successor: `base`
+    /// is a staged revision nobody has seen, and this is what it recorded.
+    /// See [`TransactionCommit::amend`](crate::TransactionCommit::amend).
+    pub(crate) amend: Option<Amended>,
+}
+
+/// What a staged revision recorded about itself, for a [`Mint`] amending
+/// it: its signed in-tree record and its causal context. Amending leaves
+/// both as they are; only the revision's tree changes.
+pub(crate) struct Amended {
+    /// The revision's signed in-tree record.
+    pub(crate) record: RevisionRecord,
+    /// The revision's causal context.
+    pub(crate) context: Context,
 }
 
 impl<Changes> Mint<'_, Changes>
@@ -473,12 +489,32 @@ where
         let issuer = authority.did();
         let profile = authority.profile().clone();
 
-        let edition = base_revision
-            .as_ref()
-            .map(|base| base.edition.successor())
-            .unwrap_or(Edition::GENESIS);
         let (line_entity, origin) = line(&profile, &issuer);
-        let version = Version::new(origin, edition);
+        // An amend writes more under the version it amends; anything else
+        // mints the successor of its base.
+        let version = match (&self.amend, base_revision.as_ref()) {
+            (Some(_), Some(base)) => {
+                let amended = base.version();
+                // Only the actor that minted a staged revision may amend
+                // it: its version names that actor's origin.
+                if amended.origin != origin {
+                    return Err(CommitError::Amend(format!(
+                        "revision {amended} was minted by another issuer"
+                    )));
+                }
+                amended
+            }
+            (Some(_), None) => {
+                return Err(CommitError::Amend(
+                    "there is no revision to amend".to_string(),
+                ));
+            }
+            (None, base) => Version::new(
+                origin,
+                base.map(|base| base.edition.successor())
+                    .unwrap_or(Edition::GENESIS),
+            ),
+        };
 
         // Walk forward from the base revision's tree root, or from the
         // empty tree if the line has no commits yet (and therefore no tree
@@ -520,15 +556,30 @@ where
         // for callers that want the history-independent form (see
         // `Commit::canonicalize`).
         let mut delta = Delta::zero();
-        let batch = dialog_artifacts::BufferedBatch::apply_reusing(
-            source.spine(),
-            &tree,
-            &mut store,
-            Some(version),
-            changes,
-            self.scope,
-        )
-        .await?;
+        let batch = match self.amend {
+            Some(_) => {
+                dialog_artifacts::BufferedBatch::amend_reusing(
+                    source.spine(),
+                    &tree,
+                    &mut store,
+                    version,
+                    changes,
+                    self.scope,
+                )
+                .await?
+            }
+            None => {
+                dialog_artifacts::BufferedBatch::apply_reusing(
+                    source.spine(),
+                    &tree,
+                    &mut store,
+                    Some(version),
+                    changes,
+                    self.scope,
+                )
+                .await?
+            }
+        };
         // Machinery entries count as changes: a commit carrying only a
         // blob-index edit still advances the head.
         let changed = batch.changed() || !self.entries.is_empty();
@@ -544,6 +595,35 @@ where
             && let Some(base) = base_revision
         {
             return Ok(Outcome::Unchanged(base));
+        }
+
+        // An amend replaces its base in place: the revision keeps its
+        // version, record, and causal context, since none of them depend
+        // on the tree, and only the tree it names moves to include the
+        // batch. The record is already in the tree; the batch folded its
+        // history into what the base recorded.
+        if let Some(Amended { record, context }) = self.amend {
+            let Some(mut revision) = base_revision else {
+                return Err(CommitError::Amend(
+                    "there is no revision to amend".to_string(),
+                ));
+            };
+            let batch = batch.record(&store, self.entries).await?;
+            tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
+            source
+                .archive()
+                .index()
+                .import(delta.flush().map(|(_, buffer)| buffer))
+                .perform(env)
+                .await
+                .map_err(DialogArtifactsError::from)?;
+            revision.tree = TreeReference::from(*tree.root().as_bytes());
+            revision.signature = Attest::new(revision.payload()).perform(env).await?;
+            return Ok(Outcome::Minted(Box::new(Minted {
+                revision,
+                record,
+                context,
+            })));
         }
 
         // Mint the revision (the placeholder tree root is replaced below,
