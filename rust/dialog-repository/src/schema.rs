@@ -349,7 +349,23 @@ pub mod vault_secret {
 /// All attributes here live under the `dialog.space` domain: the
 /// repositories a peer keeps, by name, and where each is stored.
 pub mod space {
-    use super::Attribute;
+    use super::{Attribute, Entity};
+
+    /// `dialog.space/peer` — the peer that keeps the repository.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Peer(
+        /// The peer's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.space/repository` — the repository kept.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Repository(
+        /// The repository's entity: its DID.
+        pub Entity,
+    );
 
     /// `dialog.space/name` — the name the peer knows the repository by.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -809,14 +825,20 @@ impl AsRef<Entity> for PeerAddress {
 }
 
 /// A repository a peer keeps, by the name it knows it by and where it
-/// is stored. Its entity is the repository's DID.
+/// is stored on that peer's device. Its entity is derived from the peer
+/// and the repository, so peers whose records sync into one space each
+/// keep their own names and locations.
 ///
 /// What a peer's space names resolve to: looking a repository up by name
 /// reads these before anything is looked for on disk.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Space {
-    /// The repository's entity: its DID.
+    /// The record's entity, derived from the peer and the repository.
     pub this: Entity,
+    /// The peer that keeps it.
+    pub peer: space::Peer,
+    /// The repository.
+    pub repository: space::Repository,
     /// The name the peer knows it by.
     pub name: space::Name,
     /// Where it is stored.

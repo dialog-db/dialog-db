@@ -35,7 +35,13 @@ note was written while a derived peer was called a *worker* and built with
   vault but acts through a delegation from it, and opens a vault through
   a custodian credential (`OpenVault::via`). Rotation opens the vault the
   same way and re-holds every member's copy without a secret ever
-  leaving sealed form.
+  leaving sealed form. The peer that creates or adopts a space also keeps
+  a copy of its key sealed to itself, so it signs as that space without
+  the account's custodian; rotating the account without that peer
+  forgets the copy, and a copy already opened elsewhere stands, as a
+  delegation copied elsewhere does. An account is handed over to a key
+  its owner holds (`Vault::hand_over`) knowing only the owner's DID, and
+  before any vault is opened below it.
 - A peer's records are brought up to date by numbered upgrade steps an
   application registers on the builder (`PeerBuilder::upgrade(Step)`),
   recorded in the home's `dialog/peer` version cell; a failed step runs

@@ -202,6 +202,14 @@ impl<T> Default for Retract<T> {
     }
 }
 
+impl Attenuation for Retract<dialog_credentials::Credential> {
+    type Of = Key;
+}
+
+impl Effect for Retract<dialog_credentials::Credential> {
+    type Output = Result<(), CredentialError>;
+}
+
 impl Attenuation for Retract<Secret> {
     type Of = Site;
 }

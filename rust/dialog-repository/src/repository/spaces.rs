@@ -35,26 +35,35 @@ pub enum SpaceError {
     Encoding(String),
 }
 
-/// Record in `state` that the repository `subject` is known as `name` and
-/// stored at `location`.
+/// The entity of `peer`'s record of the repository `subject`.
+fn kept(peer: &Did, subject: &Did) -> Entity {
+    secrets::derived("space", format!("{peer}\u{0}{subject}").as_bytes())
+}
+
+/// Record in `state` that `peer` knows the repository `subject` as `name`
+/// and stores it at `location`.
 ///
-/// A name picks out one repository: one recorded under it before, other
-/// than `subject`, stops being known by it.
+/// A name picks out one repository for a peer: one the peer recorded
+/// under it before, other than `subject`, stops being known by it. Other
+/// peers' names are their own.
 pub async fn record<Env: RegistryEnv>(
     state: &Branch,
+    peer: &Did,
     subject: &Did,
     name: &str,
     location: &Location,
     env: &Env,
 ) -> Result<(), SpaceError> {
     let mut changes = Changes::new();
-    for previous in named(state, name, env).await? {
-        if previous.this != subject.this() {
+    for previous in named(state, peer, name, env).await? {
+        if previous.repository.0 != subject.this() {
             previous.retract(&mut changes);
         }
     }
     Space {
-        this: subject.this(),
+        this: kept(peer, subject),
+        peer: space::Peer(peer.this()),
+        repository: space::Repository(subject.this()),
         name: space::Name(name.to_string()),
         address: space::Address(location.uri()),
     }
@@ -96,9 +105,10 @@ pub async fn sealed<Env: RegistryEnv>(
         .map(|held| held.sealed))
 }
 
-/// The records of the repositories `state` knows by `name`.
+/// The records of the repositories `peer` knows by `name` in `state`.
 async fn named<Env: RegistryEnv>(
     state: &Branch,
+    peer: &Did,
     name: &str,
     env: &Env,
 ) -> Result<Vec<Space>, SpaceError> {
@@ -107,6 +117,8 @@ async fn named<Env: RegistryEnv>(
             .query()
             .select(Query::<Space> {
                 this: Term::var("this"),
+                peer: peer.this().into(),
+                repository: Term::var("repository"),
                 name: name.to_string().into(),
                 address: Term::var("address"),
             })
@@ -116,17 +128,19 @@ async fn named<Env: RegistryEnv>(
     .await?)
 }
 
-/// The repositories `state` knows by `name`, and where each is stored.
+/// The repositories `peer` knows by `name` in `state`, and where each is
+/// stored.
 pub async fn find<Env: RegistryEnv>(
     state: &Branch,
+    peer: &Did,
     name: &str,
     env: &Env,
 ) -> Result<Vec<(Did, Location)>, SpaceError> {
-    named(state, name, env)
+    named(state, peer, name, env)
         .await?
         .into_iter()
         .map(|row| {
-            let subject = subject(&row.this)?;
+            let subject = subject(&row.repository.0)?;
             let location = Location::from_uri(&row.address.0).ok_or_else(|| {
                 SpaceError::Encoding(format!("{} is not a storage location", row.address.0))
             })?;
@@ -142,10 +156,11 @@ fn subject(entity: &Entity) -> Result<Did, SpaceError> {
         .map_err(|_| SpaceError::Encoding(format!("{entity} is not a repository DID")))
 }
 
-/// Where `state` records the repository `subject` is stored, under each
-/// name it is known by.
+/// Where `peer` records the repository `subject` is stored, under each
+/// name it knows it by.
 pub async fn locate<Env: RegistryEnv>(
     state: &Branch,
+    peer: &Did,
     subject: &Did,
     env: &Env,
 ) -> Result<Vec<(String, Location)>, SpaceError> {
@@ -153,7 +168,9 @@ pub async fn locate<Env: RegistryEnv>(
         state
             .query()
             .select(Query::<Space> {
-                this: subject.this().into(),
+                this: Term::var("this"),
+                peer: peer.this().into(),
+                repository: subject.this().into(),
                 name: Term::var("name"),
                 address: Term::var("address"),
             })
@@ -182,8 +199,8 @@ mod tests {
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_varsig::did;
 
-    /// A name picks out one space: recording it for another repository
-    /// moves it there, rather than leaving the name naming two.
+    /// A name picks out one space for a peer: recording it for another
+    /// repository moves it there, rather than leaving the name naming two.
     #[dialog_common::test]
     async fn it_moves_a_name_to_the_repository_last_recorded_under_it() -> anyhow::Result<()> {
         let (session, peer) = test_session_with_peer().await;
@@ -191,10 +208,20 @@ mod tests {
         let state = repo.branch("state").open().perform(&session).await?;
         let first = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
         let second = did!("key:z6MkkZfZmshVFcBYo9RS6ZyUstxYdjjStQaFaL2TSTVdsiJh");
+        let keeper = peer.did();
 
-        record(&state, &first, "notes", &Location::temp("first"), &session).await?;
         record(
             &state,
+            &keeper,
+            &first,
+            "notes",
+            &Location::temp("first"),
+            &session,
+        )
+        .await?;
+        record(
+            &state,
+            &keeper,
             &second,
             "notes",
             &Location::temp("second"),
@@ -203,8 +230,51 @@ mod tests {
         .await?;
 
         assert_eq!(
-            find(&state, "notes", &session).await?,
+            find(&state, &keeper, "notes", &session).await?,
             vec![(second, Location::temp("second"))]
+        );
+        Ok(())
+    }
+
+    /// Peers whose records share one space keep their own names and
+    /// locations: one peer naming another repository leaves the other's
+    /// name where it was.
+    #[dialog_common::test]
+    async fn it_keeps_each_peers_names_apart() -> anyhow::Result<()> {
+        let (session, peer) = test_session_with_peer().await;
+        let repo = test_repo(&session, &peer).await;
+        let state = repo.branch("state").open().perform(&session).await?;
+        let first = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        let second = did!("key:z6MkkZfZmshVFcBYo9RS6ZyUstxYdjjStQaFaL2TSTVdsiJh");
+        let laptop = did!("key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH");
+        let phone = did!("key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG");
+
+        record(
+            &state,
+            &laptop,
+            &first,
+            "notes",
+            &Location::temp("a"),
+            &session,
+        )
+        .await?;
+        record(
+            &state,
+            &phone,
+            &second,
+            "notes",
+            &Location::temp("b"),
+            &session,
+        )
+        .await?;
+
+        assert_eq!(
+            find(&state, &laptop, "notes", &session).await?,
+            vec![(first, Location::temp("a"))]
+        );
+        assert_eq!(
+            find(&state, &phone, "notes", &session).await?,
+            vec![(second, Location::temp("b"))]
         );
         Ok(())
     }

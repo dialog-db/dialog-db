@@ -74,8 +74,9 @@ pub use builder::{
 pub use mode::{Local, Mode, Session};
 pub use runtime::Runtime;
 pub use secret::{
-    Add, Conceal, Delegate, ForgetSecret, KeepSecret, OpenVault, Reveal, RevealSecret, Rotate,
-    SecretReference, SpaceVaultExt, Vault, VaultReference,
+    Add, Conceal, Delegate, ForgetSecret, HandOver, HeldHandOver, HeldReference, HeldRevoke,
+    HeldShare, KeepSecret, OpenVault, Reveal, RevealSecret, Rotate, SecretReference, SpaceVaultExt,
+    Vault, VaultReference,
 };
 pub use upgrade::{Step, StepBound, StepFuture, Upgraded};
 
@@ -276,6 +277,12 @@ pub(crate) struct Inner {
     /// built from a key alone has no peer to ask, and a peer acting as
     /// itself opens its own.
     sites: Option<Arc<dyn secret::SiteSecrets>>,
+    /// The peer this handle acts for, whose records of spaces it reads and
+    /// writes: itself when it holds its key; the peer it was built from
+    /// when it is a session of one; and the home, standing in for the peer
+    /// whose state it was given, when it is a session built from a key
+    /// alone.
+    holder: Did,
 }
 
 impl<S: Clone, M: Mode> fmt::Debug for Peer<S, M> {
