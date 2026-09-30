@@ -84,7 +84,7 @@ Every key Dialog creates is an Ed25519 key pair, named by its public key written
 </svg>
 </figure>
 
-The two-byte prefix `ed 01` says what kind of key follows. The 34 bytes are written in base58, and prefixed with `z` to say so. The bytes above become `did:key:z6MkgyhVBiwiVdpYtCepzRZFdQcdBNEZZjNBZN6CwyYC97tg`. Every Ed25519 `did:key` starts with `z6Mk`, because that is what the prefix bytes turn into. A remote checking permissions also accepts P-256 signatures, and issuers named by `did:web` or `did:plc`, so keys Dialog did not create can take part too.
+The two-byte prefix `ed 01` says what kind of key follows. The 34 bytes are written in base58, and prefixed with `z` to say so. The bytes above become `did:key:z6MkgyhVBiwiVdpYtCepzRZFdQcdBNEZZjNBZN6CwyYC97tg`. Every Ed25519 `did:key` starts with `z6Mk`, because that is what the prefix bytes turn into.
 
 Several kinds of things are keys:
 
