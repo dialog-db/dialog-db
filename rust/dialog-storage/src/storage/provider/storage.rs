@@ -47,6 +47,7 @@ pub struct Storage<S: Clone> {
         archive::Put,
         archive::Import,
         blob::Read,
+        blob::Size,
         blob::Write,
         blob::Import,
         memory::Resolve,

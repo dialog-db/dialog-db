@@ -14,7 +14,8 @@
 //!         └── Blob (/archive/blob)
 //!               ├── Write                          → BlobWriter  (ingest; finish → hash)
 //!               ├── Import { digest, size, chunks } → BlobWriter
-//!               └── Read { digest, range }          → BlobReader
+//!               ├── Read { digest, range }          → BlobReader
+//!               └── Size { digest }                 → Option<u64>
 //! ```
 //!
 //! Bytes never travel inside an effect: the signed capability carries only
@@ -140,6 +141,36 @@ impl Effect for Read {
     type Output = Result<BlobReader, BlobError>;
 }
 
+/// The size of a blob by hash, without reading its bytes: `None` when the
+/// store holds no blob under `digest`.
+///
+/// A store answers from what it keeps beside the bytes (a file's length, a
+/// buffer's). One that keeps nothing of the kind may answer by reading the
+/// blob through, and says so where it implements this.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct Size {
+    /// The blob's content hash.
+    #[serde(with = "dialog_common::as_bytes")]
+    pub digest: Blake3Hash,
+}
+
+impl Size {
+    /// The size of the blob `digest`.
+    pub fn new(digest: impl Into<Blake3Hash>) -> Self {
+        Self {
+            digest: digest.into(),
+        }
+    }
+}
+
+impl Policy for Size {
+    type Of = Blob<method::Get>;
+}
+
+impl Effect for Size {
+    type Output = Result<Option<u64>, BlobError>;
+}
+
 /// Ingest a blob whose hash is **discovered** during the write. Carries no
 /// content-bound arguments — the hash is not known until the bytes are
 /// streamed in and hashed; [`BlobSink::finish`] returns it.
@@ -222,6 +253,16 @@ mod tests {
             .blob()
             .read([0u8; 32]);
         assert_eq!(claim.subject(), &did!("key:zSpace"));
+        assert_eq!(claim.ability(), "/use/get/archive/blob");
+    }
+
+    #[dialog_common::test]
+    fn it_builds_blob_size_path() {
+        let claim = Subject::from(did!("key:zSpace"))
+            .reader()
+            .archive()
+            .blob()
+            .size([0u8; 32]);
         assert_eq!(claim.ability(), "/use/get/archive/blob");
     }
 
