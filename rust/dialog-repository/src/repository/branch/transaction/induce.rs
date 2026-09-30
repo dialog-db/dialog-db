@@ -1629,7 +1629,7 @@ mod tests {
     /// dispatched itself is not reported back.
     #[dialog_common::test]
     async fn it_reports_the_transients_induction_emitted() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1690,7 +1690,7 @@ mod tests {
     /// out when the next link is committed.
     #[dialog_common::test]
     async fn it_accumulates_induced_transients_across_staged_links() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
