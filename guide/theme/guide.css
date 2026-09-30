@@ -269,5 +269,10 @@ figure.dg svg {
   background: var(--dg-well);
   font-size: 0.92em;
 }
+/* A trade-off or caveat the reader should not skip. */
+.aside.caveat {
+  border-left-color: var(--dg-triangle);
+  background: color-mix(in srgb, var(--dg-triangle) 14%, var(--dg-paper));
+}
 .aside > :first-child { margin-top: 0; }
 .aside > :last-child { margin-bottom: 0; }

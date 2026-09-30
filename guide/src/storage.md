@@ -23,7 +23,7 @@ The hash is BLAKE3, 32 bytes, unkeyed, taken over the whole node, prelude includ
 
 Naming by hash has three useful consequences:
 
-- **A name can be checked.** Whoever hands you a block, you can hash it and see whether it is the block you asked for. Dialog checks every tree node it reads and refuses bytes whose hash does not match. So a node can come from anywhere, including a server that is not trusted, without that server being able to change it. (Spilled value blocks are currently read without this check.)
+- **A name can be checked.** Whoever hands you a block, you can hash it and see whether it is the block you asked for. Dialog checks every tree node it reads and refuses bytes whose hash does not match. So a node can come from anywhere, including a server that is not trusted, without that server being able to change it.
 - **Equal blocks are stored once.** Two trees that share a subtree share its blocks. Writing a block that already exists is harmless: it can only write the same bytes again.
 - **A root names a whole tree.** A root holds its children's hashes, which hold theirs. Handing someone one 32-byte root hands them a name for every fact beneath it.
 
@@ -56,16 +56,16 @@ While a commit edits the tree, the new nodes it produces collect in memory. Spil
 
 ## Reading: fetch on demand
 
-A replica does not need every block of a tree to use it. When a read reaches a node that is not in the local archive, and the branch has a remote, Dialog fetches that one block from the remote and keeps a copy:
+A replica does not need every block of a tree to use it. When a read reaches a node that is not in the local archive, and the branch has a remote peer, Dialog fetches that one block from the remote peer and keeps a copy:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 660 234" width="660" height="234" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A read misses locally, fetches from the remote, keeps a copy, and the reader checks the hash">
+<svg class="dg" viewBox="0 0 660 234" width="660" height="234" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A read misses locally, fetches from the remote peer, keeps a copy, and the reader checks the hash">
 <defs><marker id="f-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="title" x="80" y="18" text-anchor="middle">tree reader</text>
 <line class="dashed" x1="80" y1="26" x2="80" y2="226"/>
 <text class="title" x="320" y="18" text-anchor="middle">local archive</text>
 <line class="dashed" x1="320" y1="26" x2="320" y2="226"/>
-<text class="title" x="560" y="18" text-anchor="middle">remote</text>
+<text class="title" x="560" y="18" text-anchor="middle">remote peer</text>
 <line class="dashed" x1="560" y1="26" x2="560" y2="226"/>
 <line x1="80" y1="52" x2="316" y2="52" marker-end="url(#f-arrow)"/>
 <text class="small" x="198.0" y="46" text-anchor="middle">get 8Ea3Qm…</text>
@@ -82,10 +82,10 @@ A replica does not need every block of a tree to use it. When a read reaches a n
 </svg>
 </figure>
 
-So a phone can open a large shared repository by fetching its root, then mostly the nodes its queries walk through, plus some fetched ahead of time in the background. The hash check happens in the tree reader, which is why a remote can be any dumb store of bytes.
+So a phone can open a large shared repository by fetching its root, then mostly the nodes its queries walk through, plus some fetched ahead of time in the background. The hash check happens in the tree reader, which is why a remote peer can be any dumb store of bytes.
 
 <div class="aside">
 
-**Implementations.** Hash-checked reads and writes are `ContentAddressedStorage` in [`dialog-search-tree/src/storage.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/storage.rs). The local backends are under [`dialog-storage/src/storage/provider`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-storage/src/storage/provider), and the S3 and R2 remote is [`dialog-remote-s3`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-s3). Fetching from a remote on a local miss is `NetworkedIndex` in [`dialog-repository/src/repository/archive/networked.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/archive/networked.rs).
+**Implementations.** Hash-checked reads and writes are `ContentAddressedStorage` in [`dialog-search-tree/src/storage.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/storage.rs). The local backends are under [`dialog-storage/src/storage/provider`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-storage/src/storage/provider), and the S3 and R2 remote peer is [`dialog-remote-s3`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-s3). Fetching from a remote peer on a local miss is `NetworkedIndex` in [`dialog-repository/src/repository/archive/networked.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/archive/networked.rs).
 
 </div>

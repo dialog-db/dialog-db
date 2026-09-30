@@ -311,7 +311,7 @@ The numbers used above, 65,536 and 512 and 3, the entry overhead 64 and the link
 
 ## Buffered writes
 
-Rewriting a whole 64 KiB leaf to add one small fact is wasteful when facts arrive one commit at a time. So by default, a commit does not push its changes all the way down. It parks them in a buffer on the link that leads toward where they belong:
+As [Changing the tree](#changing-the-tree) showed, changing one fact rewrites every node on the path from its leaf up to the root: each node on that spine gets a new hash, so each is written again. When facts arrive a few per commit, every commit pays for a whole spine, and a commit that touches facts in several places pays for several. So by default, a commit does not push its changes all the way down. It parks them in a buffer in the root, on the link that leads toward where they belong:
 
 <figure class="dg">
 <svg class="dg" viewBox="0 0 660 200" width="660" height="200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A buffered write sits on the root&#x27;s link to leaf 1 until the buffer is flushed">
@@ -338,11 +338,59 @@ Rewriting a whole 64 KiB leaf to add one small fact is wasteful when facts arriv
 </svg>
 </figure>
 
-Reads look at the buffers on the way down and merge what they find with what the leaves hold, so a buffered write is visible immediately. When the buffers on one node hold more than 256 operations, or more than 64 KiB of weight, the heaviest of them are pushed one level down until the node is back under half that limit. Over time, every operation reaches the leaves. Both limits come from the tree's format: 256 is 2<sup>8</sup>, the format's fanout setting, and 64 KiB is its node size target. Each commit then rewrites the root and a few index nodes near it, rather than a path of full leaves.
+Reads look at the buffers on the way down and merge what they find with what the leaves hold, so a buffered write is visible immediately. When the buffers on one node hold more than 256 operations, or more than 64 KiB of weight, the heaviest of them are pushed one level down until the node is back under half that limit. Over time, every operation reaches the leaves. Both limits come from the tree's format: 256 is 2<sup>8</sup>, the format's fanout setting, and 64 KiB is its node size target. A commit then rewrites the root, plus whatever nodes a flush reaches, instead of a whole spine for every change.
 
-A buffered tree gives up one thing: it is no longer the canonical tree for its keys. Two replicas with the same facts can hold them in different buffers and so have different roots. Nothing breaks when that happens. A node's hash still covers its buffers, so a root still names its content exactly, and the comparison described above still works. It just cannot stop early at the root, and does a little work to find that nothing differs.
+<div class="aside caveat">
+
+**A buffered tree is not canonical.** Two replicas with the same facts can hold them in different buffers and so have different roots. Nothing breaks when that happens. A node's hash still covers its buffers, so a root still names its content exactly, and the comparison described above still works. It just cannot stop early at the root, and does a little work to find that nothing differs.
 
 When the canonical form matters, a commit can ask for it, and Dialog pushes every buffer down before sealing the tree. Bulk imports do this once at the end. Ordinary commits and sync do not.
+
+</div>
+
+## Why buffer by default
+
+Giving up the canonical form sounds like a steep price, since it is what lets two replicas holding the same facts recognize each other at the root. But that is rarely how replicas meet. It is unlikely that two peers start from nothing, insert the same facts in different orders, and then sync. The usual case is the grocery list: Alice and Bob start from the same tree, each adds a few facts of their own, and then they reconcile.
+
+In that case what matters is how many blocks differ between their trees, because every differing block has to be exchanged. With canonical edits, each new fact rewrites the spine from its leaf to the root, and facts that land in different parts of the tree rewrite different spines. With buffering, the new facts sit in the root, and everything below it is still the base both replicas started from. Here Bob adds two facts that belong in different leaves:
+
+<figure class="dg">
+<svg class="dg" viewBox="0 0 670 220" width="670" height="220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two new facts in different leaves: canonical edits make five new blocks, buffered edits make one">
+<text class="title" x="160" y="18" text-anchor="middle">canonical</text>
+<line x1="160.0" y1="60" x2="80.0" y2="96"/>
+<line x1="80.0" y1="120" x2="47.0" y2="156"/>
+<line x1="80.0" y1="120" x2="122.0" y2="156"/>
+<line x1="160.0" y1="60" x2="240.0" y2="96"/>
+<line x1="240.0" y1="120" x2="197.0" y2="156"/>
+<line x1="240.0" y1="120" x2="272.0" y2="156"/>
+<rect class="critical" x="130" y="34" width="60" height="26"/>
+<rect class="critical" x="50" y="96" width="60" height="24"/>
+<rect class="critical" x="210" y="96" width="60" height="24"/>
+<rect class="shade" x="15" y="156" width="64" height="22"/>
+<rect class="critical" x="90" y="156" width="64" height="22"/>
+<rect class="critical" x="165" y="156" width="64" height="22"/>
+<rect class="shade" x="240" y="156" width="64" height="22"/>
+<text class="label small muted" x="160" y="206" text-anchor="middle">5 new blocks: two spines</text>
+<text class="title" x="500" y="18" text-anchor="middle">buffered</text>
+<line x1="500.0" y1="60" x2="420.0" y2="96"/>
+<line x1="420.0" y1="120" x2="387.0" y2="156"/>
+<line x1="420.0" y1="120" x2="462.0" y2="156"/>
+<line x1="500.0" y1="60" x2="580.0" y2="96"/>
+<line x1="580.0" y1="120" x2="537.0" y2="156"/>
+<line x1="580.0" y1="120" x2="612.0" y2="156"/>
+<rect class="critical" x="470" y="34" width="60" height="26"/>
+<rect class="shade" x="390" y="96" width="60" height="24"/>
+<rect class="shade" x="550" y="96" width="60" height="24"/>
+<rect class="shade" x="355" y="156" width="64" height="22"/>
+<rect class="shade" x="430" y="156" width="64" height="22"/>
+<rect class="shade" x="505" y="156" width="64" height="22"/>
+<rect class="shade" x="580" y="156" width="64" height="22"/>
+<text class="small critical" x="500.0" y="51" text-anchor="middle">+2</text>
+<text class="label small muted" x="500" y="206" text-anchor="middle">1 new block: the root</text>
+</svg>
+</figure>
+
+So replicas that have diverged a little sync by exchanging a root or two, rather than a path of nodes for every change. The rare case where replicas diverge a lot, such as importing a large dataset, is where the canonical form earns its keep: a bulk import pushes every buffer down once when it finishes, and an app can ask for the canonical form on any commit that needs it.
 
 <div class="aside">
 

@@ -84,16 +84,16 @@ Every key Dialog creates is an Ed25519 key pair, named by its public key written
 </svg>
 </figure>
 
-The two-byte prefix `ed 01` says what kind of key follows. The 34 bytes are written in base58, and prefixed with `z` to say so. The bytes above become `did:key:z6MkgyhVBiwiVdpYtCepzRZFdQcdBNEZZjNBZN6CwyYC97tg`. Every Ed25519 `did:key` starts with `z6Mk`, because that is what the prefix bytes turn into. A remote checking permissions also accepts P-256 signatures, and issuers named by `did:web` or `did:plc`, so keys Dialog did not create can take part too.
+The two-byte prefix `ed 01` says what kind of key follows. The 34 bytes are written in base58, and prefixed with `z` to say so. The bytes above become `did:key:z6MkgyhVBiwiVdpYtCepzRZFdQcdBNEZZjNBZN6CwyYC97tg`. Every Ed25519 `did:key` starts with `z6Mk`, because that is what the prefix bytes turn into.
 
 Several kinds of things are keys:
 
 - **A repository** has its own key. Its DID is the repository's name everywhere: in storage paths, in permissions, and in the branch identity a signed head carries.
-- **An account** is a person. It is the key Alice's devices act for.
-- **A device**, such as Alice's laptop, has a key that never leaves it. In a browser the key is a non-extractable WebCrypto key, so even the page that uses it cannot read its secret half.
-- **A session** is a separate key, usually derived from the device's key for one app or one purpose. It acts under a permission from the device, so the app never holds the device key.
+- **An authority** is someone responsible for changes: usually a person, like Alice, with a presence across several peers, such as her laptop and her phone. It is the key those peers act for.
+- **A peer** is a place where replicas live, such as Alice's laptop or Bob's phone. One peer can hold replicas of many repositories. Its key never leaves it. In a browser the key is a non-extractable WebCrypto key, so even the page that uses it cannot read its secret half.
+- **A session** is also a peer, just a more constrained one. It has its own key, usually derived from its parent peer's key for one app or one purpose, and acts only under a permission from that peer, so the app never holds the parent peer's key.
 
-When Alice's laptop creates the grocery list repository, it makes a fresh key for it. It seals the secret half so that only Alice's account can open it. The repository's key then signs one permission, to Alice's account, allowing everything. Storage keeps only the public half. From then on, the repository is Alice's because the repository itself said so.
+When Alice's laptop creates the grocery list repository, it makes a fresh key for it. It seals the secret half so that only Alice, as its authority, can open it. The repository's key then signs one permission, to Alice, allowing everything. Storage keeps only the public half. From then on, the repository is Alice's because the repository itself said so.
 
 ## Capabilities
 
@@ -103,7 +103,7 @@ A **delegation** says *"you may do this, as me."* It names an issuer, an audienc
 
 An **invocation** says *"do this, for this subject."* It is signed by the key that wants the work done, and it carries the delegations that prove it may.
 
-The commands Dialog sends to a remote look like paths:
+The commands Dialog sends to a remote peer look like paths:
 
 | Command | What it asks for |
 |---|---|
@@ -114,7 +114,7 @@ The commands Dialog sends to a remote look like paths:
 | `/use/delete/memory/cell` | remove a cell |
 | `/use/get/archive/blob`, `/use/put/archive/blob` | read or store a blob |
 
-Here is a typical chain that lets the session on Alice's laptop store a block in the grocery list's remote:
+Here is a typical chain that lets the session on Alice's laptop store a block in the grocery list's remote peer:
 
 <figure class="dg">
 <svg class="dg" viewBox="0 0 870 196" width="870" height="196" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A delegation chain from the repository key down to a session key, and the invocation it authorizes">
@@ -123,13 +123,13 @@ Here is a typical chain that lets the session on Alice's laptop store a block in
 <text class="label" x="80" y="40" text-anchor="middle">repository</text>
 <text class="small muted" x="80" y="57" text-anchor="middle">did:key:zR…</text>
 <rect class="alice" x="225" y="20" width="140" height="46"/>
-<text class="label" x="295" y="40" text-anchor="middle">Alice's account</text>
-<text class="small muted" x="295" y="57" text-anchor="middle">did:key:zAc…</text>
+<text class="label" x="295" y="40" text-anchor="middle">Alice</text>
+<text class="small muted" x="295" y="57" text-anchor="middle">authority</text>
 <rect class="alice" x="440" y="20" width="140" height="46"/>
-<text class="label" x="510" y="40" text-anchor="middle">Alice's laptop</text>
-<text class="small muted" x="510" y="57" text-anchor="middle">did:key:zL…</text>
+<text class="label" x="510" y="40" text-anchor="middle">Alice's peer</text>
+<text class="small muted" x="510" y="57" text-anchor="middle">her laptop</text>
 <rect class="alice" x="655" y="20" width="140" height="46"/>
-<text class="label" x="725" y="40" text-anchor="middle">laptop session</text>
+<text class="label" x="725" y="40" text-anchor="middle">peer session</text>
 <text class="small muted" x="725" y="57" text-anchor="middle">did:key:zS…</text>
 <line x1="150" y1="43" x2="221" y2="43" marker-end="url(#c-arrow)"/>
 <text class="small" x="185.5" y="36" text-anchor="middle">may do /</text>
@@ -152,11 +152,11 @@ Here is a typical chain that lets the session on Alice's laptop store a block in
 </svg>
 </figure>
 
-Each delegation's issuer must be the previous one's audience, and the first issuer must be the repository itself. Bob gets access the same way: someone who holds a delegation for the repository signs a new one to Bob's account, possibly for a narrower command.
+Each delegation's issuer must be the previous one's audience, and the first issuer must be the repository itself. Bob gets access the same way: someone who holds a delegation for the repository signs a new one to Bob, possibly for a narrower command.
 
-## Asking a remote
+## Asking a remote peer
 
-A remote that speaks UCAN takes one HTTP request per operation. The signed container goes in the `Authorization` header and the body is the raw bytes. The command and subject are also copied into the URL, but only as labels for network logs: the remote reads them from the signed invocation and ignores the URL:
+A remote peer that speaks UCAN takes one HTTP request per operation. The signed container goes in the `Authorization` header and the body is the raw bytes. The command and subject are also copied into the URL, but only as labels for network logs: the remote peer reads them from the signed invocation and ignores the URL:
 
 <figure class="dg">
 <svg class="dg" viewBox="0 0 640 182" width="640" height="182" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A direct UCAN request: command and subject in the URL, the signed container in the Authorization header, the bytes in the body">
@@ -170,7 +170,7 @@ A remote that speaks UCAN takes one HTTP request per operation. The signed conta
 </svg>
 </figure>
 
-The remote checks, in order:
+The remote peer checks, in order:
 
 1. The chain links up: each issuer is the previous audience, and the first issuer is the subject.
 2. The command is covered by every delegation in the chain, and the arguments meet their conditions.
@@ -178,18 +178,18 @@ The remote checks, in order:
 4. Every signature holds, and no link has been revoked.
 5. The body is what the invocation promised. For a block, its BLAKE3 hash is the digest the invocation named and its SHA-256 is the checksum. For a cell, its SHA-256 is the checksum. For a blob, its size and digest match.
 
-Only then does the remote store the block or answer the read. The remote never needs to know who Alice is. It only needs to know the repository's DID, and to check signatures.
+Only then does the remote peer store the block or answer the read. The remote peer never needs to know who Alice is. It only needs to know the repository's DID, and to check signatures.
 
-A second exchange exists for storage the remote does not proxy. There the remote answers an invocation with a presigned S3 URL, a permit, and the client talks to S3 directly. Which exchange to use is part of the remote's address, not negotiated per request.
+A second exchange exists for storage the remote peer does not proxy. There the remote peer answers an invocation with a presigned S3 URL, a permit, and the client talks to S3 directly. Which exchange to use is part of the remote peer's address, not negotiated per request.
 
 <div class="aside">
 
-**Revocation.** UCAN lets an issuer revoke a delegation it signed, and the verifier in Dialog asks a revocation checker about every link of the chain. The checker Dialog ships today does not consult any store, so it reports every delegation as not revoked. Until a real store is plugged in, a delegation stays valid until its time window ends, and the repository's delegation to its account has no window at all.
+**Revocation.** UCAN lets an issuer revoke a delegation it signed, and the verifier in Dialog asks a revocation checker about every link of the chain. The checker Dialog ships today does not consult any store, so it reports every delegation as not revoked. Until a real store is plugged in, a delegation stays valid until its time window ends, and the repository's delegation to its authority has no window at all.
 
 </div>
 
 <div class="aside">
 
-**Implementations.** Keys are in [`dialog-credentials`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-credentials) and signatures in [`dialog-varsig`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-varsig). Capabilities are [`dialog-capability`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-capability), and the commands are defined in [`dialog-effects`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-effects). UCAN tokens and chain checks are [`dialog-ucan-core`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-ucan-core). The HTTP exchange is [`dialog-remote-ucan`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-ucan). Creating a repository and delegating it to the account is in [`dialog-peer/src/peer/space.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-peer/src/peer/space.rs).
+**Implementations.** Keys are in [`dialog-credentials`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-credentials) and signatures in [`dialog-varsig`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-varsig). Capabilities are [`dialog-capability`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-capability), and the commands are defined in [`dialog-effects`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-effects). UCAN tokens and chain checks are [`dialog-ucan-core`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-ucan-core). The HTTP exchange is [`dialog-remote-ucan`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-ucan). Creating a repository and delegating it to its authority is in [`dialog-peer/src/peer/space.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-peer/src/peer/space.rs).
 
 </div>
