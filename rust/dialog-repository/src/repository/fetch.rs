@@ -48,7 +48,7 @@ use dialog_search_tree::{
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 
 use crate::repository::source::Source;
-use crate::{EMPTY_TREE_HASH, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite};
+use crate::{Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
@@ -239,10 +239,9 @@ where
         + ConditionalSync
         + 'static,
 {
-    let root = source.as_ref().root();
-    if root == EMPTY_TREE_HASH {
+    let Some(root) = source.as_ref().root() else {
         return Ok(());
-    }
+    };
     let remote = fallback.await;
     // Warming exists to fetch ahead of demand. With nowhere to fetch
     // from, every block is local already and a demand read finds it; a

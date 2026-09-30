@@ -4,9 +4,8 @@ use std::{collections::VecDeque, sync::mpsc::Sender};
 
 use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Index, Key, State, Storage};
-use dialog_common::NULL_BLAKE3_HASH;
 use dialog_search_tree::{
-    Accessor, ArchivedNodeBody, Cache, ContentAddressedStorage as TreeStorage, PersistentNode,
+    Accessor, Cache, ContentAddressedStorage as TreeStorage, NodeBody, PersistentNode,
 };
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 
@@ -63,10 +62,11 @@ impl ArtifactsTreeAnalysis {
     /// of the tree to compute statistics. The results are sent via the
     /// configured channel when complete.
     pub fn run(&self) {
-        let root = self.tree.root().clone();
-        if &root == NULL_BLAKE3_HASH {
+        // An empty tree has nothing persisted to walk: its root is derived
+        // from its format, not the all-zero hash, and no store holds it.
+        let Some(root) = self.tree.stored_root().cloned() else {
             return;
-        }
+        };
 
         let storage = self.storage.clone();
         let tx = self.tx.clone();
@@ -85,12 +85,12 @@ impl ArtifactsTreeAnalysis {
                 for hash in level {
                     let node: PersistentNode<Key, State<Datum>> = accessor.get_node(&hash).await?;
                     match node.body() {
-                        ArchivedNodeBody::Index(index) => {
+                        NodeBody::Index(index) => {
                             for at in 0..index.len() {
                                 next_level.push(index.hash_at(at)?.clone());
                             }
                         }
-                        ArchivedNodeBody::Segment(segment) => {
+                        NodeBody::Segment(segment) => {
                             let entry_count = segment.len();
 
                             segment_sizes.push(entry_count);

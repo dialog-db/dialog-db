@@ -92,7 +92,7 @@ use futures_util::TryStreamExt as _;
 
 use super::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
-use crate::{Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, Revision};
+use crate::{Branch, Index, NetworkedIndex, RemoteSite, Revision};
 
 /// The demand cover of one evaluation: every index key range the
 /// evaluation's selects read, recorded at the `Select` boundary.
@@ -107,6 +107,10 @@ pub struct Demand {
     /// affect any row — it invalidates the whole result, not one
     /// entity's slice.
     rules: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
+    /// The format the recorded ranges are keyed under: the manifest of
+    /// the tree the evaluation read. `None` until something is recorded.
+    /// Keys checked against the cover are built under it.
+    manifest: Arc<Mutex<Option<dialog_search_tree::Manifest>>>,
     /// Whether the evaluation read a revision-bearing metadata
     /// attribute (`dialog.branch/tree` & co). Those facts are
     /// overlay-injected — never in the tree — so no tree diff can
@@ -165,13 +169,6 @@ fn selects_head(selector: &ArtifactSelector<Constrained>, metadata: &BTreeSet<En
 /// sorted list of disjoint intervals, so it cannot grow beyond the
 /// number of genuinely distinct demanded regions no matter how many
 /// (nested, repeated) selectors record into it.
-/// The default key format, used where a demand range must be built without a
-/// storage handle to read the tree's real manifest. See [`Demand::record`] for
-/// why that is sound today and what it costs later.
-fn default_manifest() -> dialog_search_tree::Manifest {
-    dialog_search_tree::Manifest::default()
-}
-
 fn record_range(ranges: &Mutex<Vec<RangeInclusive<Key>>>, range: RangeInclusive<Key>) {
     let mut ranges = ranges.lock().expect("demand lock");
     let (mut start, mut end) = range.into_inner();
@@ -200,18 +197,19 @@ impl Demand {
     /// everything the selector's scan would touch — including where
     /// no entries exist, so misses are demanded too.
     ///
-    /// The range is built under the DEFAULT format [`Manifest`] rather than the
-    /// branch tree's own. `Demand` is built by the synchronous
-    /// [`Branch::subscribe`](crate::Branch::subscribe), which has no storage
-    /// handle and so cannot read a manifest. This is sound only while every
-    /// tree carries the default manifest, which is the case today (nothing
-    /// constructs another). Making manifests configurable requires the
-    /// subscription to carry its branch's manifest instead: a demand range
-    /// built under the wrong `inline_n` or `spill_prefix` brackets the wrong
-    /// keys for a value-constrained selector, so a write inside the real
-    /// scanned range would fail to invalidate the reader.
-    pub(crate) fn record(&self, selector: &ArtifactSelector<Constrained>) {
-        record_range(&self.facts, selector_range(selector, &default_manifest()));
+    /// The range is built under `manifest`, the format of the tree the
+    /// scan reads (the query environment resolves it from the branch's
+    /// root). A range built under another format's `inline_n` or
+    /// `spill_prefix` would bracket the wrong keys for a value-constrained
+    /// selector, so a write inside the real scanned range would fail to
+    /// invalidate the reader.
+    pub(crate) fn record(
+        &self,
+        selector: &ArtifactSelector<Constrained>,
+        manifest: &dialog_search_tree::Manifest,
+    ) {
+        self.keyed_under(manifest);
+        record_range(&self.facts, selector_range(selector, manifest));
         let metadata = self.metadata.lock().expect("demand metadata lock");
         if selects_head(selector, &metadata) {
             self.head.store(true, Ordering::Relaxed);
@@ -230,10 +228,36 @@ impl Demand {
             .insert(entity);
     }
 
-    /// Record a rule-discovery scan's demanded range.
-    /// Carries the same default-manifest caveat as [`Demand::record`].
-    pub(crate) fn record_rules(&self, selector: &ArtifactSelector<Constrained>) {
-        record_range(&self.rules, selector_range(selector, &default_manifest()));
+    /// Record a rule-discovery scan's demanded range, built under
+    /// `manifest` as in [`Demand::record`].
+    pub(crate) fn record_rules(
+        &self,
+        selector: &ArtifactSelector<Constrained>,
+        manifest: &dialog_search_tree::Manifest,
+    ) {
+        self.keyed_under(manifest);
+        record_range(&self.rules, selector_range(selector, manifest));
+    }
+
+    /// Note the format a range is recorded under. One evaluation reads
+    /// one branch, so every range shares it.
+    fn keyed_under(&self, manifest: &dialog_search_tree::Manifest) {
+        let mut recorded = self.manifest.lock().expect("demand manifest lock");
+        debug_assert!(
+            recorded
+                .as_ref()
+                .is_none_or(|recorded| recorded == manifest),
+            "one demand cover must be keyed under one format"
+        );
+        *recorded = Some(manifest.clone());
+    }
+
+    /// The format the recorded ranges are keyed under, or `None` while
+    /// nothing is recorded. A key checked against the cover is built
+    /// under it: one built under another format brackets other bytes,
+    /// and would miss a range the evaluation really read.
+    pub(crate) fn manifest(&self) -> Option<dialog_search_tree::Manifest> {
+        self.manifest.lock().expect("demand manifest lock").clone()
     }
 
     /// Whether the key falls inside any recorded range.
@@ -356,6 +380,70 @@ impl Branch {
     }
 }
 
+/// Classify what `instants` of a session overlay changed within
+/// `demand`'s cover: the exact facts they asserted and retracted,
+/// filtered by their index keys against the cover, with no diff to
+/// compute. A change inside a rule-discovery range is
+/// [`Touched::Rules`].
+///
+/// The keys are built under the manifest the cover was recorded in
+/// ([`Demand::manifest`]): the cover brackets keys of that format, and a
+/// key built under another one (the default, say, for a tree whose
+/// values spill at another length) would fall outside a range the
+/// evaluation really read. A cover nothing was recorded in covers no
+/// key, so it is touched by nothing.
+fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
+    let Some(manifest) = demand.manifest() else {
+        return Touched::Nothing;
+    };
+    let mut subjects = BTreeSet::new();
+    let mut asserted = Vec::new();
+    let mut retracted = Vec::new();
+    let mut seen = BTreeSet::new();
+    for instant in instants {
+        for (arriving, facts) in [(true, instant.asserted), (false, instant.retracted)] {
+            for fact in facts {
+                let keys = [
+                    EntityKey::from_artifact(&fact, &manifest).into_key(),
+                    AttributeKey::from_artifact(&fact, &manifest).into_key(),
+                    ValueKey::from_artifact(&fact, &manifest).into_key(),
+                ];
+                if keys.iter().any(|key| demand.covers_rules(key)) {
+                    return Touched::Rules;
+                }
+                if !keys.iter().any(|key| demand.covers_facts(key)) {
+                    continue;
+                }
+                if !seen.insert((
+                    arriving,
+                    fact.of.to_string(),
+                    fact.the.to_string(),
+                    fact.is.to_bytes(),
+                )) {
+                    continue;
+                }
+                subjects.insert(fact.of.clone());
+                if arriving {
+                    asserted.push(fact);
+                } else {
+                    retracted.push(fact);
+                }
+            }
+        }
+    }
+    if subjects.is_empty() {
+        Touched::Nothing
+    } else {
+        let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
+        Touched::Facts {
+            subjects,
+            facts,
+            asserted,
+            retracted,
+        }
+    }
+}
+
 /// What the in-cover changes between two roots touched.
 enum Touched {
     /// Nothing inside the cover changed (or the changes cannot
@@ -432,13 +520,10 @@ type EvaluationFuture<'a, T> =
 #[cfg(target_arch = "wasm32")]
 type EvaluationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + 'a>>;
 
-/// The index root a revision pins, or the empty tree for an
-/// unborn branch.
-fn tree_hash(revision: &Option<Revision>) -> Blake3Hash {
-    revision
-        .as_ref()
-        .map(|revision| *revision.tree.hash())
-        .unwrap_or(EMPTY_TREE_HASH)
+/// The index root a revision pins — `None` for an unborn branch,
+/// which has no tree at all.
+fn tree_hash(revision: &Option<Revision>) -> Option<Blake3Hash> {
+    revision.as_ref().map(|revision| *revision.tree.hash())
 }
 
 impl<Q> Subscription<Q>
@@ -646,9 +731,16 @@ where
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
-        let previous =
-            Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
-        let next = Index::from_hash_with_cache(NodeHash::from(target), self.branch.node_cache());
+        let index_at = |hash: Option<Blake3Hash>| match hash {
+            Some(hash) => {
+                Index::from_hash_with_cache(NodeHash::from(hash), self.branch.node_cache())
+            }
+            // An unborn side of the diff has no tree; the differential
+            // runs against the empty index.
+            None => Index::empty_with_cache(self.branch.node_cache()),
+        };
+        let previous = index_at(pinned);
+        let next = index_at(target);
 
         let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
         let mut changes = Box::pin(changes);
@@ -724,53 +816,7 @@ where
         let Some(instants) = self.branch.overlay().since(sequence) else {
             return Touched::Rules;
         };
-        let manifest = dialog_search_tree::Manifest::default();
-        let mut subjects = BTreeSet::new();
-        let mut asserted = Vec::new();
-        let mut retracted = Vec::new();
-        let mut seen = BTreeSet::new();
-        for instant in instants {
-            for (arriving, facts) in [(true, instant.asserted), (false, instant.retracted)] {
-                for fact in facts {
-                    let keys = [
-                        EntityKey::from_artifact(&fact, &manifest).into_key(),
-                        AttributeKey::from_artifact(&fact, &manifest).into_key(),
-                        ValueKey::from_artifact(&fact, &manifest).into_key(),
-                    ];
-                    if keys.iter().any(|key| self.demand.covers_rules(key)) {
-                        return Touched::Rules;
-                    }
-                    if !keys.iter().any(|key| self.demand.covers_facts(key)) {
-                        continue;
-                    }
-                    if !seen.insert((
-                        arriving,
-                        fact.of.to_string(),
-                        fact.the.to_string(),
-                        fact.is.to_bytes(),
-                    )) {
-                        continue;
-                    }
-                    subjects.insert(fact.of.clone());
-                    if arriving {
-                        asserted.push(fact);
-                    } else {
-                        retracted.push(fact);
-                    }
-                }
-            }
-        }
-        if subjects.is_empty() {
-            Touched::Nothing
-        } else {
-            let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
-            Touched::Facts {
-                subjects,
-                facts,
-                asserted,
-                retracted,
-            }
-        }
+        touched_by(&self.demand, instants)
     }
 
     /// Maintain the retained result incrementally: for each touched
@@ -1051,7 +1097,7 @@ mod tests {
     use dialog_query::{AttributeQuery, Claim, Term, the};
     use dialog_query::{Cardinality, ConceptDescriptor, ConceptQuery, Output as _};
     use dialog_storage::provider::storage::VolatileSpace;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::str::FromStr;
 
     /// The head flag flips only for scans that can actually read the
@@ -1071,19 +1117,28 @@ mod tests {
         let demand = super::Demand::new();
         demand.anchor_metadata(branch_entity.clone());
 
-        demand.record(&ArtifactSelector::new().of(ordinary));
+        demand.record(
+            &ArtifactSelector::new().of(ordinary),
+            &dialog_search_tree::Manifest::default(),
+        );
         assert!(
             !demand.depends_on_head(),
             "a dynamic-attribute scan of an ordinary entity must stay incremental"
         );
 
-        demand.record(&ArtifactSelector::new().the("dialog.branch/name".parse()?));
+        demand.record(
+            &ArtifactSelector::new().the("dialog.branch/name".parse()?),
+            &dialog_search_tree::Manifest::default(),
+        );
         assert!(
             !demand.depends_on_head(),
             "stable branch attributes are deliberately not head-bearing"
         );
 
-        demand.record(&ArtifactSelector::new().of(branch_entity));
+        demand.record(
+            &ArtifactSelector::new().of(branch_entity),
+            &dialog_search_tree::Manifest::default(),
+        );
         assert!(
             demand.depends_on_head(),
             "the branch entity's own slice carries the head attributes"
@@ -4483,6 +4538,63 @@ mod tests {
             bindings(subscription.results()),
             bindings(&fresh),
             "maintained rows read exactly like recomputed ones"
+        );
+        Ok(())
+    }
+
+    /// A session overlay's changes are keyed under the manifest the
+    /// demand cover was recorded in. A value the tree's manifest keeps
+    /// inline spills under the default one, and its key then carries a
+    /// prefix and a hash instead of the value: a cover checked with
+    /// default-keyed changes would miss a fact the evaluation really
+    /// read.
+    #[dialog_common::test]
+    fn it_keys_overlay_changes_under_the_demands_manifest() -> anyhow::Result<()> {
+        let default = dialog_search_tree::Manifest::default();
+        let inlining = dialog_search_tree::Manifest {
+            inline_n: default.inline_n * 2,
+            ..default.clone()
+        };
+        let alice = Entity::new()?;
+        let fact = dialog_artifacts::Artifact {
+            the: "person/bio".parse()?,
+            of: alice.clone(),
+            is: Value::String("x".repeat(default.inline_n as usize + 1)),
+            cause: None,
+        };
+        let demand = super::Demand::new();
+        demand.record(
+            &dialog_artifacts::ArtifactSelector::new()
+                .the(fact.the.clone())
+                .is(fact.is.clone()),
+            &inlining,
+        );
+        assert_eq!(demand.manifest(), Some(inlining.clone()));
+        assert!(
+            !demand.covers(&dialog_artifacts::ValueKey::from_artifact(&fact, &default).into_key()),
+            "keyed under the default manifest the fact spills and falls outside the cover"
+        );
+
+        let instant = crate::Instant {
+            sequence: 1,
+            hash: dialog_common::Blake3Hash::from([0u8; 32]),
+            asserted: vec![fact],
+            retracted: Vec::new(),
+        };
+        match super::touched_by(&demand, vec![instant.clone()]) {
+            super::Touched::Facts { subjects, .. } => {
+                assert_eq!(subjects, BTreeSet::from([alice]));
+            }
+            _ => panic!("a session fact inside the cover touches it"),
+        }
+
+        let untouched = super::Demand::new();
+        assert!(
+            matches!(
+                super::touched_by(&untouched, vec![instant]),
+                super::Touched::Nothing
+            ),
+            "a cover nothing was recorded in is touched by nothing"
         );
         Ok(())
     }

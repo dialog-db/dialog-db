@@ -44,14 +44,11 @@ use std::sync::Arc;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, AttributeKey, Changes, DialogArtifactsError,
-    Entity, EntityKey, Instruction, Key, Select, SortKey, Statement, Update, ValueKey,
-    default_sort_key,
+    Artifact, ArtifactSelector, AttributeKey, Changes, Entity, EntityKey, Instruction, Key,
+    SortKey, Statement, Update, ValueKey, sort_key,
 };
-use dialog_capability::Provider;
 use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
-use futures_util::stream;
 use parking_lot::RwLock;
 
 /// How many instants the ring retains. A subscription pinned further
@@ -182,9 +179,13 @@ impl State {
 
     /// Every held fact at an `(entity, attribute)` cell.
     fn cell(&self, of: &Entity, the: &dialog_artifacts::Attribute) -> Vec<Artifact> {
-        let selector = ArtifactSelector::new().of(of.clone()).the(the.clone());
+        self.scan(&ArtifactSelector::new().of(of.clone()).the(the.clone()))
+    }
+
+    /// The facts a selector matches, in the store's own key order.
+    fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
         self.facts
-            .range(selector_range(&selector, &self.manifest))
+            .range(selector_range(selector, &self.manifest))
             .map(|(_, fact)| fact.clone())
             .collect()
     }
@@ -212,7 +213,7 @@ impl State {
                 // Not held here: hide it beneath. A tombstone is a
                 // change readers see (the fact disappears), so it is
                 // reported as retracted.
-                if let Entry::Vacant(slot) = self.shadowed.entry(default_sort_key(&fact)) {
+                if let Entry::Vacant(slot) = self.shadowed.entry(sort_key(&fact, &self.manifest)) {
                     slot.insert(fact.clone());
                     delta.tombstones_changed = true;
                     delta.retracted.push(fact);
@@ -238,7 +239,7 @@ impl State {
         chunks.push(self.sequence.to_be_bytes().to_vec());
         for (polarity, facts) in [(b'+', &delta.asserted), (b'-', &delta.retracted)] {
             for fact in facts {
-                let (the, of, tail) = default_sort_key(fact);
+                let (the, of, tail) = sort_key(fact, &self.manifest);
                 let mut chunk = Vec::with_capacity(1 + the.len() + of.len() + tail.len() + 2);
                 chunk.push(polarity);
                 chunk.extend(the);
@@ -409,10 +410,22 @@ impl Ephemeral {
         }
     }
 
-    /// Sort keys of every fact this line hides beneath it. Shared, so
-    /// a read never copies the set.
-    pub(crate) fn tombstones(&self) -> Arc<HashSet<SortKey>> {
-        self.state.read().tombstones.clone()
+    /// Sort keys of every fact this line hides beneath it, keyed under
+    /// `manifest`: the format of the tree whose rows they are checked
+    /// against. Shared when that is the store's own format, so a read
+    /// never copies the set; keyed afresh under another.
+    pub(crate) fn tombstones(&self, manifest: &Manifest) -> Arc<HashSet<SortKey>> {
+        let state = self.state.read();
+        if *manifest == state.manifest {
+            return state.tombstones.clone();
+        }
+        Arc::new(
+            state
+                .shadowed
+                .values()
+                .map(|fact| sort_key(fact, manifest))
+                .collect(),
+        )
     }
 
     /// Whether the store holds no facts (tombstones aside).
@@ -427,28 +440,34 @@ impl Ephemeral {
     }
 
     /// The facts a selector matches, in the order a tree scan of the
-    /// same selector would produce them.
+    /// same selector would produce them under the store's own format.
+    /// For rows merged with a tree's, see [`select`](Self::select).
     pub fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
-        let state = self.state.read();
-        state
-            .facts
-            .range(selector_range(selector, &state.manifest))
-            .map(|(_, fact)| fact.clone())
-            .collect()
+        self.state.read().scan(selector)
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a> Provider<Select<'a>> for Ephemeral {
-    async fn execute(
+    /// The facts a selector matches, in the order a scan of a tree
+    /// written under `manifest` would produce them: what a query merges
+    /// with that tree's rows. A fact's index keys differ between formats
+    /// only in their value tail, so under another format than the
+    /// store's own the rows are re-keyed, and only the order of values
+    /// within a cell can change.
+    pub fn select(
         &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        let rows = self.scan(&input);
-        Ok(Box::pin(stream::iter(
-            rows.into_iter().map(|fact| Ok(fact.into())),
-        )))
+        selector: &ArtifactSelector<Constrained>,
+        manifest: &Manifest,
+    ) -> Vec<Artifact> {
+        let state = self.state.read();
+        let mut rows = state.scan(selector);
+        if *manifest != state.manifest {
+            let range = selector_range(selector, manifest);
+            rows.sort_by_cached_key(|fact| {
+                index_keys(fact, manifest)
+                    .into_iter()
+                    .find(|key| range.contains(key))
+            });
+        }
+        rows
     }
 }
 
@@ -572,8 +591,8 @@ mod tests {
             values(&source, "id:a", "person/name")
         );
         assert_eq!(
-            *target.tombstones(),
-            *source.tombstones(),
+            *target.tombstones(&Manifest::default()),
+            *source.tombstones(&Manifest::default()),
             "the tombstone hiding id:b travels too"
         );
     }
@@ -595,7 +614,7 @@ mod tests {
         assert_eq!(removed.retracted, vec![fact("id:a", "person/name", "A")]);
         assert!(line.is_empty());
         assert!(
-            line.tombstones().is_empty(),
+            line.tombstones(&Manifest::default()).is_empty(),
             "a held fact is removed, not shadowed"
         );
 
@@ -606,7 +625,7 @@ mod tests {
         );
         let shadowed = &line.since(2).expect("a tombstone is a visible change")[0];
         assert_eq!(shadowed.retracted, vec![fact("id:b", "person/name", "B")]);
-        assert_eq!(line.tombstones().len(), 1);
+        assert_eq!(line.tombstones(&Manifest::default()).len(), 1);
         line.retract(
             the!("person/name")
                 .of("id:b".parse().unwrap())
@@ -621,7 +640,7 @@ mod tests {
         line.clear();
         let lifted = &line.since(3).expect("lifting a tombstone is visible")[0];
         assert_eq!(lifted.asserted, vec![fact("id:b", "person/name", "B")]);
-        assert!(line.tombstones().is_empty());
+        assert!(line.tombstones(&Manifest::default()).is_empty());
     }
 
     #[dialog_common::test]
@@ -728,7 +747,7 @@ mod tests {
             "the doc tombstone is unrelated"
         );
         assert_eq!(line.len(), 1);
-        assert_eq!(line.tombstones().len(), 1);
+        assert_eq!(line.tombstones(&Manifest::default()).len(), 1);
         assert!(
             !line.retain_entities(|_| true),
             "keeping everything changes nothing"
@@ -742,5 +761,47 @@ mod tests {
         handle.assert(claim("id:a", "person/name", "A"));
         assert_eq!(line.len(), 1);
         assert_eq!(line.revision(), handle.revision());
+    }
+
+    /// Reads for a tree of another format are keyed under that format:
+    /// a value that spills there and inlines here gets a different sort
+    /// key, and the tombstone set and row order follow the reader's
+    /// manifest, not the store's own.
+    #[dialog_common::test]
+    fn it_keys_reads_under_the_readers_manifest() {
+        let spilling = Manifest {
+            inline_n: 8,
+            ..Manifest::default()
+        };
+        let long = "x".repeat(64);
+        let hidden = fact("id:a", "person/bio", &long);
+        let line = Ephemeral::new();
+        line.retract(claim("id:a", "person/bio", &long));
+        line.assert(claim("id:b", "person/bio", &long));
+        line.assert(claim("id:b", "person/bio", "short"));
+
+        let own = line.tombstones(&Manifest::default());
+        let theirs = line.tombstones(&spilling);
+        assert!(own.contains(&sort_key(&hidden, &Manifest::default())));
+        assert!(theirs.contains(&sort_key(&hidden, &spilling)));
+        assert_ne!(
+            *own, *theirs,
+            "a spilled value keys differently from an inline one"
+        );
+        assert!(
+            Arc::ptr_eq(&own, &line.tombstones(&Manifest::default())),
+            "the store's own format shares its set"
+        );
+
+        let selector = ArtifactSelector::new().of("id:b".parse().unwrap());
+        let rows: Vec<Vec<u8>> = line
+            .select(&selector, &spilling)
+            .iter()
+            .map(|row| sort_key(row, &spilling).2)
+            .collect();
+        let mut sorted = rows.clone();
+        sorted.sort();
+        assert_eq!(rows, sorted, "rows come out in the reader's key order");
+        assert_eq!(line.select(&selector, &spilling).len(), 2);
     }
 }

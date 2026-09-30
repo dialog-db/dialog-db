@@ -21,14 +21,16 @@ use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
-use dialog_search_tree::{Buffer, PersistentNode};
+use dialog_search_tree::{Buffer, Manifest, PersistentNode};
 use dialog_storage::{Blake3Hash, StorageBackend};
 use futures_util::future::try_join_all;
-use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+use futures_util::{TryStreamExt as _, stream};
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 use crate::REGISTRY;
-use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::layer::{MergeKeys, filter_tombstones, merge_grouped, tombstones_from};
+use crate::repository::branch::select::line_manifest;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
@@ -355,17 +357,12 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
     /// All overlay facts — caller-asserted + auto-injected metadata —
-    /// merged into one batch. Queried via `Provider<Select> for Changes`.
+    /// merged into one batch. Queried via [`Changes::select`] under the
+    /// lines' format.
     changes: Arc<Changes>,
-    /// `sort_key`s of every retracted fact in `changes`. Each line's
-    /// session overlay stream is filtered against these before the
-    /// merge so a staged retract suppresses a session fact.
-    staged: Arc<HashSet<SortKey>>,
-    /// `staged` plus every line's session tombstones. Each line's tree
-    /// stream is filtered against these before the merge so retracts
-    /// in the per-query changes and session tombstones suppress
-    /// matching facts in the tree.
-    tombstones: Arc<HashSet<SortKey>>,
+    /// The lines' format and the tombstones keyed under it, resolved on
+    /// the first read (it needs the lines' tree roots) and shared by clones.
+    format: Arc<OnceCell<Format>>,
     /// When present, every selector this environment executes —
     /// fact scans and rule-discovery reads alike — records its
     /// demanded range here. Subscriptions use the recorded cover to
@@ -383,12 +380,51 @@ pub(crate) struct QueryEnv<'a, Env> {
     env: &'a Env,
 }
 
+/// The format [`Manifest`]s of the trees a [`QueryEnv`] reads, and the
+/// tombstone sets keyed under them.
+///
+/// A line's rows are keyed under its tree's manifest. Overlay facts and
+/// retracts are keyed under the lines' manifest too, so they order and
+/// match exactly as the trees' own rows do. Lines written under different
+/// manifests are still read together rather than refused: each line's rows
+/// are filtered with tombstones keyed under its own manifest, and the merge
+/// derives every row's key from its fields under the first line's
+/// ([`MergeKeys::Fields`]), a slower path that keeps retracts and dedup
+/// exact across formats.
+struct Format {
+    /// The manifest overlay rows and merge keys are taken under: the lines'
+    /// shared manifest, or the first line's when they differ.
+    manifest: Manifest,
+    /// How the merge keys rows: off stored bytes when every line shares
+    /// `manifest`, from fields when they do not.
+    keys: MergeKeys,
+    /// Per line, in line order: its manifest and the tombstone sets its
+    /// streams are filtered with.
+    lines: Vec<LineFormat>,
+}
+
+/// One line's manifest and the tombstone sets its streams are filtered
+/// with before the merge, keyed under that manifest.
+struct LineFormat {
+    /// The manifest of the line's tree.
+    manifest: Manifest,
+    /// The `sort_key`s of every retracted fact in the per-query changes.
+    /// The line's session overlay stream is filtered against these so a
+    /// staged retract suppresses a session fact.
+    staged: Arc<HashSet<SortKey>>,
+    /// `staged` plus the line's session tombstones. The line's tree
+    /// stream is filtered against these so retracts in the per-query
+    /// changes and session tombstones suppress matching facts in the
+    /// tree.
+    tombstones: Arc<HashSet<SortKey>>,
+}
+
 impl<'a, Env> QueryEnv<'a, Env> {
     /// Build a runtime env from already-resolved parts: the lines to
     /// read, the per-query overlay (caller changes + injected metadata),
     /// and the underlying capability env. The tombstones are lifted
-    /// here: the per-query retracts, plus each line's session
-    /// tombstones for the tree streams.
+    /// on first read, once the lines' format is known: the per-query
+    /// retracts, keyed under each line's manifest.
     ///
     /// `Branch::query`, `Snapshot::query`, and the transaction-query
     /// paths all construct through here so there is exactly one query
@@ -403,25 +439,10 @@ impl<'a, Env> QueryEnv<'a, Env> {
     ) -> Self {
         let changes = changes.into();
         let fetches = sources.iter().any(|source| source.as_ref().fetches());
-        let staged = tombstones_from(&changes);
-        // The common case, one line and nothing staged, shares the
-        // overlay's own set rather than copying it per query.
-        let tombstones = match sources.as_slice() {
-            [only] if staged.is_empty() => only.as_ref().overlay().tombstones(),
-            _ => {
-                let mut tombstones = staged.clone();
-                for source in &sources {
-                    let session = source.as_ref().overlay().tombstones();
-                    tombstones.extend(session.iter().cloned());
-                }
-                Arc::new(tombstones)
-            }
-        };
         Self {
             sources,
             changes,
-            staged: Arc::new(staged),
-            tombstones,
+            format: Arc::new(OnceCell::new()),
             demand: None,
             fixpoint: None,
             fetches,
@@ -445,11 +466,80 @@ impl<'a, Env> QueryEnv<'a, Env> {
         self
     }
 
-    /// Record a selector's demanded range, when recording is on.
-    fn record_demand(&self, selector: &ArtifactSelector<Constrained>) {
+    /// Record a selector's demanded range under `manifest`, when
+    /// recording is on.
+    fn record_demand(&self, selector: &ArtifactSelector<Constrained>, manifest: &Manifest) {
         if let Some(demand) = &self.demand {
-            demand.record(selector);
+            demand.record(selector, manifest);
         }
+    }
+}
+
+impl<Env> QueryEnv<'_, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    /// The lines' formats and the tombstones keyed under them, resolved
+    /// from the lines' tree roots on first use (see [`Format`]).
+    async fn format(&self) -> Result<&Format, DialogArtifactsError> {
+        self.format
+            .get_or_try_init(|| async {
+                let mut lines = Vec::with_capacity(self.sources.len());
+                for source in &self.sources {
+                    lines.push(line_manifest(source.as_ref(), self.env).await?);
+                }
+                // With no line there is no tree, and the overlay is read
+                // as a new tree would order it.
+                let manifest = lines.first().cloned().unwrap_or_default();
+                let keys = if lines.iter().all(|line| *line == manifest) {
+                    MergeKeys::Stored
+                } else {
+                    MergeKeys::Fields
+                };
+                let shared = Arc::new(tombstones_from(&self.changes, &manifest));
+                let lines = self
+                    .sources
+                    .iter()
+                    .zip(lines)
+                    .map(|(source, line)| {
+                        let staged = if line == manifest {
+                            shared.clone()
+                        } else {
+                            Arc::new(tombstones_from(&self.changes, &line))
+                        };
+                        // The common case, nothing staged, shares the
+                        // overlay's own set rather than copying it per
+                        // query.
+                        let session = source.as_ref().overlay().tombstones(&line);
+                        let tombstones = if staged.is_empty() {
+                            session
+                        } else if session.is_empty() {
+                            staged.clone()
+                        } else {
+                            let mut all = HashSet::clone(&staged);
+                            all.extend(session.iter().cloned());
+                            Arc::new(all)
+                        };
+                        LineFormat {
+                            manifest: line,
+                            staged,
+                            tombstones,
+                        }
+                    })
+                    .collect();
+                Ok(Format {
+                    manifest,
+                    keys,
+                    lines,
+                })
+            })
+            .await
     }
 }
 
@@ -458,8 +548,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
         Self {
             sources: self.sources.clone(),
             changes: self.changes.clone(),
-            staged: self.staged.clone(),
-            tombstones: self.tombstones.clone(),
+            format: self.format.clone(),
             demand: self.demand.clone(),
             fixpoint: self.fixpoint.clone(),
             fetches: self.fetches,
@@ -531,49 +620,61 @@ where
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        self.record_demand(&input);
+        let format = self.format().await?;
+        let manifest = format.manifest.clone();
+        self.record_demand(&input, &manifest);
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
 
         // Line streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
         // retract in `with(..)`) suppresses matching source facts, and
-        // by the line's session tombstones. Each borrows only
-        // `self.env`.
-        for source in &self.sources {
+        // by the line's session tombstones. Each line's stream is
+        // filtered with the tombstones keyed under its own manifest, and
+        // borrows only `self.env`.
+        for (source, line) in self.sources.iter().zip(&format.lines) {
             let raw = select_from_source(source.as_ref(), self.env, input.clone()).await?;
-            streams.push(filter_tombstones(raw, self.tombstones.clone()));
+            streams.push(filter_tombstones(
+                raw,
+                line.tombstones.clone(),
+                line.manifest.clone(),
+            ));
         }
 
         // Each line's session overlay, read live. Filtered by the
         // staged retracts only: the overlay's own tombstones hide facts
         // *beneath* it, never its own. Pushed only when it has rows,
         // for the same reason the per-query stream is below.
-        for source in &self.sources {
-            let mut session =
-                Provider::<Select<'a>>::execute(source.as_ref().overlay(), input.clone()).await?;
-            if let Some(first) = futures_util::StreamExt::next(&mut session).await {
-                let rows: ArtifactStream<'a> = Box::pin(stream::iter(vec![first]).chain(session));
-                streams.push(filter_tombstones(rows, self.staged.clone()));
+        for (source, line) in self.sources.iter().zip(&format.lines) {
+            let rows = source.as_ref().overlay().select(&input, &line.manifest);
+            if rows.is_empty() {
+                continue;
             }
+            let rows: ArtifactStream<'a> =
+                Box::pin(stream::iter(rows.into_iter().map(|fact| Ok(fact.into()))));
+            streams.push(filter_tombstones(
+                rows,
+                line.staged.clone(),
+                line.manifest.clone(),
+            ));
         }
 
-        // Overlay stream — Changes itself is a Provider<Select>. The
-        // overlay always carries facts (session metadata at minimum), but
-        // MATCHES the typical fact selector rarely: a join's inner premise
-        // probes one entity per outer binding, and pushing an empty overlay
-        // stream anyway forced the k-way merge (and its per-row sort keys)
-        // on every one of those probes. Peek the overlay's materialized
-        // result and push it only when it has rows, so the single-source
-        // common case flows through `merge_grouped`'s passthrough arm.
-        let mut overlay = Provider::<Select<'a>>::execute(self.changes.as_ref(), input).await?;
-        match futures_util::StreamExt::next(&mut overlay).await {
-            None => {}
-            Some(first) => {
-                streams.push(Box::pin(stream::iter(vec![first]).chain(overlay)));
-            }
+        // Overlay stream — the per-query changes, read in the lines'
+        // format so the rows order as the tree's own. The overlay always
+        // carries facts (session metadata at minimum), but MATCHES the
+        // typical fact selector rarely: a join's inner premise probes one
+        // entity per outer binding, and pushing an empty overlay stream
+        // anyway forced the k-way merge (and its per-row sort keys) on
+        // every one of those probes. Push the overlay's materialized
+        // result only when it has rows, so the single-source common case
+        // flows through `merge_grouped`'s passthrough arm.
+        let overlay = self.changes.select(&input, &manifest);
+        if !overlay.is_empty() {
+            streams.push(Box::pin(stream::iter(
+                overlay.into_iter().map(|fact| Ok(fact.into())),
+            )));
         }
 
-        Ok(merge_grouped(streams))
+        Ok(merge_grouped(streams, manifest, format.keys))
     }
 }
 
@@ -716,7 +817,7 @@ where
         // demand: a hit here invalidates the whole result, not one
         // entity's slice.
         if let Some(demand) = &self.demand {
-            demand.record_rules(&selector);
+            demand.record_rules(&selector, &self.format().await?.manifest);
         }
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
@@ -736,18 +837,19 @@ where
         &self,
         source: &Source,
         concept: &Entity,
+        manifest: &Manifest,
     ) -> Result<Vec<DeductiveRule>, EvaluationError> {
         let overlay = source.as_ref().overlay();
         let conclusions = conclusion_selector(concept);
         if let Some(demand) = &self.demand {
-            demand.record_rules(&conclusions);
+            demand.record_rules(&conclusions, manifest);
         }
         let entities = rule_entities(overlay.scan(&conclusions));
         let mut rules = Vec::with_capacity(entities.len());
         for rule_entity in entities {
             let sources = source_selector(&rule_entity);
             if let Some(demand) = &self.demand {
-                demand.record_rules(&sources);
+                demand.record_rules(&sources, manifest);
             }
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
                 continue;
@@ -907,9 +1009,10 @@ where
 
         // Durable layers — one per line — and each line's session
         // overlay, read fresh.
+        let manifest = &self.format().await?.manifest;
         for source in &self.sources {
             rules.extend(self.durable_rules(source, &concept).await?);
-            rules.extend(self.session_rules(source, &concept)?);
+            rules.extend(self.session_rules(source, &concept, manifest)?);
         }
         // Transient layer — the per-query overlay, read fresh.
         rules.extend(overlay_rules(&self.changes, &concept));
@@ -1015,9 +1118,10 @@ where
             let resolved =
                 try_join_all(frontier.into_iter().map(|(entity, descriptor)| async move {
                     let mut rules: Vec<DeductiveRule> = builtin(&entity);
+                    let manifest = &self.format().await?.manifest;
                     for source in &self.sources {
                         rules.extend(self.durable_rules(source, &entity).await?);
-                        rules.extend(self.session_rules(source, &entity)?);
+                        rules.extend(self.session_rules(source, &entity, manifest)?);
                     }
                     rules.extend(overlay_rules(&self.changes, &entity));
                     // The analysis reads premises and never plans, so

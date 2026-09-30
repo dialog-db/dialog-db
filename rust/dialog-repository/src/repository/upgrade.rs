@@ -242,7 +242,7 @@ where
             };
             pull(&tracking, &target).assert(&mut changes);
             push(&tracking, &target).assert(&mut changes);
-            state.record(&route.upstream(subject, upstream.tree().clone()));
+            state.record(&route.upstream(subject, upstream.tree().cloned()));
             routes.push(route);
         }
         tracked.push((name.clone(), routes, state));
@@ -629,10 +629,9 @@ mod tests {
             main_tracking.get(&Target::Remote(origin_main.clone())),
             Some(&TreeReference::from([7; 32]))
         );
-        assert_eq!(
-            main_tracking.get(&Target::Local("develop".into())),
-            Some(&TreeReference::default())
-        );
+        // The cell wrote "never synced" as the all-zero tree; that is no
+        // sync to carry over.
+        assert_eq!(main_tracking.get(&Target::Local("develop".into())), None);
         let draft_tracking = repo
             .branch("draft")
             .open()

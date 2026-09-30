@@ -18,7 +18,7 @@
 //! complete inventory of what is missing.
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use futures_util::stream::FuturesUnordered;
@@ -34,8 +34,8 @@ use rkyv::{
 use std::collections::VecDeque;
 
 use crate::{
-    ArchivedNodeBody, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key,
-    PersistentNode, PersistentTree, Value,
+    ContentAddressedStorage, DialogSearchTreeError, Distribution, Key, NodeBody, PersistentNode,
+    PersistentTree, Value,
 };
 
 /// What a gap-tolerant traversal found at one position in the tree.
@@ -120,7 +120,7 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSend,
     {
-        traverse::<Key, Value, Backend>(self.root().clone(), storage, None)
+        traverse::<Key, Value, Backend>(self.stored_root().cloned(), storage, None)
     }
 
     fn traverse_available_within<'a, Backend>(
@@ -132,7 +132,7 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSend,
     {
-        traverse::<Key, Value, Backend>(self.root().clone(), storage, Some(scope))
+        traverse::<Key, Value, Backend>(self.stored_root().cloned(), storage, Some(scope))
     }
 }
 
@@ -161,7 +161,7 @@ fn span_intersects(
 /// [`Traversable::traverse_available_within`]; `scope` of `None` keeps
 /// every child.
 fn traverse<'a, Key, Value, Backend>(
-    root: Blake3Hash,
+    root: Option<Blake3Hash>,
     storage: &'a ContentAddressedStorage<Backend>,
     scope: Option<&'a [core::ops::RangeInclusive<Vec<u8>>]>,
 ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
@@ -178,7 +178,7 @@ where
     use futures_util::StreamExt as _;
 
     try_stream! {
-        if &root != NULL_BLAKE3_HASH {
+        if let Some(root) = root {
             // A continuation queue rather than levels: the root goes out,
             // and every node that lands queues its children behind
             // whatever is already waiting. Against a backend that reaches
@@ -225,7 +225,7 @@ where
                 let node: PersistentNode<Key, Value> =
                     PersistentNode::try_from(Buffer::from(bytes))?;
 
-                if let ArchivedNodeBody::Index(index) = node.body() {
+                if let NodeBody::Index(index) = node.body() {
                     let links = index.links()?;
                     match scope {
                         None => {
@@ -391,17 +391,15 @@ mod tests {
             frame_ceiling_factor: 0,
             ..crate::Manifest::default()
         };
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree =
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_with_manifest(manifest, Default::default());
         let mut delta = Delta::zero();
         for i in keys {
-            tree = crate::TransientTree::with_manifest(
-                tree.root().clone(),
-                tree.node_cache(),
-                manifest,
-            )
-            .insert(i.to_be_bytes(), vec![i as u8], storage)
-            .await?
-            .persist(&mut delta)?;
+            tree = tree
+                .edit()
+                .insert(i.to_be_bytes(), vec![i as u8], storage)
+                .await?
+                .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
                 storage
                     .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
@@ -442,7 +440,7 @@ mod tests {
                 while let Some(visit) = visits.next().await {
                     if let Visit::Present(node) = visit? {
                         nodes += 1;
-                        if let crate::ArchivedNodeBody::Segment(segment) = node.body() {
+                        if let crate::NodeBody::Segment(segment) = node.body() {
                             segment.for_each_entry::<[u8; 5], _>(|key, _| {
                                 keys.push(key.to_vec());
                                 Ok(())
@@ -556,7 +554,7 @@ mod tests {
                 let mut count = 0usize;
                 while let Some(visit) = visits.next().await {
                     if let Visit::Present(node) = visit?
-                        && let crate::ArchivedNodeBody::Index(index) = node.body()
+                        && let crate::NodeBody::Index(index) = node.body()
                     {
                         count += index
                             .all_novelty::<[u8; 5]>()?
@@ -581,7 +579,7 @@ mod tests {
         while let Some(visit) = visits.next().await {
             if let Visit::Present(node) = visit? {
                 match node.body() {
-                    crate::ArchivedNodeBody::Segment(segment) => {
+                    crate::NodeBody::Segment(segment) => {
                         segment.for_each_entry::<[u8; 5], _>(|key, _| {
                             if key[0] == 1 {
                                 found += 1;
@@ -589,7 +587,7 @@ mod tests {
                             Ok(())
                         })?;
                     }
-                    crate::ArchivedNodeBody::Index(index) => {
+                    crate::NodeBody::Index(index) => {
                         found += index
                             .all_novelty::<[u8; 5]>()?
                             .into_iter()

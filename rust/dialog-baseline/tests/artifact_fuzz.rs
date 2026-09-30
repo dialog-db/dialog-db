@@ -21,10 +21,10 @@ use anyhow::Result;
 use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStoreMut as _, ArtifactViewStream as _, Artifacts,
-    Attribute, Datum, Entity, IndexRoot, Instruction, Key, State, Value, default_sort_key,
+    Attribute, Datum, Entity, IndexRoot, Instruction, Key, State, Value, sort_key,
 };
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_search_tree::{ContentAddressedStorage, PersistentTree};
+use dialog_search_tree::{ContentAddressedStorage, Manifest, PersistentTree};
 use dialog_storage::{
     Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
 };
@@ -155,7 +155,10 @@ async fn replay(
         .owned()
         .try_collect()
         .await?;
-    rows.sort_by_key(default_sort_key);
+    // Any fixed order works for a fingerprint; one fixed format keeps it
+    // a function of the facts alone, whatever format an arm's tree uses.
+    let order = Manifest::default();
+    rows.sort_by_cached_key(|row| sort_key(row, &order));
     let mut digest = Vec::new();
     for row in &rows {
         digest.extend_from_slice(format!("{row:?}").as_bytes());

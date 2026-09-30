@@ -21,8 +21,8 @@ use std::hash::Hash;
 
 use dialog_common::Blake3Hash;
 use dialog_search_tree::{
-    ArchivedNodeBody, Buffer, Component, ContentAddressedStorage, Delta, DialogSearchTreeError,
-    Key as TreeKey, PersistentNode, PersistentTree, Schema,
+    Buffer, Component, ContentAddressedStorage, Delta, DialogSearchTreeError, Key as TreeKey,
+    NodeBody, PersistentNode, PersistentTree, Schema,
 };
 use dialog_storage::{JournaledStorage, MemoryStorageBackend};
 
@@ -228,14 +228,14 @@ async fn live_footprint(tree: &Tree, storage: &Storage) -> Footprint {
         let node: PersistentNode<EavKey, Vec<u8>> =
             PersistentNode::try_from(Buffer::from(bytes)).unwrap();
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 footprint.index_nodes += 1;
                 footprint.index_bytes += size;
                 for at in 0..index.len() {
                     frontier.push(index.hash_at(at).unwrap().clone());
                 }
             }
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Segment(segment) => {
                 footprint.segment_nodes += 1;
                 footprint.segment_bytes += size;
                 footprint.entries += segment.len() as u64;

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::Revision;
 use crate::{
     Artifact, Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value,
-    key::artifact_index_keys,
+    key::{EncodedValue, artifact_index_keys_with},
 };
 use dialog_search_tree::Manifest;
 
@@ -171,23 +171,27 @@ impl RevisionRecord {
     ///
     /// `manifest` is the target tree's format: the record's value rides its key
     /// through the inline-vs-spill decision, so a read must use the same
-    /// manifest to find it.
-    pub fn entries(
-        &self,
-        manifest: &Manifest,
-    ) -> Result<Vec<(Key, State<Datum>)>, DialogArtifactsError> {
+    /// manifest to find it. Under a manifest whose `inline_n` is below the
+    /// record's size the value spills, and the result carries the block to
+    /// store beside the tree.
+    pub fn entries(&self, manifest: &Manifest) -> Result<RecordEntries, DialogArtifactsError> {
         let version = self.version();
         let artifact = self.to_artifact(&version)?;
 
         // Only the EAV and AEV orderings are written (see above), so the VAE
         // key this builds is dropped.
-        let (entity_key, attribute_key, _) = artifact_index_keys(&artifact, manifest);
+        let encoded = EncodedValue::new(&artifact.is, manifest);
+        let (entity_key, attribute_key, _) = artifact_index_keys_with(&artifact, encoded.payload);
         let mut datum = Datum::for_artifact(&artifact);
         datum.version = Some(version);
         let added = State::Added(datum);
 
-        Ok(vec![(entity_key, added.clone()), (attribute_key, added)])
+        Ok(RecordEntries {
+            entries: vec![(entity_key, added.clone()), (attribute_key, added)],
+            spill: encoded.spill,
+        })
     }
+
     /// The record for `revision` —
     /// everything the revision states about itself as one atomic fact,
     /// ready to be signed and written into the tree.
@@ -211,6 +215,31 @@ impl RevisionRecord {
             parents,
             skips,
             signature: Vec::new(),
+        }
+    }
+}
+
+/// Pre-built tree entries to write outside the instruction path (revision
+/// records, blob-index machinery), with the value block they need when a
+/// value spilled out of its key.
+///
+/// The write paths ([`ArtifactTreeExt::record`](crate::tree::ArtifactTreeExt::record),
+/// [`BufferedBatch::record`](crate::BufferedBatch::record)) store the block
+/// with the entries, so a spilled value is never written without its bytes.
+#[derive(Debug, Clone, Default)]
+pub struct RecordEntries {
+    /// The tree entries.
+    pub entries: Vec<(Key, State<Datum>)>,
+    /// A spilled value's block: the reference its keys carry and the raw
+    /// value bytes stored under it. `None` when every value stays inline.
+    pub spill: Option<(dialog_storage::Blake3Hash, Vec<u8>)>,
+}
+
+impl From<Vec<(Key, State<Datum>)>> for RecordEntries {
+    fn from(entries: Vec<(Key, State<Datum>)>) -> Self {
+        Self {
+            entries,
+            spill: None,
         }
     }
 }

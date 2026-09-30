@@ -28,9 +28,7 @@ mod store;
 pub use store::*;
 
 mod update;
-pub use update::{
-    Change, ChangeStream, Changes, SortKey, Statement, Update, default_sort_key, sort_key,
-};
+pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort_key};
 
 mod attribute;
 pub use attribute::*;
@@ -58,7 +56,7 @@ use rand::{Rng, distributions::Alphanumeric};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_search_tree::{Buffer as TreeBuffer, ContentAddressedStorage as TreeStorage, Delta};
 pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
@@ -133,6 +131,17 @@ where
     spine: SpineSlot,
 }
 
+/// The head pointer value versions before the sentinel-free empty tree
+/// wrote for a store with no revision: the all-zero value, which names no
+/// revision block. Still read as "no revision", never written.
+const LEGACY_NO_REVISION: [u8; HASH_SIZE] = [0u8; HASH_SIZE];
+
+/// Whether a stored head pointer value means "no revision": the empty
+/// value, or the all-zero one earlier versions wrote.
+fn is_no_revision(bytes: &[u8]) -> bool {
+    bytes.is_empty() || bytes == LEGACY_NO_REVISION
+}
+
 impl<Backend> Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -167,33 +176,7 @@ where
         // TODO: We probably want to enforce some namespacing within storage so
         // that generic K/V storage can go e.g., in a different IDB store or a
         // different folder on the FS
-        let index = {
-            let revision_block = storage.get(&make_reference(identifier.as_bytes())).await?;
-            let revision = if let Some(revision_hash_bytes) = revision_block {
-                // Check if the revision is NULL_REVISION_HASH
-                if revision_hash_bytes == NULL_REVISION_HASH {
-                    None
-                } else {
-                    // For actual revisions, read the revision from storage
-                    let hash = Blake3Hash::try_from(revision_hash_bytes).map_err(|bytes| {
-                        DialogArtifactsError::InvalidRevision(format!(
-                            "Incorrect byte length (expected {HASH_SIZE}, received {})",
-                            bytes.len()
-                        ))
-                    })?;
-
-                    storage.read::<IndexRoot>(&hash).await?
-                }
-            } else {
-                None
-            };
-
-            if let Some(revision) = revision {
-                ArtifactTree::from_hash(NodeHash::from(*revision.index()))
-            } else {
-                ArtifactTree::empty()
-            }
-        };
+        let index = Self::stored_index(&storage, &identifier).await?;
 
         Ok(Self {
             identifier,
@@ -288,91 +271,50 @@ where
         Ok(())
     }
 
-    /// Get the hash that represents the [`ArtifactStore`] at its current version.
-    pub async fn revision(&self) -> Result<Blake3Hash, DialogArtifactsError> {
+    /// Get the hash that represents the [`ArtifactStore`] at its current
+    /// version — `None` for a store that has no committed revision yet.
+    pub async fn revision(&self) -> Result<Option<Blake3Hash>, DialogArtifactsError> {
         let index = self.index.read().await;
 
-        let root = index.root();
-        Ok(if root == NULL_BLAKE3_HASH {
-            NULL_REVISION_HASH
-        } else {
-            IndexRoot::new(root.as_bytes()).as_reference().await?
+        Ok(match index.stored_root() {
+            // Nothing was ever persisted: the store has no revision yet.
+            None => None,
+            Some(root) => Some(IndexRoot::new(root.as_bytes()).as_reference().await?),
         })
     }
 
-    /// Reset the root of the database to `revision_hash` if provided, or else reset
-    /// to the stored root if available, or else to an empty database.
+    /// Reset the database to `revision` — `None` resets to the empty,
+    /// no-revision state — advancing the durable head pointer and reloading
+    /// the in-memory index to match. To re-read the head as it stands in
+    /// storage instead, use [`reload`](Self::reload).
     pub async fn reset(
         &mut self,
-        revision_hash: Option<Blake3Hash>,
+        revision: Option<Blake3Hash>,
     ) -> Result<(), DialogArtifactsError> {
-        // Determine target revision we are resetting to
-        let required_hash = match revision_hash {
-            // If a specific revision hash is provided, use it
-            Some(hash) => hash,
-            // Otherwise get current revision hash from storage
-            None => {
-                let block = self
-                    .storage
-                    .get(&make_reference(self.identifier().as_bytes()))
-                    .await?;
-
-                match block {
-                    // If store has a revision, use it
-                    Some(block_data) => {
-                        // Check if the block data matches NULL_REVISION_HASH
-                        if block_data == NULL_REVISION_HASH.to_vec() {
-                            NULL_REVISION_HASH
-                        } else {
-                            Blake3Hash::try_from(block_data).map_err(|bytes| {
-                                DialogArtifactsError::InvalidRevision(format!(
-                                    "Incorrect byte length (expected {HASH_SIZE}, received {})",
-                                    bytes.len()
-                                ))
-                            })?
-                        }
-                    }
-                    // If no revision exists in storage, use NULL_REVISION_HASH
-                    None => NULL_REVISION_HASH,
-                }
+        // Hydrate the target revision before touching the pointer, so a
+        // reset to a missing revision fails without moving anything.
+        let index_version = match &revision {
+            None => None,
+            Some(hash) => {
+                let revision = self.storage.read::<IndexRoot>(hash).await?.ok_or_else(|| {
+                    DialogArtifactsError::InvalidRevision(format!(
+                        "Block ({}) not found in storage",
+                        hash.to_base58()
+                    ))
+                })?;
+                Some(revision.index().to_owned())
             }
         };
 
-        // Now get hashes for the indexes.
-        let index_version =
-            // The null revision does not actually exists it just represents
-            // empty indexes so we set all versions to None's.
-            if required_hash == NULL_REVISION_HASH {
-                None
-            } else {
-                // Otherwise we hydrate revision info from the store.
-                let revision = self
-                    .storage
-                    .read::<IndexRoot>(&required_hash)
-                    .await?
-                    .ok_or_else(|| {
-                        DialogArtifactsError::InvalidRevision(format!(
-                            "Block ({}) not found in storage",
-                            required_hash.to_base58()
-                        ))
-                    })?;
+        // The head pointer's value is the revision hash; "no revision" is
+        // recorded as an empty value, not a sentinel hash.
+        self.storage
+            .set(
+                make_reference(self.identifier.as_bytes()),
+                revision.map(|hash| hash.to_vec()).unwrap_or_default(),
+            )
+            .await?;
 
-                Some(revision.index().to_owned())
-            };
-
-        // Update storage to point to the revision hash only if it was
-        // explicitly provided. If it was not no point of updating because
-        // we just read it from the store.
-        if revision_hash.is_some() {
-            self.storage
-                .set(
-                    make_reference(self.identifier.as_bytes()),
-                    required_hash.to_vec(),
-                )
-                .await?;
-        }
-
-        // Finally update the index
         let mut index = self.index.write().await;
         *index = match index_version {
             Some(hash) => ArtifactTree::from_hash(NodeHash::from(hash)),
@@ -380,6 +322,49 @@ where
         };
 
         Ok(())
+    }
+
+    /// Re-read the durable head pointer and reload the in-memory index
+    /// from it, discarding any uncommitted in-memory state.
+    pub async fn reload(&mut self) -> Result<(), DialogArtifactsError> {
+        let reloaded = Self::stored_index(&self.storage, &self.identifier).await?;
+        let mut index = self.index.write().await;
+        *index = reloaded;
+        Ok(())
+    }
+
+    /// The index the durable head pointer names: the revision's tree, or
+    /// the empty tree when the pointer is absent or empty (no revision
+    /// yet). A pointer naming a missing revision block is corruption and
+    /// errors rather than silently opening empty.
+    async fn stored_index(
+        storage: &Storage<CborEncoder, Backend>,
+        identifier: &str,
+    ) -> Result<Index, DialogArtifactsError> {
+        let block = storage.get(&make_reference(identifier.as_bytes())).await?;
+        let index_version = match block {
+            None => None,
+            Some(bytes) if is_no_revision(&bytes) => None,
+            Some(bytes) => {
+                let hash = Blake3Hash::try_from(bytes).map_err(|bytes| {
+                    DialogArtifactsError::InvalidRevision(format!(
+                        "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                        bytes.len()
+                    ))
+                })?;
+                let revision = storage.read::<IndexRoot>(&hash).await?.ok_or_else(|| {
+                    DialogArtifactsError::InvalidRevision(format!(
+                        "Block ({}) not found in storage",
+                        hash.to_base58()
+                    ))
+                })?;
+                Some(revision.index().to_owned())
+            }
+        };
+        Ok(match index_version {
+            Some(hash) => ArtifactTree::from_hash(NodeHash::from(hash)),
+            None => ArtifactTree::empty(),
+        })
     }
 
     /// Get the currently asserted [`Datum`]s recorded for the given entity
@@ -470,7 +455,7 @@ where
         match transaction_result {
             Ok(revision) => Ok(revision),
             Err(error) => {
-                self.reset(Some(base_revision)).await?;
+                self.reset(base_revision).await?;
                 Err(error)
             }
         }
@@ -516,7 +501,7 @@ where
         match transaction_result {
             Ok(revision) => Ok(revision),
             Err(error) => {
-                self.reset(Some(base_revision)).await?;
+                self.reset(base_revision).await?;
                 Err(error)
             }
         }
@@ -543,18 +528,12 @@ where
             .try_collect::<()>()
             .await?;
 
-        let next_revision = if root == NULL_BLAKE3_HASH {
-            None
-        } else {
-            Some(IndexRoot::new(root.as_bytes()))
-        };
-
-        let revision_hash = if let Some(revision) = &next_revision {
-            storage.write(&revision).await?;
-            revision.as_reference().await?
-        } else {
-            NULL_REVISION_HASH
-        };
+        // The root is always real: a sealed batch persists even the empty
+        // tree as its manifest-carrying node, so every publish mints a
+        // revision.
+        let revision = IndexRoot::new(root.as_bytes());
+        storage.write(&revision).await?;
+        let revision_hash = revision.as_reference().await?;
 
         // Advance the effective pointer to the latest version of this DB
         storage
@@ -620,6 +599,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::LEGACY_NO_REVISION;
     use std::{collections::BTreeSet, iter::once, str::FromStr, sync::Arc};
     use tokio::io::{BufReader, BufWriter};
 
@@ -635,8 +615,7 @@ mod tests {
     use crate::tree::distribution;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStoreMutExt, ArtifactViewStream, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, NameShape, Symbol, Value,
-        make_reference,
+        DialogArtifactsError, Entity, Instruction, NameShape, Symbol, Value, make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -2847,56 +2826,77 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_stores_null_revision_hash_directly() -> Result<()> {
+    async fn it_records_no_revision_as_an_empty_pointer() -> Result<()> {
         // Use memory storage backend to avoid file system errors
         let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 
         // Create an anonymous artifacts instance
         let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        // Reset to NULL_REVISION_HASH explicitly
-        artifacts.reset(Some(NULL_REVISION_HASH)).await?;
+        // Reset to the empty, no-revision state
+        artifacts.reset(None).await?;
 
-        // Verify that the revision reference was set to NULL_REVISION_HASH
+        // The head pointer records "no revision" as an empty value, not a
+        // sentinel hash.
         let reference_key = make_reference(artifacts.identifier().as_bytes());
         let stored_value = artifacts.storage.get(&reference_key).await?;
 
-        assert!(stored_value.is_some(), "Reference should exist");
         assert_eq!(
-            stored_value.unwrap(),
-            NULL_REVISION_HASH.to_vec(),
-            "Value should be NULL_REVISION_HASH"
+            stored_value,
+            Some(Vec::new()),
+            "no revision is an empty pointer value"
         );
+        assert_eq!(artifacts.revision().await?, None);
 
         Ok(())
     }
 
+    /// Stores written by earlier versions record "no revision" as the
+    /// all-zero pointer, and current ones as an empty value; both open and
+    /// reload as the empty store.
     #[dialog_common::test]
-    async fn it_handles_existing_null_revision() -> Result<()> {
+    async fn it_opens_both_no_revision_pointers_as_empty() -> Result<()> {
+        for stored in [LEGACY_NO_REVISION.to_vec(), Vec::new()] {
+            let mut backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
+            let identifier = "legacy".to_string();
+            backend
+                .set(make_reference(identifier.as_bytes()), stored.clone())
+                .await?;
+            let mut artifacts = Artifacts::open(identifier, backend).await?;
+            assert_eq!(artifacts.revision().await?, None, "{stored:?} opens empty");
+            artifacts.reload().await?;
+            assert_eq!(
+                artifacts.revision().await?,
+                None,
+                "{stored:?} reloads empty"
+            );
+        }
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_an_existing_empty_pointer() -> Result<()> {
         // Use memory storage backend to avoid file system errors
         let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 
         // Create an anonymous artifacts instance
         let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        // Manually set the reference to NULL_REVISION_HASH
+        // Manually record "no revision" in the head pointer
         let reference_key = make_reference(artifacts.identifier().as_bytes());
-        artifacts
-            .storage
-            .set(reference_key, NULL_REVISION_HASH.to_vec())
-            .await?;
+        artifacts.storage.set(reference_key, Vec::new()).await?;
 
-        // Get the value before reset
+        // Get the value before reload
         let before_value = artifacts.storage.get(&reference_key).await?;
 
-        // Now reset with None (should assume NULL_REVISION_HASH)
-        artifacts.reset(None).await?;
+        // Reload from the durable head: an empty pointer is the empty store
+        artifacts.reload().await?;
 
-        // Get the value after reset - should be unchanged since None was passed
+        // Reloading only reads; the stored pointer is untouched
         let after_value = artifacts.storage.get(&reference_key).await?;
         assert_eq!(
             before_value, after_value,
-            "Storage shouldn't change with reset(None)"
+            "Storage shouldn't change on reload"
         );
 
         // Verify we can still add data after reset
@@ -2956,8 +2956,8 @@ mod tests {
             .await;
         assert_eq!(results.len(), 1);
 
-        // Reset to NULL_REVISION_HASH
-        artifacts.reset(Some(NULL_REVISION_HASH)).await?;
+        // Reset to the empty, no-revision state
+        artifacts.reset(None).await?;
 
         // Verify data is gone (empty state)
         let results = artifacts
@@ -2972,29 +2972,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_verifies_storage_operations_for_null_revision() -> Result<()> {
-        // Test that null revision hash is stored correctly
-        let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
-
-        // Create artifacts instance
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
-
-        // Reset to NULL_REVISION_HASH with an explicit parameter
-        // (this should trigger a storage write)
-        artifacts.reset(Some(NULL_REVISION_HASH)).await?;
-
-        // Get the reference key and check what was stored
-        let reference_key = make_reference(artifacts.identifier().as_bytes());
-        let value = artifacts.storage.get(&reference_key).await?;
-
-        // Verify NULL_REVISION_HASH was stored directly
-        assert_eq!(value, Some(NULL_REVISION_HASH.to_vec()));
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_can_open_with_null_revision_hash() -> Result<()> {
+    async fn it_can_open_with_an_empty_pointer() -> Result<()> {
         // Use memory storage backend to avoid file system errors
         let mut storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 
@@ -3004,12 +2982,11 @@ mod tests {
         // Create a reference key for this identifier
         let reference_key = make_reference(identifier.as_bytes());
 
-        // Set the NULL_REVISION_HASH directly in storage
-        storage_backend
-            .set(reference_key, NULL_REVISION_HASH.to_vec())
-            .await?;
+        // Record "no revision" (an empty pointer value) directly in storage
+        storage_backend.set(reference_key, Vec::new()).await?;
 
-        // Open artifacts with this identifier - should successfully handle NULL_REVISION_HASH
+        // Open artifacts with this identifier: an empty pointer is an
+        // empty store
         let artifacts = Artifacts::open(identifier, storage_backend).await?;
 
         // Verify we can use the artifacts instance
@@ -3039,7 +3016,7 @@ mod tests {
         assert_eq!(
             results.len(),
             1,
-            "Should be able to read data after opening with NULL_REVISION_HASH"
+            "Should be able to read data after opening with an empty pointer"
         );
 
         Ok(())
@@ -3081,10 +3058,10 @@ mod tests {
         let reference_key = make_reference(artifacts.identifier().as_bytes());
         let before_value = artifacts.storage.get(&reference_key).await?;
 
-        // Reset with None (should not trigger a storage write)
-        artifacts.reset(None).await?;
+        // Reload from the durable head (a pure read, never a write)
+        artifacts.reload().await?;
 
-        // Check the value after reset
+        // Check the value after the reload
         let after_value = artifacts.storage.get(&reference_key).await?;
 
         // Values should be identical since we didn't trigger a write
@@ -3358,7 +3335,6 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
         use crate::EntityKey;
-        use crate::key::default_manifest;
         use crate::tree::fetch_spilled;
         let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
         let value = Value::String("m".repeat(n));
@@ -3368,7 +3344,8 @@ mod tests {
             is: value.clone(),
             cause: None,
         };
-        let key = EntityKey::from_artifact(&artifact, &default_manifest()).into_key();
+        let key = EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default())
+            .into_key();
         // A store that never had the block written.
         let empty = MemoryStorageBackend::<dialog_storage::Blake3Hash, Vec<u8>>::default();
         let result = fetch_spilled(&empty, &key).await;

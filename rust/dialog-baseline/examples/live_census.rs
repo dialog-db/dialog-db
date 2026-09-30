@@ -19,7 +19,7 @@
 use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Datum, IndexRoot, Key, State};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_search_tree::{
-    ArchivedNodeBody, Buffer as TreeBuffer, PersistentNode, Value as TreeValue, into_owned,
+    Buffer as TreeBuffer, NodeBody, PersistentNode, Value as TreeValue, into_owned,
 };
 use dialog_storage::{
     Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
@@ -77,7 +77,7 @@ async fn census(
         let size = bytes.len();
         let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 if index.novelty.is_empty() {
                     quiet.push(size);
                 } else {
@@ -87,7 +87,7 @@ async fn census(
                     stack.push(*index.hash_at(at)?.as_bytes());
                 }
             }
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Segment(segment) => {
                 let mut weight = 0usize;
                 let mut key_bytes = 0usize;
                 let mut payload = 0usize;
@@ -175,7 +175,10 @@ fn main() -> anyhow::Result<()> {
             anyhow::Ok(*root.index())
         };
 
-        let revision = store.revision().await?;
+        let revision = store
+            .revision()
+            .await?
+            .expect("the store has commits, so it has a revision");
         let bytes = inner
             .get(&revision)
             .await?
@@ -189,7 +192,10 @@ fn main() -> anyhow::Result<()> {
         .await?;
 
         store.canonicalize().await?;
-        let revision = store.revision().await?;
+        let revision = store
+            .revision()
+            .await?
+            .expect("the store has commits, so it has a revision");
         let bytes = inner
             .get(&revision)
             .await?

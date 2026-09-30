@@ -24,7 +24,7 @@ use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Datum, IndexRoot, Key, 
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_search_tree::{
-    ArchivedNodeBody, Buffer as TreeBuffer, ContentAddressedStorage, PersistentNode, PersistentTree,
+    Buffer as TreeBuffer, ContentAddressedStorage, NodeBody, PersistentNode, PersistentTree,
 };
 use dialog_storage::{
     Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
@@ -88,12 +88,12 @@ async fn replay(log: &SeLog, group: usize) -> Result<(Blake3Hash, Blake3Hash, us
             .ok_or_else(|| anyhow::anyhow!("reachable node missing"))?;
         let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 for at in (0..index.len()).rev() {
                     stack.push(*index.hash_at(at)?.as_bytes());
                 }
             }
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Segment(segment) => {
                 let mut keys = segment.keys::<Key>()?;
                 while let Some((at, key)) = keys.next_key()? {
                     keyroll.extend_from_slice(key);

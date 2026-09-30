@@ -60,6 +60,7 @@ use crate::artifacts::decode_value;
 use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord, Version};
 use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
 use crate::tree::ArtifactTree;
+use crate::tree::fetch_spilled;
 use crate::{
     Attribute, AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
     ENTITY_KEY_TAG, Entity, EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key,
@@ -412,12 +413,22 @@ where
 /// trusted from the datum's version tag. A record that fails to decode
 /// fails the merge — the same strictness the durable history reader
 /// applies.
-pub fn observe_revisions<'a, C>(
+///
+/// A record whose value spilled out of its key (a tree whose `inline_n`
+/// is below the record's size) is read back from `store`, the raw block
+/// backend the differential's tree is read through.
+pub fn observe_revisions<'a, C, S>(
     changes: C,
     observed: Arc<Mutex<BTreeSet<Version>>>,
+    store: S,
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
+    S: StorageBackend<
+            Key = dialog_storage::Blake3Hash,
+            Value = Vec<u8>,
+            Error = DialogStorageError,
+        > + 'a,
 {
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
@@ -432,16 +443,14 @@ where
                 && parts.attribute.as_ref() == REVISION_ATTRIBUTE.as_bytes()
             {
                 // The inline payload is the ORDER-PRESERVING encoding, not the
-                // raw record bytes: decode it back to a value first. Every
-                // arm that cannot produce the record's version FAILS the
-                // merge rather than skipping: the context derived here is
-                // published under the merged head's signature, and a
-                // silently omitted version understates the watermark — a
+                // raw record bytes: decode it back to a value first; a
+                // spilled payload is the raw value bytes in an archive
+                // block. Every arm that cannot produce the record's version
+                // FAILS the merge rather than skipping: the context derived
+                // here is published under the merged head's signature, and
+                // a silently omitted version understates the watermark — a
                 // later pull would then treat facts this head has seen as
-                // news and resurrect deletions. A revision record is a few
-                // hundred bytes, far under the default inline threshold, so
-                // a spilled one means a non-default manifest this pass does
-                // not support yet (reading it back needs the archive).
+                // news and resurrect deletions.
                 let bytes = match &parts.value {
                     ValueRef::Inline(inline) => {
                         match decode_value(parts.value_type, inline) {
@@ -452,11 +461,22 @@ where
                             ))?,
                         }
                     }
-                    ValueRef::Spilled { .. } => Err(DialogSearchTreeError::Node(
-                        "revision record spilled out of its key; the merged context cannot \
-                         be derived without reading it back"
-                            .to_string(),
-                    ))?,
+                    ValueRef::Spilled { .. } => {
+                        let spilled = fetch_spilled(&store, &entry.key)
+                            .await
+                            .map_err(|error| {
+                                DialogSearchTreeError::Node(format!(
+                                    "spilled revision record: {error}"
+                                ))
+                            })?;
+                        match spilled.map(|bytes| Value::try_from((parts.value_type, bytes))) {
+                            Some(Ok(Value::Record(bytes))) => bytes,
+                            _ => Err(DialogSearchTreeError::Node(
+                                "spilled revision record does not decode to a record value"
+                                    .to_string(),
+                            ))?,
+                        }
+                    }
                 };
                 let record = RevisionRecord::try_from_bytes(&bytes).map_err(|error| {
                     DialogSearchTreeError::Node(format!("revision record: {error}"))

@@ -14,12 +14,12 @@
 
 use std::env;
 
-use dialog_search_tree::{Buffer, PersistentNode, PersistentNodeBody};
+use dialog_search_tree::{Buffer, Manifest, PersistentNode, PersistentNodeBody};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::{deserialize, to_bytes};
 
-use crate::{Datum, DialogArtifactsError, EMPTY_TREE_HASH, Key, State};
+use crate::{Datum, DialogArtifactsError, Key, State};
 
 /// Which of the two node forms a walked node is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,16 +69,24 @@ pub struct NodeStat {
 
 /// Walks the tree rooted at `root` breadth-first and measures every node.
 ///
-/// `root` is the raw 32-byte tree root as carried by a revision; the empty
-/// tree yields an empty capture. The store is the same hash-to-block backend
-/// the tree persists into, so spilled value blocks and history records
-/// outside the tree are never touched.
+/// `root` is the raw 32-byte tree root as carried by a revision or reported
+/// by a tree. A tree with nothing persisted yields an empty capture: the
+/// all-zero root earlier versions stored for an empty tree, or the root an
+/// empty tree derives from its format before its first persist
+/// ([`ArtifactTree::empty`](super::ArtifactTree::empty)), which no store
+/// holds yet. The store is the same hash-to-block backend the tree persists
+/// into, so spilled value blocks and history records outside the tree are
+/// never touched.
 pub async fn capture<S>(root: &Blake3Hash, store: &S) -> Result<Vec<NodeStat>, DialogArtifactsError>
 where
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
-    if *root == EMPTY_TREE_HASH {
+    if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {
+        return Ok(Vec::new());
+    }
+    let unpersisted_empty = super::ArtifactTree::empty_root(&Manifest::default())?;
+    if root == unpersisted_empty.as_bytes() && store.get(root).await?.is_none() {
         return Ok(Vec::new());
     }
 
@@ -315,5 +323,28 @@ pub fn report(label: &str, stats: &[NodeStat]) {
                 summarize(label, &format!("{}/h{height}", kind.label()), &level);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::tree::ArtifactTree;
+    use dialog_storage::MemoryStorageBackend;
+
+    /// An empty tree has nothing persisted to measure, whichever root
+    /// names it: the all-zero root earlier versions stored, or the root a
+    /// new empty tree derives from its format before its first persist.
+    #[dialog_common::test]
+    async fn it_captures_nothing_for_an_unpersisted_empty_tree() -> anyhow::Result<()> {
+        let store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        assert!(capture(&[0u8; 32], &store).await?.is_empty());
+        let empty = ArtifactTree::empty();
+        assert_ne!(empty.root().as_bytes(), &[0u8; 32]);
+        assert!(capture(empty.root().as_bytes(), &store).await?.is_empty());
+        Ok(())
     }
 }
