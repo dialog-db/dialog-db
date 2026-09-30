@@ -30,7 +30,9 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
 use dialog_effects::peer::prelude::*;
 use dialog_peer::OpenCredential;
-use dialog_peer::helpers::{open_peer, test_session_with_peer, unique_name};
+use dialog_peer::helpers::{
+    open_peer, test_grant, test_session_with_peer, test_state, test_storage, unique_name,
+};
 // Only the native-only tests below construct one.
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::BlobError;
@@ -56,6 +58,8 @@ use dialog_effects::{
     blob::{BlobWriter, Import as BlobImportEffect},
 };
 use dialog_peer::Peer;
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_peer::helpers::test_owned;
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -63,7 +67,9 @@ use dialog_search_tree::NoveltyOp;
 use dialog_search_tree::{
     ArchivedNodeBody, ContentAddressedStorage as TreeStorage, Traversable as _, Visit, into_owned,
 };
-use dialog_storage::provider::storage::{Storage, VolatileSpace};
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_storage::provider::storage::Storage;
+use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::{StreamExt, stream};
 
 fn s3_site_address(s3: &S3Address) -> S3SiteAddress {
@@ -296,13 +302,17 @@ async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
 async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -> Result<()> {
     use crate::helpers::Counting;
 
-    let storage = Storage::temp();
+    let storage = test_owned(Storage::temp()).await;
     let profile = open_peer(
         storage.clone(),
         Location::profile(unique_name("ship-overlap")),
     )
     .await?;
-    let operator = profile.session(b"test").allow(Subject::any()).await?;
+    let operator = profile
+        .session(b"test")
+        .mount(profile.state())
+        .allow(Subject::any())
+        .await?;
     let repo = profile
         .space(unique_name("ship-overlap"))
         .create()
@@ -401,13 +411,17 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
 #[dialog_common::test]
 async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()> {
     // --- Site A: write a blob, reference it, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("blob-ship-a")),
     )
     .await?;
-    let operator_a = profile_a.session(b"test").allow(Subject::any()).await?;
+    let operator_a = profile_a
+        .session(b"test")
+        .mount(profile_a.state())
+        .allow(Subject::any())
+        .await?;
 
     let repo_a = profile_a
         .space(unique_name("blob-ship"))
@@ -441,13 +455,17 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
 
     // --- Site B: same remote subject, separate local store; pull then read. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("blob-ship-b")),
     )
     .await?;
-    let operator_b = profile_b.session(b"test").allow(Subject::any()).await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .mount(profile_b.state())
+        .allow(Subject::any())
+        .await?;
 
     let repo_b = profile_b
         .space(unique_name("blob-ship-b-repo"))
@@ -506,13 +524,17 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
 #[dialog_common::test]
 async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
     // --- Site A: write a blob, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("blob-retract-a")),
     )
     .await?;
-    let operator_a = profile_a.session(b"test").allow(Subject::any()).await?;
+    let operator_a = profile_a
+        .session(b"test")
+        .mount(profile_a.state())
+        .allow(Subject::any())
+        .await?;
 
     let repo_a = profile_a
         .space(unique_name("blob-retract"))
@@ -546,13 +568,17 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
 
     // --- Site B: pull and hydrate the bytes while still referenced. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("blob-retract-b")),
     )
     .await?;
-    let operator_b = profile_b.session(b"test").allow(Subject::any()).await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .mount(profile_b.state())
+        .allow(Subject::any())
+        .await?;
     let repo_b = profile_b
         .space(unique_name("blob-retract-b-repo"))
         .open()
@@ -617,13 +643,17 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
 
     // --- Site C: fresh replica, pulls after the retraction; it can neither
     // see the reference nor hydrate the bytes. ---
-    let storage_c = Storage::temp();
+    let storage_c = test_owned(Storage::temp()).await;
     let profile_c = open_peer(
         storage_c.clone(),
         Location::profile(unique_name("blob-retract-c")),
     )
     .await?;
-    let operator_c = profile_c.session(b"test").allow(Subject::any()).await?;
+    let operator_c = profile_c
+        .session(b"test")
+        .mount(profile_c.state())
+        .allow(Subject::any())
+        .await?;
     let repo_c = profile_c
         .space(unique_name("blob-retract-c-repo"))
         .open()
@@ -685,13 +715,17 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
     use dialog_credentials::Ed25519Signer;
 
     // --- Site A: retain a delegation, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("delegation-ship-a")),
     )
     .await?;
-    let operator_a = profile_a.session(b"test").allow(Subject::any()).await?;
+    let operator_a = profile_a
+        .session(b"test")
+        .mount(profile_a.state())
+        .allow(Subject::any())
+        .await?;
     let repo_a = profile_a
         .space(unique_name("delegation-ship"))
         .create()
@@ -738,13 +772,17 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
 
     // --- Site B: pull, query by audience, read the envelope. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("delegation-ship-b")),
     )
     .await?;
-    let operator_b = profile_b.session(b"test").allow(Subject::any()).await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .mount(profile_b.state())
+        .allow(Subject::any())
+        .await?;
     let repo_b = profile_b
         .space(unique_name("delegation-ship-b-repo"))
         .open()
@@ -867,13 +905,17 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     let reference = value.to_reference();
 
     // --- Site A: commit a spilling fact, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("spill-ship-a")),
     )
     .await?;
-    let operator_a = profile_a.session(b"test").allow(Subject::any()).await?;
+    let operator_a = profile_a
+        .session(b"test")
+        .mount(profile_a.state())
+        .allow(Subject::any())
+        .await?;
 
     let repo_a = profile_a
         .space(unique_name("spill-ship"))
@@ -939,13 +981,17 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     );
 
     // --- Site B: same remote subject, separate local store; pull then select. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("spill-ship-b")),
     )
     .await?;
-    let operator_b = profile_b.session(b"test").allow(Subject::any()).await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .mount(profile_b.state())
+        .allow(Subject::any())
+        .await?;
 
     let repo_b = profile_b
         .space(unique_name("spill-ship-b-repo"))
@@ -1018,13 +1064,17 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
     };
 
     // --- Site A: commit the spilling fact, push. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("spill-retract-a")),
     )
     .await?;
-    let operator_a = profile_a.session(b"test").allow(Subject::any()).await?;
+    let operator_a = profile_a
+        .session(b"test")
+        .mount(profile_a.state())
+        .allow(Subject::any())
+        .await?;
     let repo_a = profile_a
         .space(unique_name("spill-retract"))
         .create()
@@ -1051,13 +1101,17 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
 
     // --- Site B: separate local store; pull, retract WITHOUT selecting, push. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("spill-retract-b")),
     )
     .await?;
-    let operator_b = profile_b.session(b"test").allow(Subject::any()).await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .mount(profile_b.state())
+        .allow(Subject::any())
+        .await?;
     let repo_b = profile_b
         .space(unique_name("spill-retract-b-repo"))
         .open()
@@ -1132,13 +1186,17 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
     let body = "b".repeat(inline_n + 1);
 
     // --- Site A: repo + remote. ---
-    let storage_a = Storage::temp();
+    let storage_a = test_owned(Storage::temp()).await;
     let profile_a = open_peer(
         storage_a.clone(),
         Location::profile(unique_name("spill-sub-a")),
     )
     .await?;
-    let operator_a = profile_a.session(b"test").allow(Subject::any()).await?;
+    let operator_a = profile_a
+        .session(b"test")
+        .mount(profile_a.state())
+        .allow(Subject::any())
+        .await?;
     let repo_a = profile_a
         .space(unique_name("spill-sub"))
         .create()
@@ -1160,13 +1218,17 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .await?;
 
     // --- Site B: separate store, subscribed to doc bodies. ---
-    let storage_b = Storage::temp();
+    let storage_b = test_owned(Storage::temp()).await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("spill-sub-b")),
     )
     .await?;
-    let operator_b = profile_b.session(b"test").allow(Subject::any()).await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .mount(profile_b.state())
+        .allow(Subject::any())
+        .await?;
     let repo_b = profile_b
         .space(unique_name("spill-sub-b-repo"))
         .open()
@@ -2488,7 +2550,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
 
     // --- The account: its own identity, its own repository, the durable
     // home of delegations. ---
-    let account_storage = Storage::volatile();
+    let account_storage = test_storage().await;
     let account_signer = Ed25519Signer::generate().await?;
     let account_name = unique_name("account");
     StorageFx::profile(account_name.clone())
@@ -2501,12 +2563,15 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
         let credential = OpenCredential::load(account_name.clone())
             .perform(&account_storage)
             .await?;
-        Peer::new(credential)
-            .storage(account_storage.clone())
+        Peer::new(credential.clone())
+            .with(account_storage.clone())
+            .mount(test_state(&credential.did()))
+            .grant(test_grant().await)
             .await?
     };
     let account_operator = account_profile
         .session(b"account-device")
+        .mount(account_profile.state())
         .allow(Subject::any())
         .await?;
 
@@ -2562,7 +2627,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
     // --- The device: fresh profile and operator. "Login" retains the
     // account-to-profile powerline locally (handed over out of band) and
     // points the profile's access branch at the account. ---
-    let device_storage = Storage::volatile();
+    let device_storage = test_storage().await;
     let device_profile = open_peer(
         device_storage.clone(),
         Location::profile(unique_name("device")),
@@ -2570,6 +2635,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
     .await?;
     let device_operator = device_profile
         .session(b"device")
+        .mount(device_profile.state())
         .allow(Subject::any())
         .await?;
 
@@ -2671,7 +2737,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
     let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
 
     // The account, holding a space's grant in its pushed access branch.
-    let account_storage = Storage::volatile();
+    let account_storage = test_storage().await;
     let account_signer = Ed25519Signer::generate().await?;
     let account_name = unique_name("account");
     StorageFx::profile(account_name.clone())
@@ -2684,12 +2750,15 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         let credential = OpenCredential::load(account_name.clone())
             .perform(&account_storage)
             .await?;
-        Peer::new(credential)
-            .storage(account_storage.clone())
+        Peer::new(credential.clone())
+            .with(account_storage.clone())
+            .mount(test_state(&credential.did()))
+            .grant(test_grant().await)
             .await?
     };
     let account_operator = account_profile
         .session(b"account-device")
+        .mount(account_profile.state())
         .allow(Subject::any())
         .await?;
     let space = Ed25519Signer::generate().await?;
@@ -2739,7 +2808,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
 
     // The device logs in: retain the powerline, point at the account,
     // pull WITH download.
-    let device_storage = Storage::volatile();
+    let device_storage = test_storage().await;
     let device_profile = open_peer(
         device_storage.clone(),
         Location::profile(unique_name("device")),
@@ -2747,6 +2816,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
     .await?;
     let device_operator = device_profile
         .session(b"device")
+        .mount(device_profile.state())
         .allow(Subject::any())
         .await?;
     let login_grant = DelegationBuilder::new()
@@ -2902,7 +2972,7 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
     // --- Bob: the delegation lands in his LEGACY certificate store, the
     // way an old install left it (storage-routed, not through the
     // operator). ---
-    let bob_storage = Storage::volatile();
+    let bob_storage = test_storage().await;
     let bob_profile = open_peer(
         bob_storage.clone(),
         Location::profile(unique_name("migrate-bob")),
@@ -2920,7 +2990,11 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
         .perform(&bob_storage)
         .await?;
 
-    let bob_operator = bob_profile.session(b"test").allow(Subject::any()).await?;
+    let bob_operator = bob_profile
+        .session(b"test")
+        .mount(bob_profile.state())
+        .allow(Subject::any())
+        .await?;
     let bob_repo = bob_profile
         .space(unique_name("migrate-bob-repo"))
         .open()
@@ -2969,7 +3043,11 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
     // Migrate before build: the operator opens its access branch at
     // build time, so the post-migration operator sees the migrated
     // credentials. Resolving the remote branch revision now succeeds.
-    let bob_operator = bob_profile.session(b"test").allow(Subject::any()).await?;
+    let bob_operator = bob_profile
+        .session(b"test")
+        .mount(bob_profile.state())
+        .allow(Subject::any())
+        .await?;
     let fetched = bob_branch
         .fetch()
         .perform(&bob_operator)
@@ -3574,9 +3652,13 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
     assert_eq!(expected_blobs, 1, "site A's export carries the blob");
 
     // --- Site B: same remote, empty local store, head only. ---
-    let storage_b = Storage::<VolatileSpace>::volatile();
+    let storage_b = test_storage().await;
     let profile_b = open_peer(storage_b.clone(), Location::profile(unique_name("reach-b"))).await?;
-    let operator_b = profile_b.session(b"test").allow(Subject::any()).await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .mount(profile_b.state())
+        .allow(Subject::any())
+        .await?;
     let repo_b = profile_b
         .space(unique_name("reach-b-repo"))
         .open()
@@ -3729,13 +3811,17 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
 
     // --- Site B: pull the fact, then advance on its own so the next pull
     // is a real merge rather than a fast-forward adoption. ---
-    let storage_b = Storage::<VolatileSpace>::volatile();
+    let storage_b = test_storage().await;
     let profile_b = open_peer(
         storage_b.clone(),
         Location::profile(unique_name("retire-b")),
     )
     .await?;
-    let operator_b = profile_b.session(b"test").allow(Subject::any()).await?;
+    let operator_b = profile_b
+        .session(b"test")
+        .mount(profile_b.state())
+        .allow(Subject::any())
+        .await?;
     let repo_b = profile_b
         .space(unique_name("retire-b-repo"))
         .open()
@@ -3866,7 +3952,7 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
 
     // The account publishes its access branch, holding one grant, to the
     // access service.
-    let account_storage = Storage::volatile();
+    let account_storage = test_storage().await;
     let account_signer = Ed25519Signer::generate().await?;
     let account_name = unique_name("account");
     StorageFx::profile(account_name.clone())
@@ -3879,12 +3965,15 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
         let credential = OpenCredential::load(account_name.clone())
             .perform(&account_storage)
             .await?;
-        Peer::new(credential)
-            .storage(account_storage.clone())
+        Peer::new(credential.clone())
+            .with(account_storage.clone())
+            .mount(test_state(&credential.did()))
+            .grant(test_grant().await)
             .await?
     };
     let account_operator = account_profile
         .session(b"account-device")
+        .mount(account_profile.state())
         .allow(Subject::any())
         .await?;
     let space = Ed25519Signer::generate().await?;
@@ -3931,7 +4020,7 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
 
     // A device of the account: its login grant retained locally, the
     // account tracked as its access upstream.
-    let device_storage = Storage::volatile();
+    let device_storage = test_storage().await;
     let device_profile = open_peer(
         device_storage.clone(),
         Location::profile(unique_name("device")),
@@ -3939,6 +4028,7 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
     .await?;
     let device_operator = device_profile
         .session(b"device")
+        .mount(device_profile.state())
         .allow(Subject::any())
         .await?;
     let login_grant = DelegationBuilder::new()
@@ -4830,9 +4920,13 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         Peer<NativeTempSpace>,
         crate::Repository<SignerCredential>,
     )> {
-        let storage = Storage::temp();
+        let storage = test_owned(Storage::temp()).await;
         let profile = open_peer(storage.clone(), Location::profile(unique_name(name))).await?;
-        let operator = profile.session(b"test").allow(Subject::any()).await?;
+        let operator = profile
+            .session(b"test")
+            .mount(profile.state())
+            .allow(Subject::any())
+            .await?;
         let repo = profile
             .space(unique_name(name))
             .create()

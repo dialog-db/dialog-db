@@ -9,9 +9,11 @@
 use dialog_effects::storage::{Directory, Location};
 use dialog_identity::OpenCredential;
 use dialog_network::Network;
+use dialog_repository::{ACCESS_BRANCH, Repository};
 use dialog_storage::provider::storage::Storage;
+use dialog_varsig::Principal as _;
 
-use super::{Peer, PeerError, PeerSpace, Runtime};
+use super::{Allowance, Peer, PeerError, PeerSpace, Runtime};
 
 enum Mode {
     Open,
@@ -30,6 +32,7 @@ pub struct OpenPeer {
     runtime: Runtime,
     base: Option<Directory>,
     branch: Option<String>,
+    allowed: Vec<Allowance>,
 }
 
 impl OpenPeer {
@@ -58,6 +61,7 @@ impl OpenPeer {
             runtime: Runtime::default(),
             base: None,
             branch: None,
+            allowed: Vec::new(),
         }
     }
 
@@ -80,9 +84,18 @@ impl OpenPeer {
         self
     }
 
-    /// The state branch. Defaults to `main`.
+    /// The branch of the credential's repository that holds the peer's
+    /// state. Defaults to `main`.
     pub fn branch(mut self, name: impl Into<String>) -> Self {
         self.branch = Some(name.into());
+        self
+    }
+
+    /// Grant the peer `allowance` when it opens, as
+    /// [`PeerBuilder::grant`](super::PeerBuilder::grant) does. A peer opens only with a grant over
+    /// its storage, [`Allowance::storage`].
+    pub fn grant(mut self, allowance: impl Into<Allowance>) -> Self {
+        self.allowed.push(allowance.into());
         self
     }
 
@@ -100,13 +113,18 @@ impl OpenPeer {
             .await
             .map_err(|error| PeerError::Open(error.to_string()))?;
 
+        // The peer's state is the named branch of the repository its
+        // credential's space holds, at the location opened.
+        let state = Repository::from(credential.did())
+            .branch(self.branch.unwrap_or_else(|| ACCESS_BRANCH.to_string()));
         let mut builder = Peer::new(credential)
-            .storage(storage.clone())
-            .network(self.network)
+            .with(storage.clone())
+            .mount(state)
+            .with(self.network)
             .runtime(self.runtime)
             .base(self.base.unwrap_or(self.location.directory));
-        if let Some(branch) = self.branch {
-            builder = builder.branch(branch);
+        for allowance in self.allowed {
+            builder = builder.grant(allowance);
         }
         builder.await
     }

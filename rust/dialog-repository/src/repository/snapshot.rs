@@ -990,8 +990,9 @@ mod tests {
     use dialog_credentials::Credential;
     use dialog_effects::archive::prelude::GetBlockExt as _;
     use dialog_effects::blob::BlobSource;
+    use dialog_peer::helpers::{test_grant, test_state, test_storage};
     use dialog_search_tree::PersistentNode;
-    use dialog_storage::provider::storage::{Storage, VolatileSpace};
+    use dialog_storage::provider::storage::VolatileSpace;
     use futures_util::stream;
 
     use super::*;
@@ -1053,7 +1054,7 @@ mod tests {
     async fn destination_for(
         stage: &Stage,
     ) -> Result<dialog_peer::Peer<VolatileSpace, dialog_peer::Session>> {
-        let destination = Storage::<VolatileSpace>::volatile();
+        let destination = test_storage().await;
         StorageFx::profile(unique_name("snapshot-profile"))
             .create(Credential::Signer(stage.profile.credential().clone()))
             .perform(&destination)
@@ -1063,10 +1064,13 @@ mod tests {
             .perform(&destination)
             .await?;
         let peer = dialog_peer::Peer::new(stage.profile.credential().clone())
-            .storage(destination)
+            .with(destination)
+            .mount(test_state(&stage.profile.credential().did()))
+            .grant(test_grant().await)
             .await?;
         Ok(peer
             .session(b"snapshot-destination")
+            .mount(peer.state())
             .allow(Subject::any())
             .await?)
     }

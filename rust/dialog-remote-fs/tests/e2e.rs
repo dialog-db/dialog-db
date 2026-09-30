@@ -319,10 +319,13 @@ async fn it_allows_read_but_denies_write_with_read_only_delegation() -> Result<(
     // A read-only delegation authorizes Get but not Put: the command-prefix
     // match in prove gates the write for free.
     let (operator, profile) = test_session_with_peer().await;
-    let repo = profile
+    // The space belongs to another account: a space delegates to the
+    // account it was created for, so its own would hold it whole.
+    let (owner_operator, owner) = test_session_with_peer().await;
+    let repo = owner
         .space(unique_name("fs-readonly"))
         .create()
-        .perform(&operator)
+        .perform(&owner_operator)
         .await?;
     let (_location, address) = seed_vault(&repo).await?;
 
@@ -381,10 +384,13 @@ async fn it_allows_resolve_but_denies_publish_with_resolve_only_delegation() -> 
     use dialog_effects::memory::prelude::*;
 
     let (operator, profile) = test_session_with_peer().await;
-    let repo = profile
+    // The space belongs to another account: a space delegates to the
+    // account it was created for, so its own would hold it whole.
+    let (owner_operator, owner) = test_session_with_peer().await;
+    let repo = owner
         .space(unique_name("fs-mem-readonly"))
         .create()
-        .perform(&operator)
+        .perform(&owner_operator)
         .await?;
     let (_location, address) = seed_vault(&repo).await?;
 

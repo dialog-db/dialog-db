@@ -441,9 +441,9 @@ mod tests {
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::storage::Location;
     use dialog_peer::Peer;
-    use dialog_peer::helpers::{open_peer, unique_name};
+    use dialog_peer::helpers::{open_peer, test_storage, unique_name};
     use dialog_storage::provider::Volatile;
-    use dialog_storage::provider::storage::{Storage, VolatileSpace};
+    use dialog_storage::provider::storage::VolatileSpace;
     use dialog_ucan::{Parameters, Ucan, UcanDelegation};
     use dialog_ucan_core::{DelegationBuilder, DelegationChain};
     use dialog_varsig::Principal as _;
@@ -459,9 +459,13 @@ mod tests {
 
     impl Harness {
         async fn new(name: &str) -> Result<Self> {
-            let storage = Storage::volatile();
+            let storage = test_storage().await;
             let profile = open_peer(storage.clone(), Location::profile(unique_name(name))).await?;
-            let operator = profile.session(b"test").allow(Subject::any()).await?;
+            let operator = profile
+                .session(b"test")
+                .mount(profile.state())
+                .allow(Subject::any())
+                .await?;
             let repo = profile
                 .space(unique_name("repo"))
                 .open()

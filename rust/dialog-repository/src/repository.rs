@@ -217,6 +217,8 @@ mod tests {
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_credentials::Extractable;
+    use dialog_credentials::key::ExtractableKey;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::StreamExt;
@@ -265,7 +267,9 @@ mod tests {
 
         // Generate the keypair first, derive the space name from the
         // last 8 chars of its did:key, then create with that same signer.
-        let signer = Ed25519Signer::generate().await.unwrap();
+        let signer = <Ed25519Signer<Extractable> as ExtractableKey>::generate()
+            .await
+            .unwrap();
         let did = signer.did().to_string();
         let name = did[did.len() - 8..].to_string();
 
@@ -660,10 +664,14 @@ mod tests {
         #[dialog_common::test]
         async fn it_enforces_scoped_delegation_policy() -> Result<()> {
             let (operator, profile) = test_session_with_peer().await;
-            let repo = profile
+            // The space belongs to another account: a space delegates to
+            // the account it was created for, so its own would hold it
+            // whole whatever it is delegated here.
+            let (owner_operator, owner) = test_session_with_peer().await;
+            let repo = owner
                 .space(unique_name("home"))
                 .create()
-                .perform(&operator)
+                .perform(&owner_operator)
                 .await?;
 
             // Repo delegates only memory/space("data") to the profile
@@ -699,10 +707,14 @@ mod tests {
         #[dialog_common::test]
         async fn it_validates_delegation_against_policy() -> Result<()> {
             let (operator, profile) = test_session_with_peer().await;
-            let repo = profile
+            // The space belongs to another account: a space delegates to
+            // the account it was created for, so its own would hold it
+            // whole whatever it is delegated here.
+            let (owner_operator, owner) = test_session_with_peer().await;
+            let repo = owner
                 .space(unique_name("home"))
                 .create()
-                .perform(&operator)
+                .perform(&owner_operator)
                 .await?;
 
             // Repo delegates memory/space("data") to the profile
