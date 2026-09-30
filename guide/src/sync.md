@@ -53,8 +53,8 @@ Here is everything that happens between Alice's laptop, the remote peer, and Bob
 <text class="small" x="255.0" y="538" text-anchor="middle">What is the head of main?</text>
 <line class="" x1="396" y1="574" x2="118" y2="574" marker-end="url(#q-arrow)"/>
 <text class="small" x="255.0" y="568" text-anchor="middle">Bob&#x27;s head.</text>
-<rect class="alice" x="6" y="590" width="384.5" height="22" rx="3"/>
-<text class="small" x="198.25" y="605" text-anchor="middle">merge: replay my change onto Bob&#x27;s tree, commit (oA, 3)</text>
+<rect class="alice" x="6" y="590" width="404.6" height="22" rx="3"/>
+<text class="small" x="208.3" y="605" text-anchor="middle">merge: integrate my change into Bob&#x27;s tree, commit (oA, 3)</text>
 <line class="" x1="114" y1="636" x2="392" y2="636" marker-end="url(#q-arrow)"/>
 <text class="small" x="255.0" y="630" text-anchor="middle">Store these blocks, then set the head to mine.</text>
 <line class="" x1="686" y1="666" x2="408" y2="666" marker-end="url(#q-arrow)"/>
@@ -96,9 +96,9 @@ When Bob pulls for the first time, he has no local changes, so he takes Alice's 
 
 When Alice's push is refused, she pulls and finds that both sides have changes. Her replica has to combine them.
 
-Dialog picks the cheaper direction. It takes the side with fewer changes since the two last agreed, and replays those changes onto the other side's tree. Here Alice made one commit and Bob made one, so she replays hers onto Bob's tree. When both sides have more than 8 commits the other has not seen, and they share a sync base, Dialog instead grafts whole subtrees from one tree into the other, which costs less than replaying every change. A grafted subtree can still hold facts the other side removed, so Dialog then lists every removal either side made since the sync base, from the coverage records described in [Commits and History](./history.md#what-a-commit-writes), and clears those facts from the merged tree.
+Dialog picks the cheaper direction. It takes the side with fewer changes since the two last agreed, and integrates those changes into the other side's tree. Here Alice made one commit and Bob made one, so she integrates hers into Bob's tree. When both sides have more than 8 commits the other has not seen, and they share a sync base, Dialog instead grafts whole subtrees from one tree into the other, which costs less than integrating every change. A grafted subtree can still hold facts the other side removed, so Dialog then lists every removal either side made since the sync base, from the coverage records described in [Commits and History](./history.md#what-a-commit-writes), and clears those facts from the merged tree.
 
-Replaying is not blind copying. Unless the two replicas have never seen a single commit from each other's origins, incoming changes are screened against what the receiving side has seen:
+Integrating is not blind copying. Every change keeps its temporal information, the version that wrote it, and conflicts are resolved along the way. Unless the two replicas have never seen a single commit from each other's origins, incoming changes are screened against what the receiving side has seen:
 
 - **A fact the receiver has already seen, and no longer holds, stays gone.** If Bob had retracted a fact and Alice's replica still held it, her copy's version would fall inside Bob's watermark: Bob saw it, and removed it. It is not brought back. This is how deletes survive a merge without tombstones.
 - **A removal only removes an entry that matches it exactly, down to the version that wrote it.** Alice's change to the milk's name removes the name `"Oat milk"` written at `(oA, 0)`. If the receiver holds a copy of a fact written by some other version, the removal leaves that copy alone.
