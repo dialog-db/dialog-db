@@ -733,6 +733,9 @@ where
             let node = accessor.get_node(&next_node).await?;
 
             match node.body() {
+                // The empty tree's root: an index with no children, nothing
+                // to descend into.
+                NodeBody::Index(index) if index.is_empty() => return Ok(None),
                 NodeBody::Index(index) => {
                     // Descend into the last child whose separator is at or
                     // below the key (a probe equal to a separator belongs to

@@ -28,8 +28,9 @@ where
         self.hashes.len()
     }
 
-    /// Whether this index holds no children, which violates the node
-    /// invariant but is answerable without decoding.
+    /// Whether this index holds no children: legitimate only for the empty
+    /// tree's root (see `persist_empty_root`), an invariant violation
+    /// anywhere else, and answerable without decoding.
     pub fn is_empty(&self) -> bool {
         self.hashes.is_empty()
     }
@@ -524,10 +525,10 @@ where
         self.values.len()
     }
 
-    /// Whether this segment holds no entries. Legitimate only for the empty
-    /// tree's node — the manifest-carrying format marker at the root of an
-    /// emptied tree (see `PersistentSegment::empty`); an INTERIOR
-    /// zero-entry segment still violates the node invariant.
+    /// Whether this segment holds no entries. Legitimate only as the empty
+    /// tree's node as it was written before that node became an index (see
+    /// `persist_empty_root`), which still reads as an empty tree; anywhere
+    /// else a zero-entry segment violates the node invariant.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }

@@ -10,8 +10,8 @@
 //! which the entries arrived. Two boundary clauses matter:
 //!
 //! - the function is PARAMETERIZED BY THE MANIFEST, including for the
-//!   EMPTY entry set: the canonical empty form is the zero-entry node
-//!   carrying the tree's manifest (see
+//!   EMPTY entry set: the canonical empty form is the index node with no
+//!   children or buffered ops, carrying the tree's manifest (see
 //!   [`persist_empty_root`](crate::persist_empty_root)), under every
 //!   manifest alike — the format survives emptiness structurally, so a
 //!   delete-to-empty lifecycle no longer needs
