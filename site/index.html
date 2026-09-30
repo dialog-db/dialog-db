@@ -140,7 +140,6 @@
   .poster .ink { fill: var(--ink); }
   .poster .stroke { stroke: var(--ink); }
   .poster .paper { fill: var(--paper); }
-  .poster .caption { font-size: 22px; letter-spacing: 0.06em; }
 
   .principles {
     display: grid;
@@ -262,15 +261,13 @@
         Two replicas, Alice's and Bob's, drawn as two circles. Where they
         overlap is what both hold: the facts they agree on.
       -->
-      <svg class="poster" viewBox="0 0 560 640" role="img" aria-label="Two overlapping circles, ochre and red, their shared part in black: two replicas and the facts they agree on">
+      <svg class="poster" viewBox="0 30 560 560" role="img" aria-label="Two overlapping circles, ochre and red, their shared part in black: two replicas and the facts they agree on">
         <defs>
           <clipPath id="upper-replica"><circle cx="280" cy="210" r="170"/></clipPath>
         </defs>
         <circle cx="280" cy="210" r="170" fill="var(--triangle)"/>
         <circle cx="280" cy="410" r="170" fill="var(--square)"/>
         <circle cx="280" cy="410" r="170" fill="var(--overlap)" clip-path="url(#upper-replica)"/>
-        <rect class="ink" x="170" y="604" width="390" height="2"/>
-        <text class="ink caption" x="560" y="632" text-anchor="end">cooperative system</text>
       </svg>
     </div>
   </div>
