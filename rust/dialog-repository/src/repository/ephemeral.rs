@@ -44,8 +44,8 @@ use std::sync::Arc;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Changes, Entity, EntityKey, Instruction, Key,
-    SortKey, Statement, Update, ValueKey, sort_key,
+    Artifact, ArtifactSelector, AttributeKey, Changes, DialogArtifactsError, Entity, EntityKey,
+    Instruction, Key, SortKey, Statement, Update, ValueKey, sort_key,
 };
 use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
@@ -274,34 +274,48 @@ impl Ephemeral {
     /// Assert a statement: its asserts and replaces land in the store
     /// with the tree's semantics, its retracts remove or tombstone.
     /// Chainable; use [`apply`](Self::apply) to get the instant minted.
-    pub fn assert<S: Statement>(&self, statement: S) -> &Self {
+    ///
+    /// A line holds facts only, so a statement that changes an asset is
+    /// refused (see [`apply`](Self::apply)).
+    pub fn assert<S: Statement>(&self, statement: S) -> Result<&Self, DialogArtifactsError> {
         let mut changes = Changes::new();
         statement.assert(&mut changes);
-        self.apply(changes);
-        self
+        self.apply(changes)?;
+        Ok(self)
     }
 
     /// Retract a statement: each of its facts is removed from the
     /// store if held here, and otherwise hidden beneath by a
-    /// tombstone. Chainable.
-    pub fn retract<S: Statement>(&self, statement: S) -> &Self {
+    /// tombstone. Chainable. A statement that changes an asset is refused.
+    pub fn retract<S: Statement>(&self, statement: S) -> Result<&Self, DialogArtifactsError> {
         let mut changes = Changes::new();
         statement.retract(&mut changes);
-        self.apply(changes);
-        self
+        self.apply(changes)?;
+        Ok(self)
     }
 
     /// Land a batch of instructions as one instant.
-    pub fn apply(&self, changes: Changes) -> Option<Instant> {
+    ///
+    /// Assets are stored only by a transaction's commit. A batch that
+    /// changes one is refused with
+    /// [`AssetsUnsupported`](DialogArtifactsError::AssetsUnsupported) and
+    /// nothing in it lands, rather than landing its facts and dropping its
+    /// assets.
+    pub fn apply(&self, changes: Changes) -> Result<Option<Instant>, DialogArtifactsError> {
+        if changes.has_assets() {
+            return Err(DialogArtifactsError::AssetsUnsupported(
+                "an ephemeral line".into(),
+            ));
+        }
         if changes.is_empty() {
-            return None;
+            return Ok(None);
         }
         let mut state = self.state.write();
         let mut delta = Delta::default();
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
         }
-        state.mint(delta)
+        Ok(state.mint(delta))
     }
 
     /// Everything this line holds, as one batch: each tombstone as the
@@ -520,7 +534,8 @@ mod tests {
             the!("person/name")
                 .of("id:a".parse().unwrap())
                 .is("A".to_string()),
-        );
+        )
+        .unwrap();
         let first = &line.since(0).expect("in the ring")[0];
         assert_eq!(first.sequence, 1);
         assert_eq!(first.asserted, vec![fact("id:a", "person/name", "A")]);
@@ -528,7 +543,8 @@ mod tests {
             the!("person/name")
                 .of("id:a".parse().unwrap())
                 .is("A".to_string()),
-        );
+        )
+        .unwrap();
         assert_eq!(
             line.revision().sequence,
             1,
@@ -541,7 +557,8 @@ mod tests {
             the!("person/name")
                 .of("id:a".parse().unwrap())
                 .is("B".to_string()),
-        );
+        )
+        .unwrap();
         assert_eq!(values(&line, "id:a", "person/name").len(), 2);
         let mut changes = Changes::new();
         changes.associate_unique(
@@ -549,7 +566,7 @@ mod tests {
             "id:a".parse().unwrap(),
             Value::String("C".into()),
         );
-        let replaced = line.apply(changes).expect("replace mints");
+        let replaced = line.apply(changes).unwrap().expect("replace mints");
         assert_eq!(replaced.retracted.len(), 2);
         assert_eq!(replaced.asserted, vec![fact("id:a", "person/name", "C")]);
         assert_eq!(
@@ -562,25 +579,31 @@ mod tests {
     #[dialog_common::test]
     fn it_exports_held_facts_and_tombstones_for_another_line() {
         let source = Ephemeral::new();
-        source.assert(
-            the!("person/name")
-                .of("id:a".parse().unwrap())
-                .is("A".to_string()),
-        );
-        source.assert(
-            the!("person/name")
-                .of("id:a".parse().unwrap())
-                .is("Ann".to_string()),
-        );
-        source.retract(
-            the!("person/name")
-                .of("id:b".parse().unwrap())
-                .is("B".to_string()),
-        );
+        source
+            .assert(
+                the!("person/name")
+                    .of("id:a".parse().unwrap())
+                    .is("A".to_string()),
+            )
+            .unwrap();
+        source
+            .assert(
+                the!("person/name")
+                    .of("id:a".parse().unwrap())
+                    .is("Ann".to_string()),
+            )
+            .unwrap();
+        source
+            .retract(
+                the!("person/name")
+                    .of("id:b".parse().unwrap())
+                    .is("B".to_string()),
+            )
+            .unwrap();
 
         let exported = source.export();
         let target = Ephemeral::new();
-        let restored = target.apply(exported).expect("a restore mints");
+        let restored = target.apply(exported).unwrap().expect("a restore mints");
         assert_eq!(
             restored.sequence, 1,
             "the whole session lands as one instant"
@@ -604,12 +627,14 @@ mod tests {
             the!("person/name")
                 .of("id:a".parse().unwrap())
                 .is("A".to_string()),
-        );
+        )
+        .unwrap();
         line.retract(
             the!("person/name")
                 .of("id:a".parse().unwrap())
                 .is("A".to_string()),
-        );
+        )
+        .unwrap();
         let removed = &line.since(1).expect("in the ring")[0];
         assert_eq!(removed.retracted, vec![fact("id:a", "person/name", "A")]);
         assert!(line.is_empty());
@@ -622,7 +647,8 @@ mod tests {
             the!("person/name")
                 .of("id:b".parse().unwrap())
                 .is("B".to_string()),
-        );
+        )
+        .unwrap();
         let shadowed = &line.since(2).expect("a tombstone is a visible change")[0];
         assert_eq!(shadowed.retracted, vec![fact("id:b", "person/name", "B")]);
         assert_eq!(line.tombstones(&Manifest::default()).len(), 1);
@@ -630,7 +656,8 @@ mod tests {
             the!("person/name")
                 .of("id:b".parse().unwrap())
                 .is("B".to_string()),
-        );
+        )
+        .unwrap();
         assert_eq!(
             line.revision().sequence,
             3,
@@ -652,7 +679,7 @@ mod tests {
             ("id:a", "person/role", "Admin"),
             ("id:c", "person/role", "Admin"),
         ] {
-            line.assert(claim(of, the_, is));
+            line.assert(claim(of, the_, is)).unwrap();
         }
         // Attribute scan: entity order within the attribute.
         let by_attr: Vec<String> = line
@@ -697,8 +724,8 @@ mod tests {
     fn it_reports_instants_since_a_pin_and_gaps_past_the_ring() {
         let line = Ephemeral::new();
         assert_eq!(line.since(0), Some(Vec::new()));
-        line.assert(claim("id:a", "person/name", "A"));
-        line.assert(claim("id:b", "person/name", "B"));
+        line.assert(claim("id:a", "person/name", "A")).unwrap();
+        line.assert(claim("id:b", "person/name", "B")).unwrap();
         let since = line.since(0).expect("within the ring");
         assert_eq!(since.len(), 2);
         assert_eq!(since[0].sequence, 1);
@@ -707,7 +734,8 @@ mod tests {
         assert_eq!(line.since(2), Some(Vec::new()));
 
         for index in 0..LOG_CAPACITY {
-            line.assert(claim(&format!("id:{index}"), "person/tag", "x"));
+            line.assert(claim(&format!("id:{index}"), "person/tag", "x"))
+                .unwrap();
         }
         assert!(
             line.since(1).is_none(),
@@ -722,22 +750,22 @@ mod tests {
         let a = Ephemeral::new();
         let b = Ephemeral::new();
         assert_eq!(a.revision(), b.revision());
-        a.assert(claim("id:a", "person/name", "A"));
-        b.assert(claim("id:a", "person/name", "A"));
+        a.assert(claim("id:a", "person/name", "A")).unwrap();
+        b.assert(claim("id:a", "person/name", "A")).unwrap();
         assert_eq!(a.revision(), b.revision(), "same instants, same identity");
-        b.assert(claim("id:b", "person/name", "B"));
+        b.assert(claim("id:b", "person/name", "B")).unwrap();
         assert_ne!(a.revision(), b.revision());
         let before = b.revision();
-        b.assert(claim("id:b", "person/name", "B"));
+        b.assert(claim("id:b", "person/name", "B")).unwrap();
         assert_eq!(b.revision(), before, "a no-op mints nothing");
     }
 
     #[dialog_common::test]
     fn it_retains_entities_and_reports_the_drop() {
         let line = Ephemeral::new();
-        line.assert(claim("site:1", "site/path", "/a"));
-        line.assert(claim("site:2", "site/path", "/b"));
-        line.retract(claim("doc:1", "doc/title", "T"));
+        line.assert(claim("site:1", "site/path", "/a")).unwrap();
+        line.assert(claim("site:2", "site/path", "/b")).unwrap();
+        line.retract(claim("doc:1", "doc/title", "T")).unwrap();
         let pinned = line.revision().sequence;
         assert!(line.retain_entities(|entity| entity.to_string() != "site:1"));
         let dropped = &line.since(pinned).expect("in the ring")[0];
@@ -758,7 +786,7 @@ mod tests {
     fn it_shares_the_store_across_clones() {
         let line = Ephemeral::new();
         let handle = line.clone();
-        handle.assert(claim("id:a", "person/name", "A"));
+        handle.assert(claim("id:a", "person/name", "A")).unwrap();
         assert_eq!(line.len(), 1);
         assert_eq!(line.revision(), handle.revision());
     }
@@ -776,9 +804,9 @@ mod tests {
         let long = "x".repeat(64);
         let hidden = fact("id:a", "person/bio", &long);
         let line = Ephemeral::new();
-        line.retract(claim("id:a", "person/bio", &long));
-        line.assert(claim("id:b", "person/bio", &long));
-        line.assert(claim("id:b", "person/bio", "short"));
+        line.retract(claim("id:a", "person/bio", &long)).unwrap();
+        line.assert(claim("id:b", "person/bio", &long)).unwrap();
+        line.assert(claim("id:b", "person/bio", "short")).unwrap();
 
         let own = line.tombstones(&Manifest::default());
         let theirs = line.tombstones(&spilling);
@@ -803,5 +831,36 @@ mod tests {
         sorted.sort();
         assert_eq!(rows, sorted, "rows come out in the reader's key order");
         assert_eq!(line.select(&selector, &spilling).len(), 2);
+    }
+
+    /// A line holds facts only: a batch that changes an asset is refused
+    /// whole, facts and all, rather than landing without the asset.
+    #[dialog_common::test]
+    fn it_refuses_a_batch_that_changes_an_asset() {
+        let line = Ephemeral::new();
+        let before = line.revision();
+        let asset = dialog_artifacts::Asset::from(b"not a fact".to_vec());
+
+        let mut changes = Changes::new();
+        the!("person/name")
+            .of("id:a".parse().unwrap())
+            .is("A".to_string())
+            .assert(&mut changes);
+        asset.clone().assert(&mut changes);
+        assert!(matches!(
+            line.apply(changes),
+            Err(DialogArtifactsError::AssetsUnsupported(_))
+        ));
+        assert!(matches!(
+            line.assert(asset.clone()),
+            Err(DialogArtifactsError::AssetsUnsupported(_))
+        ));
+        assert!(matches!(
+            line.retract(asset),
+            Err(DialogArtifactsError::AssetsUnsupported(_))
+        ));
+
+        assert_eq!(line.len(), 0, "nothing in the batch landed");
+        assert_eq!(line.revision(), before, "no instant was minted");
     }
 }

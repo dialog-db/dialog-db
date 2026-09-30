@@ -60,6 +60,10 @@ pub trait Update {
     /// commit retracts its `dialog.asset/size` fact, leaving its bytes to be
     /// collected. The later of an import and a discard of the same asset in
     /// one batch wins.
+    ///
+    /// A discard is keyed on the asset's hash alone: the commit retracts the
+    /// size the line records for that hash, whatever size `asset` names, and
+    /// changes nothing when the line records none.
     fn discard(&mut self, asset: Asset);
 }
 
@@ -113,10 +117,18 @@ pub struct Changes {
 }
 
 /// The serialized shape of a [`Changes`] batch that changes assets.
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct ChangesWithAssets {
     facts: Facts,
     assets: Vec<AssetChange>,
+}
+
+/// [`ChangesWithAssets`] borrowed from a batch, for encoding without
+/// copying its facts or any asset's bytes.
+#[derive(Serialize)]
+struct ChangesWithAssetsRef<'a> {
+    facts: &'a Facts,
+    assets: Vec<&'a AssetChange>,
 }
 
 /// The serialized shape of a [`Changes`] batch that changes no asset.
@@ -140,9 +152,9 @@ impl Serialize for Changes {
         if self.assets.is_empty() {
             FactsOnly(&self.facts).serialize(serializer)
         } else {
-            ChangesWithAssets {
-                facts: self.facts.clone(),
-                assets: self.assets.values().cloned().collect(),
+            ChangesWithAssetsRef {
+                facts: &self.facts,
+                assets: self.assets.values().collect(),
             }
             .serialize(serializer)
         }
@@ -194,6 +206,16 @@ impl Changes {
     /// Whether the batch records no fact changes and changes no asset.
     pub fn is_empty(&self) -> bool {
         self.facts.is_empty() && self.assets.is_empty()
+    }
+
+    /// Whether the batch changes any asset.
+    ///
+    /// Only a transaction's commit stores assets. A target that holds facts
+    /// alone checks this before taking the batch's
+    /// [`into_instructions`](Self::into_instructions), which leaves the
+    /// asset changes out, and refuses the batch rather than drop them.
+    pub fn has_assets(&self) -> bool {
+        !self.assets.is_empty()
     }
 
     /// The asset changes this batch makes, in hash order.
@@ -297,9 +319,10 @@ impl Changes {
 
     /// Convert the fact changes to a vec of instructions.
     ///
-    /// Asset changes are not instructions and are dropped: a caller that
+    /// Asset changes are not instructions and are left out: a caller that
     /// commits the batch drains them first with
-    /// [`take_assets`](Self::take_assets).
+    /// [`take_assets`](Self::take_assets), and any other caller refuses a
+    /// batch that [`has_assets`](Self::has_assets).
     pub fn into_instructions(self) -> Vec<Instruction> {
         let mut instructions = Vec::new();
         for (entity, attributes) in self.facts {

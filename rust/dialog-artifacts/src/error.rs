@@ -63,6 +63,13 @@ pub enum DialogArtifactsError {
     #[error("Reserved attribute (the dialog. namespace is reserved): {0}")]
     ReservedAttribute(String),
 
+    /// A batch that changes assets was handed to a target that holds facts
+    /// only, such as an ephemeral line or the replica registry. Assets are
+    /// stored by a transaction's commit; anywhere else their changes would
+    /// be dropped, so the batch is refused instead. Names the target.
+    #[error("Assets can only be changed by a transaction's commit, not by {0}")]
+    AssetsUnsupported(String),
+
     /// Raw bytes could not be interpreted as an entity
     #[error("Could not convert bytes into entity: {0}")]
     InvalidEntity(String),

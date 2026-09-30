@@ -11,7 +11,7 @@ use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
-use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
+use dialog_effects::blob::{BlobError, BlobWriter, Import as BlobImport, Read as BlobRead};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 use std::fmt::Display;
 
@@ -408,14 +408,32 @@ pub(crate) async fn write_blob<Env>(
 where
     Env: Provider<BlobImport> + ConditionalSync + 'static,
 {
-    let mut sink = catalog
+    let sink = catalog
         .archive()
         .blob()
         .import(digest.clone(), bytes.len() as u64)
         .perform(env)
         .await?;
+    fill_import(sink, digest, bytes).await
+}
+
+/// Write `bytes` through an import `sink` opened for `digest` and commit
+/// it. The store verifies the bytes against the declared digest and keeps
+/// nothing on a mismatch; the digest the sink commits is checked here too,
+/// so a store that answers with another one is refused rather than trusted.
+pub(crate) async fn fill_import(
+    mut sink: BlobWriter,
+    digest: &Blake3Hash,
+    bytes: &[u8],
+) -> Result<(), BlobError> {
     sink.write_all(bytes).await?;
-    sink.finish().await?;
+    let committed = sink.finish().await?;
+    if &committed != digest {
+        return Err(BlobError::DigestMismatch {
+            expected: digest.to_string(),
+            actual: committed.to_string(),
+        });
+    }
     Ok(())
 }
 

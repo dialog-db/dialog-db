@@ -62,6 +62,7 @@
 //! ```
 
 use crate::repository::archive::persist;
+use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
 use crate::{
@@ -72,7 +73,9 @@ use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::RevisionRecord;
 use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity};
+use dialog_artifacts::{
+    Asset, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity, Instruction,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
@@ -85,7 +88,7 @@ use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
 };
 use dialog_effects::memory::{Publish, Resolve};
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, stream};
 
 /// A line's blob store: the target that blob reads and writes bind to.
 ///
@@ -659,6 +662,10 @@ where
 /// Retract a blob's index reference as one new revision. Created by
 /// [`Blob::retract`].
 ///
+/// An asset entity is dropped the same way: when the line records an asset
+/// fact for the hash, that fact is retracted in a revision of its own, as a
+/// transaction's `retract(asset)` would.
+///
 /// Removes the blob from the index only: the bytes stay in the blob store,
 /// so a replica that already holds them can still read them locally.
 /// Reclaiming bytes no index references is a separate, local concern. The
@@ -693,17 +700,30 @@ impl RetractBlob<'_> {
     {
         let branch = self.archive.branch()?;
         let hash = blob_hash(&self.entity)?;
-        if !index_references(SourceRef::from(branch), &hash, env).await? {
-            return Ok(());
+        if index_references(SourceRef::from(branch), &hash, env).await? {
+            advance_blob_index(
+                branch,
+                env,
+                BlobIndexEdit::Retract {
+                    hash: *hash.as_bytes(),
+                },
+            )
+            .await?;
         }
-        advance_blob_index(
-            branch,
-            env,
-            BlobIndexEdit::Retract {
-                hash: *hash.as_bytes(),
-            },
-        )
-        .await
+        // An asset is recorded by a fact rather than an index entry: drop it
+        // the way a transaction's discard does, by the size the line
+        // records for the hash.
+        if let Some(size) = recorded_size(SourceRef::from(branch), hash.as_bytes(), env).await? {
+            let retraction = Instruction::Retract(Asset::stored(*hash.as_bytes(), size).fact()?);
+            Box::pin(
+                branch
+                    .commit(stream::iter(vec![retraction]))
+                    .machinery()
+                    .perform(env),
+            )
+            .await?;
+        }
+        Ok(())
     }
 }
 

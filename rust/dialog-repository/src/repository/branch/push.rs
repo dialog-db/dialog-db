@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use super::resolve::resolve;
 use crate::ResolveEnv;
 use crate::repository::archive::local::read_all;
+use crate::repository::archive::networked::fill_import;
 use crate::repository::remote::Step;
 use crate::{
     Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteSite,
@@ -775,7 +776,15 @@ where
                 // adjudicate.
                 None => {
                     if !sole_remote {
-                        ensure_spill_on_target(digest, branch, remote, sources, env).await?;
+                        ensure_spill_on_target(
+                            digest,
+                            LocalCopy::Missing,
+                            branch,
+                            remote,
+                            sources,
+                            env,
+                        )
+                        .await?;
                     }
                     return Ok(());
                 }
@@ -802,19 +811,17 @@ where
         .reach(|address| {
             let digest = digest.clone();
             async move {
-                let mut sink = address
+                let sink = address
                     .subject
                     .clone()
                     .writer()
                     .archive()
                     .blob()
-                    .import(digest, bytes.len() as u64)
+                    .import(digest.clone(), bytes.len() as u64)
                     .fork(address.site())
                     .perform(env)
                     .await?;
-                sink.write_all(bytes).await?;
-                sink.finish().await?;
-                Ok::<_, BlobError>(())
+                fill_import(sink, &digest, bytes).await
             }
         })
         .await?;
@@ -854,6 +861,7 @@ where
 /// source remote the same way.
 async fn spill_from_anywhere<Env>(
     digest: &NodeHash,
+    local: LocalCopy,
     branch: &Branch,
     sources: &[ConnectedReplica],
     env: &Env,
@@ -866,11 +874,11 @@ where
         + ConditionalSync
         + 'static,
 {
-    let local = LocalIndex::new(env, branch.archive().index());
-    if let Some(bytes) = local
-        .load_blob(digest)
-        .await
-        .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
+    if let LocalCopy::Unprobed = local
+        && let Some(bytes) = LocalIndex::new(env, branch.archive().index())
+            .load_blob(digest)
+            .await
+            .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
     {
         return Ok(Some(bytes.into_vec()));
     }
@@ -894,12 +902,24 @@ where
     Ok(None)
 }
 
+/// Whether the local archive has yet to be asked for a spilled value, or
+/// was asked and does not hold it, so a lookup asks it at most once.
+#[derive(Clone, Copy)]
+enum LocalCopy {
+    /// Not looked for yet.
+    Unprobed,
+    /// Looked for and not held.
+    Missing,
+}
+
 /// Make sure the target holds a spilled value: probe once, and forward the
 /// bytes from wherever they are reachable only on a miss, into the
-/// target's blob store. Never persists the bytes locally: the pusher is a
-/// bridge here, not a replica.
+/// target's blob store. `local` says whether the caller already missed in
+/// the local archive, which is then not asked again. Never persists the
+/// bytes locally: the pusher is a bridge here, not a replica.
 async fn ensure_spill_on_target<Env>(
     digest: NodeHash,
+    local: LocalCopy,
     branch: &Branch,
     target: &ConnectedReplica,
     sources: &[ConnectedReplica],
@@ -917,7 +937,7 @@ where
     if target_has_spill(&digest, target, env).await? {
         return Ok(());
     }
-    let Some(bytes) = spill_from_anywhere(&digest, branch, sources, env).await? else {
+    let Some(bytes) = spill_from_anywhere(&digest, local, branch, sources, env).await? else {
         return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
             "spilled value {digest} is referenced by the head but reachable from no \
              store: not local, not on the push target, not on any tracked remote"
@@ -1205,6 +1225,7 @@ where
                             ShipmentRef::SpilledValue(reference) => {
                                 ensure_spill_on_target(
                                     NodeHash::from(reference),
+                                    LocalCopy::Unprobed,
                                     branch,
                                     target,
                                     sources,

@@ -1,7 +1,7 @@
 use base58::ToBase58;
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_bytes::ByteBuf;
+use serde_bytes::{ByteBuf, Bytes};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::sync::Arc;
 
@@ -56,6 +56,10 @@ impl Asset {
 
     /// An asset naming `size` bytes the blob store already holds under
     /// `hash`, such as a streamed upload's.
+    ///
+    /// Asserting it checks the store holds `size` bytes under `hash`.
+    /// Retracting it ignores `size`: the commit retracts whatever size the
+    /// line records for `hash` (see [`Update::discard`]).
     pub fn stored(hash: Blake3Hash, size: u64) -> Self {
         Self {
             hash,
@@ -133,7 +137,7 @@ impl Debug for Asset {
 /// The serialized shape of an [`Asset`]: its bytes when it carries them,
 /// from which the hash and size are derived rather than trusted, otherwise
 /// the hash and size it names.
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum AssetShape {
     Content(ByteBuf),
@@ -144,15 +148,28 @@ enum AssetShape {
     },
 }
 
+/// [`AssetShape`] borrowed from an asset, for encoding its bytes without
+/// copying them.
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum AssetShapeRef<'a> {
+    Content(&'a Bytes),
+    Stored {
+        #[serde(with = "serde_bytes")]
+        hash: &'a Blake3Hash,
+        size: u64,
+    },
+}
+
 impl Serialize for Asset {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match &self.content {
-            Some(content) => AssetShape::Content(ByteBuf::from(content.to_vec())),
-            None => AssetShape::Stored {
-                hash: self.hash,
+            Some(content) => AssetShapeRef::Content(Bytes::new(content)),
+            None => AssetShapeRef::Stored {
+                hash: &self.hash,
                 size: self.size,
             },
         }
