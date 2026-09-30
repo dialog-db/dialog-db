@@ -35,8 +35,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Change, Changes, Entity, Instruction, Select, Statement,
-    Value,
+    Artifact, ArtifactSelector, Attribute, Change, Changes, DialogArtifactsError, Entity,
+    Instruction, Select, Statement, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -88,6 +88,14 @@ where
         + ConditionalSync
         + 'static,
 {
+    // Transients never commit, so an asset among them would be dropped:
+    // refuse the commit before anything is written instead.
+    if transients.has_assets() {
+        return Err(
+            DialogArtifactsError::AssetsUnsupported("a dispatched transient".into()).into(),
+        );
+    }
+
     // Round 1 stimulus: everything the commit changes, plus the
     // watermark lag — facts that entered the branch since the last
     // inducing instant (a pull, a raw commit, a crash between publish

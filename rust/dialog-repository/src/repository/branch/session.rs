@@ -1906,7 +1906,7 @@ mod rule_tests {
 
         branch
             .overlay()
-            .assert(rule_with_person_attr("org/contractor-name"));
+            .assert(rule_with_person_attr("org/contractor-name"))?;
         let after: Vec<ConceptConclusion> = branch
             .select(employees())
             .perform(&operator)
@@ -1961,7 +1961,7 @@ mod rule_tests {
 
         branch
             .overlay()
-            .assert(rule_with_person_attr("org/contractor-name"));
+            .assert(rule_with_person_attr("org/contractor-name"))?;
         let delta = subscription
             .poll(&operator)
             .await?
@@ -2021,7 +2021,7 @@ mod rule_tests {
             let site = Entity::new()?;
             branch
                 .overlay()
-                .assert(the!("xyz.tonk.site/path").of(site).is(path.to_string()));
+                .assert(the!("xyz.tonk.site/path").of(site).is(path.to_string()))?;
             assert!(
                 subscription.poll(&operator).await?.is_none(),
                 "an unrelated session stamp changes nothing"

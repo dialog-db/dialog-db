@@ -1282,7 +1282,7 @@ mod tests {
         let bob = Entity::new()?;
         branch
             .overlay()
-            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
 
         let mut subscription = branch.subscribe(names_query());
         let delta = subscription
@@ -1341,7 +1341,7 @@ mod tests {
         let bob = Entity::new()?;
         branch
             .overlay()
-            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
 
         let delta = subscription
             .poll(&operator)
@@ -1422,7 +1422,7 @@ mod tests {
             the!("person/name")
                 .of(alice.clone())
                 .is("Alice".to_string()),
-        );
+        )?;
 
         let delta = subscription
             .poll(&operator)
@@ -1476,7 +1476,7 @@ mod tests {
         let bob = Entity::new()?;
         branch
             .overlay()
-            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
 
         let mut read = names(
             &branch
@@ -1583,7 +1583,7 @@ mod tests {
         // the committed spilled row.
         branch
             .overlay()
-            .retract(the!("person/name").of(alice.clone()).is(spilled.clone()));
+            .retract(the!("person/name").of(alice.clone()).is(spilled.clone()))?;
         let hidden = names(
             &branch
                 .select(names_query())
@@ -3960,7 +3960,7 @@ mod tests {
         let bob = Entity::new()?;
         branch
             .overlay()
-            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
         let delta = subscription
             .poll(&operator)
             .await?
@@ -3981,7 +3981,7 @@ mod tests {
             the!("misc/tag")
                 .of(Entity::new()?)
                 .is("unrelated".to_string()),
-        );
+        )?;
         assert!(
             subscription.poll(&operator).await?.is_none(),
             "an uncovered session write is free"
@@ -3992,7 +3992,7 @@ mod tests {
         // A session retract of a session fact: maintained the same way.
         branch
             .overlay()
-            .retract(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+            .retract(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
         let delta = subscription
             .poll(&operator)
             .await?
@@ -4022,14 +4022,14 @@ mod tests {
         let bob = Entity::new()?;
         branch
             .overlay()
-            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
         // Push the ring past its capacity with unrelated instants.
         for index in 0..2048u32 {
             branch.overlay().assert(
                 the!("misc/tag")
                     .of(Entity::new()?)
                     .is(format!("tag-{index}")),
-            );
+            )?;
         }
         let delta = subscription
             .poll(&operator)
@@ -4062,7 +4062,7 @@ mod tests {
             );
             changes
         };
-        branch.overlay().assert(status("pending"));
+        branch.overlay().assert(status("pending"))?;
 
         let mut subscription = branch.subscribe(names_query());
         let initial = subscription.poll(&operator).await?.expect("initial");
@@ -4071,7 +4071,7 @@ mod tests {
             vec![(here.clone(), "pending".to_string())]
         );
 
-        branch.overlay().assert(status("settled"));
+        branch.overlay().assert(status("settled"))?;
         let delta = subscription
             .poll(&operator)
             .await?
@@ -4117,12 +4117,12 @@ mod tests {
         let bob = Entity::new()?;
         branch
             .overlay()
-            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?
             .retract(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-            );
+            )?;
 
         let mut subscription = branch.subscribe(names_query());
         let initial = subscription.poll(&operator).await?.expect("initial");
@@ -4177,7 +4177,7 @@ mod tests {
             .await?;
         branch
             .overlay()
-            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
 
         let delta = subscription.poll(&operator).await?.expect("both propagate");
         let mut asserted = names(&delta.asserted);
@@ -4239,7 +4239,7 @@ mod tests {
         // nothing readable changed at all.
         branch
             .overlay()
-            .retract(Parent::of(c.clone()).is(b.clone()));
+            .retract(Parent::of(c.clone()).is(b.clone()))?;
         let mut subscription = branch.subscribe(Query::<HasAncestor>::default());
         subscription.poll(&operator).await?.expect("initial");
         branch.overlay().clear();
@@ -4317,11 +4317,11 @@ mod tests {
                 here.clone(),
                 Value::String(status.into()),
             );
-            branch.overlay().assert(changes);
+            branch.overlay().assert(changes)?;
             let site = Entity::new()?;
             branch
                 .overlay()
-                .assert(the!("site/path").of(site.clone()).is("/".to_string()));
+                .assert(the!("site/path").of(site.clone()).is("/".to_string()))?;
             branch.overlay().retain_entities(|entity| *entity != site);
 
             assert!(
@@ -4413,17 +4413,17 @@ mod tests {
             Ok(())
         };
 
-        branch.overlay().assert(name(&carol, "Carol"));
+        branch.overlay().assert(name(&carol, "Carol"))?;
         check(&mut subscription, "session assert").await?;
-        branch.overlay().assert(name(&carol, "Carol"));
+        branch.overlay().assert(name(&carol, "Carol"))?;
         check(&mut subscription, "idempotent re-assert").await?;
-        branch.overlay().assert(rename(&carol, "Caroline"));
+        branch.overlay().assert(rename(&carol, "Caroline"))?;
         check(&mut subscription, "session replace").await?;
-        branch.overlay().retract(name(&alice, "Alice"));
+        branch.overlay().retract(name(&alice, "Alice"))?;
         check(&mut subscription, "tombstone over a committed fact").await?;
-        branch.overlay().assert(name(&alice, "Alice"));
+        branch.overlay().assert(name(&alice, "Alice"))?;
         check(&mut subscription, "session copy of a tombstoned fact").await?;
-        branch.overlay().retract(name(&alice, "Alice"));
+        branch.overlay().retract(name(&alice, "Alice"))?;
         check(&mut subscription, "retract the session copy").await?;
         branch
             .transaction()
@@ -4433,7 +4433,7 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        branch.overlay().assert(name(&bob, "Robert"));
+        branch.overlay().assert(name(&bob, "Robert"))?;
         check(&mut subscription, "commit and session write together").await?;
         branch.overlay().retain_entities(|entity| *entity != carol);
         check(&mut subscription, "garbage-collect an entity").await?;

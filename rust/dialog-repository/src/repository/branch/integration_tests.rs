@@ -20,12 +20,13 @@ use crate::{
     SiteAddress, SnapshotError, peer_did,
 };
 use anyhow::{Context as _, Result};
+use dialog_artifacts::Asset;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State,
     Value,
 };
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_artifacts::{Asset, Changes, Entity, Update as _};
+use dialog_artifacts::{Changes, Entity, Update as _};
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::Buffer;
@@ -49,8 +50,6 @@ use dialog_artifacts::{ShipmentRef, shipment_ref};
 use dialog_capability::{Fork, Provider};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
-#[cfg(not(feature = "web-integration-tests"))]
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::{
     Rejection,
@@ -5978,6 +5977,48 @@ async fn it_hydrates_a_spill_a_legacy_remote_holds_as_a_block(s3: S3Address) -> 
         local,
         value.to_bytes(),
         "the hydrated spill lands in the local blob store"
+    );
+    Ok(())
+}
+
+/// `Blob::retract` on an asset's entity drops the asset's fact, so a push
+/// made after it does not ship the asset's bytes.
+#[dialog_common::test]
+async fn it_does_not_ship_an_asset_retracted_through_blob_retract(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let (repo, branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "blob-retract-asset").await?;
+
+    let asset = Asset::from(b"retracted before it ever ships".to_vec());
+    branch
+        .transaction()
+        .assert(asset.clone())
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    Blob::from(asset.entity()?)
+        .retract((&branch).into())
+        .perform(&operator)
+        .await?;
+    assert!(branch.push().perform(&operator).await?.is_some());
+
+    let origin = contact("origin")
+        .connect()
+        .repository(repo.did())
+        .open()
+        .perform(&operator)
+        .await?;
+    let probe = Subject::from(origin.did())
+        .reader()
+        .archive()
+        .blob()
+        .read(NodeHash::from(*asset.hash()))
+        .perform(&origin.connection(&operator))
+        .await;
+    assert!(
+        matches!(probe, Err(BlobError::NotFound(_))),
+        "the retracted asset's bytes were not shipped"
     );
     Ok(())
 }

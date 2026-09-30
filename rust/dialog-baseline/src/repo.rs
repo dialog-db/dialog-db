@@ -11,6 +11,7 @@
 //! the realistic application shape, which also keeps the branch-owned record
 //! and node caches warm the way a running app would.
 use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Size as BlobSize;
 use std::str::FromStr;
 
 use anyhow::Result;
@@ -22,7 +23,7 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
-use dialog_effects::blob::{Read as BlobRead, Write as BlobWrite};
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{List, Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
@@ -105,10 +106,10 @@ impl DialogRepo<Peer<NativeTempSpace, Session>> {
 
 impl<Env> DialogRepo<Env>
 where
-    Env: Provider<BlobImport>
+    Env: Provider<BlobSize>
+        + Provider<BlobImport>
         + Provider<Get>
         + Provider<BlobRead>
-        + Provider<BlobWrite>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>

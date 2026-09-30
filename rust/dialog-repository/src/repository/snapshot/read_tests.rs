@@ -400,12 +400,12 @@ async fn it_restores_an_exported_overlay_elsewhere() -> Result<()> {
         .perform(&operator)
         .await?;
     let source = branch.snapshot().expect("snapshot");
-    source.overlay().assert(person("id:bob", "Bob"));
+    source.overlay().assert(person("id:bob", "Bob"))?;
     source.overlay().retract(
         the!("test/name")
             .of("id:alice".parse::<Entity>()?)
             .is("Alice".to_string()),
-    );
+    )?;
 
     let bytes = serde_ipld_dagcbor::to_vec(&source.overlay().export())?;
 
@@ -417,7 +417,7 @@ async fn it_restores_an_exported_overlay_elsewhere() -> Result<()> {
     );
     let restored: Changes = serde_ipld_dagcbor::from_slice(&bytes)?;
     assert!(
-        target.overlay().apply(restored).is_some(),
+        target.overlay().apply(restored)?.is_some(),
         "restoring lands as one instant"
     );
     assert_eq!(
@@ -442,7 +442,7 @@ async fn it_folds_the_overlay_into_reads() -> Result<()> {
         .await?;
     let snapshot = branch.snapshot().expect("snapshot");
 
-    snapshot.overlay().assert(person("id:bob", "Bob"));
+    snapshot.overlay().assert(person("id:bob", "Bob"))?;
     assert_eq!(
         people(snapshot.query(), &operator).await?,
         vec!["Alice".to_string(), "Bob".to_string()],
@@ -452,7 +452,7 @@ async fn it_folds_the_overlay_into_reads() -> Result<()> {
         the!("test/name")
             .of("id:alice".parse::<Entity>()?)
             .is("Alice".to_string()),
-    );
+    )?;
     assert_eq!(
         people(snapshot.query(), &operator).await?,
         vec!["Bob".to_string()],

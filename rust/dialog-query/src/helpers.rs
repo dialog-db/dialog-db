@@ -36,7 +36,8 @@ use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
-use dialog_effects::blob::{Read as BlobRead, Write as BlobWrite};
+use dialog_effects::blob::Read as BlobRead;
+use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{List, Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
@@ -637,9 +638,9 @@ impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
 
 impl<Env> BenchEnv<Env>
 where
-    Env: Provider<BlobImport>
+    Env: Provider<BlobSize>
+        + Provider<BlobImport>
         + Provider<Get>
-        + Provider<BlobWrite>
         + Provider<BlobRead>
         + Provider<Put>
         + Provider<Import>
@@ -1749,8 +1750,8 @@ mod test {
     where
         Env: Provider<BlobImport>
             + Provider<Get>
-            + Provider<BlobWrite>
             + Provider<BlobRead>
+            + Provider<BlobSize>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -1873,9 +1874,9 @@ mod test {
         seed_start: Instant,
     ) -> Result<()>
     where
-        Env: Provider<BlobImport>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
             + Provider<Get>
-            + Provider<BlobWrite>
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
@@ -2010,8 +2011,8 @@ mod test {
     where
         Env: Provider<BlobImport>
             + Provider<Get>
-            + Provider<BlobWrite>
             + Provider<BlobRead>
+            + Provider<BlobSize>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>

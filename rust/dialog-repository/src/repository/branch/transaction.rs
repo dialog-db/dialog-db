@@ -15,7 +15,8 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
-use dialog_effects::blob::{Read as BlobRead, Write as BlobWrite};
+use dialog_effects::blob::Read as BlobRead;
+use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Publish, Resolve};
 
 /// A transaction on a line of the repository.
@@ -240,9 +241,9 @@ impl TransactionCommit<&Snapshot> {
     /// the settled batch is a no-op).
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<BlobImport>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
             + Provider<Get>
-            + Provider<BlobWrite>
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
@@ -344,9 +345,9 @@ impl Branch {
     /// themselves over the merged-in facts.
     pub async fn induce<Env>(&self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<BlobImport>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
             + Provider<Get>
-            + Provider<BlobWrite>
             + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>

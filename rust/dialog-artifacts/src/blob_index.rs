@@ -228,6 +228,18 @@ pub trait BlobIndexExt {
     where
         S: ArchiveReader + Clone;
 
+    /// The size an asset's `dialog.asset/size` fact records for `hash`, or
+    /// `None` when this tree records no such asset. Unlike
+    /// [`content_size`](BlobIndexExt::content_size), this never consults
+    /// the blob index.
+    async fn asset_size<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: ArchiveReader + Clone;
+
     /// Whether the index references a blob.
     async fn has_blob<S>(&self, store: &S, hash: &Blake3Hash) -> Result<bool, DialogArtifactsError>
     where
@@ -315,6 +327,17 @@ impl BlobIndexExt for ArtifactTree {
         if let Some(record) = self.get_blob(store, hash).await? {
             return Ok(Some(record.size));
         }
+        self.asset_size(store, hash).await
+    }
+
+    async fn asset_size<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: ArchiveReader + Clone,
+    {
         let entity = Entity::from_blob(hash)?;
         let attribute: Attribute = ASSET_SIZE.parse()?;
         for fact in self

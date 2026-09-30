@@ -776,7 +776,7 @@ async fn it_integrates_external_changes() -> Result<()> {
 #[dialog_common::test]
 async fn it_keeps_the_overlay_across_commits() -> Result<()> {
     let (operator, _, _, _, snapshot) = staged().await?;
-    snapshot.overlay().assert(name("user:ghost", "Ghost"));
+    snapshot.overlay().assert(name("user:ghost", "Ghost"))?;
     snapshot
         .transaction()
         .assert(name("user:bob", "Bob"))

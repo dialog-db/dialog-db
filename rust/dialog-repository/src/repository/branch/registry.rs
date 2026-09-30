@@ -13,7 +13,7 @@
 //! it goes through the same [`machinery`](super::Commit::machinery)
 //! scope, beside the delegation records that already use it.
 
-use dialog_artifacts::{Changes, Entity, Statement};
+use dialog_artifacts::{Changes, DialogArtifactsError, Entity, Statement};
 use dialog_capability::{Capability, Fork, Provider, Subject};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
@@ -309,11 +309,17 @@ pub(crate) fn push(branch: &BranchConcept, upstream: &BranchConcept) -> BranchPu
 
 /// Commit `changes` to the registry under the machinery scope, which
 /// is what lets them write the reserved `dialog.` namespace.
+///
+/// The registry records facts only: a batch that changes an asset is
+/// refused before anything commits, rather than committed without it.
 pub(crate) async fn apply<Env: RegistryEnv>(
     registry: &Branch,
     changes: Changes,
     env: &Env,
 ) -> Result<(), CommitError> {
+    if changes.has_assets() {
+        return Err(DialogArtifactsError::AssetsUnsupported("the replica registry".into()).into());
+    }
     let instructions = changes.into_instructions();
     if instructions.is_empty() {
         return Ok(());
@@ -384,13 +390,17 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::CommitError;
     use crate::helpers::test_repo;
     use crate::schema::{Branch as BranchConcept, Replica};
     use crate::{REGISTRY, RepositoryExt as _, RepositoryMemoryExt};
-    use dialog_artifacts::{ArtifactSelector, Value};
+    use dialog_artifacts::{
+        ArtifactSelector, Asset, DialogArtifactsError, Entity, Statement as _, Value,
+    };
     use dialog_capability::Subject;
     use dialog_common::Holds as _;
     use dialog_effects::authority::Identify;
+    use dialog_effects::authority::OperatorExt as _;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use futures_util::StreamExt as _;
 
@@ -528,6 +538,43 @@ mod tests {
         assert_eq!(rows.len(), 1, "one active branch recorded: {}", rows.len());
         let artifact = rows.into_iter().next().expect("one row")?;
         assert_eq!(artifact.to_owned()?.is, Value::Entity(feature));
+        Ok(())
+    }
+
+    /// The registry records facts only: a batch that changes an asset is
+    /// refused before anything commits, facts and all.
+    #[dialog_common::test]
+    async fn it_refuses_a_batch_that_changes_an_asset() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let identity = Identify.perform(&operator).await?;
+        let registry = Subject::from(repo.did())
+            .branch(REGISTRY)
+            .open()
+            .perform(&operator)
+            .await?;
+        let head = registry.revision();
+
+        let replica = Replica::new(identity.profile().clone(), registry.of().clone());
+        let mut changes = dialog_artifacts::Changes::new();
+        super::ActiveBranch {
+            this: replica.this,
+            branch: Entity::new()?.into(),
+        }
+        .assert(&mut changes);
+        Asset::from(b"not a registry fact".to_vec()).assert(&mut changes);
+
+        let refused = super::apply(&registry, changes, &operator).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Artifact(
+                    DialogArtifactsError::AssetsUnsupported(_)
+                ))
+            ),
+            "got {refused:?}"
+        );
+        assert_eq!(registry.revision(), head, "nothing committed");
         Ok(())
     }
 }

@@ -40,6 +40,7 @@
 //! Recording and dropping an asset are both a transaction's job:
 //! `tx.assert(asset)` records it and `tx.retract(asset)` drops it.
 
+use crate::repository::archive::networked::write_blob;
 use crate::repository::branch::blob::index_store;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Hydrate, Index, Snapshot};
@@ -47,7 +48,9 @@ use dialog_artifacts::{Asset, AssetChange, BlobIndexExt as _, Instruction};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
-use dialog_effects::blob::{BlobError, Read as BlobRead, Write as BlobWrite};
+use dialog_effects::blob::{
+    BlobError, Import as BlobImport, Read as BlobRead, Size as BlobSize, Write as BlobWrite,
+};
 use dialog_effects::memory::Resolve;
 use futures_util::{Stream, StreamExt};
 
@@ -130,22 +133,27 @@ where
 /// them, for the commit to apply under machinery scope (see
 /// [`Commit::with_machinery`](crate::Commit)).
 ///
-/// An imported asset carrying its bytes is written through `source`'s blob
-/// store, which is the hashing authority: bytes it hashes to anything but
-/// the asset's own hash fail the commit. An imported asset naming stored
-/// bytes, such as an upload's, is read back from the store once and its
-/// length checked, since the size its fact records is what transfers
-/// declare. Either way the bytes are durable before the revision recording
-/// them is minted, the order [`WriteBlob`](crate::WriteBlob) keeps. Each import yields its
-/// `dialog.asset/size` fact, each discard that fact's retraction.
+/// An imported asset carrying its bytes is imported into `source`'s blob
+/// store under the asset's hash and size; the store verifies the bytes
+/// against both and keeps nothing on a mismatch, which fails the commit. An
+/// imported asset naming stored bytes, such as an upload's, is checked to be
+/// reachable at the size it names. Either way the bytes are durable before
+/// the revision recording them is minted, the order
+/// [`WriteBlob`](crate::WriteBlob) keeps. Each import yields its
+/// `dialog.asset/size` fact.
+///
+/// A discard is keyed on the hash alone: it retracts the size the line
+/// records for that hash, whatever size the discarded asset names, and
+/// yields nothing when the line records none.
 pub(crate) async fn store_assets<Env>(
     source: SourceRef<'_>,
     changes: Vec<AssetChange>,
     env: &Env,
 ) -> Result<Vec<Instruction>, CommitError>
 where
-    Env: Provider<BlobWrite>
+    Env: Provider<BlobImport>
         + Provider<BlobRead>
+        + Provider<BlobSize>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
@@ -167,15 +175,45 @@ where
                 instructions.push(Instruction::Replace(asset.fact()?));
             }
             AssetChange::Discard(asset) => {
-                instructions.push(Instruction::Retract(asset.fact()?));
+                if let Some(size) = recorded_size(source, asset.hash(), env).await? {
+                    instructions.push(Instruction::Retract(
+                        Asset::stored(*asset.hash(), size).fact()?,
+                    ));
+                }
             }
         }
     }
     Ok(instructions)
 }
 
-/// Write an asset's bytes through `source`'s blob store, failing when the
-/// store hashes them to anything but the asset's hash.
+/// The size `source`'s current tree records for the asset `hash`, if it
+/// records that asset.
+pub(crate) async fn recorded_size<Env>(
+    source: SourceRef<'_>,
+    hash: &dialog_storage::Blake3Hash,
+    env: &Env,
+) -> Result<Option<u64>, CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let Some(revision) = source.revision() else {
+        return Ok(None);
+    };
+    let store = index_store(source, env).await;
+    Ok(Index::from_hash(NodeHash::from(*revision.tree.hash()))
+        .asset_size(&store, hash)
+        .await?)
+}
+
+/// Import `content` into `source`'s blob store under `asset`'s hash and
+/// size. The store verifies the bytes as they land and keeps nothing when
+/// they hash to anything else.
 async fn write_asset<Env>(
     source: SourceRef<'_>,
     asset: &Asset,
@@ -183,18 +221,15 @@ async fn write_asset<Env>(
     env: &Env,
 ) -> Result<(), CommitError>
 where
-    Env: Provider<BlobWrite> + ConditionalSync + 'static,
+    Env: Provider<BlobImport> + ConditionalSync + 'static,
 {
-    let mut sink = source.archive().blob().write().perform(env).await?;
-    sink.write_all(content).await?;
-    let digest = sink.finish().await?;
-    if digest.as_bytes() != asset.hash() {
-        return Err(BlobError::DigestMismatch {
-            expected: Blake3Hash::from(*asset.hash()).to_string(),
-            actual: digest.to_string(),
-        }
-        .into());
-    }
+    write_blob(
+        env,
+        &source.archive().index(),
+        &Blake3Hash::from(*asset.hash()),
+        content,
+    )
+    .await?;
     Ok(())
 }
 
@@ -202,13 +237,13 @@ where
 /// size it names, before any revision records it.
 ///
 /// Reachable means one of two things. The local blob store holds the bytes:
-/// it keys them by their verified hash, so presence proves the hash, and the
-/// length is counted against the asset's size. Or the line already records
-/// this asset at this size, so its bytes are held by reference and hydrate
-/// from the remote on demand, as after a pull; re-asserting such an asset
-/// changes nothing. Anything else, bytes this replica has never held for an
-/// asset its line never recorded, fails the commit rather than recording
-/// content nobody here can read.
+/// it keys them by their verified hash, so presence proves the hash, and it
+/// reports their length without the bytes being read. Or the line already
+/// records this asset at this size, so its bytes are held by reference and
+/// hydrate from the remote on demand, as after a pull; re-asserting such an
+/// asset changes nothing. Anything else, bytes this replica has never held
+/// for an asset its line never recorded, fails the commit rather than
+/// recording content nobody here can read.
 async fn check_stored_asset<Env>(
     source: SourceRef<'_>,
     asset: &Asset,
@@ -216,6 +251,7 @@ async fn check_stored_asset<Env>(
 ) -> Result<(), CommitError>
 where
     Env: Provider<BlobRead>
+        + Provider<BlobSize>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
@@ -227,42 +263,22 @@ where
     let local = source
         .archive()
         .blob()
-        .invoke(BlobRead {
-            digest: digest.clone(),
-            range: None,
-        })
+        .size(digest.clone())
         .perform(env)
-        .await;
+        .await?;
     let held = match local {
-        Ok(mut reader) => {
-            let mut size: u64 = 0;
-            while let Some(chunk) = reader.next().await? {
-                size += chunk.len() as u64;
-            }
-            size
-        }
-        Err(BlobError::NotFound(missing)) => {
-            let recorded = match source.revision() {
-                Some(revision) => {
-                    let store = index_store(source, env).await;
-                    Index::from_hash(NodeHash::from(*revision.tree.hash()))
-                        .content_size(&store, asset.hash())
-                        .await?
-                }
-                None => None,
-            };
-            match recorded {
-                Some(size) => size,
-                None => return Err(BlobError::NotFound(missing).into()),
-            }
-        }
-        Err(error) => return Err(error.into()),
+        Some(size) => size,
+        None => match recorded_size(source, asset.hash(), env).await? {
+            Some(size) => size,
+            None => return Err(BlobError::NotFound(digest.to_string()).into()),
+        },
     };
     if held != asset.size() {
-        return Err(BlobError::Storage(format!(
-            "asset {digest} names {} bytes, {held} are reachable",
-            asset.size()
-        ))
+        return Err(BlobError::SizeMismatch {
+            digest: digest.to_string(),
+            expected: asset.size(),
+            held,
+        }
         .into());
     }
     Ok(())
@@ -274,7 +290,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::test_repo;
+    use crate::helpers::{Counting, test_repo};
+    use crate::repository::source::SourceRef;
     use crate::{Blob, Branch, CommitError};
     use anyhow::Result;
     use dialog_artifacts::{
@@ -451,8 +468,136 @@ mod tests {
             .publish()
             .perform(&operator)
             .await;
-        assert!(refused.is_err(), "a misstated size fails the commit");
-        assert_eq!(branch.revision(), None);
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Blob(BlobError::SizeMismatch { expected, held, .. }))
+                    if expected == imported.size() + 1 && held == imported.size()
+            ),
+            "a misstated size fails the commit, got {refused:?}"
+        );
+        assert_eq!(branch.revision(), None, "the head does not move");
+        Ok(())
+    }
+
+    /// Checking a stored asset's size asks the blob store for the size and
+    /// never reads the bytes back.
+    #[dialog_common::test]
+    async fn it_checks_a_stored_asset_without_reading_its_bytes() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let payload: Vec<u8> = (0..40_000u32).map(|i| (i % 227) as u8).collect();
+        let imported = branch
+            .asset(stream::iter(chunked(&payload, 4096)))
+            .import()
+            .perform(&operator)
+            .await?;
+
+        let counting = Counting::new(operator.clone());
+        branch
+            .transaction()
+            .assert(imported.clone())
+            .commit()
+            .publish()
+            .perform(&counting)
+            .await?;
+
+        assert_eq!(
+            counting.count("blob::Read"),
+            0,
+            "the check reads no bytes: {:?}",
+            counting.snapshot()
+        );
+        assert_eq!(counting.count("blob::Size"), 1);
+        assert_eq!(
+            recorded_size(&branch, &operator, &imported).await?,
+            Some(Value::UnsignedInt(payload.len() as u128))
+        );
+        Ok(())
+    }
+
+    /// Carried bytes are imported under the asset's hash, so bytes that hash
+    /// to anything else are refused by the store as they land, and nothing
+    /// is kept under either hash.
+    #[dialog_common::test]
+    async fn it_refuses_carried_bytes_that_do_not_hash_to_the_asset() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let declared = Asset::from(b"the declared bytes".to_vec());
+        let carried = b"some other bytes".to_vec();
+        let refused =
+            super::write_asset(SourceRef::from(&branch), &declared, &carried, &operator).await;
+
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Blob(BlobError::DigestMismatch { .. }))
+            ),
+            "got {refused:?}"
+        );
+        for hash in [*declared.hash(), *Asset::from(carried).hash()] {
+            let held = branch
+                .archive()
+                .index()
+                .archive()
+                .blob()
+                .size(hash)
+                .perform(&operator)
+                .await?;
+            assert_eq!(held, None, "nothing is stored under either hash");
+        }
+        Ok(())
+    }
+
+    /// An asset dispatched as a transient would never commit, so its bytes
+    /// and fact would be dropped: the commit is refused instead, and
+    /// nothing in it lands.
+    #[dialog_common::test]
+    async fn it_refuses_an_asset_dispatched_as_a_transient() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let head = branch
+            .transaction()
+            .assert(avatar_of_alice(alice()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let asset = Asset::from(b"a transient asset".to_vec());
+        let refused = branch
+            .transaction()
+            .assert(avatar_of_alice(asset.entity()?))
+            .dispatch(asset.clone())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await;
+
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Artifact(
+                    DialogArtifactsError::AssetsUnsupported(_)
+                ))
+            ),
+            "got {refused:?}"
+        );
+        assert_eq!(branch.revision(), Some(head), "the head does not move");
+        assert_eq!(recorded_size(&branch, &operator, &asset).await?, None);
+        let held = branch
+            .archive()
+            .index()
+            .archive()
+            .blob()
+            .size(*asset.hash())
+            .perform(&operator)
+            .await?;
+        assert_eq!(held, None, "the asset's bytes were not stored");
         Ok(())
     }
 
@@ -603,6 +748,74 @@ mod tests {
             .retract(photo.clone())
             .commit()
             .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(recorded_size(&branch, &operator, &photo).await?, None);
+        assert_eq!(
+            Blob::from(photo.entity()?)
+                .size((&branch).into())
+                .perform(&operator)
+                .await?,
+            None
+        );
+        Ok(())
+    }
+
+    /// A discard is keyed on the hash: retracting an asset named at a size
+    /// other than the one recorded still retracts the recorded fact.
+    #[dialog_common::test]
+    async fn it_discards_an_asset_by_its_hash_whatever_size_is_named() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let photo = Asset::from(b"discard me by hash".to_vec());
+        branch
+            .transaction()
+            .assert(photo.clone())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch
+            .transaction()
+            .retract(Asset::stored(*photo.hash(), photo.size() + 7))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(recorded_size(&branch, &operator, &photo).await?, None);
+        assert_eq!(
+            Blob::from(photo.entity()?)
+                .size((&branch).into())
+                .perform(&operator)
+                .await?,
+            None
+        );
+        Ok(())
+    }
+
+    /// `Blob::retract` on an asset's entity drops the asset, as a
+    /// transaction's `retract(asset)` would: the asset is recorded by a fact,
+    /// not by a blob-index entry.
+    #[dialog_common::test]
+    async fn it_retracts_an_asset_through_blob_retract() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let photo = Asset::from(b"retract me through the blob api".to_vec());
+        branch
+            .transaction()
+            .assert(photo.clone())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        Blob::from(photo.entity()?)
+            .retract((&branch).into())
             .perform(&operator)
             .await?;
 
