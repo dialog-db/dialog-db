@@ -56,6 +56,14 @@ impl<'a> Delegations<'a> {
             issuer,
         }
     }
+
+    /// The retained delegations issued to `audience`: the grants it holds.
+    pub fn issued_to(self, audience: Did) -> IssuedTo<'a> {
+        IssuedTo {
+            branch: self.branch,
+            audience,
+        }
+    }
 }
 
 /// The delegations a principal signed. Created by
@@ -82,61 +90,123 @@ impl IssuedBy<'_> {
             + ConditionalSync
             + 'static,
     {
-        let branch = self.branch;
-        if branch.revision().is_none() {
-            return Ok(Vec::new());
-        }
-        let store = index_store(branch, env).await;
-        let selector = ArtifactSelector::new()
-            .the(
-                DELEGATION_ISSUER
-                    .parse()
-                    .map_err(|error| malformed("issuer attribute", error))?,
-            )
-            .is(Value::String(self.issuer.to_string()));
-        let facts = Select::new(branch, selector)
-            .execute(store)
-            .await
-            .map_err(|error| malformed("issuer read failed", error))?;
-        futures_util::pin_mut!(facts);
-        let mut entities = Vec::new();
-        while let Some(item) = facts.next().await {
-            let fact: Artifact = item
-                .and_then(|view| view.to_owned())
-                .map_err(|error| malformed("issuer fact undecodable", error))?;
-            entities.push(fact.of);
-        }
+        Ok(
+            certificates(self.branch, DELEGATION_ISSUER, &self.issuer, env)
+                .await?
+                .into_iter()
+                .filter(|certificate| certificate.issuer() == &self.issuer)
+                .map(|certificate| UcanDelegation::new(DelegationChain::new(certificate.0)))
+                .collect(),
+        )
+    }
+}
 
-        let mut chains = Vec::new();
-        for entity in entities {
-            let Ok(mut reader) = Blob::from(entity).read(branch.into()).perform(env).await else {
-                continue;
-            };
-            let mut bytes = Vec::new();
-            let mut readable = true;
-            loop {
-                match reader.next().await {
-                    Ok(Some(chunk)) => bytes.extend(chunk),
-                    Ok(None) => break,
-                    Err(_) => {
-                        readable = false;
-                        break;
-                    }
+/// The delegations a principal holds. Created by
+/// [`Delegations::issued_to`].
+pub struct IssuedTo<'a> {
+    branch: &'a Branch,
+    audience: Did,
+}
+
+impl IssuedTo<'_> {
+    /// Read them: each certificate whose audience fact names the audience,
+    /// its envelope read back and checked to be addressed to it. An
+    /// envelope that is unavailable or disagrees with its facts is skipped.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Vec<UcanDelegation>, AuthorizeError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<BlobRead>
+            + Provider<BlobImport>
+            + Provider<crate::Hydrate>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, BlobRead>>
+            + ConditionalSync
+            + 'static,
+    {
+        Ok(
+            certificates(self.branch, DELEGATION_AUDIENCE, &self.audience, env)
+                .await?
+                .into_iter()
+                .filter(|certificate| certificate.audience() == &self.audience)
+                .map(|certificate| UcanDelegation::new(DelegationChain::new(certificate.0)))
+                .collect(),
+        )
+    }
+}
+
+/// The retained certificates whose `attribute` fact names `did`, their
+/// envelopes read back. An envelope that is unavailable or undecodable is
+/// skipped; the caller checks it against the fact it was found by.
+async fn certificates<Env>(
+    branch: &Branch,
+    attribute: &str,
+    did: &Did,
+    env: &Env,
+) -> Result<Vec<UcanCertificate>, AuthorizeError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + Provider<crate::Hydrate>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
+{
+    if branch.revision().is_none() {
+        return Ok(Vec::new());
+    }
+    let store = index_store(branch, env).await;
+    let selector = ArtifactSelector::new()
+        .the(
+            attribute
+                .parse()
+                .map_err(|error| malformed("delegation attribute", error))?,
+        )
+        .is(Value::String(did.to_string()));
+    let facts = Select::new(branch, selector)
+        .execute(store)
+        .await
+        .map_err(|error| malformed("delegation read failed", error))?;
+    futures_util::pin_mut!(facts);
+    let mut entities = Vec::new();
+    while let Some(item) = facts.next().await {
+        let fact: Artifact = item
+            .and_then(|view| view.to_owned())
+            .map_err(|error| malformed("delegation fact undecodable", error))?;
+        entities.push(fact.of);
+    }
+
+    let mut found = Vec::new();
+    for entity in entities {
+        let Ok(mut reader) = Blob::from(entity).read(branch.into()).perform(env).await else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        let mut readable = true;
+        loop {
+            match reader.next().await {
+                Ok(Some(chunk)) => bytes.extend(chunk),
+                Ok(None) => break,
+                Err(_) => {
+                    readable = false;
+                    break;
                 }
             }
-            if !readable {
-                continue;
-            }
-            let Ok(certificate) = UcanCertificate::decode(&bytes) else {
-                continue;
-            };
-            if certificate.issuer() != &self.issuer {
-                continue;
-            }
-            chains.push(UcanDelegation::new(DelegationChain::new(certificate.0)));
         }
-        Ok(chains)
+        if !readable {
+            continue;
+        }
+        let Ok(certificate) = UcanCertificate::decode(&bytes) else {
+            continue;
+        };
+        found.push(certificate);
     }
+    Ok(found)
 }
 
 impl<'a> Delegations<'a> {
