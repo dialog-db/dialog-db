@@ -11,7 +11,7 @@ The guide is written for two kinds of readers. If you want to build something th
 Alice and Bob share a grocery list. Alice edits it on her laptop. Bob edits it on his phone. Sometimes they are both offline, and sometimes they edit the same item at the same time.
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 640 210" width="640" height="210" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Alice's laptop and Bob's phone each hold a replica and sync through a shared remote">
+<svg class="dg" viewBox="0 0 640 210" width="640" height="210" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Alice's laptop and Bob's phone each hold a replica and sync through a shared remote peer">
 <defs><marker id="intro-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <rect class="alice" x="20" y="40" width="170" height="130" rx="6"/>
 <text class="title alice" x="105" y="64" text-anchor="middle">Alice's laptop</text>
@@ -26,7 +26,7 @@ Alice and Bob share a grocery list. Alice edits it on her laptop. Bob edits it o
 <text class="small muted" x="535" y="124" text-anchor="middle">facts, tree,</text>
 <text class="small muted" x="535" y="138" text-anchor="middle">history</text>
 <rect class="hash" x="255" y="70" width="130" height="70" rx="6"/>
-<text class="title" x="320" y="98" text-anchor="middle">remote</text>
+<text class="title" x="320" y="98" text-anchor="middle">remote peer</text>
 <text class="small muted" x="320" y="118" text-anchor="middle">blocks + a head</text>
 <line x1="192" y1="95" x2="252" y2="95" marker-end="url(#intro-arrow)"/>
 <line x1="252" y1="115" x2="192" y2="115" marker-end="url(#intro-arrow)"/>
@@ -36,7 +36,7 @@ Alice and Bob share a grocery list. Alice edits it on her laptop. Bob edits it o
 <text class="small muted" x="222" y="132" text-anchor="middle">pull</text>
 <text class="small muted" x="418" y="88" text-anchor="middle">push</text>
 <text class="small muted" x="418" y="132" text-anchor="middle">pull</text>
-<text class="small muted" x="320" y="195" text-anchor="middle">The remote stores bytes. It never needs to understand them.</text>
+<text class="small muted" x="320" y="195" text-anchor="middle">The remote peer stores bytes. It never needs to understand them.</text>
 </svg>
 </figure>
 
@@ -50,7 +50,7 @@ The same list appears in every chapter, so the same facts, keys and hashes turn 
 4. [Nodes](./nodes.md): the bytes of a single node, and how a node says how to read itself.
 5. [Blocks and Storage](./storage.md): content addressing, and where blocks live.
 6. [Commits and History](./history.md): versions, the log inside the tree, and signed heads.
-7. [Identity and Capabilities](./identity.md): who may read and write, and how a remote checks.
+7. [Identity and Capabilities](./identity.md): who may read and write, and how a remote peer checks.
 8. [Sync](./sync.md): how Alice's and Bob's replicas converge.
 9. [Queries](./queries.md): how an app asks questions of all this.
 

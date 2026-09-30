@@ -1,19 +1,19 @@
 # Sync
 
-Alice and Bob each have a replica. Now they need to agree. Dialog does this through a remote: a store of blocks and cells that both can reach, such as an S3 bucket, a Cloudflare R2 bucket behind a UCAN service, or a shared folder. The remote stores bytes and swaps cells. It does not understand facts, trees or merges. All of that happens on the replicas.
+Alice and Bob each have a replica. Now they need to agree. Dialog does this through a remote peer: a peer that both can reach and that stores blocks and cells, such as an S3 bucket, a Cloudflare R2 bucket behind a UCAN service, or a shared folder. The remote peer stores bytes and swaps cells. It does not understand facts, trees or merges. All of that happens on the replicas.
 
-A branch that syncs with a remote remembers one extra thing per remote: its **sync base**, the tree the remote's head pointed at the last time the two agreed.
+A branch that syncs with a remote peer remembers one extra thing per remote peer: its **sync base**, the tree the remote peer's head pointed at the last time the two agreed.
 
 ## A whole conversation
 
-Here is everything that happens between Alice's laptop, the remote, and Bob's phone, from Alice's first push to the moment both replicas hold the same root. Each message is written as what it says:
+Here is everything that happens between Alice's laptop, the remote peer, and Bob's phone, from Alice's first push to the moment both replicas hold the same root. Each message is written as what it says:
 
 <figure class="dg">
 <svg class="dg" viewBox="0 0 800 768" width="800" height="768" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Alice pushes, Bob pulls, both edit, Bob pushes first, Alice&#x27;s push is refused, she pulls and merges, pushes, and Bob adopts her merge">
 <defs><marker id="q-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="title alice" x="110" y="22" text-anchor="middle">▲ Alice</text>
 <line class="dashed" x1="110" y1="32" x2="110" y2="762"/>
-<text class="title hash" x="400" y="22" text-anchor="middle">remote</text>
+<text class="title hash" x="400" y="22" text-anchor="middle">remote peer</text>
 <line class="dashed" x1="400" y1="32" x2="400" y2="762"/>
 <text class="title bob" x="690" y="22" text-anchor="middle">● Bob</text>
 <line class="dashed" x1="690" y1="32" x2="690" y2="762"/>
@@ -70,24 +70,24 @@ The rest of the chapter walks through it.
 
 ## Push
 
-A push moves the remote's head forward to the local one, and only forward.
+A push moves the remote peer's head forward to the local one, and only forward.
 
-1. **Check.** Read the remote's head. If it is not the sync base, someone else has pushed since this replica last looked, and the push stops with a refusal: *not a fast-forward*. The replica must pull first.
-2. **Find what is new.** Compare the local tree with the sync base, skipping every subtree whose hash matches, as described in [The Search Tree](./tree.md). What is left are the blocks the remote does not have.
-3. **Upload.** Send spilled values and blobs, then the new tree nodes, children before parents. A node never arrives before the nodes it points at, so the remote never holds a node with a dangling link.
-4. **Swap the head.** Ask the remote to set its head cell to the new signed head, *if it still holds what step 1 read*. If another push slipped in between, the swap fails and nothing points at the uploaded blocks.
+1. **Check.** Read the remote peer's head. If it is not the sync base, someone else has pushed since this replica last looked, and the push stops with a refusal: *not a fast-forward*. The replica must pull first.
+2. **Find what is new.** Compare the local tree with the sync base, skipping every subtree whose hash matches, as described in [The Search Tree](./tree.md). What is left are the blocks the remote peer does not have.
+3. **Upload.** Send spilled values and blobs, then the new tree nodes, children before parents. A node never arrives before the nodes it points at, so the remote peer never holds a node with a dangling link.
+4. **Swap the head.** Ask the remote peer to set its head cell to the new signed head, *if it still holds what step 1 read*. If another push slipped in between, the swap fails and nothing points at the uploaded blocks.
 5. **Record.** The new tree becomes the sync base.
 
 On S3 the swap in step 4 is a conditional `PUT` with `If-Match` on the cell's ETag, or `If-None-Match: *` when there is no head yet.
 
 ## Pull
 
-A pull brings the remote's changes in. It reads the remote's head, checks the head's signature, and then looks at two watermarks: the one in the remote's head, and the one in the local head. Each watermark says what its side has seen (see [Commits and History](./history.md)). Comparing them tells the replica which case it is in:
+A pull brings the remote peer's changes in. It reads the remote peer's head, checks the head's signature, and then looks at two watermarks: the one in the remote peer's head, and the one in the local head. Each watermark says what its side has seen (see [Commits and History](./history.md)). Comparing them tells the replica which case it is in:
 
 | Case | What the replica says | What it does |
 |---|---|---|
-| The local head has seen everything the remote has | *"Nothing new here."* | keeps its head, updates the sync base |
-| The remote has seen everything local, and nothing changed locally since the last sync | *"I'll take yours."* | adopts the remote root as is, reading no blocks at all |
+| The local head has seen everything the remote peer has | *"Nothing new here."* | keeps its head, updates the sync base |
+| The remote peer has seen everything local, and nothing changed locally since the last sync | *"I'll take yours."* | adopts the remote peer's root as is, reading no blocks at all |
 | Both sides have changes the other has not seen | *"We need to merge."* | merges, then makes a merge commit |
 
 When Bob pulls for the first time, he has no local changes, so he takes Alice's root as it is. He reads no nodes to do it. The nodes arrive later, on demand, as his queries walk through them ([Blocks and Storage](./storage.md)).
@@ -140,10 +140,10 @@ The election is a function of the stored facts alone, so every replica elects th
 
 ## After the merge
 
-Alice pushes her merge. This time the remote's head is Bob's, which is her new sync base, so the push goes through. Bob pulls, sees that Alice's merge has seen everything he has, and adopts its root without reading a single node. The two replicas now hold the same root, and they agree on every fact.
+Alice pushes her merge. This time the remote peer's head is Bob's, which is her new sync base, so the push goes through. Bob pulls, sees that Alice's merge has seen everything he has, and adopts its root without reading a single node. The two replicas now hold the same root, and they agree on every fact.
 
 <div class="aside">
 
-**Implementations.** Push is [`branch/push.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/push.rs) and pull is [`branch/pull.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/pull.rs), both in `dialog-repository`. The screens are documented and implemented in [`dialog-artifacts/src/merge.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/merge.rs). The election is `ArtifactView::elect` in [`artifacts/artifact.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/artifact.rs). The remotes are [`dialog-remote-s3`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-s3), [`dialog-remote-ucan`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-ucan) and [`dialog-remote-fs`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-fs).
+**Implementations.** Push is [`branch/push.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/push.rs) and pull is [`branch/pull.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/pull.rs), both in `dialog-repository`. The screens are documented and implemented in [`dialog-artifacts/src/merge.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/merge.rs). The election is `ArtifactView::elect` in [`artifacts/artifact.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/artifact.rs). The remote peers are [`dialog-remote-s3`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-s3), [`dialog-remote-ucan`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-ucan) and [`dialog-remote-fs`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-fs).
 
 </div>
