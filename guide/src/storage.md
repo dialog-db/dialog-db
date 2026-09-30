@@ -23,7 +23,7 @@ The hash is BLAKE3, 32 bytes, unkeyed, taken over the whole node, prelude includ
 
 Naming by hash has three useful consequences:
 
-- **A name can be checked.** Whoever hands you a block, you can hash it and see whether it is the block you asked for. Dialog checks every tree node it reads and refuses bytes whose hash does not match. So a node can come from anywhere, including a server that is not trusted, without that server being able to change it. (Spilled value blocks are currently read without this check.)
+- **A name can be checked.** Whoever hands you a block, you can hash it and see whether it is the block you asked for. Dialog checks every tree node it reads and refuses bytes whose hash does not match. So a node can come from anywhere, including a server that is not trusted, without that server being able to change it.
 - **Equal blocks are stored once.** Two trees that share a subtree share its blocks. Writing a block that already exists is harmless: it can only write the same bytes again.
 - **A root names a whole tree.** A root holds its children's hashes, which hold theirs. Handing someone one 32-byte root hands them a name for every fact beneath it.
 
