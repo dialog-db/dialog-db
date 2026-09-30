@@ -588,6 +588,31 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
         Box::pin(branch.delegations().issued_by(issuer.clone()).perform(&env)).await
     }
 
+    /// The delegations retained where this peer proves from that were
+    /// issued to `audience`: the grants it holds.
+    pub(crate) async fn issued_to(
+        &self,
+        audience: &Did,
+    ) -> Result<Vec<UcanDelegation>, AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        Box::pin(
+            branch
+                .delegations()
+                .issued_to(audience.clone())
+                .perform(&env),
+        )
+        .await
+    }
+
     /// Stop proving from `delegation`: retract it where this peer retains
     /// delegations.
     pub(crate) async fn retract(&self, delegation: UcanDelegation) -> Result<(), AuthorizeError> {

@@ -719,6 +719,104 @@ mod tests {
         Ok(())
     }
 
+    /// An invite principal held for the account follows a handover with
+    /// the chain it holds its authority by: the account's authority over
+    /// the space it was invited to runs space → invite → account, and after
+    /// the handover space → invite → owner, never a lone invite → owner
+    /// link that proves nothing.
+    #[dialog_common::test]
+    async fn it_hands_an_invite_over_with_the_chain_it_holds() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/invite-handover").await?;
+
+        // Someone else's space invited a principal whose key this peer holds.
+        let space = Ed25519Signer::generate().await?;
+        let invite = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await?;
+        let invited = DelegationBuilder::new()
+            .issuer(Signer::from(space.clone()))
+            .audience(&invite.did())
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        peer.access()
+            .save(UcanDelegation::new(DelegationChain::new(invited)))
+            .perform(&peer)
+            .await?;
+        peer.adopt_principal("invite", invite.clone()).await?;
+        let account = peer.authority().await?;
+        let before = proven_through(&peer, &account, &space.did()).await?;
+        assert_eq!(before, vec![space.did(), invite.did()]);
+
+        let custodian = test_custodian(&peer).await?;
+        let vault = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await?;
+        let owner = Ed25519Signer::generate().await?;
+        let powerline = DelegationBuilder::new()
+            .issuer(Signer::from(owner.clone()))
+            .audience(&peer.did())
+            .subject(UcanSubject::Any)
+            .command(Vec::new())
+            .try_build()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        peer.access()
+            .save(UcanDelegation::new(DelegationChain::new(powerline)))
+            .perform(&peer)
+            .await?;
+        vault.hand_over(owner.did()).perform(&peer).await?;
+
+        let after = proven_through(&peer, &owner.did(), &space.did()).await?;
+        assert_eq!(after, vec![space.did(), invite.did()]);
+        for delegation in peer.issued_by(&invite.did()).await? {
+            assert_ne!(
+                delegation.chain().audience(),
+                &account,
+                "the invite's delegation to the old account is retracted"
+            );
+        }
+        Ok(())
+    }
+
+    /// The issuers of the chain proving `principal` may archive `space`,
+    /// root first, checked to end at `principal`.
+    async fn proven_through(
+        peer: &Peer<VolatileSpace>,
+        principal: &dialog_varsig::Did,
+        space: &dialog_varsig::Did,
+    ) -> anyhow::Result<Vec<dialog_varsig::Did>> {
+        let scope = Scope {
+            subject: UcanSubject::Specific(space.clone()),
+            command: UcanCommand(vec!["archive".to_string()]),
+            parameters: Parameters::default(),
+        };
+        let proof = Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(principal.clone(), scope))
+            .perform(peer)
+            .await?;
+        let last = proof.proofs.last().expect("a chain proves it");
+        assert_eq!(
+            last.0.audience(),
+            principal,
+            "the chain ends at the principal"
+        );
+        Ok(proof
+            .proofs
+            .iter()
+            .map(|certificate| certificate.0.issuer().clone())
+            .collect())
+    }
+
     /// An account handed over to a key its owner holds keeps its spaces,
     /// and needs only the owner's DID: the peer acts for the owner, the
     /// owner's key opens the account and the old custodian no longer

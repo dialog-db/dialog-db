@@ -48,7 +48,7 @@ use core::fmt::{self, Debug, Display};
 
 use super::space::SPACE_KEY;
 use super::{Local, Mode, Peer, PeerSpace};
-use dialog_capability::access::{Access, Retain};
+use dialog_capability::access::{Access, Prove, Retain};
 use dialog_capability::{Capability, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::key::{ExtractableKey, KeyExport};
@@ -59,7 +59,7 @@ use dialog_repository::registry::RegistryEnv;
 use dialog_repository::schema::SealedMessage;
 use dialog_repository::{Branch, BranchReference};
 use dialog_repository::{secrets, spaces};
-use dialog_ucan::{Ucan, UcanDelegation};
+use dialog_ucan::{Parameters, Scope, Ucan, UcanDelegation};
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use dialog_ucan_core::{DelegationBuilder, DelegationChain};
 use dialog_varsig::eddsa::Ed25519Signature;
@@ -83,6 +83,19 @@ const SECRET: Context = Context::new("dialog.secret/message");
 
 /// The context a vault's key is sealed in to each of its members.
 const KEY: Context = Context::new("dialog.secret/key");
+
+/// The context the key of a held principal other than a space is sealed
+/// in to the account; a space's is [`SPACE_KEY`].
+const PRINCIPAL_KEY: Context = Context::new("dialog.principal/key");
+
+/// The context the key of a principal of `kind` is held sealed in.
+fn held_context(kind: &str) -> Context {
+    if kind == spaces::SPACE {
+        SPACE_KEY
+    } else {
+        PRINCIPAL_KEY
+    }
+}
 
 /// The context a vault's key is derived from its parent's in.
 const DERIVE: Context = Context::new("dialog.vault/derive");
@@ -846,7 +859,7 @@ async fn moved<S: PeerSpace>(
 }
 
 /// Forget the copies the members `without` keep for themselves of the key
-/// of each space held for `old`. A copy already opened elsewhere stands,
+/// of each principal held for `old`. A copy already opened elsewhere stands,
 /// as a delegation the member copied does.
 async fn unheld<S: PeerSpace>(
     branch: &Branch,
@@ -854,15 +867,12 @@ async fn unheld<S: PeerSpace>(
     without: &[Did],
     peer: &Peer<S, Local>,
 ) -> Result<(), CredentialError> {
-    for (space, held) in secrets::held_by(branch, &old.did, peer)
+    for (principal, _) in secrets::held_by(branch, &old.did, peer)
         .await
         .map_err(unavailable)?
     {
-        if held.kind != spaces::SPACE {
-            continue;
-        }
         for member in without {
-            secrets::revoke(branch, &space, member, peer)
+            secrets::revoke(branch, &principal, member, peer)
                 .await
                 .map_err(unavailable)?;
         }
@@ -870,8 +880,8 @@ async fn unheld<S: PeerSpace>(
     Ok(())
 }
 
-/// Hold every space key held sealed to `old` sealed to `new` instead, and
-/// have each space delegate to `new`.
+/// Hold every principal's key held sealed to `old` sealed to `new`
+/// instead, and have each re-issue its authority to `new`.
 async fn rehold<S: PeerSpace>(
     branch: &Branch,
     old: &Vault,
@@ -879,53 +889,116 @@ async fn rehold<S: PeerSpace>(
     peer: &Peer<S, Local>,
 ) -> Result<(), CredentialError> {
     let opener = old.key().await?;
-    for (space, held) in secrets::held_by(branch, &old.did, peer)
+    for (principal, held) in secrets::held_by(branch, &old.did, peer)
         .await
         .map_err(unavailable)?
     {
-        if held.kind != spaces::SPACE {
-            continue;
-        }
+        let context = held_context(&held.kind);
         let seed = opener
-            .secret(SPACE_KEY)
+            .secret(context)
             .reveal(&SealedSecret::from_bytes(&held.sealed).map_err(unopened)?)
             .await
             .map_err(unopened)?;
         let seed: [u8; 32] = seed
             .try_into()
-            .map_err(|_| unopened(format!("the key held for {space} is not a key")))?;
+            .map_err(|_| unopened(format!("the key held for {principal} is not a key")))?;
         let signer = Ed25519Signer::import(&seed).await.map_err(unavailable)?;
-        if signer.did() != space {
-            return Err(unopened(format!("the key held for {space} is not its key")));
+        if signer.did() != principal {
+            return Err(unopened(format!(
+                "the key held for {principal} is not its key"
+            )));
         }
         let sealed = sealable(new)?
-            .secret(SPACE_KEY)
+            .secret(context)
             .conceal(&seed)
             .await
             .map_err(unavailable)?;
         secrets::hold_principal(
             branch,
-            &space,
-            spaces::SPACE,
+            &principal,
+            &held.kind,
             secrets::sealed_message(new, sealed.to_bytes()),
             peer,
         )
         .await
         .map_err(unavailable)?;
-        let delegation = DelegationBuilder::new()
-            .issuer(Signer::from(signer))
-            .audience(new)
-            .subject(UcanSubject::Specific(space.clone()))
-            .command(Vec::new())
-            .try_build()
-            .await
-            .map_err(|error| unavailable(format!("{error:?}")))?;
-        retain(peer, DelegationChain::new(delegation)).await?;
-        for delegation in peer.issued_by(&space).await.map_err(unavailable)? {
+        reissue(&signer, new, peer).await?;
+        for delegation in peer.issued_by(&principal).await.map_err(unavailable)? {
             if delegation.chain().audience() == &old.did {
                 peer.retract(delegation).await.map_err(unavailable)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Have the principal `signer` is the key of delegate its authority to
+/// `owner`, and retain the delegation where the peer proves from. A
+/// principal that holds no grant is its own authority, as a space is, and
+/// delegates itself. One that holds grants, as an invite does, delegates
+/// each on with the chain proving it: space → … → invite → owner.
+async fn reissue<S: PeerSpace>(
+    signer: &Ed25519Signer,
+    owner: &Did,
+    peer: &Peer<S, Local>,
+) -> Result<(), CredentialError> {
+    let principal = signer.did();
+    let grants = peer.issued_to(&principal).await.map_err(unavailable)?;
+    if grants.is_empty() {
+        let delegation = DelegationBuilder::new()
+            .issuer(Signer::from(signer.clone()))
+            .audience(owner)
+            .subject(UcanSubject::Specific(principal))
+            .command(Vec::new())
+            .try_build()
+            .await
+            .map_err(|error| unavailable(format!("{error:?}")))?;
+        return retain(peer, DelegationChain::new(delegation)).await;
+    }
+    for grant in grants {
+        let granted = grant
+            .chain()
+            .export()
+            .map(|(_, granted)| granted)
+            .next()
+            .ok_or_else(|| unopened("a delegation with no certificate"))?;
+        let scope = Scope {
+            subject: granted.subject().clone(),
+            command: granted.command().clone(),
+            parameters: Parameters::default(),
+        };
+        let proof = Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(principal.clone(), scope))
+            .perform(peer)
+            .await
+            .map_err(unavailable)?;
+        let chain = DelegationChain::try_from(
+            proof
+                .proofs
+                .into_iter()
+                .map(|certificate| certificate.0)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| unopened(format!("{error:?}")))?;
+        let builder = DelegationBuilder::new()
+            .issuer(Signer::from(signer.clone()))
+            .audience(owner)
+            .subject(granted.subject().clone())
+            .command(granted.command().0.clone())
+            .policy(granted.policy().clone());
+        let builder = match granted.expiration() {
+            Some(expiration) => builder.expiration(expiration),
+            None => builder,
+        };
+        let link = builder
+            .try_build()
+            .await
+            .map_err(|error| unavailable(format!("{error:?}")))?;
+        let chain = chain
+            .push(link)
+            .map_err(|error| unopened(format!("{error:?}")))?;
+        retain(peer, chain).await?;
     }
     Ok(())
 }
@@ -1160,7 +1233,51 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
     }
 }
 
-/// Open the key of a space. Created by [`Peer::space_key`].
+impl<S: PeerSpace> Peer<S, Local> {
+    /// Take the principal `key` is the key of into the custody of the
+    /// account this peer acts for, as a principal of `kind`: its key held
+    /// sealed to the account, a copy kept for this peer, and its authority
+    /// delegated on to the account. A principal that holds grants, as an
+    /// invite does, delegates each on with the chain proving it, so the
+    /// account's authority runs through it to what it was granted.
+    ///
+    /// [`adopt_space`](Self::adopt_space) is the space's case, which also
+    /// checks the storage the space is kept in.
+    pub async fn adopt_principal(
+        &self,
+        kind: &str,
+        key: Ed25519Signer<Extractable>,
+    ) -> Result<(), CredentialError> {
+        let seed = seed_of(&key).await?;
+        let principal = key.did();
+        let account = self.authority().await?;
+        let branch = opened(&BranchReference::from(self.state()), self).await?;
+        let sealed = sealable(&account)?
+            .secret(held_context(kind))
+            .conceal(&seed)
+            .await
+            .map_err(unavailable)?;
+        secrets::hold_principal(
+            &branch,
+            &principal,
+            kind,
+            secrets::sealed_message(&account, sealed.to_bytes()),
+            self,
+        )
+        .await
+        .map_err(unavailable)?;
+        let holder = self.holder();
+        let copy = seal_key(&seed, &holder).await?;
+        secrets::grant(&branch, &principal, &holder, copy, self)
+            .await
+            .map_err(unavailable)?;
+        let signer = Ed25519Signer::import(&seed).await.map_err(unavailable)?;
+        reissue(&signer, &account, self).await
+    }
+}
+
+/// Open the key of a space, or of another principal the peer holds for
+/// its account, such as an invite's. Created by [`Peer::space_key`].
 pub struct SpaceKey {
     space: Did,
     via: Option<SignerCredential>,
@@ -1199,7 +1316,6 @@ impl SpaceKey {
         let held = secrets::held_principal(&branch, &space, peer)
             .await
             .map_err(unavailable)?
-            .filter(|held| held.kind == spaces::SPACE)
             .ok_or_else(|| CredentialError::NotFound(format!("no key held for {space}")))?;
         let account = branch
             .vault(ACCOUNT)
@@ -1216,7 +1332,7 @@ impl SpaceKey {
         let seed = account
             .key()
             .await?
-            .secret(SPACE_KEY)
+            .secret(held_context(&held.kind))
             .reveal(&SealedSecret::from_bytes(&held.sealed).map_err(unopened)?)
             .await
             .map_err(unopened)?;
