@@ -1,6 +1,7 @@
 //! DID (Decentralized Identifier) types.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::{fmt, str::FromStr};
 
 /// A [Decentralized Identifier][spec] string.
@@ -8,10 +9,14 @@ use std::{fmt, str::FromStr};
 /// Wraps a raw DID string like `did:key:z6Mk...` or `did:web:example.com`.
 /// Use [`method()`][Did::method] to inspect the DID method at runtime.
 ///
+/// A DID is immutable once parsed, and handles to one (subjects,
+/// capabilities, catalogs) are cloned on every read that names it, so
+/// the string is shared rather than copied by each clone.
+///
 /// [spec]: https://www.w3.org/TR/did-core/
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct Did(String);
+pub struct Did(Arc<str>);
 
 impl Did {
     /// Get the raw DID string.
@@ -81,7 +86,7 @@ impl FromStr for Did {
                 "expected did:method:identifier, got: {s}"
             )));
         }
-        Ok(Did(s.to_string()))
+        Ok(Did(Arc::from(s)))
     }
 }
 

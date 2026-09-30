@@ -153,6 +153,12 @@ impl<'a> QueryLayer<'a> {
     /// `operator` (from [`Identify`]) supplies the profile + operator
     /// DIDs the schema entities are derived from.
     pub fn metadata(&self, operator: &Capability<Operator>) -> Changes {
+        Changes::clone(&self.shared_metadata(operator))
+    }
+
+    /// [`metadata`](Self::metadata), shared with every other query over
+    /// the same branch, profile, operator and head.
+    fn shared_metadata(&self, operator: &Capability<Operator>) -> Arc<Changes> {
         // Every query folds this in, and for a layer over one branch it
         // depends only on the profile, the operator and the head, so the
         // branch keeps it: deriving it hashes and base58-renders entities
@@ -160,7 +166,7 @@ impl<'a> QueryLayer<'a> {
         if let [SourceRef::Branch(branch)] = self.sources.as_slice() {
             return branch.layer_metadata(operator, || self.derive_metadata(operator));
         }
-        self.derive_metadata(operator)
+        Arc::new(self.derive_metadata(operator))
     }
 
     /// Derive what [`metadata`](Self::metadata) folds in.
@@ -214,10 +220,18 @@ impl<'a> QueryLayer<'a> {
     /// [`changes`](Self::changes) with [`metadata`](Self::metadata)
     /// folded in. This is exactly what `.select(..).perform(..)`
     /// queries against alongside the branch streams.
-    pub fn overlay(&self, operator: &Capability<Operator>) -> Changes {
+    ///
+    /// A layer that adds no changes of its own queries the metadata
+    /// alone, which is then the branch's shared copy rather than a new
+    /// one rebuilt fact by fact for every query.
+    pub fn overlay(&self, operator: &Capability<Operator>) -> Arc<Changes> {
+        let metadata = self.shared_metadata(operator);
+        if self.changes.is_empty() {
+            return metadata;
+        }
         let mut overlay = self.changes.clone();
-        self.metadata(operator).assert(&mut overlay);
-        overlay
+        Changes::clone(&metadata).assert(&mut overlay);
+        Arc::new(overlay)
     }
 
     /// Stage a query application. Call `.perform(&operator)` to execute.
@@ -342,7 +356,7 @@ pub(crate) struct QueryEnv<'a, Env> {
     sources: Vec<Source>,
     /// All overlay facts — caller-asserted + auto-injected metadata —
     /// merged into one batch. Queried via `Provider<Select> for Changes`.
-    changes: Changes,
+    changes: Arc<Changes>,
     /// `sort_key`s of every retracted fact in `changes`. Each line's
     /// session overlay stream is filtered against these before the
     /// merge so a staged retract suppresses a session fact.
@@ -362,6 +376,10 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// evaluation continues (or rebuilds into) the retained answer
     /// table instead of computing a throwaway one.
     fixpoint: Option<(Entity, Continuation)>,
+    /// Whether any line can fetch what it lacks (see
+    /// [`SourceRef::fetches`](crate::repository::source::SourceRef)):
+    /// preload hints are refused when none can.
+    fetches: bool,
     env: &'a Env,
 }
 
@@ -378,7 +396,13 @@ impl<'a, Env> QueryEnv<'a, Env> {
     /// Deductive-rule resolution is built in (a durable layer per line,
     /// its session overlay, and the per-query changes as a transient
     /// layer), so the paths can never diverge on it.
-    pub(crate) fn new(sources: Vec<Source>, changes: Changes, env: &'a Env) -> Self {
+    pub(crate) fn new(
+        sources: Vec<Source>,
+        changes: impl Into<Arc<Changes>>,
+        env: &'a Env,
+    ) -> Self {
+        let changes = changes.into();
+        let fetches = sources.iter().any(|source| source.as_ref().fetches());
         let staged = tombstones_from(&changes);
         // The common case, one line and nothing staged, shares the
         // overlay's own set rather than copying it per query.
@@ -400,6 +424,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
             tombstones,
             demand: None,
             fixpoint: None,
+            fetches,
             env,
         }
     }
@@ -437,6 +462,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             tombstones: self.tombstones.clone(),
             demand: self.demand.clone(),
             fixpoint: self.fixpoint.clone(),
+            fetches: self.fetches,
             env: self.env,
         }
     }
@@ -447,14 +473,17 @@ impl<Env> Clone for QueryEnv<'_, Env> {
 /// helper so every line in a [`QueryEnv`] shares the exact same read path
 /// (a transaction query is itself a single-line `QueryEnv`).
 ///
-/// Takes the line by value (a cheap clone: shared caches) and moves it
-/// into the returned stream, so the stream borrows only the env —
-/// errors surface as the stream's first item.
-pub(crate) fn select_from_source<'a, Env>(
-    source: Source,
+/// The line is only borrowed while the scan is set up: the returned
+/// stream borrows nothing but the env. The setup runs here rather than
+/// inside the stream so the stream boxed per scan holds only the scan,
+/// not the setup's futures alongside it (together they came to 16 KiB,
+/// allocated and copied for every scan a query ran), and the scan is
+/// built in its box ([`Select::execute_boxed`](crate::Select)).
+pub(crate) async fn select_from_source<'a, Env>(
+    source: SourceRef<'_>,
     env: &'a Env,
     input: ArtifactSelector<Constrained>,
-) -> ArtifactStream<'a>
+) -> Result<ArtifactStream<'a>, DialogArtifactsError>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -464,18 +493,13 @@ where
         + ConditionalSync
         + 'static,
 {
-    Box::pin(async_stream::try_stream! {
-        let select = crate::Select::from_source(source.as_ref(), input);
-        let remote = source.as_ref().fallback();
-        // Concurrent reads of one digest share fetch-and-hydrate through
-        // the env's own `Hydrate` flight (see `crate::Hydrate`), with
-        // every other evaluation in the process.
-        let store = NetworkedIndex::new(env, select.catalog(), remote);
-        let stream = select.execute(store).await?;
-        for await artifact in stream {
-            yield artifact?;
-        }
-    })
+    let select = crate::Select::from_source(source, input);
+    let remote = source.fallback();
+    // Concurrent reads of one digest share fetch-and-hydrate through
+    // the env's own `Hydrate` flight (see `crate::Hydrate`), with
+    // every other evaluation in the process.
+    let store = NetworkedIndex::new(env, select.catalog(), remote);
+    Ok(select.execute_boxed(store).await?)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -513,10 +537,10 @@ where
         // Line streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
         // retract in `with(..)`) suppresses matching source facts, and
-        // by the line's session tombstones. Each owns its line clone
-        // and borrows only `self.env`.
+        // by the line's session tombstones. Each borrows only
+        // `self.env`.
         for source in &self.sources {
-            let raw = select_from_source(source.clone(), self.env, input.clone());
+            let raw = select_from_source(source.as_ref(), self.env, input.clone()).await?;
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
@@ -541,7 +565,7 @@ where
         // on every one of those probes. Peek the overlay's materialized
         // result and push it only when it has rows, so the single-source
         // common case flows through `merge_grouped`'s passthrough arm.
-        let mut overlay = Provider::<Select<'a>>::execute(&self.changes, input).await?;
+        let mut overlay = Provider::<Select<'a>>::execute(self.changes.as_ref(), input).await?;
         match futures_util::StreamExt::next(&mut overlay).await {
             None => {}
             Some(first) => {
@@ -592,10 +616,17 @@ where
 // A `Preload` hint forwards to the underlying env's ambient queue —
 // the enqueue half of speculative replication; whichever driven
 // evaluation stream polls next does the fetching (see
-// `crate::repository::fetch`). Forwarding unconditionally is the whole
-// point of the ambient design: every construction site (plain queries,
+// `crate::repository::fetch`). Forwarding is the whole point of the
+// ambient design: every construction site (plain queries,
 // subscriptions, transaction queries) emits hints with no per-path
 // wiring, and the env's budget decides whether anyone listens.
+//
+// The one exception is an env none of whose lines has a remote: the
+// job a hint becomes warms this query's own lines, and with nowhere to
+// fetch from it does nothing (see `warm_source`). Such an env refuses
+// hints, which also tells an evaluator to stop composing them: a
+// selection that hands each scan many rows otherwise queues a hint per
+// row only for it to be dropped.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Env> Provider<Preload> for QueryEnv<'_, Env>
@@ -603,6 +634,9 @@ where
     Env: Provider<Preload> + ConditionalSync,
 {
     async fn execute(&self, input: PreloadRequest) -> bool {
+        if !self.fetches {
+            return false;
+        }
         Provider::<Preload>::execute(self.env, input).await
     }
 }
@@ -686,7 +720,8 @@ where
         }
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
-        select_from_source(source.clone(), self.env, selector)
+        select_from_source(source.as_ref(), self.env, selector)
+            .await?
             .owned()
             .try_collect()
             .await
@@ -1035,7 +1070,7 @@ mod rule_tests {
 
     use super::*;
     use crate::Branch;
-    use crate::helpers::{Counting, test_repo};
+    use crate::helpers::{Counting, connect, test_repo};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
@@ -1216,19 +1251,66 @@ mod rule_tests {
     /// scans it, and warming it whole makes every deeper closure
     /// level's discovery and hydration local. The query's own driven
     /// stream executes the hints, leaving nothing pending.
+    ///
+    /// The branch tracks a remote, since hints are only taken from a
+    /// query whose lines can fetch; the remote is never reached, because
+    /// every block the query reads is local.
     #[dialog_common::test]
     async fn it_hints_the_rule_region_when_resolving_cold() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let env = Counting::new(operator);
         let branch = repo.branch("main").open().perform(&env).await?;
-
-        let alice: Entity = "id:alice".parse()?;
         branch
             .transaction()
             .assert(
                 the!("org/person-name")
-                    .of(alice.clone())
+                    .of("id:alice".parse::<Entity>()?)
+                    .is("Alice".to_string()),
+            )
+            .assert(employee_from_person())
+            .commit()
+            .publish()
+            .perform(&env)
+            .await?;
+        let site = dialog_remote_s3::Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()?;
+        let origin = connect("origin", site, repo.did(), &env).await?;
+        let remote_main = origin.branch("main").open().perform(&env).await?;
+        branch.set_upstream(&remote_main).perform(&env).await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        env.reset();
+        let employees = query_employees(&branch, &env).await?;
+        assert!(
+            employees.contains(&"id:alice".parse()?),
+            "committed rule must resolve"
+        );
+        assert!(
+            env.count("Preload") >= 2,
+            "cold rule resolution hints the conclusion and source spans"
+        );
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the query's own stream drove the hints");
+        Ok(())
+    }
+
+    /// A query whose lines have no remote reads only local blocks, so
+    /// there is nothing to warm ahead of it: it takes no hints, and
+    /// resolves the same.
+    #[dialog_common::test]
+    async fn it_takes_no_hints_over_local_lines() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let env = Counting::new(operator);
+        let branch = repo.branch("main").open().perform(&env).await?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of("id:alice".parse::<Entity>()?)
                     .is("Alice".to_string()),
             )
             .assert(employee_from_person())
@@ -1240,13 +1322,13 @@ mod rule_tests {
 
         env.reset();
         let employees = query_employees(&branch, &env).await?;
-        assert!(employees.contains(&alice), "committed rule must resolve");
         assert!(
-            env.count("Preload") >= 2,
-            "cold rule resolution hints the conclusion and source spans"
+            employees.contains(&"id:alice".parse()?),
+            "committed rule must resolve"
         );
+        assert_eq!(env.count("Preload"), 0, "a local query forwards no hints");
         let queue = Provider::<Speculation>::execute(&env, ()).await;
-        assert_eq!(queue.pending(), 0, "the query's own stream drove the hints");
+        assert_eq!(queue.pending(), 0, "nothing was queued");
         Ok(())
     }
 

@@ -11,12 +11,12 @@ use crate::selection::{Match, Selection};
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term, Value};
-use auto_enums::auto_enum;
 use dialog_artifacts::Cause;
 use serde::Serialize;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::ops::Not;
+use std::pin::Pin;
 
 use super::all::AttributeQueryAll;
 use super::only::AttributeQueryOnly;
@@ -132,7 +132,7 @@ impl DynamicAttributeQuery {
             Err(_) => self.is().clone(),
         };
         let cause = self.cause().resolve(source);
-        let resolved = AttributeQueryAll::new(the, of, is, cause);
+        let resolved = AttributeQueryAll::lookup(the, of, is, cause);
         ArtifactSelector::try_from(&resolved)
     }
 
@@ -185,12 +185,15 @@ impl DynamicAttributeQuery {
     }
 
     /// Evaluate, dispatching to the appropriate cardinality variant.
-    #[auto_enum(futures03::Stream)]
+    ///
+    /// Each variant boxes its own stream where it builds it, so this
+    /// hands that box on rather than wrapping it in an enum as large as
+    /// either.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
         selection: M,
-    ) -> impl Selection + 'a
+    ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
     {
@@ -238,7 +241,7 @@ impl Application for DynamicAttributeQuery {
             } if [self.the().name(), self.is().name(), self.cause().name()]
                 .into_iter()
                 .flatten()
-                .any(|other| other == name) =>
+                .any(|other| other == &**name) =>
             {
                 // `of` joins another slot through a shared variable
                 // name; pinning it would sever the join.
