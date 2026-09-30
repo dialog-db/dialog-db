@@ -395,6 +395,16 @@ pub(super) async fn list(handle: &FileSystemHandle) -> Result<Vec<String>, FileS
     Ok(names)
 }
 
+pub(super) async fn size(handle: &FileSystemHandle) -> Result<Option<u64>, FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    match fs::metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(FileSystemError::Io(error.to_string())),
+    }
+}
+
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
     let Ok(path) = PathBuf::try_from(handle) else {
         return false;

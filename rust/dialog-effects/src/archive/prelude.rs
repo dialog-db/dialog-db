@@ -24,7 +24,9 @@ use dialog_capability::{Capability, Constraint, Policy};
 use dialog_common::{Blake3Hash, Buffer};
 
 use super::{Archive, Block, Catalog, Get, Import, Put};
-use crate::blob::{Blob, Import as BlobImport, Read as BlobRead, Write as BlobWrite};
+use crate::blob::{
+    Blob, Import as BlobImport, Read as BlobRead, Size as BlobSize, Write as BlobWrite,
+};
 use crate::{Method, MethodExt as _, method};
 
 /// Scope a method to the archive namespace.
@@ -333,6 +335,14 @@ impl BlobScope {
         ArchiveScope::new(self.subject.clone())
             .read_blob()
             .read(digest)
+    }
+
+    /// The size of a blob by digest, without reading its bytes.
+    pub fn size(&self, digest: impl Into<Blake3Hash>) -> Capability<BlobSize> {
+        use crate::blob::prelude::ReadBlobExt as _;
+        ArchiveScope::new(self.subject.clone())
+            .read_blob()
+            .size(digest)
     }
 
     /// Open a blob for writing.

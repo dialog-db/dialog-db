@@ -381,6 +381,12 @@ impl FileSystemHandle {
     pub async fn exists(&self) -> bool {
         backend::exists(self).await
     }
+
+    /// The length in bytes of the file at this location, without reading
+    /// it, or `None` when there is no file here.
+    pub async fn size(&self) -> Result<Option<u64>, FileSystemError> {
+        backend::size(self).await
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -965,6 +965,21 @@ pub(super) async fn list(handle: &FileSystemHandle) -> Result<Vec<String>, FileS
     Ok(names)
 }
 
+pub(super) async fn size(handle: &FileSystemHandle) -> Result<Option<u64>, FileSystemError> {
+    let Some((parent, name)) = handle.navigate_parent(false).await? else {
+        return Ok(None);
+    };
+    let Some(file_handle) = get_file_handle(&parent, &name, false).await? else {
+        return Ok(None);
+    };
+    let file: web_sys::File = JsFuture::from(file_handle.get_file())
+        .await
+        .map_err(|e| js_io_error("getting file", e))?
+        .dyn_into()
+        .map_err(|_| FileSystemError::Io("expected File".into()))?;
+    Ok(Some(file.size() as u64))
+}
+
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
     let Ok(Some((parent, name))) = handle.navigate_parent(false).await else {
         // Either the parent directory is missing, or this is the root handle.
