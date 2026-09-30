@@ -32,7 +32,7 @@
 //! does not want proving to pay download latency materializes the branch
 //! up front with `Branch::download`.
 
-use super::{Grant, Local, Mode, Peer};
+use super::{Grant, Local, Mode, Peer, PeerSpace};
 use dialog_capability::access::{
     Access, Authorize, AuthorizeError, Certificate as _, Export, Proof as _, Protocol, Prove,
     Retain, Scope as _, TimeRange,
@@ -46,7 +46,7 @@ use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead, Wr
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_repository::RemoteSite;
 use dialog_storage::provider::storage::Storage;
-use dialog_ucan::{Ucan, UcanCertificate, UcanProof};
+use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use std::collections::HashMap;
 
@@ -568,6 +568,48 @@ where
     }
 }
 
+impl<S: PeerSpace, M: Mode> Peer<S, M> {
+    /// The delegations retained where this peer proves from that `issuer`
+    /// issued.
+    pub(crate) async fn issued_by(
+        &self,
+        issuer: &Did,
+    ) -> Result<Vec<UcanDelegation>, AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        Box::pin(branch.delegations().issued_by(issuer.clone()).perform(&env)).await
+    }
+
+    /// Stop proving from `delegation`: retract it where this peer retains
+    /// delegations.
+    pub(crate) async fn retract(&self, delegation: UcanDelegation) -> Result<(), AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        Box::pin(branch.delegations().retract(delegation).perform(&env))
+            .await
+            .map(|_| ())
+            .map_err(|error| AuthorizeError::Malformed {
+                detail: format!("failed to retract delegation: {error}"),
+            })
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, P, M: Mode> Provider<Export<P>> for Peer<S, M>
@@ -608,7 +650,7 @@ where
             .perform(self)
             .await?;
 
-        let operator_signer = self.authority().operator_signer().clone();
+        let operator_signer = self.identity().operator_signer().clone();
         proof.claim(operator_signer)
     }
 }
@@ -647,7 +689,7 @@ mod tests {
             .unwrap();
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .await
             .unwrap();
         (operator, profile)
@@ -706,7 +748,7 @@ mod tests {
             open_peer(storage.clone(), Location::profile(unique("access-branch"))).await?;
         let operator = profile
             .session(b"test")
-            .mount(Repository::from(profile.home().clone()).branch("account-test"))
+            .space(Repository::from(profile.home().clone()).branch("account-test"))
             .await?;
 
         let space = Ed25519Signer::generate().await?;
@@ -842,7 +884,7 @@ mod tests {
         let profile = open_peer(storage.clone(), Location::profile(unique("direct-grant"))).await?;
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(Subject::any())
             .await?;
 
@@ -1091,7 +1133,7 @@ mod tests {
                 .unwrap();
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -1105,10 +1147,12 @@ mod tests {
             .await?;
         assert!(exported.is_empty(), "the legacy store must stay empty");
 
-        let head = operator.delegations().revision();
-        assert!(
-            head.is_none(),
-            "opening a peer and building an operator commit nothing to the access branch"
+        // The profile recorded its roles when it was set up; building the
+        // operator after it committed nothing more.
+        assert_eq!(
+            operator.delegations().revision(),
+            profile.state().revision(),
+            "building an operator commits nothing to the access branch"
         );
 
         // And yet the operator authorizes: the session link is the chain.
@@ -1148,7 +1192,7 @@ mod tests {
                 .unwrap();
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await
                 .unwrap();
@@ -1194,15 +1238,18 @@ mod tests {
 
     /// A peer's grant of the storage is held in memory, like every grant
     /// it is given: opening it again and again, as a heartbeat would,
-    /// records nothing in its state.
+    /// records nothing more than its account's delegation to it, once.
     #[dialog_common::test]
     async fn it_records_no_storage_grant_however_often_it_opens() -> Result<()> {
         let storage = test_storage().await;
         let location = Location::profile(unique("storage-grant"));
         for _ in 0..3 {
             let peer = open_peer(storage.clone(), location.clone()).await?;
-            assert_eq!(retained_count(&peer).await?, 0);
-            assert!(peer.state().revision().is_none());
+            assert_eq!(
+                retained_count(&peer).await?,
+                1,
+                "only the account's delegation to the peer, recorded once"
+            );
         }
         Ok(())
     }
@@ -1217,7 +1264,7 @@ mod tests {
             .await?
             .credential()
             .clone();
-        let built = Peer::new(credential)
+        let built = Peer::new(credential.clone())
             .with(storage)
             .grant(test_grant().await)
             .await;
@@ -1233,7 +1280,7 @@ mod tests {
             Location::profile(unique("bounded-session")),
         )
         .await?;
-        let setup = profile.session(b"setup").mount(profile.state()).await?;
+        let setup = profile.session(b"setup").space(profile.state()).await?;
         let space = Ed25519Signer::generate().await?;
         let now = now_s();
         let upstream_end = now + 7200;
@@ -1251,8 +1298,10 @@ mod tests {
             .perform(&setup)
             .await?;
         let revision = setup.delegations().revision();
+        // The space's delegation, beside the account's delegation to the
+        // profile that onboarding recorded.
         let retained = retained_count(&setup).await?;
-        assert_eq!(retained, 1);
+        assert_eq!(retained, 2);
         let exported = Subject::from(profile.did())
             .attenuate(Access)
             .invoke(Export::<Ucan>::new())
@@ -1261,7 +1310,7 @@ mod tests {
         for session_end in [now + 3600, now + 10800, now - 60] {
             let operator = profile
                 .session(session_end.to_le_bytes())
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(
                     profile
                         .access()
@@ -1320,7 +1369,7 @@ mod tests {
         let now = now_s();
         let operator = profile
             .session(b"test")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(
                 profile
                     .access()

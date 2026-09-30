@@ -1594,7 +1594,7 @@ impl BenchEnv<Peer<VolatileSpace, Session>> {
         let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
         let operator = profile
             .session(b"bench")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(Subject::any())
             .await?;
         Self::assemble(operator, &profile).await
@@ -1607,7 +1607,7 @@ impl BenchEnv<Peer<NativeTempSpace, Session>> {
         let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
         let operator = profile
             .session(b"bench")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(Subject::any())
             .await?;
         Self::assemble(operator, &profile).await
@@ -1622,7 +1622,7 @@ impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
         let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
         let operator = profile
             .session(b"bench")
-            .mount(profile.state())
+            .space(profile.state())
             .allow(Subject::any())
             .await?;
         Self::assemble(operator, &profile).await

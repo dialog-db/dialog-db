@@ -1,34 +1,39 @@
 //! [`PeerBuilder`]: opens a [`Peer`].
 
+use std::any::Any;
 use std::fmt;
 use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use dialog_capability::access::{Access, Prove};
 use dialog_capability::{Ability, Capability, Constraint, Subject, did};
-use dialog_common::Holdings;
-use dialog_credentials::{Ed25519Signer, Signer, SignerCredential};
+use dialog_common::{Held, Holdings};
+use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential, Verifier};
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
 use dialog_identity::access::{Access as Accessor, Claim};
 use dialog_network::Network;
 use dialog_repository::BranchReference;
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan, UcanCertificate};
+use dialog_ucan_core::subject::Subject as UcanSubject;
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
-use dialog_varsig::Principal as _;
+use dialog_varsig::{Did, Principal as _};
 
 use parking_lot::Mutex;
 
+use super::secret::SiteSecrets;
+use super::upgrade::Step;
 use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
 
 /// A peer built from the branch that holds its state: the same builder
-/// [`Peer::new`] starts, with this branch [mounted](PeerBuilder::mount).
+/// [`Peer::new`] starts, with this branch as its [space](PeerBuilder::space).
 ///
 /// ```no_run
 /// # use dialog_peer::{Allowance, BranchPeerExt as _};
 /// # use dialog_repository::Repository;
-/// # use dialog_varsig::Principal as _;
+/// # use dialog_varsig::{Did, Principal as _};
 /// # async fn example(
 /// #     credential: dialog_credentials::SignerCredential,
 /// #     storage: dialog_storage::provider::storage::Storage<dialog_storage::provider::storage::VolatileSpace>,
@@ -36,7 +41,7 @@ use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
 /// # ) -> anyhow::Result<()> {
 /// let peer = Repository::from(credential.did())
 ///     .branch("profile")
-///     .peer(credential)
+///     .peer(credential.clone())
 ///     .with(storage)
 ///     .grant(granted)
 ///     .await?;
@@ -52,7 +57,7 @@ pub trait BranchPeerExt {
 
 impl BranchPeerExt for BranchReference {
     fn peer(self, credential: impl Into<SignerCredential>) -> PeerBuilder<PeerKey> {
-        Peer::new(credential).mount(self)
+        Peer::new(credential).space(self)
     }
 }
 
@@ -193,6 +198,28 @@ impl Allowance {
         }
         self
     }
+
+    /// Whether this allowance so much as names the storage of `system`:
+    /// a scope or certificate over that subject whose command covers
+    /// `storage`. Not a proof, a first look before anything is mounted.
+    fn names_storage_of(&self, system: &Did) -> bool {
+        let covers = |segments: &[String]| {
+            segments.is_empty() || segments.first().map(String::as_str) == Some("storage")
+        };
+        match &self.kind {
+            AllowanceKind::Scope { scope, .. } => {
+                matches!(&scope.subject, UcanSubject::Specific(subject) if subject == system)
+                    && covers(scope.command.segments())
+            }
+            AllowanceKind::Certificate(certificate) => {
+                let subject = match certificate.0.subject() {
+                    UcanSubject::Any => true,
+                    UcanSubject::Specific(subject) => subject == system,
+                };
+                subject && covers(&certificate.0.command().0)
+            }
+        }
+    }
 }
 
 impl<T> From<Capability<T>> for Allowance
@@ -266,6 +293,13 @@ pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     /// Certificates addressed to someone above this peer in its chain:
     /// a session's peer's own grants, which its proofs pass through.
     held: Vec<Grant>,
+    /// Steps bringing the peer's records up to date, run when it opens:
+    /// each a `Step<S>` for the storage's space, type-erased until the
+    /// storage is known.
+    steps: Vec<Held>,
+    /// The live peer a session is built from, asked for its site secrets
+    /// (see [`Inner::sites`]).
+    sites: Option<Arc<dyn SiteSecrets>>,
     mode: PhantomData<M>,
 }
 
@@ -282,16 +316,18 @@ impl<M> PeerBuilder<Unset, Unset, M> {
             issuer: None,
             allowed: Vec::new(),
             held: Vec::new(),
+            steps: Vec::new(),
+            sites: None,
             mode: PhantomData,
         }
     }
 }
 
-impl<S: Clone> PeerBuilder<PeerKey, Storage<S>, Session> {
+impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>, Session> {
     /// A session builder pre-filled from `peer`: its storage, network,
     /// runtime and base directory, with `peer` as the issuer of
     /// bare-capability grants. Its state branch is not assumed to be the
-    /// peer's: it is given one with [`mount`](Self::mount).
+    /// peer's: it is given one with [`space`](Self::space).
     pub(crate) fn from_peer(peer: &Peer<S, Local>, key: PeerKey) -> Self {
         Self {
             state: None,
@@ -312,18 +348,20 @@ impl<S: Clone> PeerBuilder<PeerKey, Storage<S>, Session> {
                 .filter(|grant| &grant.issuer == peer.system())
                 .cloned()
                 .collect(),
+            steps: Vec::new(),
+            sites: Some(Arc::new(peer.clone())),
             mode: PhantomData,
         }
     }
 }
 
 impl<K, St, M> PeerBuilder<K, St, M> {
-    /// Where the home repository's space lives. Mounted at open when it
-    /// is not already, and checked to be the space `home` names.
+    /// Where the home repository's space lives: mounted at open, and
+    /// created holding the home's public identity when it is not there
+    /// yet, then checked to be the space the home names.
     ///
     /// Not needed when the space is already mounted in the storage, as it
-    /// is after `OpenCredential` loaded the credential from it, or for a
-    /// worker of a peer that mounted it.
+    /// is for a session of a peer that mounted it.
     pub fn at(mut self, location: Location) -> Self {
         self.location = Some(location);
         self
@@ -353,12 +391,13 @@ impl<K, St, M> PeerBuilder<K, St, M> {
         self
     }
 
-    /// Mount `branch` as the peer's state: the branch where it finds
-    /// delegations and retains them, and records its spaces and contacts.
-    /// Its repository is the peer's home. Required: a peer is never
-    /// assumed to keep its state anywhere in particular, and a session is
-    /// not assumed to share its peer's.
-    pub fn mount(mut self, branch: impl Into<BranchReference>) -> Self {
+    /// The space the peer keeps its records in: `branch`, where it finds
+    /// delegations and retains them, records its spaces and contacts, and
+    /// keeps its sealed secrets. Its repository is
+    /// the peer's home. Required: a peer is never assumed to keep its
+    /// records anywhere in particular, and a session is not assumed to
+    /// share its peer's.
+    pub fn space(mut self, branch: impl Into<BranchReference>) -> Self {
         self.state = Some(branch.into());
         self
     }
@@ -403,6 +442,8 @@ impl<St> PeerBuilder<PeerKey, St, Local> {
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
+            steps: self.steps,
+            sites: self.sites,
             mode: PhantomData,
         }
     }
@@ -443,6 +484,8 @@ impl<St, M> PeerBuilder<Unset, St, M> {
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
+            steps: self.steps,
+            sites: self.sites,
             mode: PhantomData,
         }
     }
@@ -472,6 +515,8 @@ impl<K, M, S: Clone> With<Storage<S>> for PeerBuilder<K, Unset, M> {
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
+            steps: self.steps,
+            sites: self.sites,
             mode: PhantomData,
         }
     }
@@ -488,6 +533,14 @@ impl<K, St, M> With<Network> for PeerBuilder<K, St, M> {
 }
 
 impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
+    /// Register `step`, run when the peer opens if its version is above
+    /// the one the peer's records are at. See
+    /// [`upgrade`](super::upgrade). A session runs no step.
+    pub fn upgrade(mut self, step: Step<S>) -> Self {
+        self.steps.push(Arc::new(step));
+        self
+    }
+
     /// Open the peer: resolve its key, mount its home space when told
     /// where, mint its grants, and open its state branch.
     ///
@@ -502,20 +555,57 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
     pub async fn build(self) -> Result<Peer<S, M>, PeerError> {
         let Some(reference) = self.state else {
             return Err(PeerError::State(
-                "no state branch: mount one with `mount`".to_string(),
+                "no state branch: give the peer one with `space`".to_string(),
             ));
         };
         let home = reference.of().clone();
         let credential = self.key.resolve().await?;
 
+        // Mounting a space takes the authority of the system the storage
+        // belongs to. Nothing grants it implicitly: the peer holds a grant
+        // from that system in memory, or proves one through its state.
+        let Some(system) = self.storage.system().cloned() else {
+            return Err(PeerError::Storage(
+                "the storage belongs to no system: give it one with `Storage::owned_by`"
+                    .to_string(),
+            ));
+        };
+        // A peer acting as itself is refused before it mounts anything
+        // when no grant it was given so much as names the storage: the
+        // proof below is what admits it, but a refused peer must not
+        // leave its home mounted in the storage it was refused.
+        if M::HOLDS_KEYS
+            && !self
+                .allowed
+                .iter()
+                .any(|allowance| allowance.names_storage_of(&system))
+        {
+            return Err(PeerError::Storage(format!(
+                "nothing grants {} the storage of {system}: grant it with `Allowance::storage`",
+                credential.did()
+            )));
+        }
+
         if let Some(location) = &self.location {
-            let mounted = Subject::from(did!("local:storage"))
+            let at = Subject::from(did!("local:storage"))
                 .attenuate(storage_fx::Storage)
-                .attenuate(location.clone())
-                .load()
-                .perform(&self.storage)
-                .await
-                .map_err(|error| PeerError::Open(error.to_string()))?;
+                .attenuate(location.clone());
+            // The home space holds the home's public identity only, like
+            // every space: created from the home DID's verifier when it is
+            // not there yet.
+            let mounted = match at.clone().load().perform(&self.storage).await {
+                Ok(mounted) => mounted,
+                Err(storage_fx::StorageError::NotFound(_)) => {
+                    let identity: Verifier = home.to_string().parse().map_err(|_| {
+                        PeerError::Home(format!("the home {home} names no public key"))
+                    })?;
+                    at.create(Credential::from(identity))
+                        .perform(&self.storage)
+                        .await
+                        .map_err(|error| PeerError::Open(error.to_string()))?
+                }
+                Err(error) => return Err(PeerError::Open(error.to_string())),
+            };
             if mounted.did() != home {
                 return Err(PeerError::Home(format!(
                     "the space at {location:?} is {}, not the home {home}",
@@ -631,16 +721,6 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
             grants.push(grant);
         }
 
-        // Mounting a space takes the authority of the system the storage
-        // belongs to. Nothing grants it implicitly: the peer holds a grant
-        // from that system in memory, or proves one through its state.
-        let Some(system) = self.storage.system().cloned() else {
-            return Err(PeerError::Storage(
-                "the storage belongs to no system: give it one with `Storage::owned_by`"
-                    .to_string(),
-            ));
-        };
-
         let state = reference
             .open()
             .perform(&self.storage)
@@ -662,6 +742,7 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 grants,
                 holdings: Holdings::default(),
                 connections: Mutex::default(),
+                sites: self.sites,
             },
         );
 
@@ -683,6 +764,17 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                         peer.did()
                     ))
                 })?;
+        }
+
+        // A peer acting as itself brings its records up to date. A
+        // session runs no step: it writes nothing to its peer's space.
+        if let Some(local) = (&peer as &dyn Any).downcast_ref::<Peer<S, Local>>() {
+            let steps: Vec<&Step<S>> = self
+                .steps
+                .iter()
+                .filter_map(|step| step.downcast_ref::<Step<S>>())
+                .collect();
+            local.upgrade(&steps).await?;
         }
 
         Ok(peer)
@@ -739,6 +831,11 @@ pub enum PeerError {
     /// The peer was given no state branch, or it could not be opened.
     #[error("State error: {0}")]
     State(String),
+
+    /// A step bringing the peer's records up to date failed, or its
+    /// version could not be read or recorded.
+    #[error("Upgrade error: {0}")]
+    Upgrade(String),
 }
 
 #[cfg(test)]
@@ -785,29 +882,16 @@ mod tests {
         assert_eq!(derived.did().to_string(), EXPECTED_SESSION_DID);
 
         // The session a peer opens for the context acts with that key.
-        // The peer's home is created at its location with the key's
-        // verifier, as opening a credential there would; the peer then
-        // opens over it with the key in hand.
-        let storage = test_storage().await;
-        let location = Location::profile(unique_name("fixed"));
-        Subject::from(did!("local:storage"))
-            .attenuate(storage_fx::Storage)
-            .attenuate(location.clone())
-            .create(dialog_credentials::Credential::from(
-                credential.signer().verifier(),
-            ))
-            .perform(&storage)
-            .await?;
         let peer = Peer::new(credential.clone())
-            .at(location)
-            .mount(test_state(&credential.did()))
-            .with(storage)
+            .at(Location::profile(unique_name("fixed")))
+            .space(test_state(&credential.did()))
+            .with(test_storage().await)
             .grant(test_grant().await)
             .build()
             .await?;
         let session = peer
             .session(FIXTURE)
-            .mount(peer.state())
+            .space(peer.state())
             .allow(Subject::any())
             .await?;
         assert_eq!(session.did().to_string(), EXPECTED_SESSION_DID);
@@ -854,7 +938,7 @@ mod tests {
 
         let Err(refused) = peer
             .session(CONTEXT)
-            .mount(peer.state())
+            .space(peer.state())
             .grant(UcanCertificate(tampered))
             .await
         else {
@@ -864,7 +948,7 @@ mod tests {
 
         // The untampered certificate is the peer's authority.
         peer.session(CONTEXT)
-            .mount(peer.state())
+            .space(peer.state())
             .grant(UcanCertificate(delegation))
             .await?;
         Ok(())
@@ -880,7 +964,7 @@ mod tests {
 
         let Err(refused) = peer
             .session(CONTEXT)
-            .mount(peer.state())
+            .space(peer.state())
             .grant(UcanCertificate(delegation))
             .await
         else {

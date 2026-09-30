@@ -1,17 +1,21 @@
 use std::str::FromStr;
 
-use crate::{Allowance, Mode, OpenPeer, Peer, PeerError, PeerSpace, Session};
+use crate::{
+    Allowance, Mode, OpenCredential, Peer, PeerError, PeerSpace, Session, SpaceVaultExt as _,
+};
 use anyhow::Result;
 use base58::ToBase58;
 use dialog_artifacts::{Artifact, Attribute, Entity, Value};
 use dialog_capability::Subject;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
-use dialog_effects::storage::Location;
+use dialog_effects::credential::CredentialError;
+use dialog_effects::storage::{Directory, Location};
 use dialog_repository::{ACCESS_BRANCH, BranchReference, Repository};
-use dialog_storage::provider::storage::{Storage, VolatileSpace};
+use dialog_storage::provider::storage::{CredentialStore, Storage, VolatileSpace};
 use dialog_varsig::{Did, Principal as _};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use std::sync::OnceLock;
 
 /// Generate a unique name with a prefix for test isolation.
 ///
@@ -73,16 +77,67 @@ pub fn test_state(home: &Did) -> BranchReference {
     Repository::from(home.clone()).branch(ACCESS_BRANCH)
 }
 
-/// Open a root peer whose credential lives at `location` in `storage`,
-/// granted the storage by the [test system](test_system).
+/// The credential store every test peer's key is kept in: one for the
+/// test process, so a peer opened twice at one location acts with one
+/// key.
+pub fn test_credential_store() -> CredentialStore<VolatileSpace> {
+    static CREDENTIALS: OnceLock<CredentialStore<VolatileSpace>> = OnceLock::new();
+    CREDENTIALS.get_or_init(CredentialStore::new).clone()
+}
+
+/// Open a root peer: its key from the [test credential store](test_credential_store)
+/// under `location`'s name, its home space at `location` in `storage`,
+/// acting for itself, its records in the home's main branch, granted the
+/// storage by the [test system](test_system), and [onboarded](onboard).
 pub async fn open_peer<S: PeerSpace>(
     storage: Storage<S>,
     location: Location,
 ) -> Result<Peer<S>, PeerError> {
-    OpenPeer::open(location)
-        .grant(test_grant().await)
-        .perform(&storage)
+    let credential = OpenCredential::open(location.name.clone())
+        .at(location.directory.clone())
+        .perform(&test_credential_store())
         .await
+        .map_err(|error| PeerError::Open(error.to_string()))?;
+    let peer = Peer::new(credential.clone())
+        .at(location)
+        .space(test_state(&credential.did()))
+        .with(storage)
+        .grant(test_grant().await)
+        .build()
+        .await?;
+    onboard(&peer)
+        .await
+        .map_err(|error| PeerError::State(error.to_string()))?;
+    Ok(peer)
+}
+
+/// The custodian guarding `peer`'s account in tests: a key of its own in
+/// the [test credential store](test_credential_store), the way an
+/// onboarding custodian is a key of its own beside the peer's. The same
+/// peer always gets the same custodian.
+pub async fn test_custodian<S: PeerSpace, M: Mode>(
+    peer: &Peer<S, M>,
+) -> Result<SignerCredential, CredentialError> {
+    OpenCredential::open(format!("custodian-{}", peer.home()))
+        .at(Directory::Temp)
+        .perform(&test_credential_store())
+        .await
+        .map_err(|error| CredentialError::Storage(error.to_string()))
+}
+
+/// Onboard `peer`, unless its space has an account: the space creates the
+/// `account` vault guarded by the peer's [test custodian](test_custodian),
+/// and the account delegates to the peer, as onboarding would. The peer
+/// holds no copy of the account's key. Yields the custodian.
+pub async fn onboard<S: PeerSpace>(peer: &Peer<S>) -> Result<SignerCredential, CredentialError> {
+    let custodian = test_custodian(peer).await?;
+    if peer.authority().await.is_ok() {
+        return Ok(custodian);
+    }
+    let account = peer.state().vault("account").create().perform(peer).await?;
+    account.add(custodian.did()).perform(peer).await?;
+    account.delegate(peer.did()).perform(peer).await?;
+    Ok(custodian)
 }
 
 /// A fresh volatile peer under a unique name.
@@ -102,7 +157,7 @@ pub async fn test_session_with_peer() -> (Peer<VolatileSpace, Session>, Peer<Vol
     let peer = test_peer().await;
     let worker = peer
         .session(b"test")
-        .mount(peer.state())
+        .space(peer.state())
         .allow(Subject::any())
         .await
         .expect("test_session: failed to build worker");

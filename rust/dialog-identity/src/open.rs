@@ -127,7 +127,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use dialog_effects::storage::{Create, Load, StorageError};
-    use dialog_storage::provider::storage::Storage;
+    use dialog_storage::provider::storage::{CredentialStore, VolatileSpace};
 
     struct FailingLoad {
         create_called: AtomicBool,
@@ -152,7 +152,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_a_credential() {
-        let storage = Storage::volatile();
+        let storage = CredentialStore::<VolatileSpace>::new();
 
         let credential = OpenCredential::open("alice")
             .perform(&storage)
@@ -163,7 +163,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_the_same_credential_twice() {
-        let storage = Storage::volatile();
+        let storage = CredentialStore::<VolatileSpace>::new();
 
         let first = OpenCredential::open("bob").perform(&storage).await.unwrap();
         let second = OpenCredential::open("bob").perform(&storage).await.unwrap();
@@ -191,7 +191,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_creates_then_loads() {
-        let storage = Storage::volatile();
+        let storage = CredentialStore::<VolatileSpace>::new();
 
         let created = OpenCredential::create("charlie")
             .perform(&storage)
@@ -207,7 +207,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_to_create_a_duplicate() {
-        let storage = Storage::volatile();
+        let storage = CredentialStore::<VolatileSpace>::new();
 
         OpenCredential::create("dave")
             .perform(&storage)
@@ -220,7 +220,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_to_load_a_missing_credential() {
-        let storage = Storage::volatile();
+        let storage = CredentialStore::<VolatileSpace>::new();
 
         let result = OpenCredential::load("missing").perform(&storage).await;
         assert!(matches!(result, Err(IdentityError::NotFound)));
@@ -228,7 +228,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_isolates_credentials_across_directories() {
-        let storage = Storage::volatile();
+        let storage = CredentialStore::<VolatileSpace>::new();
 
         let profile = OpenCredential::open("same-name")
             .at(Directory::Profile)
@@ -250,7 +250,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_creates_and_loads_at_temp() {
-        let storage = Storage::volatile();
+        let storage = CredentialStore::<VolatileSpace>::new();
 
         let created = OpenCredential::create("temp-load")
             .at(Directory::Temp)
@@ -268,7 +268,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_does_not_find_a_temp_credential_in_the_default_directory() {
-        let storage = Storage::volatile();
+        let storage = CredentialStore::<VolatileSpace>::new();
 
         OpenCredential::create("only-in-temp")
             .at(Directory::Temp)

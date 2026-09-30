@@ -27,7 +27,8 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::Resolve;
-use dialog_ucan::{Scope, UcanCertificate, UcanProof};
+use dialog_ucan::{Scope, UcanCertificate, UcanDelegation, UcanProof};
+use dialog_ucan_core::DelegationChain;
 use dialog_ucan_core::command::Command;
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use futures_util::StreamExt as _;
@@ -44,6 +45,99 @@ use crate::{Blob, Branch, RemoteSite, Select};
 /// Maximum chain depth, matching
 /// [`CertificateStore::MAX_DEPTH`](dialog_capability::access::CertificateStore::MAX_DEPTH).
 const MAX_DEPTH: usize = 10;
+
+impl<'a> Delegations<'a> {
+    /// The delegations retained here that `issuer` signed, each as its
+    /// own chain: what an account delegated, to re-issue or retract when
+    /// its key is rotated.
+    pub fn issued_by(self, issuer: Did) -> IssuedBy<'a> {
+        IssuedBy {
+            branch: self.branch,
+            issuer,
+        }
+    }
+}
+
+/// The delegations a principal signed. Created by
+/// [`Delegations::issued_by`].
+pub struct IssuedBy<'a> {
+    branch: &'a Branch,
+    issuer: Did,
+}
+
+impl IssuedBy<'_> {
+    /// Read them: each certificate whose issuer fact names the issuer, its
+    /// envelope read back and checked to be the issuer's. An envelope that
+    /// is unavailable or disagrees with its facts is skipped.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Vec<UcanDelegation>, AuthorizeError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<BlobRead>
+            + Provider<BlobImport>
+            + Provider<crate::Hydrate>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, BlobRead>>
+            + ConditionalSync
+            + 'static,
+    {
+        let branch = self.branch;
+        if branch.revision().is_none() {
+            return Ok(Vec::new());
+        }
+        let store = index_store(branch, env).await;
+        let selector = ArtifactSelector::new()
+            .the(
+                DELEGATION_ISSUER
+                    .parse()
+                    .map_err(|error| malformed("issuer attribute", error))?,
+            )
+            .is(Value::String(self.issuer.to_string()));
+        let facts = Select::new(branch, selector)
+            .execute(store)
+            .await
+            .map_err(|error| malformed("issuer read failed", error))?;
+        futures_util::pin_mut!(facts);
+        let mut entities = Vec::new();
+        while let Some(item) = facts.next().await {
+            let fact: Artifact = item
+                .and_then(|view| view.to_owned())
+                .map_err(|error| malformed("issuer fact undecodable", error))?;
+            entities.push(fact.of);
+        }
+
+        let mut chains = Vec::new();
+        for entity in entities {
+            let Ok(mut reader) = Blob::from(entity).read(branch.into()).perform(env).await else {
+                continue;
+            };
+            let mut bytes = Vec::new();
+            let mut readable = true;
+            loop {
+                match reader.next().await {
+                    Ok(Some(chunk)) => bytes.extend(chunk),
+                    Ok(None) => break,
+                    Err(_) => {
+                        readable = false;
+                        break;
+                    }
+                }
+            }
+            if !readable {
+                continue;
+            }
+            let Ok(certificate) = UcanCertificate::decode(&bytes) else {
+                continue;
+            };
+            if certificate.issuer() != &self.issuer {
+                continue;
+            }
+            chains.push(UcanDelegation::new(DelegationChain::new(certificate.0)));
+        }
+        Ok(chains)
+    }
+}
 
 impl<'a> Delegations<'a> {
     /// Search the retained delegations for a chain proving `principal` may
@@ -463,7 +557,7 @@ mod tests {
             let profile = open_peer(storage.clone(), Location::profile(unique_name(name))).await?;
             let operator = profile
                 .session(b"test")
-                .mount(profile.state())
+                .space(profile.state())
                 .allow(Subject::any())
                 .await?;
             let repo = profile

@@ -1,7 +1,9 @@
 # Peers and sessions
 
 Status: design, agreed in discussion; steps 2, 7 and 8 of the order below
-are implemented (the `dialog-peer` crate, one `Peer` type).
+are implemented (the `dialog-peer` crate, one `Peer` type), and the
+credential store and vaults of step 6 have landed in the form described
+here.
 
 **Current surface, which supersedes the names used further down.** The
 note was written while a derived peer was called a *worker* and built with
@@ -14,13 +16,33 @@ note was written while a derived peer was called a *worker* and built with
   peer grants it. `Peer::session_of(did).operator(key)` builds one when
   only the peer's DID is at hand, from pre-minted certificates; they must
   be issued to the session's key and not have expired.
-- A session is never handed a key: the peer's key is withheld from it,
-  a repository it loads comes without its signing key, and the peer's raw
-  storage is not reachable through it. What it may do elsewhere is proven
-  from its grants, the grant covering the claim's subject.
-- A session is not yet confined to its grants for local reads and writes:
-  it shares the peer's storage, and local effects are served without a
-  proof. Authorizing them is planned separately.
+- A session holds no key and writes nothing to the peer's own space. The
+  peer's key is withheld from it, a repository it loads comes without its
+  signing key, the peer's raw storage is not reachable through it, and it
+  creates no vault and keeps no site secret. A session built from a live
+  peer syncs with a site through the secret that peer opens for it, until
+  site secrets are sealed to a network principal instead. What it may do
+  elsewhere is proven from its grants, the grant covering the claim's
+  subject.
+- The peer's own key lives in a **credential store** (a `.credentials`
+  space beside the storage) in non-extractable form; a storage hands out
+  no signing key, and a key a legacy space kept at its `self` slot moves
+  into the store on first open (`CredentialStore::adopt_from`).
+- Every other key is a **vault**: a space's key is a principal held
+  sealed (`dialog.secret/*` custody rows in the home branch) to the
+  vaults that may open it. The account is such a vault root, sealed to
+  its custodians (recovery); a peer is not a member of its account's
+  vault but acts through a delegation from it, and opens a vault through
+  a custodian credential (`OpenVault::via`). Rotation opens the vault the
+  same way and re-holds every member's copy without a secret ever
+  leaving sealed form.
+- A peer's records are brought up to date by numbered upgrade steps an
+  application registers on the builder (`PeerBuilder::upgrade(Step)`),
+  recorded in the home's `dialog/peer` version cell; a failed step runs
+  again, a session runs none.
+- A session is not yet confined to its grants for local reads of other
+  spaces: it shares the peer's storage, and local reads are served
+  without a proof. Authorizing them is planned separately.
 
 Everywhere below, read *worker* as *session*, `Peer::open(home)` as
 `Peer::new` or `Peer::session_of`, and `peer.worker(ctx)` as
@@ -274,13 +296,14 @@ by type.
   (immutable per version). Not node/spill caches (the local archive already
   is one), not the scheduler or preload queue (in-flight state). A snapshot
   lives in the registry's device layer, so it gets CAS for free.
-- The credential store shrinks to the one `self` slot per space. Every
-  other secret (S3 credentials, local-root handoff, account session state)
-  becomes a sealed fact (`dialog-credentials::secret`) in the device layer.
-  Before that lands: extend the AAD to bind entity and attribute (today it
-  binds only the recipient DID), use envelope encryption for account-wide
-  secrets (one content key sealed per device), and say plainly that
-  retracting a sealed fact is not rotation, since history is append-only.
+- **Landed:** the credential store holds one key, the peer's own, and
+  spaces keep no `self` slot. Every other secret (a space's key, a site
+  secret, an account) is a sealed fact in the home branch, sealed to a
+  vault (`dialog.secret/*`), with the recipient DID as the AAD. Still
+  open: binding entity and attribute into the AAD, and envelope
+  encryption for account-wide secrets (one content key sealed per
+  device). Retracting a sealed fact is not rotation, since history is
+  append-only; rotation replaces the key and re-holds every copy.
 - Retaining a delegation is `branch.delegations().retain(chain)`, nothing
   else. `Profile::save`, `Access::save`, `Provider<Retain<Ucan>> for Operator`
   and its refresh-and-retry loop go; `MigrateAccess` takes a target branch.
@@ -367,7 +390,10 @@ Each step is one PR and leaves tonk compiling.
 5. `session.connect(peer)` returning a bound env; invocation audience = peer DID;
    `Connect` capability on the peer subject; pull/push/hydrate rewritten
    as effects against two envs.
-6. Retire the `Secret` effects for sealed facts.
+6. **Partly done.** Space keys and site secrets are sealed facts held by
+   vaults, and the peer's own key sits in the credential store. The
+   `Secret` effects still front the site-secret handle, and go once tonk
+   reads its secrets as facts.
 7. **Done.** `Profile` is gone. `dialog-identity` keeps the credential
    loader as `OpenCredential`, the access API, the site-secret handle and
    `SpaceHandle`; `Peer` fronts all of them (`access`, `secrets`, `space`).

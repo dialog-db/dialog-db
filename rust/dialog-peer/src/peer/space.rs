@@ -2,7 +2,7 @@
 
 use core::fmt::Display;
 
-use super::{Mode, Peer};
+use super::{Mode, Peer, PeerSpace};
 use dialog_capability::access::{Access, FromCapability as _, Prove, Retain};
 use dialog_capability::{Ability, Capability, Constraint, Effect, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -11,11 +11,10 @@ use dialog_credentials::secret::{Context, SealedSecret};
 use dialog_credentials::{
     Credential, Ed25519Signer, Ed25519Verifier, Extractable, Signer, SignerCredential,
 };
-use dialog_effects::credential::{self as credential_fx, prelude::*};
 use dialog_effects::space as space_fx;
 use dialog_effects::storage::{self as storage_fx, LocationExt as _};
 use dialog_repository::registry::RegistryEnv;
-use dialog_repository::spaces;
+use dialog_repository::{secrets, spaces};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan, UcanDelegation};
 use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -24,7 +23,7 @@ use dialog_varsig::{Did, Principal as _};
 
 /// The context a space's key is sealed in, so a sealed key opens only as
 /// one.
-const SPACE_KEY: Context = Context::new("dialog.space/key");
+pub(crate) const SPACE_KEY: Context = Context::new("dialog.space/key");
 
 /// A failure creating a space, as a storage error.
 fn failed(error: impl Display) -> storage_fx::StorageError {
@@ -44,10 +43,8 @@ fn handed<M: Mode>(credential: Credential) -> Credential {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<space_fx::Load> for Peer<S, M>
 where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Storage<S>: Provider<storage_fx::Load>
-        + Provider<credential_fx::Load<Credential>>
-        + Provider<credential_fx::Save<Credential>>,
+    S: PeerSpace,
+    Storage<S>: Provider<storage_fx::Load>,
     Self: RegistryEnv
         + Provider<Prove<Ucan>>
         + Provider<Retain<Ucan>>
@@ -79,17 +76,24 @@ where
                     credential.did()
                 )));
             }
-            return self.adopted(credential).await;
+            return Ok(handed::<M>(credential));
         }
 
-        // A repository named by its DID is the one already mounted, if it
-        // is; else it may be recorded under another name, and is found by
-        // the repository it is, from where it was recorded.
+        // The home is the one space a peer is built over: it is mounted
+        // when the peer opens, and every handle of the peer, its sessions
+        // included, reaches it by its DID without proving anything more.
         if let Ok(repository) = name.parse::<Did>()
-            && let Some(credential) = self.mounted(&repository).await
+            && repository == *self.home()
+            && let Some(credential) = self.storage.identity(&repository).await
         {
-            return self.adopted(credential).await;
+            return Ok(handed::<M>(credential));
         }
+
+        // Any other repository named by its DID is found by the
+        // repository it is, from where this peer recorded it under
+        // whatever name. A space another peer mounted in the same storage
+        // is not reached this way: every load goes through where it is
+        // recorded, and proves the storage's grant there.
         if let Ok(repository) = name.parse::<Did>()
             && let Some(location) = self.located(&repository).await?
         {
@@ -100,13 +104,15 @@ where
                     credential.did()
                 )));
             }
-            return self.adopted(credential).await;
+            return Ok(handed::<M>(credential));
         }
 
         let location = storage_fx::Location::new(self.directory().clone(), name);
         let credential = self.load_at(location.clone()).await?;
-        self.record_space(&credential.did(), name, &location).await;
-        self.adopted(credential).await
+        // Best-effort: the repository is where it is either way, and a
+        // name left unrecorded is found here again the next time.
+        let _ = self.record_space(&credential.did(), name, &location).await;
+        Ok(handed::<M>(credential))
     }
 }
 
@@ -157,18 +163,26 @@ where
     /// Best-effort: the repository is where it is either way, and a name
     /// left unrecorded is found in the base directory and recorded the
     /// next time it is loaded.
-    async fn record_space(&self, repository: &Did, name: &str, location: &storage_fx::Location) {
-        let _ = spaces::record(self.state(), repository, name, location, self).await;
+    async fn record_space(
+        &self,
+        repository: &Did,
+        name: &str,
+        location: &storage_fx::Location,
+    ) -> Result<(), storage_fx::StorageError> {
+        spaces::record(self.state(), repository, name, location, self)
+            .await
+            .map_err(failed)
     }
 
-    /// Keep the sealed key of the repository `repository` in this peer's
-    /// state, as it keeps the space's name and location.
+    /// Keep the key of the repository `repository`, sealed to `account`,
+    /// in this peer's state: a principal whose key is held sealed.
     async fn seal_space(
         &self,
         repository: &Did,
+        account: &Did,
         sealed: Vec<u8>,
     ) -> Result<(), storage_fx::StorageError> {
-        spaces::seal(self.state(), repository, sealed, self)
+        spaces::seal(self.state(), repository, account, sealed, self)
             .await
             .map_err(failed)
     }
@@ -176,20 +190,8 @@ where
 
 impl<S: Clone, M: Mode> Peer<S, M>
 where
-    Storage<S>: Provider<storage_fx::Load> + Provider<credential_fx::Load<Credential>>,
+    Storage<S>: Provider<storage_fx::Load>,
 {
-    /// The credential of the repository `repository`, if its space is
-    /// mounted in this peer's storage.
-    async fn mounted(&self, repository: &Did) -> Option<Credential> {
-        Subject::from(repository.clone())
-            .credential()
-            .key(credential_fx::SELF)
-            .load()
-            .perform(&self.storage)
-            .await
-            .ok()
-    }
-
     /// The credential of the space stored at `location`.
     async fn load_at(
         &self,
@@ -205,64 +207,63 @@ where
         self.may_mount(&load).await?;
         load.perform(&self.storage).await
     }
+}
 
-    /// `credential` as this peer hands a loaded space over, after
-    /// bringing a space from before keys were sealed up to date.
+impl<S> Peer<S, super::Local>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Storage<S>: Provider<storage_fx::Load>,
+    Self: RegistryEnv
+        + Provider<Prove<Ucan>>
+        + Provider<Retain<Ucan>>
+        + ConditionalSend
+        + ConditionalSync,
+{
+    /// Take custody of a space whose key the application holds: seal the
+    /// key to the account this peer acts for, record the space as a
+    /// principal held sealed, and have it delegate to the account, as
+    /// creating it would have.
     ///
-    /// Such a space still holds its signing key. Its key is sealed to the
-    /// account and the space delegates to it, and only then is the stored
-    /// key replaced by its verifier: a load that stops part-way finds the
-    /// key still there and does it again. The home is never touched, since
-    /// its key is this peer's own identity.
-    ///
-    /// In the browser a stored key restores as a `CryptoKey` that gives no
-    /// seed back, so there is nothing to seal: the key is left where it
-    /// was, as every space kept its own before, for the upgrade step that
-    /// adopts it into the credential store.
-    async fn adopted(&self, credential: Credential) -> Result<Credential, storage_fx::StorageError>
-    where
-        S: ConditionalSend + ConditionalSync + 'static,
-        Self: RegistryEnv + Provider<Retain<Ucan>>,
-        Storage<S>: Provider<credential_fx::Save<Credential>>,
-    {
-        let Credential::Signer(signer) = &credential else {
-            return Ok(handed::<M>(credential));
-        };
-        if credential.did() == *self.home() {
-            return Ok(handed::<M>(credential));
-        }
-        let signer = signer.signer().clone();
+    /// The one way a space's key enters a peer from outside: a space made
+    /// before keys were sealed, whose key the application recovered from
+    /// its own custody, or one another application created. Nothing is
+    /// read from the storage: a signing key a space still holds there is
+    /// never handed to anyone, and the application brings the key.
+    pub async fn adopt_space(
+        &self,
+        key: Ed25519Signer<Extractable>,
+    ) -> Result<(), storage_fx::StorageError> {
         // Other algorithms are features; without them this always holds.
         #[allow(irrefutable_let_patterns)]
-        let Signer::Ed25519(ed25519) = &signer else {
-            return Err(failed("only an Ed25519 space key can be sealed"));
+        let KeyExport::Extractable(seed) = key.export().await.map_err(failed)? else {
+            return Err(failed("the space's key is not extractable"));
         };
-        // Natively every export is the seed; in the browser a restored key
-        // exports opaque handles, and stays where it was.
-        #[allow(irrefutable_let_patterns)]
-        let KeyExport::Extractable(seed) = ed25519.export().await.map_err(failed)? else {
-            return Ok(handed::<M>(credential));
-        };
-        let sealed = self.seal_to_account(&seed).await?;
-        self.delegate_to_account(&signer).await?;
-        self.seal_space(&credential.did(), sealed.to_bytes())
-            .await?;
-        Subject::from(credential.did())
-            .credential()
-            .key(credential_fx::SELF)
-            .save(Credential::from(signer.verifier()))
-            .perform(&self.storage)
+        let signer = Signer::from(
+            Ed25519Signer::import(KeyExport::Extractable(seed.clone()))
+                .await
+                .map_err(failed)?,
+        );
+        if signer.did() == *self.home() {
+            return Err(failed("the home is this peer's own identity, not a space"));
+        }
+        let account = self.authority().await.map_err(failed)?;
+        let sealed = self.seal_to_account(&account, &seed).await?;
+        self.delegate_to_account(&account, &signer).await?;
+        self.seal_space(&signer.did(), &account, sealed.to_bytes())
             .await
-            .map_err(failed)?;
-        Ok(handed::<M>(credential))
     }
+}
 
-    /// `seed`, sealed to the account this peer acts for.
-    async fn seal_to_account(&self, seed: &[u8]) -> Result<SealedSecret, storage_fx::StorageError> {
-        let account: Ed25519Verifier = self.account().to_string().parse().map_err(|_| {
+impl<S: Clone, M: Mode> Peer<S, M> {
+    /// `seed`, sealed to `account`.
+    async fn seal_to_account(
+        &self,
+        account: &Did,
+        seed: &[u8],
+    ) -> Result<SealedSecret, storage_fx::StorageError> {
+        let account: Ed25519Verifier = account.to_string().parse().map_err(|_| {
             failed(format!(
-                "the account {} has no key to seal the space's key to",
-                self.account()
+                "the account {account} has no key to seal the space's key to"
             ))
         })?;
         account
@@ -273,32 +274,35 @@ where
     }
 
     /// Have the space `space` is the key of delegate its whole authority
-    /// to the account this peer acts for, and retain the delegation where
-    /// the peer proves from.
-    async fn delegate_to_account(&self, space: &Signer) -> Result<(), storage_fx::StorageError>
+    /// to `account`, and retain the delegation where the peer proves from.
+    async fn delegate_to_account(
+        &self,
+        account: &Did,
+        space: &Signer,
+    ) -> Result<UcanDelegation, storage_fx::StorageError>
     where
         Self: Provider<Retain<Ucan>>,
     {
         let delegation = DelegationBuilder::new()
             .issuer(space.clone())
-            .audience(self.account())
+            .audience(account)
             .subject(UcanSubject::Specific(space.did()))
             .command(Vec::new())
             .try_build()
             .await
             .map_err(|error| storage_fx::StorageError::Storage(format!("{error:?}")))?;
+        let delegation = UcanDelegation::new(DelegationChain::new(delegation));
         Subject::from(self.home().clone())
             .attenuate(Access)
-            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
-                DelegationChain::new(delegation),
-            )))
+            .invoke(Retain::<Ucan>::new(delegation.clone()))
             .perform(self)
             .await
             .map_err(|error| {
                 storage_fx::StorageError::Storage(format!(
                     "the space's delegation to its account was not kept: {error}"
                 ))
-            })
+            })?;
+        Ok(delegation)
     }
 
     /// Refuse `mount` unless this peer can prove the storage's system
@@ -335,10 +339,8 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S, M: Mode> Provider<space_fx::Create> for Peer<S, M>
 where
-    S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Storage<S>: Provider<storage_fx::Create>
-        + Provider<storage_fx::Load>
-        + Provider<credential_fx::Load<Credential>>,
+    S: PeerSpace,
+    Storage<S>: Provider<storage_fx::Create> + Provider<storage_fx::Load>,
     Self: RegistryEnv
         + Provider<Prove<Ucan>>
         + Provider<Retain<Ucan>>
@@ -374,28 +376,41 @@ where
         let KeyExport::Extractable(seed) = key.export().await.map_err(failed)? else {
             return Err(failed("the space's key is not extractable"));
         };
-        let sealed = self.seal_to_account(&seed).await?;
+        let account = self.authority().await.map_err(failed)?;
+        let sealed = self.seal_to_account(&account, &seed).await?;
         let signer = Signer::from(
             Ed25519Signer::import(KeyExport::Extractable(seed))
                 .await
                 .map_err(failed)?,
         );
         let location = storage_fx::Location::new(self.directory().clone(), name);
-
-        // The space keeps its identity, not its key: whoever holds the
-        // storage finds nothing to sign as the space with.
         let create = Subject::from(self.system().clone())
             .attenuate(storage_fx::Storage)
             .attenuate(location.clone())
             .create(Credential::from(signer.verifier()));
         self.may_mount(&create).await?;
-        let created = create.perform(&self.storage).await?;
 
-        // Its authority goes to the account it is created for, where the
-        // peer acting for that account proves it from.
-        self.delegate_to_account(&signer).await?;
-        self.seal_space(&created.did(), sealed.to_bytes()).await?;
-        self.record_space(&created.did(), name, &location).await;
+        // The key is in custody and the space delegates to its account
+        // before the space exists: a create that stops after the space is
+        // made would otherwise leave a name nobody can ever sign as. A
+        // create that stops before it leaves records naming a space that
+        // was never made, which the next attempt, with a key of its own,
+        // does not see. When the storage refuses, the records go.
+        self.seal_space(&signer.did(), &account, sealed.to_bytes())
+            .await?;
+        let delegation = self.delegate_to_account(&account, &signer).await?;
+
+        // The space keeps its identity, not its key: whoever holds the
+        // storage finds nothing to sign as the space with.
+        let created = match create.perform(&self.storage).await {
+            Ok(created) => created,
+            Err(error) => {
+                let _ = self.retract(delegation).await;
+                let _ = secrets::forget_principal(self.state(), &signer.did(), self).await;
+                return Err(error);
+            }
+        };
+        self.record_space(&created.did(), name, &location).await?;
         Ok(Credential::Signer(SignerCredential::from(signer)))
     }
 }
@@ -405,22 +420,32 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_grant, test_storage, test_system, unique_name};
-    use crate::{ClaimExt as _, Peer};
+    use crate::helpers::{
+        onboard, test_credential_store, test_custodian, test_grant, test_storage, test_system,
+        unique_name,
+    };
+    use crate::{ClaimExt as _, Peer, SpaceVaultExt as _};
     use dialog_capability::access::{Access, Prove};
     use dialog_capability::{Subject, did};
-    use dialog_credentials::key::KeyExport;
+    use dialog_credentials::key::{ExtractableKey, KeyExport};
     use dialog_credentials::secret::{Context, SealedSecret};
-    use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential};
-    use dialog_effects::credential::{self as credential_fx, prelude::*};
+    use dialog_credentials::{Credential, Ed25519Signer, Extractable, SignerCredential};
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
     use dialog_identity::OpenCredential;
-    use dialog_repository::{Repository, RepositoryExt as _, spaces};
-    use dialog_storage::provider::storage::{Storage, VolatileSpace};
+    use dialog_repository::{Repository, RepositoryExt as _, secrets, spaces};
+    use dialog_storage::provider::storage::{CredentialStore, Storage, VolatileSpace};
     use dialog_ucan::{Parameters, Scope, Ucan};
     use dialog_ucan_core::command::Command as UcanCommand;
     use dialog_ucan_core::subject::Subject as UcanSubject;
     use dialog_varsig::Principal as _;
+
+    /// Where a test peer acting as `credential` keeps its home space.
+    fn home_of(credential: &SignerCredential) -> Location {
+        Location::new(
+            Directory::Temp,
+            format!("home.{}", credential.did().to_string().replace(':', "-")),
+        )
+    }
 
     /// A peer over `storage` acting as `credential`, looking for names it
     /// has no record of under `base`.
@@ -429,12 +454,15 @@ mod tests {
         credential: &SignerCredential,
         base: &str,
     ) -> anyhow::Result<Peer<VolatileSpace>> {
-        Ok(Peer::new(credential.clone())
+        let peer = Peer::new(credential.clone())
+            .at(home_of(credential))
             .with(storage.clone())
-            .mount(Repository::from(credential.did()).branch("main"))
+            .space(Repository::from(credential.did()).branch("main"))
             .grant(test_grant().await)
             .base(Directory::At(base.into()))
-            .await?)
+            .await?;
+        onboard(&peer).await?;
+        Ok(peer)
     }
 
     /// A name resolves to the repository recorded under it, loaded from
@@ -444,7 +472,7 @@ mod tests {
     async fn it_resolves_a_name_from_where_it_was_recorded() -> anyhow::Result<()> {
         let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
-            .perform(&storage)
+            .perform(&test_credential_store())
             .await?;
         let name = unique_name("notes");
 
@@ -465,11 +493,12 @@ mod tests {
         let system = SignerCredential::from(Ed25519Signer::generate().await?);
         let storage = Storage::volatile().owned_by(system.did());
         let credential = OpenCredential::open(unique_name("alice"))
-            .perform(&storage)
+            .perform(&test_credential_store())
             .await?;
         let built = Peer::new(credential.clone())
+            .at(home_of(&credential))
             .with(storage)
-            .mount(Repository::from(credential.did()).branch("main"))
+            .space(Repository::from(credential.did()).branch("main"))
             .await;
         assert!(
             built.is_err(),
@@ -486,7 +515,7 @@ mod tests {
     {
         let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
-            .perform(&storage)
+            .perform(&test_credential_store())
             .await?;
         let peer = peer_at(&storage, &credential, "/gate").await?;
         let name = unique_name("notes");
@@ -495,7 +524,7 @@ mod tests {
         let elsewhere = Ed25519Signer::generate().await?;
         let scoped = peer
             .session(b"scoped")
-            .mount(peer.state())
+            .space(peer.state())
             .allow(Subject::from(elsewhere.did()).claim(peer.credential()))
             .await?;
         let refused = peer.space(name.clone()).load().perform(&scoped).await;
@@ -506,7 +535,7 @@ mod tests {
 
         let trusted = peer
             .session(b"trusted")
-            .mount(peer.state())
+            .space(peer.state())
             .allow(Subject::any().claim(peer.credential()))
             .await?;
         let loaded = peer.space(name).load().perform(&trusted).await?;
@@ -520,7 +549,7 @@ mod tests {
     async fn it_keeps_no_signing_key_in_a_created_space() -> anyhow::Result<()> {
         let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
-            .perform(&storage)
+            .perform(&test_credential_store())
             .await?;
         let peer = peer_at(&storage, &credential, "/keys").await?;
         let created = peer
@@ -529,12 +558,10 @@ mod tests {
             .perform(&peer)
             .await?;
 
-        let stored = Subject::from(created.did())
-            .credential()
-            .key(credential_fx::SELF)
-            .load()
-            .perform(&storage)
-            .await?;
+        let stored = storage
+            .identity(&created.did())
+            .await
+            .expect("the space is mounted");
         assert!(
             matches!(stored, Credential::Verifier(_)),
             "the space holds its signing key"
@@ -549,7 +576,7 @@ mod tests {
     async fn it_proves_authority_over_a_space_it_created() -> anyhow::Result<()> {
         let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
-            .perform(&storage)
+            .perform(&test_credential_store())
             .await?;
         let peer = peer_at(&storage, &credential, "/authority").await?;
         let created = peer
@@ -571,13 +598,100 @@ mod tests {
         Ok(())
     }
 
+    /// A peer refused its storage mounts nothing in it: the home it would
+    /// have been built over is not left mounted for others to find.
+    #[dialog_common::test]
+    async fn it_mounts_nothing_for_a_peer_it_refuses() -> anyhow::Result<()> {
+        let system = SignerCredential::from(Ed25519Signer::generate().await?);
+        let storage = Storage::volatile().owned_by(system.did());
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let refused = Peer::new(credential.clone())
+            .at(home_of(&credential))
+            .with(storage.clone())
+            .space(Repository::from(credential.did()).branch("main"))
+            .await;
+        assert!(refused.is_err(), "a peer with no grant was built");
+        assert!(
+            storage.identity(&credential.did()).await.is_none(),
+            "the refused peer left its home mounted"
+        );
+        Ok(())
+    }
+
+    /// A create the storage refuses leaves nothing behind: no key in
+    /// custody for a space that was never made, and no delegation from it.
+    #[dialog_common::test]
+    async fn it_leaves_nothing_behind_when_the_storage_refuses_a_space() -> anyhow::Result<()> {
+        use dialog_capability::access::Export;
+
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/refused").await?;
+        let name = unique_name("notes");
+        peer.space(name.clone()).create().perform(&peer).await?;
+        let account = peer.authority().await?;
+        let held = secrets::held_by(peer.state(), &account, &peer).await?.len();
+        let retained = Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Export::<Ucan>::new())
+            .perform(&peer)
+            .await?
+            .len();
+
+        let refused = peer.space(name).create().perform(&peer).await;
+        assert!(refused.is_err(), "a name in use was created again");
+        assert_eq!(
+            secrets::held_by(peer.state(), &account, &peer).await?.len(),
+            held,
+            "a key stayed in custody for a space that was never made"
+        );
+        assert_eq!(
+            Subject::from(peer.did())
+                .attenuate(Access)
+                .invoke(Export::<Ucan>::new())
+                .perform(&peer)
+                .await?
+                .len(),
+            retained,
+            "a delegation stayed from a space that was never made"
+        );
+        Ok(())
+    }
+
+    /// A space's key is kept the way tonk keeps custody: a principal whose
+    /// seed is held sealed, pointing at the message sealed to the account.
+    #[dialog_common::test]
+    async fn it_keeps_a_space_key_as_a_principal_held_sealed() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/principal").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space is recorded as a principal held sealed");
+        assert_eq!(held.kind, "space");
+        assert_eq!(held.to, peer.authority().await?);
+        Ok(())
+    }
+
     /// A space's key is kept only sealed to its account, and the account
     /// opens it: the key it reveals is the one the space is named by.
     #[dialog_common::test]
     async fn it_seals_a_created_spaces_key_to_its_account() -> anyhow::Result<()> {
         let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
-            .perform(&storage)
+            .perform(&test_credential_store())
             .await?;
         let peer = peer_at(&storage, &credential, "/sealed").await?;
         let created = peer
@@ -589,12 +703,19 @@ mod tests {
         let sealed = spaces::sealed(peer.state(), &created.did(), &peer)
             .await?
             .expect("the space's key is kept sealed");
-        // Other algorithms are features; without them this always holds.
-        #[allow(irrefutable_let_patterns)]
-        let Signer::Ed25519(account) = credential.signer() else {
-            panic!("the account is an Ed25519 key");
-        };
+        // Sealed to the account the peer acts for, opened through its
+        // custodian: the peer holds no copy of the account's key.
+        let custodian = test_custodian(&peer).await?;
+        let account = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await?;
         let seed = account
+            .key()
+            .await?
             .secret(Context::new("dialog.space/key"))
             .reveal(&SealedSecret::from_bytes(&sealed)?)
             .await?;
@@ -603,71 +724,60 @@ mod tests {
         Ok(())
     }
 
-    /// A space's key stored the way every space stored its own before
-    /// keys were sealed: whole. How it was made does not matter: in the
-    /// browser a stored key restores from the storage non-extractable
-    /// whichever way it was made.
-    async fn legacy_key() -> anyhow::Result<Ed25519Signer> {
-        Ok(Ed25519Signer::generate().await?)
-    }
-
-    /// A space created the way every space was before keys were sealed,
-    /// with its key stored in it, under `directory` in `storage`.
-    async fn legacy_space(
-        storage: &Storage<VolatileSpace>,
-        directory: &str,
-        name: &str,
-    ) -> anyhow::Result<Credential> {
-        let location = Location::new(Directory::At(directory.into()), name);
-        let repository = Credential::Signer(SignerCredential::from(legacy_key().await?));
-        Subject::from(did!("local:storage"))
-            .attenuate(storage_fx::Storage)
-            .attenuate(location)
-            .create(repository.clone())
-            .perform(storage)
-            .await?;
-        Ok(repository)
-    }
-
-    /// A space from before keys were sealed still holds its signing key.
-    /// Loading it through a peer seals the key to the account, has the
-    /// space delegate to it, and leaves only the verifier in the space.
-    ///
-    /// Native only: a key restored from the storage gives its seed back
-    /// only there. In the browser the key is left where it was, which
-    /// `it_leaves_the_key_of_a_legacy_space_it_cannot_read_back` pins.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// A rotated account keeps its spaces: each space's key is held
+    /// sealed to the new account, which the space delegates to, and the
+    /// peer proves authority over it through the new account alone.
     #[dialog_common::test]
-    async fn it_seals_the_key_of_a_space_from_before_keys_were_sealed() -> anyhow::Result<()> {
+    async fn it_keeps_its_spaces_across_a_rotation() -> anyhow::Result<()> {
         let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
-            .perform(&storage)
+            .perform(&test_credential_store())
             .await?;
-        let peer = peer_at(&storage, &credential, "/legacy").await?;
-        let name = unique_name("notes");
-        let repository = legacy_space(&storage, "/legacy", &name).await?;
-
-        let loaded = peer.space(name).load().perform(&peer).await?;
-        assert_eq!(loaded.did(), repository.did());
-
-        let stored = Subject::from(repository.did())
-            .credential()
-            .key(credential_fx::SELF)
+        let peer = peer_at(&storage, &credential, "/rotation").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+        let custodian = test_custodian(&peer).await?;
+        let old = peer
+            .state()
+            .vault("account")
             .load()
-            .perform(&storage)
+            .via(&custodian)
+            .perform(&peer)
             .await?;
+
+        let account = old.rotate().perform(&peer).await?;
+        assert_ne!(account.did(), old.did());
+        assert_eq!(peer.authority().await?, *account.did());
+
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space is still held sealed");
+        assert_eq!(held.to, *account.did());
+        let seed = account
+            .key()
+            .await?
+            .secret(Context::new("dialog.space/key"))
+            .reveal(&SealedSecret::from_bytes(&held.sealed)?)
+            .await?;
+        let key = Ed25519Signer::import(KeyExport::Extractable(seed)).await?;
+        assert_eq!(key.did(), created.did());
+
         assert!(
-            matches!(stored, Credential::Verifier(_)),
-            "the space still holds its signing key"
+            peer.issued_by(old.did()).await?.is_empty(),
+            "the old account's delegations are retracted"
         );
-        assert!(
-            spaces::sealed(peer.state(), &repository.did(), &peer)
-                .await?
-                .is_some(),
-            "the space's key was not sealed"
-        );
+        for delegation in peer.issued_by(&created.did()).await? {
+            assert_ne!(
+                delegation.chain().audience(),
+                old.did(),
+                "the space's delegation to the old account is retracted"
+            );
+        }
         let scope = Scope {
-            subject: UcanSubject::Specific(repository.did()),
+            subject: UcanSubject::Specific(created.did()),
             command: UcanCommand(vec!["archive".to_string()]),
             parameters: Parameters::default(),
         };
@@ -679,41 +789,67 @@ mod tests {
         Ok(())
     }
 
-    /// In the browser a key restored from the storage gives no seed back,
-    /// so a space from before keys were sealed loads with its key left
-    /// where it was, unsealed, for the upgrade step that adopts it. The
-    /// native peer seals it on load instead, which
-    /// `it_seals_the_key_of_a_space_from_before_keys_were_sealed` pins.
-    #[cfg(target_arch = "wasm32")]
+    /// A space whose key the application holds, from before keys were
+    /// sealed say, is taken into custody: its key is sealed to the
+    /// account, the space delegates to it, and the peer proves authority
+    /// over it. Nothing is read out of the storage: a signing key a space
+    /// still holds there is never handed to anyone.
     #[dialog_common::test]
-    async fn it_leaves_the_key_of_a_legacy_space_it_cannot_read_back() -> anyhow::Result<()> {
+    async fn it_adopts_a_space_key_the_application_holds() -> anyhow::Result<()> {
         let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
-            .perform(&storage)
+            .perform(&test_credential_store())
             .await?;
-        let peer = peer_at(&storage, &credential, "/legacy").await?;
+        let peer = peer_at(&storage, &credential, "/adopt").await?;
         let name = unique_name("notes");
-        let repository = legacy_space(&storage, "/legacy", &name).await?;
 
-        let loaded = peer.space(name).load().perform(&peer).await?;
-        assert_eq!(loaded.did(), repository.did());
-
-        let stored = Subject::from(repository.did())
-            .credential()
-            .key(credential_fx::SELF)
-            .load()
+        // Created the way every space was before: its key stored in it,
+        // and here in the application's hands as well.
+        let key = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await?;
+        let signer = Ed25519Signer::import(KeyExport::Extractable(match key.export().await? {
+            KeyExport::Extractable(seed) => seed,
+            #[allow(unreachable_patterns)]
+            _ => anyhow::bail!("not extractable"),
+        }))
+        .await?;
+        let location = Location::new(Directory::At("/adopt".into()), name.as_str());
+        Subject::from(did!("local:storage"))
+            .attenuate(storage_fx::Storage)
+            .attenuate(location)
+            .create(Credential::Signer(SignerCredential::from(signer.clone())))
             .perform(&storage)
             .await?;
+
+        let loaded = peer.space(name.clone()).load().perform(&peer).await?;
+        assert_eq!(loaded.did(), signer.did());
         assert!(
-            matches!(stored, Credential::Signer(_)),
-            "the key was moved out of the space"
+            matches!(loaded.credential(), Credential::Verifier(_)),
+            "the peer was handed a space's signing key"
         );
         assert!(
-            spaces::sealed(peer.state(), &repository.did(), &peer)
+            spaces::sealed(peer.state(), &signer.did(), &peer)
                 .await?
                 .is_none(),
-            "a key that gives no seed back was sealed"
+            "loading a space took custody of its key"
         );
+
+        peer.adopt_space(key).await?;
+        assert!(
+            spaces::sealed(peer.state(), &signer.did(), &peer)
+                .await?
+                .is_some(),
+            "the space's key was not sealed"
+        );
+        let scope = Scope {
+            subject: UcanSubject::Specific(signer.did()),
+            command: UcanCommand(vec!["archive".to_string()]),
+            parameters: Parameters::default(),
+        };
+        Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(peer.did(), scope))
+            .perform(&peer)
+            .await?;
         Ok(())
     }
 
@@ -723,14 +859,21 @@ mod tests {
     async fn it_records_a_name_found_in_the_base_directory() -> anyhow::Result<()> {
         let storage = test_storage().await;
         let credential = OpenCredential::open(unique_name("alice"))
-            .perform(&storage)
+            .perform(&test_credential_store())
             .await?;
         let peer = peer_at(&storage, &credential, "/base").await?;
         let name = unique_name("notes");
 
         // Stored where the peer looks, but never recorded.
         let location = Location::new(Directory::At("/base".into()), name.as_str());
-        let repository = legacy_space(&storage, "/base", &name).await?;
+        let repository =
+            Credential::Signer(SignerCredential::from(Ed25519Signer::generate().await?));
+        Subject::from(did!("local:storage"))
+            .attenuate(storage_fx::Storage)
+            .attenuate(location.clone())
+            .create(repository.clone())
+            .perform(&storage)
+            .await?;
 
         let state = peer.state();
         assert!(spaces::find(state, &name, &peer).await?.is_empty());
@@ -761,24 +904,27 @@ mod tests {
         let first = Storage::<NativeSpace>::default().owned_by(test_system().await.did());
         let credential = OpenCredential::open(name.clone())
             .at(base.clone())
-            .perform(&first)
+            .perform(&CredentialStore::<NativeSpace>::default())
             .await?;
         let peer = Peer::new(credential.clone())
+            .at(Location::new(base.clone(), name.clone()))
             .with(first)
-            .mount(Repository::from(credential.did()).branch("main"))
+            .space(Repository::from(credential.did()).branch("main"))
             .grant(test_grant().await)
             .base(base.clone())
             .await?;
+        onboard(&peer).await?;
         let notes = peer.space("notes").create().perform(&peer).await?;
 
         let second = Storage::<NativeSpace>::default().owned_by(test_system().await.did());
-        let credential = OpenCredential::load(name)
+        let credential = OpenCredential::load(name.clone())
             .at(base.clone())
-            .perform(&second)
+            .perform(&CredentialStore::<NativeSpace>::default())
             .await?;
         let restarted = Peer::new(credential.clone())
+            .at(Location::new(base.clone(), name))
             .with(second)
-            .mount(Repository::from(credential.did()).branch("main"))
+            .space(Repository::from(credential.did()).branch("main"))
             .grant(test_grant().await)
             .base(base)
             .await?;
