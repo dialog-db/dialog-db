@@ -1331,6 +1331,61 @@ mod tests {
         Ok(())
     }
 
+    /// The empty tree's root is an index, as every root is: no children,
+    /// no buffered ops, only the manifest. A tree opened from it reads
+    /// nothing, streams nothing, and takes a first insert.
+    #[dialog_common::test]
+    async fn it_roots_the_empty_tree_in_an_index() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+        let empty = PersistentTree::<[u8; 4], Vec<u8>>::empty()
+            .edit()
+            .delete(&1u32.to_le_bytes(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let accessor = Accessor::new(empty.node_cache(), storage.clone());
+        let root = accessor.get_node(empty.root()).await?;
+        let crate::NodeBody::Index(index) = root.body() else {
+            anyhow::bail!("the empty tree's root is a segment, not an index");
+        };
+        assert!(index.is_empty(), "the empty root has no children");
+        assert_eq!(index.novelty_len(), 0, "and no buffered ops");
+        assert!(root.is_empty()?);
+
+        let opened = PersistentTree::<[u8; 4], Vec<u8>>::from_hash(empty.root().clone());
+        assert_eq!(opened.get(&1u32.to_le_bytes(), &storage).await?, None);
+        {
+            let stream = opened.stream(&storage);
+            futures_util::pin_mut!(stream);
+            assert!(
+                stream.next().await.is_none(),
+                "an empty tree streams nothing"
+            );
+        }
+
+        let mut delta = Delta::zero();
+        let one = opened
+            .edit()
+            .insert(1u32.to_le_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        assert_eq!(one.get(&1u32.to_le_bytes(), &storage).await?, Some(vec![1]));
+        Ok(())
+    }
+
     /// A root stored by a version that recorded the empty tree as the
     /// all-zero hash opens as the empty tree under the default manifest:
     /// it reads as empty, builds the same tree a fresh empty tree builds,

@@ -16,10 +16,10 @@
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
     DialogSearchTreeError, Differential, Distribution, Entry, Geometric, IndexPieceOrigin, Key,
-    Link, Manifest, Node, NodeCache, Novelty, NoveltyEntry, NoveltyOp, PersistentNode,
-    PersistentTree, PieceOrigin, Rank, TransientIndex, TransientNode, TransientSegment, TreeWalker,
-    Value, link_bounds, regroup_children, regroup_children_reusing, regroup_entries,
-    regroup_entries_reusing,
+    Link, Manifest, Node, NodeCache, Novelty, NoveltyEntry, NoveltyOp, PersistentIndex,
+    PersistentNode, PersistentNodeBody, PersistentTree, PieceOrigin, Rank, TransientIndex,
+    TransientNode, TransientSegment, TreeWalker, Value, link_bounds, regroup_children,
+    regroup_children_reusing, regroup_entries, regroup_entries_reusing,
 };
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
@@ -3982,9 +3982,10 @@ fn adjust_index_origins(
 
 /// Persists the canonical EMPTY-TREE root for `manifest` into `delta`.
 ///
-/// The empty tree's persisted form is the zero-entry segment node stamped
-/// with the manifest — the empty tree "whose node is the manifest without
-/// children or novelty" — under EVERY manifest, the default included: the
+/// The empty tree's persisted form is an index node with no children and no
+/// buffered ops, stamped with the manifest — the empty tree "whose node is
+/// the manifest without children or novelty", and an index because every
+/// root is one — under EVERY manifest, the default included: the
 /// format survives emptiness and a reopened session recovers it from the
 /// root instead of silently reverting to the defaults. The null hash is
 /// never a persisted form; it only ever means a tree that does not exist
@@ -4006,8 +4007,14 @@ where
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
-    TransientNode::<Key, Value>::Segment(TransientSegment::new(Vec::new(), Vec::new()))
-        .persist(delta, manifest)
+    // An index, as every root is: no children and no buffered ops, only
+    // the manifest. Built directly, since an index built from links
+    // refuses zero of them everywhere else.
+    let body =
+        PersistentNodeBody::from_index(PersistentIndex::from_links(Vec::new()), manifest.clone());
+    let node = PersistentNode::try_from(&body)?;
+    delta.add(node.hash().clone(), node.buffer().clone());
+    Ok(node)
 }
 
 /// Turns the root's replacement run (the nodes that stand for the old root after

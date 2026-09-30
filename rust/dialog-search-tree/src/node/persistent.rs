@@ -396,14 +396,17 @@ where
         decode_manifest(&bytes[start as usize..end as usize])
     }
 
-    /// Whether this node is the empty tree's node: a zero-entry segment
-    /// carrying the format manifest and nothing else (see
-    /// [`PersistentSegment::empty`]). Such a node is a pure format marker —
-    /// it is the persisted root of an empty tree, never an interior node —
-    /// and load paths treat it as the absence of a root.
+    /// Whether this node is the empty tree's node: an index with no
+    /// children and no buffered ops, carrying the format manifest and
+    /// nothing else (see [`persist_empty_root`](crate::persist_empty_root)),
+    /// so every root, the empty one included, is an index. A zero-entry
+    /// segment, the empty tree's node before, reads as empty too. Such a
+    /// node is a pure format marker — the persisted root of an empty tree,
+    /// never an interior node — and load paths treat it as the absence of a
+    /// root.
     pub fn is_empty(&self) -> Result<bool, DialogSearchTreeError> {
         Ok(match self.body() {
-            NodeBody::Index(_) => false,
+            NodeBody::Index(index) => index.is_empty() && index.novelty_len() == 0,
             NodeBody::Segment(segment) => segment.len() == 0,
         })
     }
@@ -1493,10 +1496,10 @@ where
         })
     }
 
-    /// The canonical zero-entry segment: a tree node that carries the format
-    /// manifest and nothing else. See [`from_entries`](Self::from_entries) —
-    /// this is the empty tree's persisted representation under every
-    /// manifest. The column set mirrors the [`MIXED_LAYOUT`] opaque schema
+    /// The zero-entry segment: a tree node that carries the format manifest
+    /// and nothing else. It was the empty tree's persisted representation
+    /// before that became an index with no children (see
+    /// `persist_empty_root`), and still reads as an empty tree. The column set mirrors the [`MIXED_LAYOUT`] opaque schema
     /// (one whole-key arena column, here empty) so decode paths see the
     /// arity they expect.
     pub fn empty() -> Self {
