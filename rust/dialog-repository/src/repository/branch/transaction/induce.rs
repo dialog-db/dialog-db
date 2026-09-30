@@ -65,12 +65,15 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// Run commit-time induction over `changes` + `transients`, folding
 /// durable novelty into `changes`. Transients never enter `changes`;
 /// they are visible to rule bodies for exactly one round.
+///
+/// Returns every transient a rule head emitted, across all rounds. The
+/// dispatched `transients` are not part of it.
 pub(crate) async fn induce<Env>(
     source: SourceRef<'_>,
     changes: &mut Changes,
     transients: Changes,
     env: &Env,
-) -> Result<(), CommitError>
+) -> Result<Changes, CommitError>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -91,8 +94,9 @@ where
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
     stimulus.extend(lag_delta(source, env).await?);
+    let mut induced = Changes::new();
     if stimulus.is_empty() {
-        return Ok(());
+        return Ok(induced);
     }
 
     // Committed trigger structures, resolved once per induction: the
@@ -285,10 +289,11 @@ where
         stimulus = novelty.clone().into_instructions();
         stimulus.extend(emitted_transients.clone().into_instructions());
         novelty.assert(changes);
+        emitted_transients.clone().assert(&mut induced);
         transient_overlay = emitted_transients;
     }
 
-    Ok(())
+    Ok(induced)
 }
 
 /// The committed side of trigger dispatch for one induction run: the
@@ -1212,7 +1217,7 @@ mod tests {
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite};
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Entity, Value};
+    use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
     use dialog_effects::archive::{Get, Put};
@@ -1562,6 +1567,179 @@ mod tests {
                 .await?
                 .is_empty(),
             "the transient intermediate must never reach the branch"
+        );
+        Ok(())
+    }
+
+    /// A rule that relays a transient into another transient concept:
+    /// `assert! {to} when {from}`, both `this`-keyed on the command.
+    fn relay(from: &str, to: &str) -> Result<InductiveRule> {
+        Ok(serde_json::from_value(json!({
+            "assert!": {
+                "with": {
+                    "target": { "the": to, "as": "Entity" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "target": { "the": from, "as": "Entity" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "target": { "?": { "name": "target" } }
+                    }
+                }
+            ]
+        }))?)
+    }
+
+    /// Mark the `{target}` concept over `the` as transient.
+    fn transient_target(the: &str) -> Result<Transient> {
+        let concept: ConceptDescriptor = serde_json::from_value(json!({
+            "with": {
+                "target": { "the": the, "as": "Entity" }
+            }
+        }))?;
+        Ok(Transient(concept.this()))
+    }
+
+    /// The `(attribute, entity, value)` triples a [`Changes`] asserts.
+    fn asserted(changes: &Changes) -> Vec<(String, Entity, Value)> {
+        let mut triples: Vec<_> = changes
+            .clone()
+            .into_instructions()
+            .into_iter()
+            .filter_map(|instruction| match instruction {
+                Instruction::Assert(a) | Instruction::Replace(a) => {
+                    Some((a.the.to_string(), a.of, a.is))
+                }
+                Instruction::Retract(_) => None,
+            })
+            .collect();
+        triples.sort_by_key(|(the, of, _)| (the.clone(), of.to_string()));
+        triples
+    }
+
+    /// Transients a rule concludes are reported on the staged batch, from
+    /// every round of the cascade, so a host whose handlers live outside
+    /// the rule system can run them. The transient the transaction
+    /// dispatched itself is not reported back.
+    #[dialog_common::test]
+    async fn it_reports_the_transients_induction_emitted() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(transient_target("cmd.stage/target")?)
+            .assert(transient_target("cmd.finish/target")?)
+            .assert(relay("cmd.start/target", "cmd.stage/target")?)
+            .assert(relay("cmd.stage/target", "cmd.finish/target")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        let batch = branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            asserted(batch.induced()),
+            vec![
+                (
+                    "cmd.finish/target".to_string(),
+                    command.clone(),
+                    Value::Entity(target.clone())
+                ),
+                (
+                    "cmd.stage/target".to_string(),
+                    command.clone(),
+                    Value::Entity(target.clone())
+                ),
+            ],
+            "both rounds' transient heads are reported, the dispatched command is not"
+        );
+
+        batch.publish().perform(&operator).await?;
+        assert!(
+            values(&branch, &operator, "cmd.finish/target", &command)
+                .await?
+                .is_empty(),
+            "a reported transient still never reaches the branch"
+        );
+        Ok(())
+    }
+
+    /// Every link of a staged chain adds the transients its own induction
+    /// emitted: publishing the chain runs all of them, so none may drop
+    /// out when the next link is committed.
+    #[dialog_common::test]
+    async fn it_accumulates_induced_transients_across_staged_links() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(transient_target("cmd.stage/target")?)
+            .assert(relay("cmd.start/target", "cmd.stage/target")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let first: Entity = "cmd:first".parse()?;
+        let second: Entity = "cmd:second".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        let batch = branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(first.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(second.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            asserted(batch.induced()),
+            vec![
+                (
+                    "cmd.stage/target".to_string(),
+                    first,
+                    Value::Entity(target.clone())
+                ),
+                (
+                    "cmd.stage/target".to_string(),
+                    second,
+                    Value::Entity(target)
+                ),
+            ]
         );
         Ok(())
     }

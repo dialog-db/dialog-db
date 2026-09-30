@@ -244,6 +244,9 @@ impl TransactionCommit<&Snapshot> {
     {
         let snapshot = self.line;
         let mut changes = self.changes;
+        // A snapshot commit reports only its revision: the transients
+        // induction emitted surface on a staged
+        // [`TransactionBatch::induced`] alone.
         induce::induce(
             SourceRef::Snapshot(snapshot),
             &mut changes,
