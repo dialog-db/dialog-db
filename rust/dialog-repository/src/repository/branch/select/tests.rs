@@ -5,6 +5,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use dialog_effects::blob::{BlobError, Read as BlobRead};
 use std::collections::BTreeSet;
 use std::pin::pin;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use parking_lot::Mutex;
 
 use crate::helpers::{Counting, test_repo};
+use crate::repository::archive::local::read_all;
 use crate::{Branch, Hydrate, LocalIndex, RemoteSite, Repository, Revision};
 
 /// The session every test commits and reads through.
@@ -77,7 +79,8 @@ async fn select<Env>(
     env: &Env,
 ) -> Result<Vec<Artifact>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -142,10 +145,27 @@ async fn spilled_block(
     value: &Value,
     operator: &Operator,
 ) -> Result<Option<Vec<u8>>> {
-    Ok(LocalIndex::new(operator, branch.archive().index())
-        .load(&Blake3Hash::from(value.to_reference()))
-        .await?
-        .map(Buffer::into_vec))
+    let reference = Blake3Hash::from(value.to_reference());
+    let block = LocalIndex::new(operator, branch.archive().index())
+        .load(&reference)
+        .await?;
+    assert!(
+        block.is_none(),
+        "a spilled value is written to the blob store, never the block catalog"
+    );
+    match branch
+        .archive()
+        .index()
+        .archive()
+        .blob()
+        .read(reference)
+        .perform(operator)
+        .await
+    {
+        Ok(reader) => Ok(Some(read_all(reader).await?)),
+        Err(BlobError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The inline threshold of a fresh tree.
@@ -1448,8 +1468,8 @@ async fn it_avoids_unnecessary_storage_writes() -> Result<()> {
 }
 
 /// A value larger than the inline threshold spills: its key carries a
-/// reference, its bytes land as a content-addressed block in the branch's
-/// archive (keyed by that reference), and a select reconstructs the exact
+/// reference, its bytes land in the archive's blob store (keyed by that
+/// reference), and a select reconstructs the exact
 /// value by fetching the block. Inline values are unaffected.
 #[dialog_common::test]
 async fn it_round_trips_a_spilled_value() -> Result<()> {
@@ -1468,7 +1488,7 @@ async fn it_round_trips_a_spilled_value() -> Result<()> {
     assert_eq!(
         spilled_block(&branch, &value, &operator).await?,
         Some(value.to_bytes()),
-        "spilled value bytes are stored as a block under the value reference"
+        "spilled value bytes are stored as a blob under the value reference"
     );
 
     // A cold handle has no spill cache, so the read fetches the block.

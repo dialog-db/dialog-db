@@ -60,6 +60,7 @@
 //!
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
+use dialog_effects::blob::Read as BlobRead;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::ops::RangeInclusive;
@@ -579,7 +580,8 @@ where
         env: &'a Env,
     ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
@@ -694,7 +696,8 @@ where
         current: &'a Option<Revision>,
     ) -> Result<Touched, EvaluationError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -841,7 +844,8 @@ where
         retracted: &'a [Artifact],
     ) -> EvaluationFuture<'a, Option<Delta<Q::Conclusion>>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
@@ -975,7 +979,8 @@ where
         query: &'a Q,
     ) -> EvaluationFuture<'a, Vec<Q::Conclusion>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
@@ -1029,7 +1034,8 @@ where
         deletions: Arc<Vec<Artifact>>,
     ) -> EvaluationFuture<'a, Vec<Q::Conclusion>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
@@ -1087,6 +1093,7 @@ mod tests {
     use dialog_common::{ConditionalSend, ConditionalSync};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::Identify;
+    use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::The;
@@ -1155,7 +1162,8 @@ mod tests {
     /// [`it_keeps_the_poll_future_send_general`].
     fn require_send_poll<Env>(subscription: &mut super::Subscription<AttributeQuery>, env: &Env)
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>

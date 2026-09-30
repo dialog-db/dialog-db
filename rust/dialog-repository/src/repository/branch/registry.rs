@@ -18,6 +18,7 @@ use dialog_capability::{Capability, Fork, Provider, Subject};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
+use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_query::{Output as _, Query, Term};
 use futures_util::stream;
@@ -29,6 +30,8 @@ use crate::{Branch, CommitError, REGISTRY, RemoteSite, RepositoryMemoryExt as _,
 /// The environment a registry write runs against.
 pub trait RegistryEnv:
     Provider<Get>
+    + Provider<BlobRead>
+    + Provider<BlobImport>
     + Provider<Put>
     + Provider<Import>
     + Provider<Resolve>
@@ -47,6 +50,8 @@ pub trait RegistryEnv:
 
 impl<T> RegistryEnv for T where
     T: Provider<Get>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>

@@ -71,6 +71,8 @@ use crate::{ConnectedReplica, PeersEnv, Repository, SiteAddress, contact, peer_d
 #[cfg(test)]
 use dialog_credentials::Credential;
 #[cfg(test)]
+use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
+#[cfg(test)]
 use dialog_peer::{Mode, Peer, PeerSpace, Session};
 #[cfg(test)]
 use dialog_storage::Flaky;
@@ -135,7 +137,9 @@ pub async fn fill_account_branch<Env>(
     env: &Env,
 ) -> anyhow::Result<usize>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobImport>
+        + Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Publish>

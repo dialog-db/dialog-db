@@ -14,6 +14,7 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::{Read as BlobRead, Write as BlobWrite};
 use dialog_effects::memory::{Publish, Resolve};
 
@@ -239,7 +240,8 @@ impl TransactionCommit<&Snapshot> {
     /// the settled batch is a no-op).
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
             + Provider<BlobWrite>
             + Provider<BlobRead>
             + Provider<Put>
@@ -339,7 +341,8 @@ impl Branch {
     /// themselves over the merged-in facts.
     pub async fn induce<Env>(&self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
             + Provider<BlobWrite>
             + Provider<BlobRead>
             + Provider<Put>

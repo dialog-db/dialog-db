@@ -227,6 +227,12 @@ impl CatalogScope {
         &self.catalog
     }
 
+    /// The archive this catalog belongs to, for reaching its other stores
+    /// (its blobs) without naming the subject again.
+    pub fn archive(&self) -> ArchiveScope {
+        ArchiveScope::new(self.subject.clone())
+    }
+
     /// The chain for reading from it.
     pub fn read(&self) -> Capability<Catalog<method::Get>> {
         self.subject

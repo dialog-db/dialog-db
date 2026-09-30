@@ -23,6 +23,7 @@ use dialog_effects::Void;
 use dialog_effects::archive::prelude::{ArchiveScope, GetBlockExt as _};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
+use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::branch::{self as branch_fx, BranchError, BranchRecord};
 use dialog_effects::memory::{MemoryError, Publish, Resolve, Retract};
 use dialog_effects::method;
@@ -40,6 +41,8 @@ use dialog_repository::{
 /// single provider.
 pub trait BranchEnv:
     Provider<Get>
+    + Provider<BlobRead>
+    + Provider<BlobImport>
     + Provider<Put>
     + Provider<Import>
     + Provider<Resolve>
@@ -58,6 +61,8 @@ pub trait BranchEnv:
 
 impl<T> BranchEnv for T where
     T: Provider<Get>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>

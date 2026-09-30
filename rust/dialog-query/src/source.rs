@@ -20,7 +20,9 @@ pub(crate) mod test {
     use super::*;
     use crate::session::RuleRegistry;
     use dialog_artifacts::selector::Constrained;
-    use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
+    use dialog_artifacts::{
+        ArtifactSelector, ArtifactStream, DialogArtifactsError, LoadBlob, Select,
+    };
     use dialog_capability::Provider;
     use dialog_peer::Peer as DialogOperator;
     use dialog_repository::{Branch, NetworkedIndex};
@@ -105,6 +107,19 @@ pub(crate) mod test {
             &self,
             load: LoadBlock,
         ) -> Result<Option<dialog_common::Buffer>, DialogSearchTreeError> {
+            let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
+            load.perform(&store).await
+        }
+    }
+
+    // Spilled-value loads for `tree/value`, local archive only.
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<LoadBlob> for TestEnv<'_> {
+        async fn execute(
+            &self,
+            load: LoadBlob,
+        ) -> Result<Option<dialog_common::Buffer>, DialogArtifactsError> {
             let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
             load.perform(&store).await
         }

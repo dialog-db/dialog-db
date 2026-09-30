@@ -4,7 +4,6 @@ use std::mem;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::ArchiveDelta;
-use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::FromKey as _;
 use dialog_artifacts::history::Context;
 use dialog_artifacts::merge;
@@ -19,6 +18,7 @@ use futures_util::future::{Either, join_all};
 use super::fetch::fetch_one;
 use super::resolve::resolve;
 use crate::ResolveEnv;
+use crate::repository::archive::persist;
 use crate::{
     Branch, Checkpoint, Index, NetworkedIndex, PublishError, PullError, Revision, TreeReference,
     Upstream, UpstreamBranch,
@@ -686,13 +686,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
-                branch
-                    .archive()
-                    .index()
-                    .import(delta.flush_blocks().chain(delta.flush_blobs()))
-                    .perform(env)
-                    .await
-                    .map_err(DialogArtifactsError::from)?;
+                persist(&branch.archive().index(), &mut delta, env).await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
@@ -858,13 +852,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
-                branch
-                    .archive()
-                    .index()
-                    .import(delta.flush_blocks().chain(delta.flush_blobs()))
-                    .perform(env)
-                    .await
-                    .map_err(DialogArtifactsError::from)?;
+                persist(&branch.archive().index(), &mut delta, env).await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
@@ -1059,13 +1047,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // reference-counted (nothing is copied on the way in) and
         // providers with native batching persist it in a single round
         // trip.
-        branch
-            .archive()
-            .index()
-            .import(delta.flush_blocks().chain(delta.flush_blobs()))
-            .perform(env)
-            .await
-            .map_err(DialogArtifactsError::from)?;
+        persist(&branch.archive().index(), &mut delta, env).await?;
 
         Ok(PreparedPull::Merged(Box::new(Merged {
             branch,

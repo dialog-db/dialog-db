@@ -2,6 +2,7 @@ use dialog_capability::access::AuthorizeError;
 use dialog_capability::identity::IdentityError;
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
+use dialog_effects::blob::BlobError;
 use dialog_effects::memory::MemoryError;
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
@@ -109,6 +110,16 @@ impl From<ArchiveError> for DialogArtifactsError {
         match error {
             ArchiveError::Authorization(error) => Self::Authorization(error),
             ArchiveError::Rejected(error) => Self::Rejected(error),
+            error => Self::Storage(error.to_string()),
+        }
+    }
+}
+
+impl From<BlobError> for DialogArtifactsError {
+    fn from(error: BlobError) -> Self {
+        match error {
+            BlobError::Authorization(error) => Self::Authorization(error),
+            BlobError::Rejected(error) => Self::Rejected(error),
             error => Self::Storage(error.to_string()),
         }
     }

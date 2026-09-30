@@ -11,6 +11,7 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::The;
@@ -29,7 +30,8 @@ use crate::{
 /// Every `user/name` value on a line, sorted.
 async fn names<'a, Env>(source: impl Into<SourceRef<'a>>, env: &Env) -> Result<Vec<String>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -59,7 +61,8 @@ async fn values<'a, Env>(
     of: Option<&Entity>,
 ) -> Result<Vec<Value>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -88,7 +91,8 @@ where
 /// and metadata path, as opposed to the raw index `names` reads.
 async fn queried_names<Env>(layer: crate::QueryLayer<'_>, env: &Env) -> Result<Vec<String>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>

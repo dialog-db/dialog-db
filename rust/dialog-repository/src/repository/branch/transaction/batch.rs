@@ -36,6 +36,7 @@ use dialog_capability::{Did, Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
+use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::{Read as BlobRead, Write as BlobWrite};
 use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
 use dialog_query::query::Application;
@@ -288,7 +289,8 @@ impl TransactionPublish<&Branch> {
     /// settled batch is a no-op).
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
             + Provider<BlobWrite>
             + Provider<BlobRead>
             + Provider<Put>
@@ -314,7 +316,8 @@ impl TransactionPublish<TransactionBatch> {
     /// the newly-published [`Revision`].
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
             + Provider<BlobWrite>
             + Provider<BlobRead>
             + Provider<Put>
@@ -357,7 +360,8 @@ impl TransactionCommit<&Branch> {
     /// [`TransactionBatch::publish`] does.
     pub async fn perform<Env>(self, env: &Env) -> Result<TransactionBatch, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
             + Provider<BlobWrite>
             + Provider<BlobRead>
             + Provider<Put>
@@ -456,7 +460,8 @@ impl TransactionCommit<TransactionBatch> {
     /// [`TransactionCommit::<&Branch>::perform`].
     pub async fn perform<Env>(self, env: &Env) -> Result<TransactionBatch, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
             + Provider<BlobWrite>
             + Provider<BlobRead>
             + Provider<Put>
@@ -547,7 +552,8 @@ async fn mint_link<Env>(
     env: &Env,
 ) -> Result<Outcome, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobImport>
+        + Provider<Get>
         + Provider<BlobWrite>
         + Provider<BlobRead>
         + Provider<Put>

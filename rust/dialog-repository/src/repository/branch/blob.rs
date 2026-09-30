@@ -61,6 +61,7 @@
 //! # }
 //! ```
 
+use crate::repository::archive::persist;
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
 use crate::{
@@ -248,7 +249,8 @@ async fn index_size<Env>(
     env: &Env,
 ) -> Result<Option<u64>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -272,7 +274,8 @@ async fn index_references<Env>(
     env: &Env,
 ) -> Result<bool, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -298,7 +301,8 @@ impl BlobSize<'_> {
     /// Execute the lookup, returning the size or `None` if unreferenced.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<u64>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -445,7 +449,9 @@ where
     /// rather than clobber it.
     pub async fn perform<Env>(mut self, env: &Env) -> Result<Entity, CommitError>
     where
-        Env: Provider<BlobWrite>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<BlobWrite>
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
@@ -512,7 +518,9 @@ async fn advance_blob_index<Env>(
     edit: BlobIndexEdit,
 ) -> Result<(), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobImport>
+        + Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>
@@ -603,13 +611,7 @@ where
 
     // Persist the tree's pending nodes before referencing the root in a
     // revision; a revision must only point at durable blocks.
-    branch
-        .archive()
-        .index()
-        .import(delta.flush_blocks().chain(delta.flush_blobs()))
-        .perform(env)
-        .await
-        .map_err(DialogArtifactsError::from)?;
+    persist(&branch.archive().index(), &mut delta, env).await?;
 
     // The new head's causal context: the parent's plus this write's
     // own version, exactly as `Commit` derives it — a blob write
@@ -675,7 +677,9 @@ impl RetractBlob<'_> {
     /// no revision.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>

@@ -7,6 +7,7 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use futures_util::TryStreamExt;
 
@@ -28,7 +29,8 @@ impl<E: Exporter> Export<'_, E> {
     /// Execute the export, writing all artifacts to the exporter.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), DialogArtifactsError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>

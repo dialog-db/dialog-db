@@ -10,6 +10,7 @@
 //! commit path. The branch handle is opened once and held across commits —
 //! the realistic application shape, which also keeps the branch-owned record
 //! and node caches warm the way a running app would.
+use dialog_effects::blob::Import as BlobImport;
 use std::str::FromStr;
 
 use anyhow::Result;
@@ -104,7 +105,8 @@ impl DialogRepo<Peer<NativeTempSpace, Session>> {
 
 impl<Env> DialogRepo<Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobImport>
+        + Provider<Get>
         + Provider<BlobRead>
         + Provider<BlobWrite>
         + Provider<Put>
