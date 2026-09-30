@@ -62,10 +62,43 @@ use dialog_effects::{archive, blob, memory};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
 use dialog_ucan_core::invocation::CheckFailed;
 use dialog_ucan_core::promise::Promised;
-use dialog_ucan_core::time::TimeBoundError;
+use dialog_ucan_core::time::{TimeBoundError, TimeRange, Timestamp};
 use dialog_ucan_core::{Environment, InvocationChain, VerificationContext};
 use ipld_core::ipld::Ipld;
 use serde::de::DeserializeOwned;
+use std::ops::Bound;
+
+fn clamp_request(
+    request: &mut dialog_remote_s3::request::S3Request,
+    range: TimeRange,
+    now: Timestamp,
+) -> Result<u64, S3Error> {
+    range.check(&now).map_err(|error| {
+        S3Error::Authorization(check_failed_to_authorize_error(CheckFailed::TimeBound(
+            error,
+        )))
+    })?;
+    let at = now.to_unix();
+    let mut end = at.saturating_add(60);
+    if let Bound::Included(exp) | Bound::Excluded(exp) = range.expiration {
+        end = end.min(exp.to_unix());
+    }
+    let remaining = end.saturating_sub(at);
+    if remaining == 0 {
+        return Err(S3Error::Authorization(AuthorizeError::Expired {
+            expiration: end,
+            at,
+        }));
+    }
+    request.time = chrono::DateTime::from_timestamp(
+        i64::try_from(at)
+            .map_err(|_| S3Error::Configuration("Signing time is out of range".into()))?,
+        0,
+    )
+    .ok_or_else(|| S3Error::Configuration("Signing time is out of range".into()))?;
+    request.expires = request.expires.min(remaining);
+    Ok(end)
+}
 
 // Generic deserialization from UCAN args
 
@@ -259,19 +292,20 @@ impl FromUcanArgs for blob::Import {
 /// Dispatch UCAN command to the appropriate `FromUcanArgs` handler and authorize
 /// the resulting capability directly against the S3 address.
 macro_rules! dispatch {
-    ($self:expr, $subject:expr, $args:expr, $segments:expr, {
+    ($self:expr, $subject:expr, $args:expr, $segments:expr, $range:expr, $clock:expr, {
         $( [$($seg:literal),+ $(,)?] => $fx:ty ),+ $(,)?
     }) => {
         match $segments {
             $(
                 [$($seg),+] => {
                     let capability = <$fx as FromUcanArgs>::capability_from_args($subject, $args)?;
-                    let request = ::dialog_remote_s3::request::S3Request::from(&capability);
+                    let mut request = ::dialog_remote_s3::request::S3Request::from(&capability);
+                    let expires_at = clamp_request(&mut request, $range, $clock())?;
                     let authorization = match $self.credential.clone() {
                         Some(credential) => request.attest(credential),
                         None => ::dialog_remote_s3::S3Authorization::public(request),
                     };
-                    authorization.redeem(&$self.address).await
+                    Ok((authorization.redeem(&$self.address).await?, expires_at))
                 }
             )+
             _ => Err(S3Error::Configuration(format!("Unknown command: {:?}", $segments)))
@@ -367,13 +401,28 @@ where
     Resolver: dialog_capability::Provider<Resolve> + dialog_common::ConditionalSync,
     Revocations: dialog_ucan_core::revocation::RevocationChecker + dialog_common::ConditionalSync,
 {
+    verify_invocation_at(container, resolver, revocations, Timestamp::now())
+        .await
+        .map(|(chain, _)| chain)
+}
+
+async fn verify_invocation_at<Resolver, Revocations>(
+    container: dialog_ucan_core::Container,
+    resolver: &Resolver,
+    revocations: &Revocations,
+    now: Timestamp,
+) -> Result<(InvocationChain<dialog_varsig::AnySignature>, TimeRange), AuthorizeError>
+where
+    Resolver: dialog_capability::Provider<Resolve> + dialog_common::ConditionalSync,
+    Revocations: dialog_ucan_core::revocation::RevocationChecker + dialog_common::ConditionalSync,
+{
     let chain = InvocationChain::try_from(container).map_err(|e| AuthorizeError::Malformed {
         detail: e.to_string(),
     })?;
     let resolver = PerformingResolver::new(resolver);
     let environment = Environment::new(chain.proof_store(), resolver, revocations);
-    let context = VerificationContext::new(&environment);
-    chain.verify(&context).await.map_err(|e| match e {
+    let context = VerificationContext::at(&environment, Some(now));
+    let range = chain.verify(&context).await.map_err(|e| match e {
         ContainerError::InvalidDelegationSignature { issuer, .. } => {
             AuthorizeError::InvalidSignature { issuer }
         }
@@ -388,7 +437,7 @@ where
             detail: format!("could not verify the invocation chain: {detail}"),
         },
     })?;
-    Ok(chain)
+    Ok((chain, range))
 }
 
 pub type DefaultResolver = CachingResolver<WebResolver>;
@@ -524,14 +573,58 @@ where
     /// 2. Checks command prefix authorization at each delegation
     /// 3. Validates policy predicates on each delegation
     pub async fn authorize(&self, container: &[u8]) -> Result<Permit, S3Error> {
+        self.authorize_with_expiration(container)
+            .await
+            .map(|(permit, _)| permit)
+    }
+
+    /// Authorize and return the absolute expiry verified for the transport.
+    /// Embedders that translate the permit must preserve this deadline.
+    pub async fn authorize_with_expiration(
+        &self,
+        container: &[u8],
+    ) -> Result<(Permit, u64), S3Error> {
+        self.authorize_with_clock_and_expiration(container, Timestamp::now)
+            .await
+    }
+
+    /// Authorize using a trusted clock, sampled before verification and signing.
+    /// Signed URLs expire within 60 seconds and the verified ancestor window.
+    /// Unsigned public endpoints remain public and cannot enforce URL expiry.
+    pub async fn authorize_with_clock<C>(
+        &self,
+        container: &[u8],
+        clock: C,
+    ) -> Result<Permit, S3Error>
+    where
+        C: Fn() -> Timestamp,
+    {
+        self.authorize_with_clock_and_expiration(container, clock)
+            .await
+            .map(|(permit, _)| permit)
+    }
+
+    async fn authorize_with_clock_and_expiration<C>(
+        &self,
+        container: &[u8],
+        clock: C,
+    ) -> Result<(Permit, u64), S3Error>
+    where
+        C: Fn() -> Timestamp,
+    {
         let container = dialog_ucan_core::Container::from_bytes(container).map_err(|e| {
             S3Error::Authorization(AuthorizeError::Malformed {
                 detail: e.to_string(),
             })
         })?;
-        let chain = verify_invocation(container, self.resolver.as_ref(), &*self.revocations)
-            .await
-            .map_err(S3Error::Authorization)?;
+        let (chain, range) = verify_invocation_at(
+            container,
+            self.resolver.as_ref(),
+            &*self.revocations,
+            clock(),
+        )
+        .await
+        .map_err(S3Error::Authorization)?;
 
         let command = chain.command();
         let args = chain.arguments();
@@ -541,7 +634,7 @@ where
 
         let command_segments: Vec<&str> = command.0.iter().map(|s| s.as_str()).collect();
 
-        dispatch!(self, subject_did, args, command_segments.as_slice(), {
+        dispatch!(self, subject_did, args, command_segments.as_slice(), range, clock, {
             ["use", "get", "memory", "cell"]     => dialog_effects::memory::Resolve,
             ["use", "put", "memory", "cell"]     => dialog_effects::memory::Publish,
             ["use", "delete", "memory", "cell"]  => dialog_effects::memory::Retract,
@@ -579,6 +672,129 @@ mod tests {
     use dialog_ucan_core::InvocationChain;
     use dialog_ucan_core::subject::Subject as DelegatedSubject;
     use std::collections::BTreeMap;
+
+    fn transport_time(seconds: i128) -> Timestamp {
+        seconds.try_into().unwrap()
+    }
+
+    async fn transport_fixture_with_expiration(
+        expiration: Option<Timestamp>,
+    ) -> (UcanAuthorizer, Vec<u8>) {
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::import(&[7u8; 32]).await.unwrap();
+        let args = BTreeMap::from([
+            ("space".into(), Promised::String("branch/main".into())),
+            ("cell".into(), Promised::String("revision".into())),
+        ]);
+        let builder = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["use".into()]);
+        let builder = match expiration {
+            Some(expiration) => builder.expiration(expiration),
+            None => builder,
+        };
+        let delegation = builder.try_build().await.unwrap();
+        let invocation = InvocationBuilder::new()
+            .issuer(operator)
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec![
+                "use".into(),
+                "get".into(),
+                "memory".into(),
+                "cell".into(),
+            ])
+            .arguments(args)
+            .proofs(vec![delegation.to_cid()])
+            .try_build()
+            .await
+            .unwrap();
+        let bytes = InvocationChain::new(
+            invocation,
+            std::collections::HashMap::from([(
+                delegation.to_cid(),
+                std::sync::Arc::new(delegation),
+            )]),
+        )
+        .to_bytes()
+        .unwrap();
+        let address = Address::builder("https://s3.example.com")
+            .region("auto")
+            .bucket("test")
+            .build()
+            .unwrap();
+        (
+            UcanAuthorizer::new(address, Some(S3Credential::new("key", "secret"))),
+            bytes,
+        )
+    }
+
+    #[dialog_common::test]
+    async fn transport_ceiling_and_ancestor_at_explicit_clock() {
+        for (expiration, ttl, expires_at) in [
+            (None, "60", 1_000_060),
+            (Some(transport_time(1_000_020)), "20", 1_000_020),
+        ] {
+            let (authorizer, bytes) = transport_fixture_with_expiration(expiration).await;
+            let (permit, actual_expiration) = authorizer
+                .authorize_with_clock_and_expiration(&bytes, || transport_time(1_000_000))
+                .await
+                .unwrap();
+            let query: BTreeMap<_, _> = permit.url.query_pairs().collect();
+            assert_eq!(query["X-Amz-Expires"], ttl);
+            assert_eq!(query["X-Amz-Date"], "19700112T134640Z");
+            assert_eq!(actual_expiration, expires_at);
+        }
+    }
+
+    #[dialog_common::test]
+    async fn transport_rechecks_exhausted_ancestor_after_verification() {
+        let (authorizer, bytes) =
+            transport_fixture_with_expiration(Some(transport_time(1_000_020))).await;
+        let tick = std::sync::atomic::AtomicU64::new(1_000_000);
+        let error = authorizer
+            .authorize_with_clock(&bytes, || {
+                transport_time(
+                    tick.fetch_add(20, std::sync::atomic::Ordering::SeqCst)
+                        .into(),
+                )
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            S3Error::Authorization(AuthorizeError::Expired { .. })
+        ));
+    }
+
+    #[test]
+    fn transport_clamp_preserves_request_and_rejects_empty_windows() {
+        let mut request = dialog_remote_s3::request::S3Request {
+            method: "PUT".into(),
+            checksum: Some(dialog_common::Hasher::Sha256.checksum(b"body")),
+            precondition: dialog_remote_s3::request::Precondition::IfNoneMatch,
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&request).unwrap();
+        let range = TimeRange::new(None, Some(transport_time(1_000_020)));
+        clamp_request(&mut request, range, transport_time(1_000_000)).unwrap();
+        let mut after = serde_json::to_value(&request).unwrap();
+        after["time"] = before["time"].clone();
+        after["expires"] = before["expires"].clone();
+        assert_eq!(before, after);
+        assert_eq!(request.expires, 20);
+        assert!(clamp_request(&mut request, range, transport_time(1_000_020)).is_err());
+        assert!(
+            clamp_request(
+                &mut request,
+                TimeRange::new(Some(transport_time(1_000_001)), None),
+                transport_time(1_000_000)
+            )
+            .is_err()
+        );
+    }
 
     /// Helper to create a test signer
     async fn test_signer() -> Ed25519Signer {
