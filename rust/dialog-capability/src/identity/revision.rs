@@ -12,13 +12,10 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 
-use dialog_capability::Did;
+use crate::Did;
 
-use crate::Entity;
-use crate::history::{
-    Context, Edition, HistoryError, Origin, REVISION_RECORD_FORMAT, RevisionRecord, Version,
-    verify_issuer_signature,
-};
+use super::Entity;
+use crate::history::{Context, Edition, HistoryError, Origin, Version, verify_issuer_signature};
 
 /// The raw 32-byte Blake3 hash a [`TreeReference`] wraps. Kept as a
 /// bare array (not a wrapper type) so the wire form is a plain byte
@@ -273,34 +270,7 @@ impl Revision {
     /// onto which commit metadata can be associated, like on any other
     /// entity.
     pub fn entity(&self) -> Entity {
-        use crate::history::VersionExt as _;
         self.version().entity()
-    }
-
-    /// This revision's [`RevisionRecord`](crate::history::RevisionRecord) —
-    /// everything the revision states about itself as one atomic fact,
-    /// ready to be signed and written into the tree.
-    ///
-    /// The `authority` (the profile the issuer acts for) is passed in: the
-    /// head does not carry it — its identity is the branch entity plus the
-    /// issuer — but the record keeps the attribution readable. The
-    /// revision's tree root is deliberately not in the record: the record
-    /// lives in that tree, so the root cannot appear inside itself.
-    pub fn record(
-        &self,
-        authority: &Did,
-        parents: Vec<Version>,
-        skips: Vec<Version>,
-    ) -> RevisionRecord {
-        RevisionRecord {
-            format: REVISION_RECORD_FORMAT,
-            branch: self.branch.clone(),
-            issuer: self.issuer.to_string(),
-            authority: authority.to_string(),
-            parents,
-            skips,
-            signature: Vec::new(),
-        }
     }
 
     /// Verify that the signature is the issuer's Ed25519 signature over

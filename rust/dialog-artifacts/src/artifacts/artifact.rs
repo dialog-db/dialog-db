@@ -33,8 +33,8 @@ pub struct Artifact {
     pub the: Attribute,
     /// The [`Entity`] of the [`Artifact`]; the subject of the triple
     #[serde(
-        serialize_with = "crate::artifacts::entity::to_utf8",
-        deserialize_with = "crate::artifacts::entity::from_utf8"
+        serialize_with = "dialog_capability::identity::to_utf8",
+        deserialize_with = "dialog_capability::identity::from_utf8"
     )]
     pub of: Entity,
     /// The [`Value`] of the [`Artifact`]; the object of the triple

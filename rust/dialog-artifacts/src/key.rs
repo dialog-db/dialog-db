@@ -58,27 +58,8 @@ use crate::{
     selector::Constrained,
 };
 
-/// Helper macro for creating mutable slices from byte arrays at compile time.
-///
-/// Still used by the padded `[u8; N]` byte representations that [`Entity`] and
-/// [`Uri`](crate::Uri) carry alongside their string form.
-macro_rules! mutable_slice {
-    ( $array:expr, $index:expr, $run:expr ) => {{
-        const START: usize = $index;
-        const END: usize = $index + $run;
-        &mut $array[START..END]
-    }};
-}
-
-pub(crate) use mutable_slice;
-
 /// Length of the key tag field in bytes
 pub(crate) const TAG_LENGTH: usize = 1;
-/// Length of the padded entity byte representation carried by [`Entity`].
-///
-/// Keys no longer pad entities (they are lossless and variable-length); this
-/// width only sizes the legacy `[u8; ENTITY_LENGTH]` companion buffer.
-pub(crate) const ENTITY_LENGTH: usize = 64;
 /// Maximum attribute length in bytes (still capped for the dictionary column
 /// and for filler-based range bounds).
 pub(crate) const ATTRIBUTE_LENGTH: usize = 64;

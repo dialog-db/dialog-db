@@ -1,3 +1,5 @@
+pub use crate::Entity;
+
 mod artifact;
 pub use artifact::*;
 
@@ -35,9 +37,6 @@ pub use attribute::*;
 
 mod symbol;
 pub use symbol::*;
-
-mod entity;
-pub use entity::*;
 
 mod value;
 pub use value::*;

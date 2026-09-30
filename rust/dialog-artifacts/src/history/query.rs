@@ -7,7 +7,6 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use crate::Value;
-use crate::history::VersionExt as _;
 use crate::tree::ArtifactTreeExt as _;
 use crate::tree::{
     ArtifactNodeCache, ArtifactTree, SPILL_LOOKAHEAD, SpillCache, TreeStorageBridge,

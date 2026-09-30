@@ -1119,6 +1119,7 @@ dependencies = [
  "dialog-macros",
  "dialog-varsig",
  "ed25519-dalek",
+ "rand 0.8.5",
  "rkyv",
  "serde",
  "serde-big-array",
@@ -1129,6 +1130,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
 ]
 
