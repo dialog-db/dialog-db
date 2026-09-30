@@ -43,9 +43,9 @@ use rkyv::{
 
 use crate::{
     Accessor, ArchivedNodeBody, Buffer, Cache, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Distribution, Entry, Geometric, Key, Manifest, Node, NoveltyEntry,
-    NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientRootParts, TransientSegment,
-    TransientTree, Value, link_bounds,
+    DialogSearchTreeError, Distribution, Entry, Geometric, Key, Manifest, Node, NodeCache,
+    NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientRootParts,
+    TransientSegment, TransientTree, Value, link_bounds,
 };
 
 /// The default per-node novelty capacity.
@@ -228,7 +228,7 @@ where
     D: Distribution,
 {
     root: HitchhikerRoot<Key, Value>,
-    cache: Cache<Blake3Hash, Buffer>,
+    cache: NodeCache<Key, Value>,
     op_buf_size: usize,
     op_buf_bytes: usize,
     policy: FlushPolicy,
@@ -948,8 +948,7 @@ where
                 // query descent) otherwise misses, re-fetches the bytes
                 // from storage, and pays a full blake3 re-verification of
                 // a frame this process just hashed.
-                self.cache
-                    .insert(node.hash().clone(), node.buffer().clone());
+                self.cache.insert(node.hash().clone(), node.clone());
                 Ok(node.hash().clone())
             }
         }
@@ -974,8 +973,7 @@ where
                 let node = node.persist_mut(delta, &manifest)?;
                 // Same cache seeding as `persist`: the frame this commit
                 // just produced is what the next read resolves the root to.
-                self.cache
-                    .insert(node.hash().clone(), node.buffer().clone());
+                self.cache.insert(node.hash().clone(), node.clone());
                 Ok(node.hash().clone())
             }
         }
@@ -1015,7 +1013,7 @@ fn enqueue<'a, Key, Value, D, Backend>(
     msgs: Vec<NoveltyEntry<Value>>,
     config: EnqueueConfig,
     deferred: &'a mut Vec<NoveltyEntry<Value>>,
-    accessor: &'a Accessor<Backend>,
+    accessor: &'a Accessor<Key, Value, Backend>,
 ) -> NodeFuture<'a, Key, Value>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1166,7 +1164,7 @@ where
 /// form, loading it from storage; a transient child is left untouched.
 async fn lift_child<Key, Value, Backend>(
     child: &mut Node<Key, Value>,
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1408,7 +1406,7 @@ where
 /// subtrees that need rewriting, leaving every clean subtree's hash untouched.
 fn subtree_has_novelty<'a, Key, Value, Backend>(
     hash: &'a Blake3Hash,
-    accessor: &'a Accessor<Backend>,
+    accessor: &'a Accessor<Key, Value, Backend>,
 ) -> BoolFuture<'a>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1456,7 +1454,7 @@ where
 fn drain_novelty<'a, Key, Value, Backend>(
     node: &'a mut TransientNode<Key, Value>,
     ops: &'a mut Vec<NoveltyEntry<Value>>,
-    accessor: &'a Accessor<Backend>,
+    accessor: &'a Accessor<Key, Value, Backend>,
 ) -> UnitFuture<'a>
 where
     Key: self::Key + ConditionalSync + 'static,

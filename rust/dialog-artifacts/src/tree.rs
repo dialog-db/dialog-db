@@ -30,7 +30,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, Manifest, PersistentTree, Value as TreeValue,
+    Buffer, ContentAddressedStorage, Delta, Manifest, NodeCache, PersistentTree, Value as TreeValue,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
@@ -60,6 +60,10 @@ pub mod distribution;
 /// Keys are the raw variable-length bytes of [`Key`]; values are [`State`]
 /// payloads stored in the tree's native (rkyv) encoding.
 pub type ArtifactTree = PersistentTree<Key, State<Datum>>;
+
+/// The node cache an [`ArtifactTree`] reads through: nodes by content hash,
+/// already checked.
+pub type ArtifactNodeCache = NodeCache<Key, State<Datum>>;
 
 // Deletion is no longer resolved at the slot: it travels as a history
 // record and is applied to the active indexes by the observed-remove

@@ -16,9 +16,9 @@
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
     DialogSearchTreeError, Differential, Distribution, Entry, Geometric, IndexPieceOrigin, Key,
-    Link, Manifest, Node, Novelty, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree,
-    PieceOrigin, Rank, TransientIndex, TransientNode, TransientSegment, TreeWalker, Value,
-    link_bounds, regroup_children, regroup_children_reusing, regroup_entries,
+    Link, Manifest, Node, NodeCache, Novelty, NoveltyEntry, NoveltyOp, PersistentNode,
+    PersistentTree, PieceOrigin, Rank, TransientIndex, TransientNode, TransientSegment, TreeWalker,
+    Value, link_bounds, regroup_children, regroup_children_reusing, regroup_entries,
     regroup_entries_reusing,
 };
 use async_stream::try_stream;
@@ -68,10 +68,6 @@ const OPEN_WIDTH: usize = 32;
 /// more overlap; the bound keeps a pass from running away on a tall tree.
 const OPEN_LEVELS: usize = 4;
 
-/// Stored nodes an integration has decoded while following its pending
-/// changes' paths, by hash (see [`TransientTree::integrate`]).
-type Opened<Key, Value> = HashMap<Blake3Hash, PersistentNode<Key, Value>>;
-
 /// The root of a [`TransientTree`].
 ///
 /// An unedited root is just that hash (possibly `NULL_BLAKE3_HASH` for an
@@ -115,7 +111,7 @@ where
     /// only by the first edit that descends into it, so opening neither awaits
     /// nor touches storage.
     root: TransientRoot<Key, Value>,
-    cache: Cache<Blake3Hash, Buffer>,
+    cache: NodeCache<Key, Value>,
     /// The tree's format header, stamped into every node this batch persists
     /// and read by the boundary coin during reshaping. Every node in a tree
     /// carries the same manifest.
@@ -155,7 +151,7 @@ where
     /// [`with_manifest`](Self::with_manifest), or the
     /// [`PersistentTree::edit_with_manifest`] that feeds it, to preserve a
     /// non-default tree's format.
-    pub fn new(root: Blake3Hash, cache: Cache<Blake3Hash, Buffer>) -> Self {
+    pub fn new(root: Blake3Hash, cache: NodeCache<Key, Value>) -> Self {
         Self::with_manifest(root, cache, Manifest::default())
     }
 
@@ -168,7 +164,7 @@ where
     /// reads it from the root for exactly this reason.
     pub fn with_manifest(
         root: Blake3Hash,
-        cache: Cache<Blake3Hash, Buffer>,
+        cache: NodeCache<Key, Value>,
         manifest: Manifest,
     ) -> Self {
         Self {
@@ -191,7 +187,7 @@ where
     /// born empty has no stored header and passes the default.
     pub(crate) fn from_loaded(
         node: TransientNode<Key, Value>,
-        cache: Cache<Blake3Hash, Buffer>,
+        cache: NodeCache<Key, Value>,
         manifest: Manifest,
     ) -> Self {
         Self {
@@ -224,7 +220,7 @@ where
     /// the root's manifest, so the root check covers the tree.
     async fn load<Backend>(
         root: TransientRoot<Key, Value>,
-        accessor: &Accessor<Backend>,
+        accessor: &Accessor<Key, Value, Backend>,
         manifest: &Manifest,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
@@ -628,11 +624,6 @@ where
         futures_util::pin_mut!(changes);
         let mut pending: VecDeque<Change<Key, Value>> = VecDeque::new();
         let mut exhausted = false;
-        // Stored nodes decoded while following pending paths, by hash.
-        // Nodes are immutable, so a decode (and its validation) is paid
-        // once per node for the whole integration rather than once per
-        // key that routes through it.
-        let mut opened: Opened<Key, Value> = HashMap::new();
         loop {
             while !exhausted && pending.len() < OPEN_LOOKAHEAD {
                 match changes.next().await {
@@ -651,7 +642,7 @@ where
             // the window is worth opening: its miss and every other
             // pending miss go out together, rather than one round trip
             // at a time as each change reaches its own.
-            if let Some(first) = self.unopened_on_path(change.key(), &mut opened) {
+            if let Some(first) = self.unopened_on_path(change.key()) {
                 // Widen the window until it names enough distinct nodes
                 // to be worth a round trip, the changes run out, or the
                 // window hits its ceiling. Nothing is read meanwhile, so
@@ -661,7 +652,7 @@ where
                 let mut routed = 0;
                 loop {
                     for change in pending.iter().skip(routed) {
-                        if let Some(stop) = self.unopened_on_path(change.key(), &mut opened) {
+                        if let Some(stop) = self.unopened_on_path(change.key()) {
                             stops.insert(stop);
                         }
                     }
@@ -681,12 +672,8 @@ where
                         }
                     }
                 }
-                self.open_pending(
-                    std::iter::once(&change).chain(pending.iter()),
-                    storage,
-                    &mut opened,
-                )
-                .await;
+                self.open_pending(std::iter::once(&change).chain(pending.iter()), storage)
+                    .await;
             }
 
             match change {
@@ -830,7 +817,6 @@ where
         &self,
         changes: Changes,
         storage: &ContentAddressedStorage<Backend>,
-        opened: &mut Opened<Key, Value>,
     ) where
         Key: 'changes,
         Value: 'changes,
@@ -863,7 +849,7 @@ where
             waiting.push(at);
         };
         for (at, key) in keys.iter().enumerate() {
-            if let Some(hash) = self.unopened_on_path(key, opened) {
+            if let Some(hash) = self.unopened_on_path(key) {
                 stop_at(at, hash, &mut stopped, &mut queue);
             }
         }
@@ -893,7 +879,7 @@ where
                 if depth[at] >= OPEN_LEVELS {
                     continue;
                 }
-                if let Some(next) = self.unopened_on_path(keys[at], opened) {
+                if let Some(next) = self.unopened_on_path(keys[at]) {
                     stop_at(at, next, &mut stopped, &mut queue);
                 }
             }
@@ -906,10 +892,10 @@ where
     /// Follows exactly the route an edit takes -- the transient spine by
     /// `child_for`, then stored nodes by their own routing -- and reads no
     /// storage, so it can never name a node the descent would not read.
-    fn unopened_on_path(&self, key: &Key, opened: &mut Opened<Key, Value>) -> Option<Blake3Hash> {
+    fn unopened_on_path(&self, key: &Key) -> Option<Blake3Hash> {
         let mut node = match &self.root {
             TransientRoot::Unloaded(hash) => {
-                return self.unopened_below(hash.clone(), key, opened);
+                return self.unopened_below(hash.clone(), key);
             }
             TransientRoot::Loaded(node) => node,
         };
@@ -920,7 +906,7 @@ where
                     let at = child_for::<Key, Value>(&index.children, key).ok()?;
                     match &index.children[at] {
                         Node::Persistent(link) => {
-                            return self.unopened_below(link.node.clone(), key, opened);
+                            return self.unopened_below(link.node.clone(), key);
                         }
                         Node::Transient(child) => node = child,
                     }
@@ -936,27 +922,12 @@ where
     /// cached through to its leaf.
     ///
     /// Presence is the cache's word (a node the cache dropped is a node the
-    /// descent reads again); decoding is memoized in `opened`, so a node
-    /// that many keys route through is validated once.
-    fn unopened_below(
-        &self,
-        hash: Blake3Hash,
-        key: &Key,
-        opened: &mut Opened<Key, Value>,
-    ) -> Option<Blake3Hash> {
+    /// descent reads again), and a cached node was checked as it entered.
+    fn unopened_below(&self, hash: Blake3Hash, key: &Key) -> Option<Blake3Hash> {
         let mut hash = hash;
         loop {
-            let Some(buffer) = self.cache.get_cached(&hash) else {
+            let Some(node) = self.cache.get_cached(&hash) else {
                 return Some(hash);
-            };
-            let node = match opened.entry(hash.clone()) {
-                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let Ok(node) = PersistentNode::<Key, Value>::try_from(buffer) else {
-                        return Some(hash);
-                    };
-                    entry.insert(node)
-                }
             };
             match node.body() {
                 crate::ArchivedNodeBody::Index(index) => {
@@ -1284,7 +1255,7 @@ where
     async fn apply<Backend, D>(
         self,
         mut root: TransientNode<Key, Value>,
-        accessor: &Accessor<Backend>,
+        accessor: &Accessor<Key, Value, Backend>,
         manifest: &Manifest,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
@@ -2093,7 +2064,7 @@ async fn merge_forced_index_runs<Key, Value, D, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
     co_paths: &mut [&mut Vec<usize>],
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
     manifest: &Manifest,
 ) -> Result<(bool, Vec<(usize, Vec<IndexPieceOrigin>)>), DialogSearchTreeError>
 where
@@ -2293,7 +2264,7 @@ async fn forced_run_quiet<Key, Value, Backend, D>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
     edit: &Edit<Key, Value>,
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
     manifest: &Manifest,
 ) -> Result<RunVerdict, DialogSearchTreeError>
 where
@@ -2519,7 +2490,7 @@ async fn streamed_run_quiet<Key, Value, Backend, D>(
     lo: usize,
     hi: usize,
     edit: &Edit<Key, Value>,
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
     manifest: &Manifest,
 ) -> Result<bool, DialogSearchTreeError>
 where
@@ -2673,7 +2644,7 @@ async fn compressed_run_quiet<Key, Value, Backend, D>(
     lo: usize,
     hi: usize,
     edit: &Edit<Key, Value>,
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
     manifest: &Manifest,
 ) -> Result<Option<bool>, DialogSearchTreeError>
 where
@@ -2919,7 +2890,7 @@ async fn merge_forced_run<Key, Value, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
     co_paths: &mut [&mut Vec<usize>],
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
     manifest: &Manifest,
 ) -> Result<Option<Vec<PieceOrigin>>, DialogSearchTreeError>
 where
@@ -3105,7 +3076,7 @@ fn follow<'a, Key, Value>(
 /// still a persistent reference.
 async fn lift<Key, Value, Backend>(
     node: &mut Node<Key, Value>,
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,
@@ -3142,7 +3113,7 @@ where
 async fn lift_right_neighbor_spine<Key, Value, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -3208,7 +3179,7 @@ where
 async fn lift_left_neighbor_spine<Key, Value, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -3935,7 +3906,7 @@ async fn seal_root<Key, Value, D, Backend>(
     mut replacement: Vec<Node<Key, Value>>,
     height: Rank,
     manifest: &Manifest,
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
 ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -4070,7 +4041,7 @@ enum Trim {
 async fn carve<Key, Value, Backend>(
     root: Blake3Hash,
     range: &RangeInclusive<Key>,
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
 ) -> Result<Option<(TransientNode<Key, Value>, Rank, Trim)>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -4325,7 +4296,7 @@ fn lifted_child<Key, Value>(
 async fn lift_boundary_spine<Key, Value, Backend>(
     root: &mut TransientNode<Key, Value>,
     leftmost: bool,
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<Key, Value, Backend>,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,

@@ -23,6 +23,11 @@ pub struct Authority {
     profile: Signer,
     operator: Signer,
     account: Option<Did>,
+    /// The two signers' DIDs, derived once: rendering a key as a
+    /// `did:key` base58-encodes it, and every query identifies its
+    /// operator, while the signers never change.
+    profile_did: Did,
+    operator_did: Did,
 }
 
 impl Authority {
@@ -32,10 +37,14 @@ impl Authority {
         profile: impl Into<Signer>,
         operator: impl Into<Signer>,
     ) -> Self {
+        let profile: Signer = profile.into();
+        let operator: Signer = operator.into();
         Self {
             name: name.into(),
-            profile: profile.into(),
-            operator: operator.into(),
+            profile_did: Principal::did(&profile),
+            operator_did: Principal::did(&operator),
+            profile,
+            operator,
             account: None,
         }
     }
@@ -53,12 +62,12 @@ impl Authority {
 
     /// Get the profile DID.
     pub fn profile_did(&self) -> Did {
-        Principal::did(&self.profile)
+        self.profile_did.clone()
     }
 
     /// Get the operator DID.
     pub fn operator_did(&self) -> Did {
-        Principal::did(&self.operator)
+        self.operator_did.clone()
     }
 
     /// Get the account DID, if configured.

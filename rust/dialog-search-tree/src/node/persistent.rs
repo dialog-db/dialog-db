@@ -98,19 +98,34 @@ impl DecodedKeys {
 ///
 /// Validity is a type invariant: a `PersistentNode` can only be constructed
 /// through one of two [`TryFrom`] conversions. [`TryFrom<Buffer>`] runs full
-/// archive validation on untrusted bytes (storage, cache, the network).
+/// archive validation on untrusted bytes (storage, the network).
 /// [`TryFrom<&PersistentNodeBody<Value>>`] serializes a body this crate built,
 /// which is valid by construction and needs no revalidation. No unsafe
 /// constructor exists, and a [`PersistentNodeBody`] cannot itself be built from
 /// raw bytes, only from typed data. Either way the buffer is a valid archive of
 /// exactly `ArchivedNodeBody<Value>`, so [`body`](Self::body) is infallible and
 /// costs a pointer cast rather than a bytecheck pass per access.
-#[derive(Clone, Debug)]
+///
+/// The key and value types are markers only, so a node is `Send` and `Sync`
+/// exactly when its buffer is, whatever the types it is read as. That lets
+/// a [`NodeCache`](crate::NodeCache) share checked nodes across threads.
+#[derive(Debug)]
 pub struct PersistentNode<Key, Value> {
-    key: PhantomData<Key>,
-    value: PhantomData<Value>,
+    key: PhantomData<fn() -> Key>,
+    value: PhantomData<fn() -> Value>,
 
     buffer: Buffer,
+}
+
+// Manual impl: a clone shares the buffer, whatever the marker types are.
+impl<Key, Value> Clone for PersistentNode<Key, Value> {
+    fn clone(&self) -> Self {
+        Self {
+            key: PhantomData,
+            value: PhantomData,
+            buffer: self.buffer.clone(),
+        }
+    }
 }
 
 impl<Key, Value> PersistentNode<Key, Value>
@@ -278,8 +293,8 @@ where
     }
 }
 
-/// Builds a node from a buffer of untrusted bytes (storage, cache, the
-/// network), validating that it archives as `ArchivedNodeBody<Value>`. This
+/// Builds a node from a buffer of untrusted bytes (storage, the network),
+/// validating that it archives as `ArchivedNodeBody<Value>`. This
 /// is the only validation the node ever runs; it establishes the invariant
 /// that [`body`](PersistentNode::body) relies on for the node and all its
 /// clones.
