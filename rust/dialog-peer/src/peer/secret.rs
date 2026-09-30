@@ -46,6 +46,10 @@
 
 use core::fmt::{self, Debug, Display};
 
+mod held;
+
+pub use held::{HeldHandOver, HeldReference, HeldRevoke, HeldShare};
+
 use super::space::SPACE_KEY;
 use super::{Local, Mode, Peer, PeerSpace};
 use dialog_capability::access::{Access, Prove, Retain};
@@ -858,76 +862,41 @@ async fn moved<S: PeerSpace>(
     Ok(())
 }
 
-/// Forget the copies the members `without` keep for themselves of the key
-/// of each principal held for `old`. A copy already opened elsewhere stands,
-/// as a delegation the member copied does.
+/// Revoke each principal held for `old` from the members `without`: the
+/// copies they keep for themselves of its key are forgotten. A copy already
+/// opened elsewhere stands, as a delegation the member copied does.
 async fn unheld<S: PeerSpace>(
     branch: &Branch,
     old: &Vault,
     without: &[Did],
     peer: &Peer<S, Local>,
 ) -> Result<(), CredentialError> {
-    for (principal, _) in secrets::held_by(branch, &old.did, peer)
+    for (principal, held) in secrets::held_by(branch, &old.did, peer)
         .await
         .map_err(unavailable)?
     {
+        let held = held::Held::revealed(old, &principal, &held).await?;
         for member in without {
-            secrets::revoke(branch, &principal, member, peer)
-                .await
-                .map_err(unavailable)?;
+            held::revoke(branch, &held, member, peer).await?;
         }
     }
     Ok(())
 }
 
-/// Hold every principal's key held sealed to `old` sealed to `new`
-/// instead, and have each re-issue its authority to `new`.
+/// Hand every principal held for `old` over to `new`: its key held sealed
+/// to `new` instead, and its authority delegated to `new`.
 async fn rehold<S: PeerSpace>(
     branch: &Branch,
     old: &Vault,
     new: &Did,
     peer: &Peer<S, Local>,
 ) -> Result<(), CredentialError> {
-    let opener = old.key().await?;
     for (principal, held) in secrets::held_by(branch, &old.did, peer)
         .await
         .map_err(unavailable)?
     {
-        let context = held_context(&held.kind);
-        let seed = opener
-            .secret(context)
-            .reveal(&SealedSecret::from_bytes(&held.sealed).map_err(unopened)?)
-            .await
-            .map_err(unopened)?;
-        let seed: [u8; 32] = seed
-            .try_into()
-            .map_err(|_| unopened(format!("the key held for {principal} is not a key")))?;
-        let signer = Ed25519Signer::import(&seed).await.map_err(unavailable)?;
-        if signer.did() != principal {
-            return Err(unopened(format!(
-                "the key held for {principal} is not its key"
-            )));
-        }
-        let sealed = sealable(new)?
-            .secret(context)
-            .conceal(&seed)
-            .await
-            .map_err(unavailable)?;
-        secrets::hold_principal(
-            branch,
-            &principal,
-            &held.kind,
-            secrets::sealed_message(new, sealed.to_bytes()),
-            peer,
-        )
-        .await
-        .map_err(unavailable)?;
-        reissue(&signer, new, peer).await?;
-        for delegation in peer.issued_by(&principal).await.map_err(unavailable)? {
-            if delegation.chain().audience() == &old.did {
-                peer.retract(delegation).await.map_err(unavailable)?;
-            }
-        }
+        let held = held::Held::revealed(old, &principal, &held).await?;
+        held::hand_over(branch, &held, new, peer).await?;
     }
     Ok(())
 }
@@ -937,11 +906,11 @@ async fn rehold<S: PeerSpace>(
 /// principal that holds no grant is its own authority, as a space is, and
 /// delegates itself. One that holds grants, as an invite does, delegates
 /// each on with the chain proving it: space → … → invite → owner.
-async fn reissue<S: PeerSpace>(
+async fn reissue<S: PeerSpace, M: Mode>(
     signer: &Ed25519Signer,
     owner: &Did,
-    peer: &Peer<S, Local>,
-) -> Result<(), CredentialError> {
+    peer: &Peer<S, M>,
+) -> Result<Vec<UcanDelegation>, CredentialError> {
     let principal = signer.did();
     let grants = peer.issued_to(&principal).await.map_err(unavailable)?;
     if grants.is_empty() {
@@ -953,8 +922,9 @@ async fn reissue<S: PeerSpace>(
             .try_build()
             .await
             .map_err(|error| unavailable(format!("{error:?}")))?;
-        return retain(peer, DelegationChain::new(delegation)).await;
+        return Ok(vec![retain(peer, DelegationChain::new(delegation)).await?]);
     }
+    let mut issued = Vec::new();
     for grant in grants {
         let granted = grant
             .chain()
@@ -998,9 +968,9 @@ async fn reissue<S: PeerSpace>(
         let chain = chain
             .push(link)
             .map_err(|error| unopened(format!("{error:?}")))?;
-        retain(peer, chain).await?;
+        issued.push(retain(peer, chain).await?);
     }
-    Ok(())
+    Ok(issued)
 }
 
 /// Have `new` delegate what `old` did, to all but those `without`, and
@@ -1041,17 +1011,19 @@ async fn redelegate<S: PeerSpace>(
     Ok(())
 }
 
-/// Retain `chain` where the peer proves from.
-async fn retain<S: PeerSpace>(
-    peer: &Peer<S, Local>,
+/// Retain `chain` where the peer proves from, yielding it.
+async fn retain<S: PeerSpace, M: Mode>(
+    peer: &Peer<S, M>,
     chain: DelegationChain,
-) -> Result<(), CredentialError> {
+) -> Result<UcanDelegation, CredentialError> {
+    let delegation = UcanDelegation::new(chain);
     Subject::from(peer.home().clone())
         .attenuate(Access)
-        .invoke(Retain::<Ucan>::new(UcanDelegation::new(chain)))
+        .invoke(Retain::<Ucan>::new(delegation.clone()))
         .perform(peer)
         .await
-        .map_err(unavailable)
+        .map_err(unavailable)?;
+    Ok(delegation)
 }
 
 /// Have a vault delegate to a principal.
@@ -1072,7 +1044,8 @@ impl Delegate {
             .try_build()
             .await
             .map_err(|error| unavailable(format!("{error:?}")))?;
-        retain(peer, DelegationChain::new(delegation)).await
+        retain(peer, DelegationChain::new(delegation)).await?;
+        Ok(())
     }
 }
 
@@ -1262,7 +1235,8 @@ impl<S: PeerSpace> Peer<S, Local> {
             .await
             .map_err(unavailable)?;
         let signer = Ed25519Signer::import(&seed).await.map_err(unavailable)?;
-        reissue(&signer, &account, self).await
+        reissue(&signer, &account, self).await?;
+        Ok(())
     }
 }
 
