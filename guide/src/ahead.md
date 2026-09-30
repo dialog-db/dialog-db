@@ -12,8 +12,6 @@ Dialog is experimental, and several of the pieces above are still moving. These 
 
 **Revocation.** Delegations can be revoked in UCAN, and Dialog's verifier asks about every link, but no revocation store is wired in yet. Until one is, a delegation lasts until its time window, if it has one, ends.
 
-**Old and new nodes side by side.** Trees that mix the old untagged layout with the tagged one are readable, but their roots depend on which paths have been rewritten. Replicas converge on content, and return to identical roots once every old path has been rewritten.
-
 ---
 
 This is the end of the guide. The design notes behind each chapter are in the [`notes`](https://github.com/dialog-db/dialog-db/tree/main/notes) directory of the repository, and the code is in [`rust`](https://github.com/dialog-db/dialog-db/tree/main/rust). If something here disagrees with the code, the code is right, and a pull request to this guide is welcome.
