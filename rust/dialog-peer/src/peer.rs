@@ -75,7 +75,7 @@ pub use mode::{Local, Mode, Session};
 pub use runtime::Runtime;
 pub use secret::{
     Add, Conceal, Delegate, ForgetSecret, HandOver, KeepSecret, OpenVault, Reveal, RevealSecret,
-    Rotate, SecretReference, SpaceKey, SpaceVaultExt, Vault, VaultReference,
+    Rotate, SecretReference, SpaceVaultExt, Vault, VaultReference,
 };
 pub use upgrade::{Step, StepBound, StepFuture, Upgraded};
 
