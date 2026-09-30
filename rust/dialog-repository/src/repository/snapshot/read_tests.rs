@@ -359,7 +359,7 @@ async fn it_injects_session_metadata() -> Result<()> {
         .select(Query::<schema::Replica> {
             this: replica.this.clone().into(),
             subject: Term::var("subject"),
-            profile: Term::var("profile"),
+            peer: Term::var("peer"),
         })
         .perform(&operator)
         .try_vec()

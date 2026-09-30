@@ -43,6 +43,7 @@ futures-util = { workspace = true }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, features = ["server", "tokio", "service"], optional = true }
 parking_lot = { workspace = true }
+percent-encoding = { workspace = true }
 s3s = { workspace = true, optional = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -53,7 +54,6 @@ tokio = { workspace = true, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 url = { workspace = true }
-percent-encoding = { workspace = true }
 pidlock = { workspace = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net", "io-util"] }

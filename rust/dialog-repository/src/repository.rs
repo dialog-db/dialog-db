@@ -1293,7 +1293,7 @@ mod tests {
                 .select(Query::<schema::Replica> {
                     this: expected.this.clone().into(),
                     subject: Term::var("subject"),
-                    profile: Term::var("profile"),
+                    peer: Term::var("peer"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1302,7 +1302,7 @@ mod tests {
             assert_eq!(results.len(), 1, "schema::Replica must auto-surface");
             assert_eq!(results[0].this, expected.this);
             assert_eq!(results[0].subject.0, branch.of().this());
-            assert_eq!(results[0].profile.0, profile.did().this());
+            assert_eq!(results[0].peer.0, profile.did().this());
             Ok(())
         }
 
@@ -1729,14 +1729,14 @@ mod tests {
                 .select(Query::<schema::Replica> {
                     this: branches[0].replica.0.clone().into(),
                     subject: Term::var("subject"),
-                    profile: Term::var("profile"),
+                    peer: Term::var("peer"),
                 })
                 .perform(&operator)
                 .try_vec()
                 .await?;
             assert_eq!(origins.len(), 1);
             assert_eq!(origins[0].subject.0, branch.of().this());
-            assert_eq!(origins[0].profile.0, profile.did().this());
+            assert_eq!(origins[0].peer.0, profile.did().this());
 
             // (3) What's my session (profile + operator DIDs)?
             let sessions: Vec<schema::Session> = branch
