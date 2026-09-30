@@ -647,6 +647,7 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         .publish()
         .perform(&operator_b)
         .await?;
+    let head = branch_b.revision();
     let misstated = branch_b
         .transaction()
         .assert(Asset::stored(*asset.hash(), asset.size() + 1))
@@ -654,7 +655,15 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         .publish()
         .perform(&operator_b)
         .await;
-    assert!(misstated.is_err(), "a misstated size is refused");
+    assert!(
+        matches!(
+            misstated,
+            Err(CommitError::Blob(BlobError::SizeMismatch { expected, held, .. }))
+                if expected == asset.size() + 1 && held == asset.size()
+        ),
+        "a misstated size is refused: {misstated:?}"
+    );
+    assert_eq!(branch_b.revision(), head, "the head does not move");
     let never_recorded = branch_b
         .transaction()
         .assert(unrecorded)
