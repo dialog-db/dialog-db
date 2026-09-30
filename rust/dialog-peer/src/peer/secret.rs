@@ -1208,16 +1208,6 @@ impl ForgetSecret {
 }
 
 impl<S: PeerSpace, M: Mode> Peer<S, M> {
-    /// The key of the space `space`, to sign as it.
-    pub fn space_key(&self, space: &Did) -> SpaceKey {
-        SpaceKey {
-            space: space.clone(),
-            via: None,
-        }
-    }
-}
-
-impl<S: PeerSpace, M: Mode> Peer<S, M> {
     /// Whether the peer this handle acts for keeps a copy of the key of
     /// the space `space`: it created or adopted the space, and has not
     /// been rotated out of its account since. A key held for the account
@@ -1273,73 +1263,6 @@ impl<S: PeerSpace> Peer<S, Local> {
             .map_err(unavailable)?;
         let signer = Ed25519Signer::import(&seed).await.map_err(unavailable)?;
         reissue(&signer, &account, self).await
-    }
-}
-
-/// Open the key of a space, or of another principal the peer holds for
-/// its account, such as an invite's. Created by [`Peer::space_key`].
-pub struct SpaceKey {
-    space: Did,
-    via: Option<SignerCredential>,
-}
-
-impl SpaceKey {
-    /// Open it through the account, whose vault `custodian` guards, when
-    /// the peer holds no copy of its own.
-    pub fn via(mut self, custodian: &SignerCredential) -> Self {
-        self.via = Some(custodian.clone());
-        self
-    }
-
-    /// Open the key: through the copy the peer kept of a space it created
-    /// or adopted, or through the copy held for the account, opened with
-    /// the account's key its custodian reaches.
-    pub async fn perform<S: PeerSpace, M: Mode>(
-        self,
-        peer: &Peer<S, M>,
-    ) -> Result<Ed25519Signer, CredentialError> {
-        let SpaceKey { space, via } = self;
-        let branch = opened(&BranchReference::from(peer.state()), peer).await?;
-        match copy(&branch, &space, peer.credential(), peer).await? {
-            Some(VaultKey::Seed(seed)) => {
-                return Ed25519Signer::import(&seed).await.map_err(unavailable);
-            }
-            Some(VaultKey::Held(key)) => return Ok(*key),
-            None => {}
-        }
-        let Some(custodian) = via else {
-            return Err(CredentialError::Withheld(format!(
-                "{} holds no key of {space}",
-                peer.did()
-            )));
-        };
-        let held = secrets::held_principal(&branch, &space, peer)
-            .await
-            .map_err(unavailable)?
-            .ok_or_else(|| CredentialError::NotFound(format!("no key held for {space}")))?;
-        let account = branch
-            .vault(ACCOUNT)
-            .load()
-            .via(&custodian)
-            .perform(peer)
-            .await?;
-        if held.to != account.did {
-            return Err(CredentialError::Withheld(format!(
-                "the key of {space} is held for {}, not the account",
-                held.to
-            )));
-        }
-        let seed = account
-            .key()
-            .await?
-            .secret(held_context(&held.kind))
-            .reveal(&SealedSecret::from_bytes(&held.sealed).map_err(unopened)?)
-            .await
-            .map_err(unopened)?;
-        let seed: [u8; 32] = seed
-            .try_into()
-            .map_err(|_| unopened(format!("the key held for {space} is not a key")))?;
-        Ed25519Signer::import(&seed).await.map_err(unavailable)
     }
 }
 
@@ -1514,7 +1437,7 @@ mod tests {
     use dialog_effects::credential::{CredentialError, Secret};
     use dialog_effects::storage::Location;
     use dialog_identity::OpenCredential;
-    use dialog_repository::{BranchReference, Repository, RepositoryExt as _, secrets};
+    use dialog_repository::{BranchReference, Repository, RepositoryExt as _, secrets, spaces};
     use dialog_storage::Flaky;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_storage::provider::{Space, Volatile};
@@ -1901,10 +1824,9 @@ mod tests {
         Ok(())
     }
 
-    /// A peer removed from the account no longer opens a space it
-    /// created through the copy it kept: rotating without it forgets the
-    /// copy, and the space opens only through the account, which the
-    /// custodian still guards.
+    /// A peer removed from the account no longer keeps a copy of the key
+    /// of a space it created: rotating without it forgets the copy, and
+    /// the key is held for the rotated account.
     #[dialog_common::test]
     async fn it_forgets_a_removed_peers_copy_of_a_space_key() -> anyhow::Result<()> {
         let peer = test_peer().await;
@@ -1914,9 +1836,10 @@ mod tests {
             .create()
             .perform(&peer)
             .await?;
-        assert_eq!(
-            peer.space_key(&created.did()).perform(&peer).await?.did(),
-            created.did()
+        assert!(
+            !secrets::keys_of(peer.state(), &created.did(), &peer.did(), &peer)
+                .await?
+                .is_empty()
         );
         let account = peer
             .state()
@@ -1928,19 +1851,18 @@ mod tests {
 
         account.rotate().without(peer.did()).perform(&peer).await?;
 
-        let refused = peer.space_key(&created.did()).perform(&peer).await;
         assert!(
-            matches!(refused, Err(CredentialError::Withheld(_))),
-            "{refused:?}"
-        );
-        assert_eq!(
-            peer.space_key(&created.did())
-                .via(&custodian)
-                .perform(&peer)
+            secrets::keys_of(peer.state(), &created.did(), &peer.did(), &peer)
                 .await?
-                .did(),
-            created.did()
+                .is_empty(),
+            "the removed peer's copy is forgotten"
         );
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space's key is held");
+        assert_eq!(held.kind, spaces::SPACE);
+        assert_eq!(held.to, peer.authority().await?);
+        assert_ne!(held.to, *account.did(), "held for the rotated account");
         Ok(())
     }
 
@@ -2010,14 +1932,11 @@ mod tests {
             matches!(refused, Err(CredentialError::Withheld(_))),
             "{refused:?}"
         );
-        assert_eq!(
-            peer.space_key(&created.did())
-                .via(&custodian)
-                .perform(&peer)
-                .await?
-                .did(),
-            created.did()
-        );
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space's key is held");
+        assert_eq!(held.kind, spaces::SPACE);
+        assert_eq!(held.to, *account.did());
         let audiences: Vec<_> = peer
             .issued_by(account.did())
             .await?

@@ -888,14 +888,11 @@ mod tests {
             matches!(sealed, Err(CredentialError::Withheld(_))),
             "the owner's key is sealed to no one else: {sealed:?}"
         );
-        assert_eq!(
-            peer.space_key(&created.did())
-                .via(&owner)
-                .perform(&peer)
-                .await?
-                .did(),
-            created.did()
-        );
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space's key is held");
+        assert_eq!(held.kind, spaces::SPACE);
+        assert_eq!(held.to, owner.did());
 
         let scope = Scope {
             subject: UcanSubject::Specific(created.did()),
@@ -957,9 +954,8 @@ mod tests {
     }
 
     /// The peer that creates a space keeps its own copy of the space's
-    /// key and signs as it without the account's key. Another peer of the
-    /// same account holds no copy, and opens the key only through the
-    /// account, which its custodian guards.
+    /// key, the key is held sealed to the account, and the space delegates
+    /// to the account. Another peer of the same account keeps no copy.
     #[dialog_common::test]
     async fn it_keeps_a_copy_of_a_created_spaces_key_for_its_peer() -> anyhow::Result<()> {
         let storage = test_storage().await;
@@ -972,10 +968,25 @@ mod tests {
             .create()
             .perform(&peer)
             .await?;
-        assert_eq!(
-            peer.space_key(&created.did()).perform(&peer).await?.did(),
-            created.did()
+        assert!(
+            !secrets::keys_of(peer.state(), &created.did(), &peer.did(), &peer)
+                .await?
+                .is_empty(),
+            "the creator keeps a copy"
         );
+        let account = peer.authority().await?;
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space's key is held");
+        assert_eq!(held.kind, spaces::SPACE);
+        assert_eq!(held.to, account);
+        let audiences: Vec<_> = peer
+            .issued_by(&created.did())
+            .await?
+            .into_iter()
+            .map(|delegation| delegation.chain().audience().clone())
+            .collect();
+        assert!(audiences.contains(&account), "{audiences:?}");
 
         let other = OpenCredential::open(unique_name("bob"))
             .perform(&test_credential_store())
@@ -985,20 +996,11 @@ mod tests {
             .with(storage.clone())
             .grant(test_grant().await)
             .await?;
-        let refused = other.space_key(&created.did()).perform(&other).await;
         assert!(
-            matches!(refused, Err(CredentialError::Withheld(_))),
-            "{refused:?}"
-        );
-        let custodian = test_custodian(&peer).await?;
-        assert_eq!(
-            other
-                .space_key(&created.did())
-                .via(&custodian)
-                .perform(&other)
+            secrets::keys_of(other.state(), &created.did(), &other.did(), &other)
                 .await?
-                .did(),
-            created.did()
+                .is_empty(),
+            "another peer of the account keeps no copy"
         );
         Ok(())
     }
@@ -1007,8 +1009,7 @@ mod tests {
     /// a space it created, as does a session of it, and not for one it
     /// never made or one another peer created over the same records.
     /// Rotating the account without the peer forgets the copy, and the
-    /// key held for the account, which the custodian still opens, does
-    /// not count.
+    /// key held for the rotated account does not count.
     #[dialog_common::test]
     async fn it_says_whether_it_holds_a_spaces_key() -> anyhow::Result<()> {
         let storage = test_storage().await;
@@ -1057,14 +1058,11 @@ mod tests {
             .await?;
         account.rotate().without(peer.did()).perform(&peer).await?;
         assert!(!peer.holds_key(&created.did()).await?);
-        assert_eq!(
-            peer.space_key(&created.did())
-                .via(&custodian)
-                .perform(&peer)
-                .await?
-                .did(),
-            created.did()
-        );
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space's key is held");
+        assert_eq!(held.kind, spaces::SPACE);
+        assert_eq!(held.to, peer.authority().await?);
         Ok(())
     }
 
