@@ -780,7 +780,7 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
 async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
     use dialog_capability::Provider;
     use dialog_common::{Blake3Hash, Buffer};
-    use dialog_search_tree::{DialogSearchTreeError, Load};
+    use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
     use futures_util::stream;
     use std::future::poll_fn;
     use std::sync::Arc;
@@ -820,8 +820,11 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<Load> for Gauge {
-        async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+    impl Provider<LoadBlock> for Gauge {
+        async fn execute(
+            &self,
+            LoadBlock { hash }: LoadBlock,
+        ) -> Result<Option<Buffer>, DialogSearchTreeError> {
             Ok(self.read(&hash).await)
         }
     }
@@ -829,7 +832,10 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Provider<LoadBlob> for Gauge {
-        async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
+        async fn execute(
+            &self,
+            LoadBlob { hash }: LoadBlob,
+        ) -> Result<Option<Buffer>, DialogArtifactsError> {
             Ok(self.read(&hash).await)
         }
     }

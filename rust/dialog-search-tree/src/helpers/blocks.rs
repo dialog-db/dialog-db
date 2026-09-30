@@ -8,7 +8,7 @@ use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer};
 use parking_lot::Mutex;
 
-use crate::{Delta, DialogSearchTreeError, Load, MemoryBlocks};
+use crate::{Delta, DialogSearchTreeError, LoadBlock, MemoryBlocks};
 
 /// [`MemoryBlocks`] that journal every load, in order, while journaling is
 /// on.
@@ -95,8 +95,11 @@ impl JournaledBlocks {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Load> for JournaledBlocks {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+impl Provider<LoadBlock> for JournaledBlocks {
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
         if self.journaling.load(Ordering::SeqCst) {
             self.loads.lock().push(hash.clone());
         }

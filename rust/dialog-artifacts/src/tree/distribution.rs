@@ -1,10 +1,10 @@
 //! Node-size capture for a persisted artifact tree.
 //!
-//! Walks a tree from its root hash through any raw block store and records
-//! every node's kind, height, byte size, slot count, and buffered novelty
-//! footprint. The point is measurement, not mutation: the walk reads node
+//! Walks a tree from its root hash through any environment that loads its
+//! blocks, and records every node's kind, height, byte size, slot count, and
+//! buffered novelty footprint. The point is measurement, not mutation: the walk reads node
 //! buffers exactly as a scan would, decodes nothing but structure, and
-//! leaves the store untouched.
+//! leaves the archive untouched.
 //!
 //! Novelty bytes are measured by re-encoding the index node's links with an
 //! empty buffer set (THE canonical byte form, see
@@ -14,7 +14,7 @@
 
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
-use dialog_search_tree::Load;
+use dialog_search_tree::LoadBlock;
 use std::env;
 
 use dialog_search_tree::{Manifest, PersistentNode, PersistentNodeBody};
@@ -76,20 +76,27 @@ pub struct NodeStat {
 /// by a tree. A tree with nothing persisted yields an empty capture: the
 /// all-zero root earlier versions stored for an empty tree, or the root an
 /// empty tree derives from its format before its first persist
-/// ([`ArtifactTree::empty`](super::ArtifactTree::empty)), which no store
-/// holds yet. The store is the same hash-to-block backend the tree persists
-/// into, so spilled value blocks and history records outside the tree are
-/// never touched.
-pub async fn capture<S>(root: &Blake3Hash, store: &S) -> Result<Vec<NodeStat>, DialogArtifactsError>
+/// ([`ArtifactTree::empty`](super::ArtifactTree::empty)), which no archive
+/// holds yet. Nodes load through `env` as [`LoadBlock`]s, verified against
+/// the hash asked for; spilled values and history records outside the tree
+/// are never touched.
+pub async fn capture<Env>(
+    root: &Blake3Hash,
+    env: &Env,
+) -> Result<Vec<NodeStat>, DialogArtifactsError>
 where
-    S: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
     if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {
         return Ok(Vec::new());
     }
     let unpersisted_empty = super::ArtifactTree::empty_root(&Manifest::default())?;
-    if root == unpersisted_empty.as_bytes() && store.execute(NodeHash::from(*root)).await?.is_none()
+    if root == unpersisted_empty.as_bytes()
+        && LoadBlock::new(NodeHash::from(*root))
+            .perform(env)
+            .await?
+            .is_none()
     {
         return Ok(Vec::new());
     }
@@ -99,9 +106,12 @@ where
     while !frontier.is_empty() {
         let mut next = Vec::new();
         for hash in &frontier {
-            let bytes = store.execute(NodeHash::from(*hash)).await?.ok_or_else(|| {
-                DialogArtifactsError::Tree(format!("tree node missing from store at depth {depth}"))
-            })?;
+            let bytes = LoadBlock::new(NodeHash::from(*hash))
+                .perform(env)
+                .await?
+                .ok_or_else(|| {
+                    DialogArtifactsError::Tree(format!("tree node missing at depth {depth}"))
+                })?;
             let size = bytes.as_ref().len();
             let node = PersistentNode::<Key, State<Datum>>::try_from(bytes)?;
             let stat = if let Ok(index) = node.as_index() {
@@ -336,9 +346,52 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::tree::ArtifactTree;
+    use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
+    use crate::{ArchiveDelta, Artifact, Entity, Instruction, Value};
 
     use dialog_search_tree::MemoryBlocks;
+    use futures_util::stream;
+
+    /// Persists a one-fact tree into `blocks` and returns its root.
+    async fn persist(blocks: &MemoryBlocks, name: &str) -> anyhow::Result<Blake3Hash> {
+        let mut tree = ArtifactTree::empty();
+        let mut delta = ArchiveDelta::zero();
+        tree.apply(
+            blocks,
+            &mut delta,
+            stream::iter(vec![Instruction::Assert(Artifact {
+                the: "profile/name".parse()?,
+                of: Entity::new()?,
+                is: Value::String(name.into()),
+                cause: None,
+            })]),
+        )
+        .await?;
+        delta.flush_into(blocks);
+        Ok(*tree.root().as_bytes())
+    }
+
+    /// A store that answers with a well-formed node that is not the one
+    /// asked for is refused: capture measures the tree it was asked about
+    /// or fails, never another tree's nodes.
+    #[dialog_common::test]
+    async fn it_refuses_a_node_that_is_not_the_one_asked_for() -> anyhow::Result<()> {
+        let blocks = MemoryBlocks::new();
+        let asked = persist(&blocks, "Alice").await?;
+        let other = persist(&blocks, "Bob").await?;
+        let impostor = blocks
+            .get(&NodeHash::from(other))
+            .expect("the other tree's root is stored");
+        blocks.corrupt(NodeHash::from(asked), impostor.as_ref().to_vec());
+
+        let captured = capture(&asked, &blocks).await;
+
+        assert!(
+            matches!(&captured, Err(DialogArtifactsError::Tree(message)) if message.contains("did not match")),
+            "a node that does not hash to the root must be refused, got {captured:?}"
+        );
+        Ok(())
+    }
 
     /// An empty tree has nothing persisted to measure, whichever root
     /// names it: the all-zero root earlier versions stored, or the root a

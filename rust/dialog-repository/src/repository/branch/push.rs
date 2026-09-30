@@ -768,26 +768,28 @@ where
         // reference) in the same store as the tree nodes. Local bytes ->
         // remote block put, mirroring the novel node upload.
         ShipmentRef::SpilledValue(reference) => {
-            let bytes =
-                match Provider::<LoadBlob>::execute(blob_store, NodeHash::from(reference)).await? {
-                    Some(bytes) => bytes,
-                    // Held by reference: not this replica's to ship. Sole
-                    // remote -> the target has it by attribution; otherwise
-                    // adjudicate.
-                    None => {
-                        if !sole_remote {
-                            ensure_block_on_target(
-                                NodeHash::from(reference),
-                                branch,
-                                remote,
-                                sources,
-                                env,
-                            )
-                            .await?;
-                        }
-                        return Ok(());
+            let bytes = match LoadBlob::new(NodeHash::from(reference))
+                .perform(blob_store)
+                .await?
+            {
+                Some(bytes) => bytes,
+                // Held by reference: not this replica's to ship. Sole
+                // remote -> the target has it by attribution; otherwise
+                // adjudicate.
+                None => {
+                    if !sole_remote {
+                        ensure_block_on_target(
+                            NodeHash::from(reference),
+                            branch,
+                            remote,
+                            sources,
+                            env,
+                        )
+                        .await?;
                     }
-                };
+                    return Ok(());
+                }
+            };
             remote_index.put(bytes).perform(env).await?;
             Ok(())
         }

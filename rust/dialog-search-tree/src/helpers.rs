@@ -56,8 +56,8 @@ mod blocks;
 pub use blocks::*;
 
 use crate::{
-    Delta, DialogSearchTreeError, Distribution, Key, Load, Manifest, MemoryBlocks, NodeBody,
-    PersistentNode, PersistentTree, Rank, Value, load,
+    Delta, DialogSearchTreeError, Distribution, Key, LoadBlock, Manifest, MemoryBlocks, NodeBody,
+    PersistentNode, PersistentTree, Rank, Value,
 };
 
 /// Traversal order for tree iteration.
@@ -150,7 +150,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + ConditionalSync;
+        Env: Provider<LoadBlock> + ConditionalSync;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -172,7 +172,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let root = self.stored_root().cloned();
 
@@ -211,11 +211,14 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
-    let buffer = load(storage, hash).await?.ok_or_else(|| {
-        DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
-    })?;
+    let buffer = LoadBlock::new(hash.clone())
+        .perform(storage)
+        .await?
+        .ok_or_else(|| {
+            DialogSearchTreeError::Node(format!("Block not found in storage: {hash}"))
+        })?;
     PersistentNode::try_from(buffer)
 }
 
@@ -499,10 +502,10 @@ impl ObservingBlocks {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Load> for ObservingBlocks {
+impl Provider<LoadBlock> for ObservingBlocks {
     async fn execute(
         &self,
-        hash: Blake3Hash,
+        LoadBlock { hash }: LoadBlock,
     ) -> Result<Option<dialog_common::Buffer>, DialogSearchTreeError> {
         self.reads
             .lock()

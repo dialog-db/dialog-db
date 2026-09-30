@@ -4,11 +4,11 @@ use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::archive::{ArchiveError, Get};
-use dialog_search_tree::{DialogSearchTreeError, Load};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 
 /// Local content-addressed index backed by archive capabilities.
 ///
-/// Loads a branch's tree nodes ([`Load`]) and spilled values ([`LoadBlob`])
+/// Loads a branch's tree nodes ([`LoadBlock`]) and spilled values ([`LoadBlob`])
 /// from one catalog of the local archive, performing `Get` against the
 /// environment it borrows. It never writes: a commit writes what its batch
 /// staged.
@@ -47,8 +47,10 @@ impl<Env> LocalIndex<'_, Env>
 where
     Env: Provider<Get> + ConditionalSync + 'static,
 {
-    /// The block stored under `hash` in the local archive, if any.
-    pub async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
+    /// The block stored under `hash` in the local archive, if any, as the
+    /// archive holds it: unverified. Readers outside the crate load through
+    /// [`LoadBlock`] or [`LoadBlob`], which check it.
+    pub(crate) async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
         Ok(self
             .catalog
             .clone()
@@ -62,11 +64,14 @@ where
 /// Tree nodes load from the local archive.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<Load> for LocalIndex<'_, Env>
+impl<Env> Provider<LoadBlock> for LocalIndex<'_, Env>
 where
     Env: Provider<Get> + ConditionalSync + 'static,
 {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
         self.load(&hash)
             .await
             .map_err(|error| DialogSearchTreeError::Storage(error.into()))
@@ -81,7 +86,10 @@ impl<Env> Provider<LoadBlob> for LocalIndex<'_, Env>
 where
     Env: Provider<Get> + ConditionalSync + 'static,
 {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
         Ok(self.load(&hash).await?)
     }
 }
@@ -116,8 +124,12 @@ mod tests {
         put(&env, &catalog, &block).await?;
 
         let index = LocalIndex::new(&env, catalog);
-        let node = Provider::<Load>::execute(&index, block.blake3_hash().clone()).await?;
-        let blob = Provider::<LoadBlob>::execute(&index, block.blake3_hash().clone()).await?;
+        let node = LoadBlock::new(block.blake3_hash().clone())
+            .perform(&index)
+            .await?;
+        let blob = LoadBlob::new(block.blake3_hash().clone())
+            .perform(&index)
+            .await?;
 
         assert_eq!(node, Some(block.clone()));
         assert_eq!(blob, Some(block));
@@ -130,7 +142,9 @@ mod tests {
         let index = LocalIndex::new(&env, test_catalog("index"));
 
         let missing = Buffer::from(b"never stored".to_vec());
-        let node = Provider::<Load>::execute(&index, missing.blake3_hash().clone()).await?;
+        let node = LoadBlock::new(missing.blake3_hash().clone())
+            .perform(&index)
+            .await?;
 
         assert!(node.is_none());
         Ok(())
@@ -144,14 +158,17 @@ mod tests {
 
         let other = LocalIndex::new(&env, test_catalog("b"));
         assert!(
-            Provider::<Load>::execute(&other, block.blake3_hash().clone())
+            LoadBlock::new(block.blake3_hash().clone())
+                .perform(&other)
                 .await?
                 .is_none()
         );
 
         let same = LocalIndex::new(&env, test_catalog("a"));
         assert_eq!(
-            Provider::<Load>::execute(&same, block.blake3_hash().clone()).await?,
+            LoadBlock::new(block.blake3_hash().clone())
+                .perform(&same)
+                .await?,
             Some(block)
         );
         Ok(())

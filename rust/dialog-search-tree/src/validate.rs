@@ -62,8 +62,8 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, DialogSearchTreeError, Distribution, Key, Load, NodeBody, NoveltyEntry, NoveltyOp,
-    PersistentNode, PersistentTree, TransientTree, Value, into_owned,
+    Accessor, DialogSearchTreeError, Distribution, Key, LoadBlock, NodeBody, NoveltyEntry,
+    NoveltyOp, PersistentNode, PersistentTree, TransientTree, Value, into_owned,
 };
 
 /// Renders a separator for a violation message: a bounded hex prefix, so
@@ -106,7 +106,7 @@ where
         storage: &Env,
     ) -> Result<Vec<String>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + Clone + ConditionalSync,
+        Env: Provider<LoadBlock> + Clone + ConditionalSync,
     {
         // An unpersisted empty tree has no stored form to validate; it is
         // trivially canonical.

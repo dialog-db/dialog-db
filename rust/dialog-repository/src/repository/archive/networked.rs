@@ -10,7 +10,7 @@ use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
-use dialog_search_tree::{DialogSearchTreeError, Load};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 use std::fmt::Display;
 
 pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
@@ -139,7 +139,9 @@ where
 {
     /// The block stored under `hash`: the local archive's copy, or else the
     /// tracked remote's, hydrated into the local archive as it is read.
-    pub async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
+    /// Unverified; readers outside the crate load through [`LoadBlock`] or
+    /// [`LoadBlob`], which check it.
+    pub(crate) async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
         if let Some(block) = self.local.load(hash).await? {
             return Ok(Some(block));
         }
@@ -182,11 +184,14 @@ where
 /// remote.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<Load> for NetworkedIndex<'_, Env>
+impl<Env> Provider<LoadBlock> for NetworkedIndex<'_, Env>
 where
     Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
         self.load(&hash)
             .await
             .map_err(|error| DialogSearchTreeError::Storage(error.into()))
@@ -201,7 +206,10 @@ impl<Env> Provider<LoadBlob> for NetworkedIndex<'_, Env>
 where
     Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
         Ok(self.load(&hash).await?)
     }
 }

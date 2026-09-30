@@ -23,7 +23,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
 use dialog_peer::helpers::{generate_data, test_session_with_peer};
 use dialog_peer::{Peer, Session};
-use dialog_search_tree::{DialogSearchTreeError, Load, Manifest};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest};
 use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use parking_lot::Mutex;
@@ -165,16 +165,16 @@ impl Clone for WithoutSpills<'_> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Load> for WithoutSpills<'_> {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        Provider::<Load>::execute(&self.0, hash).await
+impl Provider<LoadBlock> for WithoutSpills<'_> {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        load.perform(&self.0).await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<LoadBlob> for WithoutSpills<'_> {
-    async fn execute(&self, _hash: Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
+    async fn execute(&self, _: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
         Ok(None)
     }
 }

@@ -4,14 +4,16 @@
 //! own nodes (blocks) and the values too large to live in a key (blobs,
 //! spilled values). They share an address space, a BLAKE3 hash, but not a
 //! meaning, so they never share a path either. Nodes load through the tree's
-//! [`Load`]; spilled values load through [`LoadBlob`]. A batch stages what it
+//! [`LoadBlock`]; spilled values load through [`LoadBlob`]. A batch stages what it
 //! writes in an [`ArchiveDelta`] that keeps the two lanes apart, and its
 //! commit writes each lane where that lane belongs.
 
 use async_trait::async_trait;
 use dialog_capability::{Command, Provider};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
-use dialog_search_tree::{Delta, DialogSearchTreeError, Load, MemoryBlocks};
+use dialog_search_tree::{Delta, DialogSearchTreeError, MemoryBlocks};
+
+pub use dialog_search_tree::LoadBlock;
 
 use crate::DialogArtifactsError;
 #[cfg(test)]
@@ -19,39 +21,49 @@ use dialog_search_tree::helpers::ObservingBlocks;
 
 /// Command for loading a spilled value's bytes by the hash its key carries.
 ///
-/// The spilled-value counterpart of the tree's [`Load`]: the same hash, a
-/// different lane. `Ok(None)` means the provider cannot reach the blob.
-/// Readers check what they load against the hash they asked for, so a
-/// provider never has to be trusted to return the right bytes.
-pub struct LoadBlob;
+/// The spilled-value counterpart of the tree's [`LoadBlock`]: the same hash,
+/// a different lane. `Ok(None)` means the provider cannot reach the blob.
+/// [`perform`](Self::perform) checks the bytes against the hash asked for,
+/// so a provider never has to be trusted to return the right ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadBlob {
+    /// The content hash of the blob to load.
+    pub hash: Blake3Hash,
+}
+
+impl LoadBlob {
+    /// Load the blob stored under `hash`.
+    pub fn new(hash: Blake3Hash) -> Self {
+        Self { hash }
+    }
+
+    /// Perform this load against an env that can provide it, refusing bytes
+    /// that do not hash to the blob asked for.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Buffer>, DialogArtifactsError>
+    where
+        Env: Provider<LoadBlob> + ConditionalSync,
+    {
+        let hash = self.hash.clone();
+        match env.execute(self).await? {
+            Some(blob) if blob.blake3_hash() != &hash => Err(DialogArtifactsError::InvalidValue(
+                format!("spilled value {hash} does not hash to its reference"),
+            )),
+            loaded => Ok(loaded),
+        }
+    }
+}
 
 impl Command for LoadBlob {
-    type Input = Blake3Hash;
+    type Input = Self;
     type Output = Result<Option<Buffer>, DialogArtifactsError>;
 }
 
 /// An environment an artifact tree can be read from: it loads nodes and
 /// spilled values.
-pub trait ArchiveReader: Provider<Load> + Provider<LoadBlob> + ConditionalSync {}
+pub trait ArchiveReader: Provider<LoadBlock> + Provider<LoadBlob> + ConditionalSync {}
 
-impl<Env> ArchiveReader for Env where Env: Provider<Load> + Provider<LoadBlob> + ConditionalSync {}
-
-/// Loads the blob stored under `hash` through `env`, refusing bytes that do
-/// not hash to it.
-pub async fn load_blob<Env>(
-    env: &Env,
-    hash: &Blake3Hash,
-) -> Result<Option<Buffer>, DialogArtifactsError>
-where
-    Env: Provider<LoadBlob> + ConditionalSync,
-{
-    match env.execute(hash.clone()).await? {
-        Some(blob) if blob.blake3_hash() != hash => Err(DialogArtifactsError::InvalidValue(
-            format!("spilled value {hash} does not hash to its reference"),
-        )),
-        loaded => Ok(loaded),
-    }
-}
+impl<Env> ArchiveReader for Env where Env: Provider<LoadBlock> + Provider<LoadBlob> + ConditionalSync
+{}
 
 /// What a batch of edits stages for its commit: the tree nodes it persisted
 /// (blocks) and the spilled values it wrote (blobs), each under its content
@@ -160,15 +172,15 @@ impl<'a, Env> DeltaOverlay<'a, Env> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<Load> for DeltaOverlay<'_, Env>
+impl<Env> Provider<LoadBlock> for DeltaOverlay<'_, Env>
 where
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        if let Some(block) = self.delta.block(&hash) {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        if let Some(block) = self.delta.block(&load.hash) {
             return Ok(Some(block));
         }
-        self.env.execute(hash).await
+        load.perform(self.env).await
     }
 }
 
@@ -178,11 +190,11 @@ impl<Env> Provider<LoadBlob> for DeltaOverlay<'_, Env>
 where
     Env: Provider<LoadBlob> + ConditionalSync,
 {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
-        if let Some(blob) = self.delta.blob(&hash) {
+    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
+        if let Some(blob) = self.delta.blob(&load.hash) {
             return Ok(Some(blob));
         }
-        self.env.execute(hash).await
+        load.perform(self.env).await
     }
 }
 
@@ -191,7 +203,10 @@ where
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<LoadBlob> for MemoryBlocks {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
         Ok(self.get(&hash))
     }
 }
@@ -212,7 +227,10 @@ impl ArchiveDelta {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<LoadBlob> for ObservingBlocks {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(Provider::<Load>::execute(self, hash).await?)
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
+        Ok(LoadBlock::new(hash).perform(self).await?)
     }
 }

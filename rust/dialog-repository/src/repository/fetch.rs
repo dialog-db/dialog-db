@@ -42,7 +42,9 @@ use async_trait::async_trait;
 use dialog_artifacts::tree::{ArtifactNodeCache, selector_range};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_effects::archive::prelude::ArchiveScope;
-use dialog_search_tree::{Buffer, DialogSearchTreeError, Load, PersistentNode, Traversable as _};
+use dialog_search_tree::{
+    Buffer, DialogSearchTreeError, LoadBlock, PersistentNode, Traversable as _,
+};
 
 use crate::repository::source::Source;
 use crate::{Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite};
@@ -272,7 +274,7 @@ where
     Ok(())
 }
 
-/// The node cache in front of a hydrating store, as a [`Load`] provider:
+/// The node cache in front of a hydrating store, as a [`LoadBlock`] provider:
 /// the traversal's reads hit the line's shared cache first (a job whose
 /// spine a peer already warmed re-reads nothing), and every miss that
 /// checks as a node lands in it, so the demand read that follows a warm is
@@ -293,15 +295,18 @@ impl<Env> Clone for CacheThrough<'_, Env> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<Load> for CacheThrough<'_, Env>
+impl<Env> Provider<LoadBlock> for CacheThrough<'_, Env>
 where
     Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
-    async fn execute(&self, hash: NodeHash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
         if let Some(node) = self.cache.get_cached(&hash) {
             return Ok(Some(node.buffer().clone()));
         }
-        let block = Provider::<Load>::execute(&self.store, hash.clone()).await?;
+        let block = LoadBlock::new(hash.clone()).perform(&self.store).await?;
         // Bytes that do not check as a node stay out of the cache; the
         // traversal reading them reports the failure.
         if let Some(node) = block
@@ -324,11 +329,103 @@ mod tests {
     use crate::RepositoryExt as _;
     use crate::helpers::{Counting, connect};
     use crate::repository::source::SourceRef;
-    use dialog_artifacts::{Preload, PreloadRequest, Speculation};
+    use dialog_artifacts::tree::ArtifactTreeExt as _;
+    use dialog_artifacts::{
+        ArchiveDelta, Artifact, Entity, Instruction, Preload, PreloadRequest, Speculation, Value,
+    };
+    use dialog_capability::{Capability, Command, Subject};
+    use dialog_effects::archive::ArchiveError;
+    use dialog_search_tree::MemoryBlocks;
+    use dialog_storage::DialogStorageError;
+    use dialog_varsig::did;
+    use futures_util::stream;
+
+    use crate::HydrationRequest;
     use dialog_query::query::Output as _;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// An archive that answers every read with the same block, whatever
+    /// was asked for, and holds nothing to hydrate.
+    struct Impostor(Vec<u8>);
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl Provider<Get> for Impostor {
+        async fn execute(&self, _: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl Provider<Hydrate> for Impostor {
+        async fn execute(&self, _: HydrationRequest) -> <Hydrate as Command>::Output {
+            Ok(None)
+        }
+    }
+
+    /// Persists a one-fact tree into `blocks` and returns its root.
+    async fn persist(blocks: &MemoryBlocks, name: &str) -> Result<NodeHash> {
+        let mut tree = Index::empty();
+        let mut delta = ArchiveDelta::zero();
+        tree.apply(
+            blocks,
+            &mut delta,
+            stream::iter(vec![Instruction::Assert(Artifact {
+                the: "profile/name".parse()?,
+                of: Entity::new()?,
+                is: Value::String(name.into()),
+                cause: None,
+            })]),
+        )
+        .await?;
+        delta.flush_into(blocks);
+        Ok(tree.root().clone())
+    }
+
+    /// A well-formed node the archive returns for some other hash is
+    /// refused and never enters the line's node cache, so a later read of
+    /// that hash cannot be served the wrong node from memory.
+    #[dialog_common::test]
+    async fn it_keeps_a_node_that_is_not_the_one_asked_for_out_of_the_cache() -> Result<()> {
+        let blocks = MemoryBlocks::new();
+        let asked = persist(&blocks, "Alice").await?;
+        let other = persist(&blocks, "Bob").await?;
+        let archive = Impostor(
+            blocks
+                .get(&other)
+                .expect("the other tree's root is stored")
+                .into_vec(),
+        );
+        let cache = ArtifactNodeCache::new();
+        let through = CacheThrough {
+            cache: cache.clone(),
+            store: NetworkedIndex::new(
+                &archive,
+                ArchiveScope::new(Subject::from(did!("key:zCacheThroughTest"))).catalog("index"),
+                None,
+            ),
+        };
+
+        let loaded = LoadBlock::new(asked.clone()).perform(&through).await;
+
+        assert!(
+            matches!(
+                loaded,
+                Err(DialogSearchTreeError::Storage(
+                    DialogStorageError::Verification(_)
+                ))
+            ),
+            "a node that does not hash to the one asked for must be refused, got {loaded:?}"
+        );
+        assert!(
+            cache.get_cached(&asked).is_none(),
+            "the impostor must not be cached under the hash asked for"
+        );
+        Ok(())
+    }
 
     fn selector(attribute: &str) -> ArtifactSelector<Constrained> {
         ArtifactSelector::new().the(attribute.parse().expect("a valid attribute"))

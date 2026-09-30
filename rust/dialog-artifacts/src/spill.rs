@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use async_stream::try_stream;
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Change, Load, TreeDifference};
+use dialog_search_tree::{Change, LoadBlock, TreeDifference};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
@@ -128,7 +128,7 @@ pub fn shipment_refs<'a, Env>(
     difference: &'a TreeDifference<'a, Key, State<Datum>, Env>,
 ) -> impl Stream<Item = Result<ShipmentRef, DialogArtifactsError>> + 'a + ConditionalSend
 where
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     try_stream! {
         let changes = difference.changes();

@@ -57,8 +57,8 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, ShipmentRef,
-    State, Statement, shipment_ref,
+    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, LoadBlob,
+    ShipmentRef, State, Statement, shipment_ref,
 };
 use dialog_capability::{Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
@@ -742,7 +742,7 @@ impl SnapshotExport {
                     let storage = &storage;
                     async move {
                         let digest = NodeHash::from(reference);
-                        let bytes = dialog_artifacts::load_blob(storage, &digest).await;
+                        let bytes = LoadBlob::new(digest.clone()).perform(storage).await;
                         (digest, bytes)
                     }
                 },

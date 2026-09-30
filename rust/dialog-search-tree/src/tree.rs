@@ -18,7 +18,7 @@ use rkyv::{
 
 use crate::{
     Accessor, Cache, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key,
-    Load, Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions, SearchResult,
+    LoadBlock, Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions, SearchResult,
     TreeDifference, TreeWalker, Value, into_owned,
 };
 
@@ -265,7 +265,7 @@ where
         storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         // The search path is the copy-on-write frontier for an update; a read
         // ignores it and takes only the leaf. Building it is allocation-free
@@ -315,7 +315,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.stream_range(.., storage)
     }
@@ -342,7 +342,7 @@ where
         storage: &Env,
     ) -> Result<Option<u64>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let Some(root) = self.stored_root() else {
             return Ok(None);
@@ -408,7 +408,7 @@ where
         storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
         let accessor = Accessor::new(self.node_cache.clone(), storage);
@@ -428,7 +428,7 @@ where
     ) -> impl Stream<Item = Result<Entry<crate::KeyHandle, Value>, DialogSearchTreeError>>
     + ConditionalSend
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
         let accessor = Accessor::new(self.node_cache.clone(), storage);
@@ -450,7 +450,7 @@ where
         other_storage: &'a Env,
     ) -> impl Differential<Key, Value> + 'a
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         Value: PartialEq,
     {
         async_stream::try_stream! {
@@ -479,7 +479,7 @@ where
         other_storage: &'a Env,
     ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         // `Key`/`Value` bound `ConditionalSync` (not just the trait's
         // `ConditionalSend`) so that `&PersistentTree` — which the
         // returned `async_stream` captures — is `Send` on native.
@@ -509,7 +509,7 @@ where
         prefetch: Prefetch,
     ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         Key: ConditionalSync,
         Value: PartialEq + ConditionalSync,
         D: ConditionalSync,
@@ -553,7 +553,7 @@ where
     /// and reports that without touching storage.
     pub async fn manifest<Env>(&self, storage: &Env) -> Result<Manifest, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         match &self.root {
             TreeRoot::Empty { manifest, .. } => Ok(manifest.clone()),
@@ -614,7 +614,7 @@ where
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let accessor = Accessor::new(self.node_cache.clone(), storage);
 

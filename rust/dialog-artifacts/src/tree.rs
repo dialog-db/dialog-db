@@ -48,7 +48,7 @@ use crate::{
     decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
-    load_blob, match_selector_and_key_ref,
+    match_selector_and_key_ref,
     selector::Constrained,
     value_predicates_admit,
 };
@@ -247,7 +247,8 @@ where
     let Some(reference) = spilled_reference(key)? else {
         return Ok(None);
     };
-    let blob = load_blob(store, &NodeHash::from(reference))
+    let blob = LoadBlob::new(NodeHash::from(reference))
+        .perform(store)
         .await?
         .ok_or_else(|| {
             DialogArtifactsError::InvalidValue("spilled value missing from store".to_string())
@@ -292,7 +293,8 @@ where
     })?;
     cache
         .get_or_fetch(&reference, async |reference: &Blake3Hash| {
-            load_blob(store, &NodeHash::from(*reference))
+            LoadBlob::new(NodeHash::from(*reference))
+                .perform(store)
                 .await
                 .map(|blob| blob.map(Buffer::into_vec))
         })

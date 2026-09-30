@@ -25,14 +25,13 @@
 // `dialog_query::…` resolves to the real crate in both.
 use anyhow::Result;
 use async_trait::async_trait;
-use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Instruction,
     LoadBlob, Select, Value,
 };
 use dialog_capability::{Fork, Provider, Subject};
-use dialog_common::{Blake3Hash as NodeHash, Buffer};
+use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -47,7 +46,7 @@ use dialog_repository::{
     Branch, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
 };
 use dialog_search_tree::audit as tree_audit;
-use dialog_search_tree::{DialogSearchTreeError, Load as TreeLoad};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 use dialog_storage::Blake3Hash;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::{DUPLICATE_SETS, TOTAL_SETS, dup_audit};
@@ -371,12 +370,13 @@ impl<Backend> CountingStore<Backend> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> Provider<TreeLoad> for CountingStore<Backend>
+impl<Backend> Provider<LoadBlock> for CountingStore<Backend>
 where
-    Backend: Provider<TreeLoad> + ConditionalSync,
+    Backend: Provider<LoadBlock> + ConditionalSync,
 {
-    async fn execute(&self, hash: NodeHash) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        let block = self.backend.execute(hash.clone()).await?;
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        let hash = load.hash.clone();
+        let block = load.perform(&self.backend).await?;
         if block.is_some() {
             self.journal.record(hash.as_bytes());
         }
@@ -390,8 +390,9 @@ impl<Backend> Provider<LoadBlob> for CountingStore<Backend>
 where
     Backend: Provider<LoadBlob> + ConditionalSync,
 {
-    async fn execute(&self, hash: NodeHash) -> Result<Option<Buffer>, DialogArtifactsError> {
-        let blob = self.backend.execute(hash.clone()).await?;
+    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
+        let hash = load.hash.clone();
+        let blob = load.perform(&self.backend).await?;
         if blob.is_some() {
             self.journal.record(hash.as_bytes());
         }
@@ -495,7 +496,7 @@ impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, E
 // block reads land in the shared read journal too.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<Load> for JoinEnv<'_, Env>
+impl<Env> Provider<LoadBlock> for JoinEnv<'_, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -507,14 +508,10 @@ where
         + ConditionalSync
         + 'static,
 {
-    async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
         let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
         let counting = CountingStore::new(store, self.journal.clone());
-        Ok(
-            Provider::<TreeLoad>::execute(&counting, NodeHash::from(input))
-                .await?
-                .map(Buffer::into_vec),
-        )
+        load.perform(&counting).await
     }
 }
 

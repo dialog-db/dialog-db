@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSend;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
-use dialog_search_tree::Load;
+use dialog_search_tree::LoadBlock;
 use dialog_search_tree::{
     Buffer, DialogSearchTreeError, Entry, HitchhikerTree, Manifest, TransientTree,
 };
@@ -82,7 +82,7 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync;
+        S: Provider<LoadBlock> + ConditionalSync;
 
     /// Insert (or overwrite) a batch of entries, one write at a time.
     ///
@@ -99,7 +99,7 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
         Self: ConditionalSend,
     {
         for (key, value) in entries {
@@ -111,7 +111,7 @@ pub trait ArtifactWriter: Sized {
     /// Remove `key`, if present.
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync;
+        S: Provider<LoadBlock> + ConditionalSync;
 
     /// Read the value at `key`, seeing this batch's own pending writes.
     async fn read<S>(
@@ -120,7 +120,7 @@ pub trait ArtifactWriter: Sized {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync;
+        S: Provider<LoadBlock> + ConditionalSync;
 
     /// Scan `range` in key order, seeing this batch's own pending writes.
     ///
@@ -134,7 +134,7 @@ pub trait ArtifactWriter: Sized {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: Provider<Load> + ConditionalSync;
+        S: Provider<LoadBlock> + ConditionalSync;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -147,14 +147,14 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.insert(key, value, storage).await
     }
 
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.delete(key, storage).await
     }
@@ -165,7 +165,7 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.get(key, storage).await
     }
@@ -176,7 +176,7 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: Provider<Load> + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.stream_range(range, storage)
     }
@@ -198,14 +198,14 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.insert_deferred(key, value, storage).await
     }
 
     async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.delete_deferred(key.clone(), storage).await
     }
@@ -216,7 +216,7 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: Provider<Load> + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.get(key, storage).await
     }
@@ -227,7 +227,7 @@ impl ArtifactWriter for BufferedArtifactTree {
         storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: Provider<Load> + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.stream_range(range, storage)
     }

@@ -5,7 +5,7 @@ use anyhow::Result;
 use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_search_tree::{Load, PersistentNode, load};
+use dialog_search_tree::{LoadBlock, PersistentNode};
 
 /// A node of an artifact tree, as stored.
 pub type TreeNode = PersistentNode<Key, State<Datum>>;
@@ -26,9 +26,10 @@ pub struct Visit {
 /// size in bytes.
 pub async fn node<Env>(env: &Env, hash: &Blake3Hash) -> Result<(TreeNode, usize)>
 where
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
-    let block = load(env, hash)
+    let block = LoadBlock::new(hash.clone())
+        .perform(env)
         .await?
         .ok_or_else(|| anyhow::anyhow!("reachable node {hash} missing"))?;
     let size = block.as_ref().len();
@@ -43,7 +44,7 @@ pub async fn walk<Env>(
     mut visit: impl FnMut(Visit) -> Result<()>,
 ) -> Result<()>
 where
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     let mut stack = vec![(root, Vec::new())];
     while let Some((hash, separator)) = stack.pop() {

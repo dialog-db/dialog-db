@@ -6,7 +6,7 @@ use std::task::Poll;
 use async_trait::async_trait;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer};
-use dialog_search_tree::{DialogSearchTreeError, Load, MemoryBlocks};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, MemoryBlocks};
 
 use crate::{ArchiveDelta, DialogArtifactsError, LoadBlob};
 
@@ -76,8 +76,11 @@ impl CountingBlocks {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Load> for CountingBlocks {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+impl Provider<LoadBlock> for CountingBlocks {
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
         Ok(self.load(&hash).await)
     }
 }
@@ -85,7 +88,10 @@ impl Provider<Load> for CountingBlocks {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<LoadBlob> for CountingBlocks {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
         Ok(self.load(&hash).await)
     }
 }

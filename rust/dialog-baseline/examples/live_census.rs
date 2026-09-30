@@ -27,7 +27,7 @@ use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::SeLog;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
-use dialog_search_tree::{Load, NodeBody, Value as TreeValue, into_owned};
+use dialog_search_tree::{LoadBlock, NodeBody, Value as TreeValue, into_owned};
 
 /// The size of every distinct block ever written, dead ones included.
 #[derive(Clone, Default)]
@@ -77,7 +77,7 @@ fn stats(label: &str, mut sizes: Vec<usize>, ceiling: usize) {
 /// census of TREE nodes, the objects the size policy governs.
 async fn census<Env>(env: &Env, root: Blake3Hash, label: &str, ceiling: usize) -> anyhow::Result<()>
 where
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     let mut leaves = Vec::new();
     let mut quiet = Vec::new();
