@@ -51,6 +51,7 @@ impl OpenBranch {
         induction.resolve().perform(env).await?;
 
         Ok(Branch {
+            writer: Branch::writer_of(&self.branch),
             reference: self.branch,
             revision,
             tracking,
@@ -67,6 +68,7 @@ impl OpenBranch {
             metadata_cache: Arc::new(Mutex::new(None)),
             layer_metadata_cache: Arc::new(Mutex::new(None)),
             overlay: Ephemeral::default(),
+            answers: Arc::default(),
         })
     }
 }

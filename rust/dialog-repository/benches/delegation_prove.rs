@@ -14,16 +14,14 @@
 //!
 //! Plus `chain3`: a clean three-hop powerline chain, the intended topology,
 //! at a single size.
-
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_capability::Subject;
 use dialog_capability::access::Access as AccessAttenuation;
 use dialog_capability::access::{CertificateStore, Prove, TimeRange};
 use dialog_credentials::Ed25519Signer;
 use dialog_effects::storage::{Directory, Location};
-use dialog_network::Network;
-use dialog_operator::DeriveOperator as _;
-use dialog_operator::{Operator, Profile};
+use dialog_peer::helpers::open_peer;
+use dialog_peer::{Peer, Session};
 use dialog_repository::{Branch, RepositoryExt as _};
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::provider::{FileSystem, Volatile};
@@ -56,21 +54,18 @@ fn scope(subject: &Did) -> Scope {
     }
 }
 
-async fn open_branch(name: &str) -> (Branch, Operator<VolatileSpace>) {
+async fn open_branch(name: &str) -> (Branch, Peer<VolatileSpace, Session>) {
     let storage = Storage::volatile();
-    let profile = Profile::open(name.to_string())
-        .perform(&storage)
+    let profile = open_peer(storage.clone(), Location::profile(name.to_string()))
         .await
         .unwrap();
     let operator = profile
-        .derive(b"bench")
+        .session(b"bench")
         .allow(Subject::any())
-        .network(Network::default())
-        .build(storage)
         .await
         .unwrap();
     let repo = profile
-        .repository(format!("{name}-repo"))
+        .space(format!("{name}-repo"))
         .open()
         .perform(&operator)
         .await
@@ -86,23 +81,23 @@ async fn operator_with_retained(
     space: &Ed25519Signer,
     holder: &Ed25519Signer,
     n: usize,
-) -> Operator<VolatileSpace> {
+) -> Peer<VolatileSpace, Session> {
     use dialog_capability::access::Retain;
     let storage = Storage::volatile();
-    let profile = Profile::open(format!("delegation-cached-{n}-{}", std::process::id()))
-        .perform(&storage)
-        .await
-        .unwrap();
+    let profile = open_peer(
+        storage.clone(),
+        Location::profile(format!("delegation-cached-{n}-{}", std::process::id())),
+    )
+    .await
+    .unwrap();
     let operator = profile
-        .derive(b"bench")
+        .session(b"bench")
         .allow(Subject::any())
-        .network(Network::default())
-        .build(storage)
         .await
         .unwrap();
     for _ in 0..n {
         let chain = delegate(space, &holder.did(), UcanSubject::Specific(space.did())).await;
-        Subject::from(operator.profile_did())
+        Subject::from(operator.home().clone())
             .attenuate(AccessAttenuation)
             .invoke(Retain::<Ucan>::new(chain))
             .perform(&operator)
@@ -117,7 +112,7 @@ struct Backends {
     fs: FileSystem,
     volatile: Volatile,
     branch: Branch,
-    operator: Operator<VolatileSpace>,
+    operator: Peer<VolatileSpace, Session>,
 }
 
 async fn populate(name: &str, chains: Vec<UcanDelegation>) -> Backends {
@@ -234,7 +229,7 @@ fn bench_prove(c: &mut Criterion) {
                     let operator = operator_with_retained(&space, &holder, n).await;
                     (holder.did(), scope(&space.did()), operator)
                 });
-                let profile_did = cached_operator.profile_did();
+                let profile_did = cached_operator.home().clone();
                 group.bench_function(BenchmarkId::new("tree-cached", n), |b| {
                     b.to_async(&rt).iter(|| {
                         let mut claim =

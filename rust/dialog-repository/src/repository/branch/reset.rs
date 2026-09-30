@@ -38,10 +38,16 @@ impl Branch {
 
 impl Reset<'_> {
     /// Execute the reset operation.
+    ///
+    /// The head moves under the branch's write lock, as it does for a
+    /// commit or a pull: a writer of this branch minting on the head in
+    /// this process sees it move before or after, never in between.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), PublishError>
     where
         Env: Provider<Publish>,
     {
+        let writer = self.branch.writer();
+        let _writing = writer.lock().await;
         self.branch
             .revision
             .publish(self.revision)

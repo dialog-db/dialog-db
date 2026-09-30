@@ -1222,7 +1222,7 @@ mod tests {
     use dialog_common::ConditionalSync;
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::memory::Resolve;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::rule::statement::on_entities;
     use dialog_query::{ConceptDescriptor, InductiveRule};
     use futures_util::StreamExt as _;
@@ -1322,7 +1322,7 @@ mod tests {
     /// never reaches the branch.
     #[dialog_common::test]
     async fn it_induces_counter_increment_from_a_dispatched_command() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1377,7 +1377,7 @@ mod tests {
     /// trigger, reached through the `unless` premise's index entry.
     #[dialog_common::test]
     async fn it_triggers_on_durable_change_and_on_retraction_via_unless() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1473,7 +1473,7 @@ mod tests {
     /// neither command leaves a trace.
     #[dialog_common::test]
     async fn it_cascades_through_a_transient_intermediate() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1629,7 +1629,7 @@ mod tests {
     /// dispatched itself is not reported back.
     #[dialog_common::test]
     async fn it_reports_the_transients_induction_emitted() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1690,7 +1690,7 @@ mod tests {
     /// out when the next link is committed.
     #[dialog_common::test]
     async fn it_accumulates_induced_transients_across_staged_links() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1748,7 +1748,7 @@ mod tests {
     /// bound and fail the commit instead of diverging.
     #[dialog_common::test]
     async fn it_errors_on_a_runaway_cascade() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1823,7 +1823,7 @@ mod tests {
     /// installed rule contributes nothing.
     #[dialog_common::test]
     async fn it_fires_only_rules_watching_touched_attributes() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1891,7 +1891,7 @@ mod tests {
     /// never lands.
     #[dialog_common::test]
     async fn it_consumes_a_message_via_a_retract_rule() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1987,7 +1987,7 @@ mod tests {
     async fn it_triggers_through_a_deductive_premise() -> Result<()> {
         use dialog_query::DeductiveRule;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2105,7 +2105,7 @@ mod tests {
     /// cached discovery and the re-scan picks the new rule up.
     #[dialog_common::test]
     async fn it_rescans_triggers_after_a_head_advance() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2195,7 +2195,7 @@ mod tests {
     /// membership).
     #[dialog_common::test]
     async fn it_stops_firing_a_retracted_rule() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2268,7 +2268,7 @@ mod tests {
     /// committed slice within the very commit.
     #[dialog_common::test]
     async fn it_suppresses_a_rule_retracted_in_the_triggering_commit() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2310,7 +2310,7 @@ mod tests {
     /// integrity that makes the reserved-namespace carve-out safe.
     #[dialog_common::test]
     async fn it_ignores_forged_rule_facts() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2361,7 +2361,7 @@ mod tests {
     /// circumstance "rule exists ∧ premises hold" completes there.
     #[dialog_common::test]
     async fn it_applies_an_installed_rule_to_current_state() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2401,7 +2401,7 @@ mod tests {
     /// facts matching the body are retracted at the install commit.
     #[dialog_common::test]
     async fn it_drains_a_backlog_when_a_consumption_rule_installs() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2458,7 +2458,7 @@ mod tests {
     async fn it_reevaluates_when_a_deductive_rule_installs() -> Result<()> {
         use dialog_query::DeductiveRule;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2562,7 +2562,7 @@ mod tests {
         use dialog_artifacts::{Artifact, Instruction};
         use futures_util::stream;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2619,7 +2619,7 @@ mod tests {
         use dialog_artifacts::{Artifact, Instruction};
         use futures_util::stream;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2701,7 +2701,7 @@ mod tests {
         use dialog_artifacts::{Artifact, Instruction};
         use futures_util::stream;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2772,7 +2772,7 @@ mod tests {
     /// head keeps its revision and the command leaves no trace.
     #[dialog_common::test]
     async fn it_commits_nothing_for_an_unconsumed_command() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2813,7 +2813,7 @@ mod tests {
     /// installs a rule must NOT carry it (the next dispatch rescans).
     #[dialog_common::test]
     async fn it_carries_the_footprint_across_rule_free_commits() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2933,7 +2933,7 @@ mod tests {
     /// the member.
     #[dialog_common::test]
     async fn it_induces_an_entry_into_a_sequence() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -3004,7 +3004,7 @@ mod tests {
     /// records the key it saw.
     #[dialog_common::test]
     async fn it_fires_a_rule_reading_a_collection() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -3067,7 +3067,7 @@ mod tests {
     /// sequence member.
     #[dialog_common::test]
     async fn it_refuses_a_key_of_the_wrong_shape() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

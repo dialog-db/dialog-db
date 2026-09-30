@@ -24,13 +24,8 @@ impl<'a> FetchRemoteBranch<'a> {
     where
         Env: Provider<Fork<RemoteSite, Resolve>> + Provider<Publish> + ConditionalSync,
     {
-        let upstream = self.branch.upstream();
-        self.branch
-            .repository()
-            .reach(
-                |address| async move { upstream.resolve().fork(address.site()).perform(env).await },
-            )
-            .await?;
+        let remote = self.branch.repository().connection(env);
+        self.branch.upstream().resolve().perform(&remote).await?;
 
         // Persist the new remote edition if the remote has one.
         let Some(edition) = self.branch.upstream().edition() else {

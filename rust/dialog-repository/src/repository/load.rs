@@ -1,5 +1,5 @@
 use crate::registry::RegistryEnv;
-use crate::{LoadRepositoryError, Repository, RepositoryMemoryExt as _};
+use crate::{LoadRepositoryError, PeersEnv, Repository, RepositoryMemoryExt as _};
 use dialog_capability::{Capability, Provider};
 use dialog_effects::memory::List;
 use dialog_effects::space::{self, SpaceExt};
@@ -19,7 +19,7 @@ impl LoadRepository {
     /// Execute against an operator.
     pub async fn perform<Env>(self, env: &Env) -> Result<Repository, LoadRepositoryError>
     where
-        Env: Provider<space::Load> + Provider<List> + RegistryEnv,
+        Env: Provider<space::Load> + Provider<List> + RegistryEnv + PeersEnv,
     {
         let repository = Repository::from(self.0.load().perform(env).await?);
         repository.upgrade().perform(env).await?;

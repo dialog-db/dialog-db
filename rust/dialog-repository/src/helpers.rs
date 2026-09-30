@@ -8,78 +8,69 @@ use dialog_capability::{Command, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use parking_lot::Mutex;
 
-// Operator-dependent helpers (test_operator, unique_name, ...) live in
-// `dialog_operator::helpers`: the operator sits above this crate, so tests
+// Operator-dependent helpers (test_session, unique_name, ...) live in
+// `dialog_peer::helpers`: the operator sits above this crate, so tests
 // import them from there via the dev-dependency. `test_repo` is the one
 // exception: it returns THIS crate's types, and through the dev-dependency
 // cycle the operator's copy of this crate is a distinct compilation — its
 // `Repository` is not `crate::Repository` — so this crate's tests need a
 // local one built from `crate::` paths.
 
-/// Create a test repository (this crate's types) using the given operator
-/// as the effect environment.
+/// Create a test repository (this crate's types) under `peer`, through
+/// `session` as the effect environment.
 #[cfg(test)]
-pub async fn test_repo<Env>(operator: &Env, profile: &Profile) -> Repository<Credential>
-where
-    Env: Provider<space::Load> + Provider<space::Create> + Provider<List> + RegistryEnv,
-{
+pub async fn test_repo<S: PeerSpace, M: Mode>(
+    session: &Peer<S, M>,
+    peer: &Peer<S>,
+) -> Repository<Credential> {
     use crate::RepositoryExt as _;
     use dialog_identity::SpaceHandle;
-    use dialog_operator::helpers::unique_name;
+    use dialog_peer::helpers::unique_name;
     let handle = SpaceHandle {
-        profile_did: profile.did(),
+        peer: peer.did(),
         name: unique_name("repo"),
     };
     handle
         .open()
-        .perform(operator)
+        .perform(session)
         .await
         .expect("test_repo: failed to open repository")
 }
 
-/// The space a flaky test operator runs over: volatile, with a memory
+/// The space a flaky test peer runs over: volatile, with a memory
 /// provider that loses the publishes a test plans.
 #[cfg(test)]
 pub type FlakySpace = Space<Volatile, Flaky, Volatile, Volatile, Volatile>;
 
-/// A test operator whose memory loses the publishes a test plans, with
-/// its profile and the storage it runs over: the storage is how a test
+/// A session on a peer whose memory loses the publishes a test plans,
+/// and the peer it was built from: the peer's storage is how a test
 /// reaches the [`Flaky`] memory of a repository, by its DID, to plan
 /// them.
 #[cfg(test)]
-pub async fn flaky_operator_with_profile() -> (Operator<FlakySpace>, Profile, Storage<FlakySpace>) {
+pub async fn flaky_session_with_peer() -> (Peer<FlakySpace, Session>, Peer<FlakySpace>) {
     use dialog_capability::Subject;
-    use dialog_operator::DeriveOperator as _;
-    use dialog_operator::helpers::unique_name;
-    let storage = Storage::<FlakySpace>::new();
-    let profile = Profile::open(unique_name("test"))
-        .perform(&storage)
-        .await
-        .expect("flaky_operator_with_profile: failed to open profile");
-    let operator = profile
-        .derive(b"test")
+    use dialog_effects::storage::Location;
+    use dialog_peer::helpers::{open_peer, unique_name};
+    let peer = open_peer(
+        Storage::<FlakySpace>::new(),
+        Location::profile(unique_name("test")),
+    )
+    .await
+    .expect("flaky_session_with_peer: failed to open peer");
+    let session = peer
+        .session(b"test")
         .allow(Subject::any())
-        .network(Network::default())
-        .build(storage.clone())
         .await
-        .expect("flaky_operator_with_profile: failed to build operator");
-    (operator, profile, storage)
+        .expect("flaky_session_with_peer: failed to build session");
+    (session, peer)
 }
 
 #[cfg(test)]
-use crate::registry::RegistryEnv;
-#[cfg(test)]
-use crate::{ConnectedReplica, Repository, SiteAddress, peer_did};
+use crate::{ConnectedReplica, PeersEnv, Repository, SiteAddress, contact, peer_did};
 #[cfg(test)]
 use dialog_credentials::Credential;
 #[cfg(test)]
-use dialog_effects::memory::List;
-#[cfg(test)]
-use dialog_effects::space;
-#[cfg(test)]
-use dialog_identity::Profile;
-#[cfg(test)]
-use dialog_operator::Operator;
+use dialog_peer::{Mode, Peer, PeerSpace, Session};
 #[cfg(test)]
 use dialog_storage::Flaky;
 #[cfg(test)]
@@ -87,32 +78,28 @@ use dialog_storage::provider::storage::Storage;
 #[cfg(test)]
 use dialog_storage::provider::{Space, Volatile};
 #[cfg(test)]
-use dialog_varsig::{Did, Principal};
+use dialog_varsig::Did;
 
-/// Add the peer reached at `address` under `name`, and connect to the
-/// repository `subject` there: what tests once did by creating a named
-/// remote. The peer's DID is derived from the address.
+/// Make the peer reached at `address` a contact named `name`, and connect
+/// to its replica of the repository `subject`: what tests once did by
+/// creating a named remote. The peer's DID is derived from the address,
+/// and connecting goes by it: names are the host's, so two tests' peers
+/// may share one.
 #[cfg(test)]
-pub async fn connect<C, Env>(
-    repo: &Repository<C>,
+pub async fn connect<Env: PeersEnv>(
     name: &str,
     address: impl Into<SiteAddress>,
     subject: Did,
     env: &Env,
-) -> anyhow::Result<ConnectedReplica>
-where
-    C: Principal,
-    Env: RegistryEnv,
-{
+) -> anyhow::Result<ConnectedReplica> {
     let address = address.into();
     let did = peer_did(&address)?;
-    repo.peer(&did)
+    contact(&did)
         .add_address(address)
         .name(name)
         .perform(env)
         .await?;
-    Ok(repo
-        .peer(name)
+    Ok(contact(&did)
         .connect()
         .repository(subject)
         .open()

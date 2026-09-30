@@ -46,8 +46,8 @@ use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::{Directory, Location};
-use dialog_operator::helpers::{test_operator_with_profile, unique_name};
-use dialog_operator::{Operator, Profile};
+use dialog_peer::Peer;
+use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_query::rule::DeductiveRuleDescriptor;
 use dialog_query::{
     Concept, ConceptConclusion, ConceptDescriptor, ConceptQuery, DeductiveRule, Entity,
@@ -55,7 +55,7 @@ use dialog_query::{
 };
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::simulation::{self, NetworkShape};
-use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
+use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, contact};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource as _;
@@ -313,25 +313,25 @@ async fn seed_vault(repo: &Repository<SignerCredential>, location: &Location) ->
 /// Open a repository for `profile`, wire `origin` at `address` for the
 /// server's subject, and track its `main` branch.
 async fn mount_client(
-    operator: &Operator<VolatileSpace>,
-    profile: &Profile,
+    operator: &Peer<VolatileSpace, dialog_peer::Session>,
+    profile: &Peer<VolatileSpace>,
     server: &Repository<SignerCredential>,
     address: &FsAddress,
     name: &str,
 ) -> Result<Branch> {
     let repo = profile
-        .repository(unique_name(name))
+        .space(unique_name(name))
         .open()
         .perform(operator)
         .await?;
     let origin = {
         let site = SiteAddress::Fs(address.clone());
-        repo.peer(&dialog_repository::peer_did(&site)?)
+        contact(&dialog_repository::peer_did(&site)?)
             .add_address(site)
             .name("origin")
             .perform(operator)
             .await?;
-        repo.peer("origin")
+        contact("origin")
             .connect()
             .repository(server.did())
             .open()
@@ -348,7 +348,7 @@ async fn mount_client(
 /// — a phase must observe real data, not a lazily erred stream.
 async fn select_count(
     branch: &Branch,
-    operator: &Operator<VolatileSpace>,
+    operator: &Peer<VolatileSpace, dialog_peer::Session>,
     selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
 ) -> Result<usize> {
     let rows = branch
@@ -434,7 +434,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     simulation::configure(None);
     simulation::reset_tally();
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     // Speculative preloading is ambient (the operator's queue, hints
     // default-on). The unshaped profile turns it off: its job is to pin
     // the engine's deterministic demand shape, and replication overlap
@@ -445,7 +445,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
     }
     let server = profile
-        .repository(unique_name("soak-server"))
+        .space(unique_name("soak-server"))
         .create()
         .perform(&operator)
         .await?;
@@ -467,14 +467,12 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
 
     let origin = {
         let site = SiteAddress::Fs(address.clone());
-        server
-            .peer(&dialog_repository::peer_did(&site)?)
+        contact(&dialog_repository::peer_did(&site)?)
             .add_address(site)
             .name("origin")
             .perform(&operator)
             .await?;
-        server
-            .peer("origin")
+        contact("origin")
             .connect()
             .repository(server.did())
             .open()

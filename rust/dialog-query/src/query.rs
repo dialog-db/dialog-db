@@ -33,11 +33,11 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::{Term, the};
     use anyhow::Result;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
     #[dialog_common::test]
     async fn it_queries_via_fact_selector() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -97,7 +97,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_with_variables_and_constants() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -118,7 +118,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_polymorphically() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -148,7 +148,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_chains_query_operations() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

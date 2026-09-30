@@ -14,12 +14,13 @@
 //!
 //! # Steps
 //!
-//! - **0 → 1**: remotes and upstreams move from cells into facts in the
-//!   [`REGISTRY`](crate::REGISTRY). Each remote becomes a
-//!   [`Peer`](crate::schema::Peer) at the address its cell holds; each
-//!   upstream becomes a pull and a push relation to the branch it
-//!   tracked. The cells, and `credential/key/self`, are left in place
-//!   for one version and removed by the next.
+//! - **0 → 1**: remotes and upstreams move from cells into facts. Each
+//!   remote becomes a contact of the host doing the upgrade, reached at
+//!   the address its cell holds and named as the remote was; each
+//!   upstream becomes a pull and a push relation in the
+//!   [`REGISTRY`](crate::REGISTRY) to the branch it tracked. The cells,
+//!   and `credential/key/self`, are left in place for one version and
+//!   removed by the next.
 
 use dialog_artifacts::Changes;
 use dialog_capability::{Capability, Did, Provider, Subject};
@@ -34,13 +35,16 @@ use dialog_query::Statement as _;
 use dialog_varsig::Principal;
 
 use super::branch::upstream::legacy;
+use super::peer::host;
 use crate::registry::{RegistryEnv, apply, pull, push};
-use crate::schema::{Peer, PeerAddress, Replica};
+use crate::schema::{DidExt as _, Replica};
 use crate::{
-    Branch, Cell, PublishError, RemoteAddress, RemoteEdition, Repository, RepositoryMemoryExt as _,
-    Resolved, Route, SiteAddress, Tracking, UpgradeError,
+    AddAddressError, Branch, Cell, PeersEnv, PublishError, RemoteAddress, RemoteEdition,
+    Repository, RepositoryMemoryExt as _, Resolved, Route, SiteAddress, Tracking, UpgradeError,
+    contact, peer_did,
 };
 use dialog_artifacts::Entity;
+use dialog_effects::peer::prelude::*;
 
 /// The layout version this release stores in.
 pub const VERSION: u32 = 1;
@@ -85,7 +89,7 @@ impl Upgrade {
     /// both ran the same steps, which assert the same facts.
     pub async fn perform<Env>(self, env: &Env) -> Result<Upgraded, UpgradeError>
     where
-        Env: RegistryEnv + Provider<List>,
+        Env: RegistryEnv + PeersEnv + Provider<List>,
     {
         let cell: Cell<u32> = SpaceScope::new(self.subject.clone(), SPACE)
             .cell(CELL)
@@ -106,7 +110,7 @@ impl Upgrade {
         env: &Env,
     ) -> Result<Upgraded, UpgradeError>
     where
-        Env: RegistryEnv + Provider<List>,
+        Env: RegistryEnv + PeersEnv + Provider<List>,
     {
         if from > VERSION {
             return Err(UpgradeError::Newer {
@@ -177,7 +181,7 @@ async fn carry_over<Env>(
     env: &Env,
 ) -> Result<(), UpgradeError>
 where
-    Env: RegistryEnv + Provider<List>,
+    Env: RegistryEnv + PeersEnv + Provider<List>,
 {
     let local = Replica::new(operator.profile().clone(), registry.of().clone());
     let remotes = stored(subject, "remote", "/address", env).await?;
@@ -219,7 +223,7 @@ where
                         continue;
                     };
                     let carried = carry(&mut peers, remote, address)?;
-                    let replica = carried.peer.repository(carried.subject.clone());
+                    let replica = Replica::new(carried.peer.clone(), carried.subject.clone());
                     let target = replica.branch(branch.as_str());
                     replica.assert(&mut changes);
                     target.clone().assert(&mut changes);
@@ -227,7 +231,7 @@ where
                     (
                         target.clone(),
                         Route::Remote {
-                            peer: carried.peer.this.clone(),
+                            peer: carried.peer.this(),
                             name: Some(remote.clone()),
                             addresses: vec![carried.site.clone()],
                             subject: carried.subject.clone(),
@@ -250,9 +254,26 @@ where
         }
     }
 
+    // Contacts are the host's, and every repository's remote is usually
+    // named origin: a name another peer already has is not given again,
+    // so looking a peer up by it stays unambiguous.
     for carried in peers {
-        carried.peer.assert(&mut changes);
-        carried.address.assert(&mut changes);
+        let entity = carried.peer.this();
+        let known = host(env)
+            .await?
+            .reader()
+            .peers()
+            .find(carried.name.clone())
+            .perform(env)
+            .await
+            .map_err(AddAddressError::from)?;
+        let contact = contact(&carried.peer).add_address(carried.site);
+        let contact = if known.iter().all(|peer| *peer == entity) {
+            contact.name(carried.name)
+        } else {
+            contact
+        };
+        contact.perform(env).await?;
     }
 
     apply(registry, changes, env).await?;
@@ -342,8 +363,7 @@ where
 #[derive(Clone)]
 struct Carried {
     name: String,
-    peer: Peer,
-    address: PeerAddress,
+    peer: Did,
     site: SiteAddress,
     subject: Did,
 }
@@ -357,11 +377,9 @@ fn carry(
     if let Some(carried) = peers.iter().find(|carried| carried.name == name) {
         return Ok(carried.clone());
     }
-    let peer = Peer::at(name, &address.address)?;
     let carried = Carried {
         name: name.to_string(),
-        address: PeerAddress::new(&peer.this, &address.address)?,
-        peer,
+        peer: peer_did(&address.address)?,
         site: address.address,
         subject: address.subject,
     };
@@ -397,23 +415,25 @@ mod tests {
     use super::{CELL, SPACE, Upgraded, VERSION};
     use crate::Repository;
     use crate::RepositoryExt as _;
-    use crate::helpers::{flaky_operator_with_profile, test_repo};
+    use crate::helpers::{flaky_session_with_peer, test_repo};
     use crate::repository::branch::resolve::resolve;
-    use crate::schema::{BranchPull, BranchPush, Peer, PeerAddress, Replica};
+    use crate::schema::{BranchPull, BranchPush, DidExt as _, Replica};
     use crate::{
-        Cell, REGISTRY, RemoteEdition, RepositoryMemoryExt as _, Route, SiteAddress, Target,
-        TreeReference, UpgradeError,
+        Cell, REGISTRY, RemoteAddress, RemoteEdition, RepositoryMemoryExt as _, Route, SiteAddress,
+        Target, TreeReference, UpgradeError, site_address,
     };
     use dialog_artifacts::Instruction;
     use dialog_capability::Provider;
     use dialog_capability::Subject;
     use dialog_common::ConditionalSync;
     use dialog_credentials::Credential;
+    use dialog_effects::MethodExt as _;
     use dialog_effects::memory::Version;
     use dialog_effects::memory::prelude::{CellScope, SpaceScope};
     use dialog_effects::memory::{Resolve, Retract};
+    use dialog_effects::peer::prelude::*;
     use dialog_identity::SpaceHandle;
-    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+    use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_query::{Output as _, Query, Term};
     use dialog_remote_ucan::UcanAddress;
     use dialog_varsig::did;
@@ -459,7 +479,7 @@ mod tests {
                 .collect()
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         unversion(&repo, &operator).await?;
         let held = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
@@ -506,34 +526,28 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        // The remote is a peer named after it, identified by its origin,
-        // reached at the address its cell held.
-        let peers: Vec<Peer> = registry
-            .query()
-            .select(Query::<Peer> {
-                this: Term::var("this"),
-                name: Term::var("name"),
-            })
+        // The remote is a contact of the host, named after it,
+        // identified by its origin, reached at the address its cell held.
+        let host = crate::host(&operator).await?;
+        let named = host
+            .clone()
+            .reader()
+            .peers()
+            .find("origin")
             .perform(&operator)
-            .try_vec()
             .await?;
-        assert_eq!(peers.len(), 1, "one remote, one peer");
-        let origin = peers.into_iter().next().expect("one peer");
-        assert_eq!(origin.this.to_string(), "did:web:tonk.network:ucan");
-        assert_eq!(origin.name.0, "origin");
-
-        let addresses: Vec<PeerAddress> = registry
-            .query()
-            .select(Query::<PeerAddress> {
-                this: origin.this.clone().into(),
-                address: Term::var("address"),
-            })
+        let origin = did!("web:tonk.network:ucan");
+        assert_eq!(named, vec![origin.this()], "one remote, one contact");
+        let connection = host
+            .reader()
+            .peers()
+            .connect(origin.this())
             .perform(&operator)
-            .try_vec()
             .await?;
-        let sites = addresses
+        let sites = connection
+            .addresses()
             .iter()
-            .map(PeerAddress::site)
+            .map(site_address)
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             sites,
@@ -545,7 +559,7 @@ mod tests {
         // Each upstream is pulled from and pushed to, by entity: on the
         // peer's replica of the repository it holds, or on this one.
         let local = Replica::new(profile.did(), repo.did());
-        let remote = origin.repository(held);
+        let remote = Replica::new(origin, held);
         let tracked = async |name: &str| -> anyhow::Result<(Vec<_>, Vec<_>)> {
             let this = local.branch(name).this;
             let mut pulls: Vec<_> = registry
@@ -656,7 +670,7 @@ mod tests {
     /// current version all the same, and records it.
     #[dialog_common::test]
     async fn it_upgrades_a_repository_with_nothing_to_carry() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         unversion(&repo, &operator).await?;
 
@@ -680,7 +694,7 @@ mod tests {
     /// does not know its layout, so it refuses rather than misreads it.
     #[dialog_common::test]
     async fn it_refuses_storage_from_a_newer_release() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let cell: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
@@ -702,7 +716,7 @@ mod tests {
     /// layout, so nothing a later upgrade could carry over exists.
     #[dialog_common::test]
     async fn it_creates_a_repository_at_the_current_version() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let version: Cell<u32> = SpaceScope::new(Subject::from(repo.did()), SPACE)
@@ -732,10 +746,10 @@ mod tests {
                 .collect()
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let name = unique_name("legacy");
         let handle = || SpaceHandle {
-            profile_did: profile.did(),
+            peer: profile.did(),
             name: name.clone(),
         };
         let repo = handle().open().perform(&operator).await?;
@@ -792,10 +806,10 @@ mod tests {
                 .collect()
         }
 
-        let (operator, profile, storage) = flaky_operator_with_profile().await;
+        let (operator, profile) = flaky_session_with_peer().await;
         let name = unique_name("raced");
         let handle = || SpaceHandle {
-            profile_did: profile.did(),
+            peer: profile.did(),
             name: name.clone(),
         };
         let repo = handle().open().perform(&operator).await?;
@@ -835,7 +849,11 @@ mod tests {
         // backend takes a publish of what a cell already holds as landed,
         // so its record of the same version would go through unnoticed;
         // the store here refuses it, as a strict compare-and-swap would.
-        let memory = storage.space(&repo.did()).expect("mounted").memory;
+        let memory = profile
+            .storage()
+            .space(&repo.did())
+            .expect("mounted")
+            .memory;
         memory.lose_next_publishes(SPACE, CELL, 1);
         let upgraded = repo.upgrade().finish(stale, 0, &operator).await?;
         assert_eq!(
@@ -851,6 +869,40 @@ mod tests {
             recorded,
             "what the first open and the sync after it recorded stands"
         );
+        Ok(())
+    }
+
+    /// Every repository's legacy remote is usually named "origin", and
+    /// contacts are the host's, not a repository's. A name already given
+    /// to another peer is not given again, so looking a peer up by it
+    /// stays unambiguous.
+    #[dialog_common::test]
+    async fn it_names_a_carried_peer_only_if_the_name_is_free() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        for endpoint in ["https://one.example/ucan/", "https://two.example/ucan/"] {
+            let repo = test_repo(&operator, &profile).await;
+            unversion(&repo, &operator).await?;
+            let origin: Cell<RemoteAddress> =
+                SpaceScope::new(Subject::from(repo.did()), "remote/origin")
+                    .cell("address")
+                    .into();
+            origin
+                .publish(RemoteAddress {
+                    address: UcanAddress::new(endpoint).into(),
+                    subject: repo.did(),
+                })
+                .perform(&operator)
+                .await?;
+            repo.upgrade().perform(&operator).await?;
+        }
+
+        let named = Subject::from(profile.did())
+            .reader()
+            .peers()
+            .find("origin")
+            .perform(&operator)
+            .await?;
+        assert_eq!(named.len(), 1, "one peer is known as origin: {named:?}");
         Ok(())
     }
 }
