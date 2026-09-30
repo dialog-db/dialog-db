@@ -9,46 +9,57 @@
 #![cfg_attr(not(test), warn(clippy::large_futures))]
 #![cfg_attr(not(test), deny(clippy::panic))]
 
-//! This package embodies a data storage primitive called [`Artifacts`]. [`Artifacts`]
-//! is a triple store backed by indexes that are represented as prolly trees.
+//! This package embodies the data model of dialog: [`Artifact`]s (facts of
+//! the form "the attribute of an entity is a value") and the indexes that
+//! store them, which are search trees keyed so that entity-, attribute- and
+//! value-ordered scans are all range reads (see [`tree`]).
 //!
-//! To make use of [`Artifacts`] via the Rust API:
+//! Applications store artifacts through a branch of a repository, which adds
+//! version control on top of the index writes here. Working with an index
+//! directly:
 //!
 //! ```rust
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::str::FromStr;
-//! use dialog_storage::MemoryStorageBackend;
-//! use dialog_artifacts::{Entity, Attribute, Value, Artifacts, Artifact, ArtifactSelector, Instruction, ArtifactStore, ArtifactStoreMut};
+//! use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt, spill_cache};
+//! use dialog_artifacts::{
+//!     ArchiveDelta, Artifact, ArtifactSelector, Attribute, Entity, Instruction, Value,
+//! };
+//! use dialog_search_tree::MemoryBlocks;
 //! use futures_util::{StreamExt, stream};
 //!
-//! // Substitute with your storage backend of choice:
-//! let storage_backend = MemoryStorageBackend::default();
-//! let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+//! // Any environment that loads blocks and blobs will do; this one keeps
+//! // them in memory.
+//! let blocks = MemoryBlocks::new();
+//! let mut index = ArtifactTree::empty();
+//! let mut delta = ArchiveDelta::zero();
 //!
-//! // Create an artifact
+//! // Assert an artifact: the new nodes (and any spilled value) are staged
+//! // in the delta, then written out.
 //! let artifact = Artifact {
 //!     the: Attribute::from_str("profile/name")?,
 //!     of: Entity::new()?,
 //!     is: Value::String("Foo Bar".into()),
-//!     cause: None
+//!     cause: None,
 //! };
+//! index
+//!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(artifact)]))
+//!     .await?;
+//! delta.flush_into(&blocks);
 //!
-//! // Create a stream of instructions and commit
-//! let instructions = stream::iter(vec![Instruction::Assert(artifact)]);
-//! artifacts.commit(instructions).await?;
-//!
-//! // Query the artifacts
-//! let artifact_stream = artifacts.select(ArtifactSelector::new()
-//!     .the(Attribute::from_str("profile/name")?));
-//!
-//! let results = artifact_stream.filter_map(|fact| async move { fact.ok() })
-//!     .collect::<Vec<_>>().await;
+//! // Query the index
+//! let selector = ArtifactSelector::new().the(Attribute::from_str("profile/name")?);
+//! let results = index
+//!     .scan(blocks.clone(), spill_cache(), selector)
+//!     .filter_map(|view| async move { view.ok() })
+//!     .collect::<Vec<_>>()
+//!     .await;
 //! # Ok(())
 //! # }
 //! ```
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub mod web;
+mod archive;
+pub use archive::*;
 
 mod artifacts;
 pub use artifacts::*;

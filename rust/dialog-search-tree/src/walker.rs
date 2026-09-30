@@ -7,8 +7,8 @@ use std::{
 };
 
 use async_stream::try_stream;
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use nonempty::NonEmpty;
@@ -23,7 +23,7 @@ use rkyv::{
 use std::sync::Arc;
 
 use crate::{
-    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NodeBody, NoveltyOp,
+    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, LoadBlock, NodeBody, NoveltyOp,
     PersistentNode, Value, into_owned,
 };
 
@@ -385,21 +385,20 @@ where
     }
 
     /// Returns a stream of entries within the specified key range.
-    pub fn stream<R, Backend>(
+    pub fn stream<R, Env>(
         self,
         range: R,
-        accessor: Accessor<Key, Value, Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         // A thin adapter, not another generator: wrapping the walk in a
         // second `try_stream!` layer measurably bloats every future that
         // embeds a walk (clippy's `large_futures` catches it downstream).
         futures_util::TryStreamExt::map_ok(
-            self.stream_scan::<R, Backend, TypedKey<Key>>(range, accessor),
+            self.stream_scan::<R, Env, TypedKey<Key>>(range, accessor),
             |entry| Entry {
                 key: entry.key.0,
                 value: entry.value,
@@ -412,31 +411,29 @@ where
     /// borrow the memoized decoded-keys arena with NO per-entry copy, and
     /// only novelty ops and cold streaming decodes copy. For consumers that
     /// work on the raw key bytes.
-    pub fn stream_handles<R, Backend>(
+    pub fn stream_handles<R, Env>(
         self,
         range: R,
-        accessor: Accessor<Key, Value, Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
-        self.stream_scan::<R, Backend, KeyHandle>(range, accessor)
+        self.stream_scan::<R, Env, KeyHandle>(range, accessor)
     }
 
     /// The walk shared by [`stream`](Self::stream) and
     /// [`stream_handles`](Self::stream_handles); `Out` decides how yielded
     /// keys materialize (see [`ScanKey`]).
-    fn stream_scan<R, Backend, Out>(
+    fn stream_scan<R, Env, Out>(
         self,
         range: R,
-        accessor: Accessor<Key, Value, Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         Out: ScanKey + 'static,
     {
         try_stream! {
@@ -702,15 +699,14 @@ where
     }
 
     /// Searches for the leaf segment that would contain the given key.
-    pub async fn search<Backend>(
+    pub async fn search<Env>(
         &self,
         key: &Key,
-        accessor: Accessor<Key, Value, Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let Some(root) = &self.root else {
             return Ok(None);
@@ -833,11 +829,11 @@ async fn until_warmed<Warm>(
 /// Returns `None` when either the key is not the leaf's last entry or the leaf
 /// has no right-adjacent neighbor (the leaf is the rightmost segment in the
 /// tree).
-async fn prefetch_right_neighbor<Key, Value, Backend>(
+async fn prefetch_right_neighbor<Key, Value, Env>(
     key: &Key,
     leaf: &PersistentNode<Key, Value>,
     path: &[TreeLayer<Key, Value>],
-    accessor: Accessor<Key, Value, Backend>,
+    accessor: Accessor<'_, Key, Value, Env>,
 ) -> Result<Option<RightNeighbor<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -846,8 +842,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.
@@ -1055,24 +1050,22 @@ impl<Key, Value> SearchResult<Key, Value> {
 mod walker_novelty_tests {
     #![allow(unexpected_cfgs)]
 
+    use crate::MemoryBlocks;
     use anyhow::Result;
     use dialog_common::Blake3Hash;
-    use dialog_storage::MemoryStorageBackend;
     use futures_util::StreamExt as _;
 
-    use crate::{Buffer, ContentAddressedStorage, Delta, HitchhikerTree, PersistentTree};
+    use crate::{Buffer, Delta, HitchhikerTree, PersistentTree};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    type Store = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+    type Store = MemoryBlocks;
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
     async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(())
     }
@@ -1083,7 +1076,7 @@ mod walker_novelty_tests {
     /// commit path produces.
     #[dialog_common::test]
     async fn it_accumulates_across_successive_buffered_writes() -> Result<()> {
-        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage: Store = MemoryBlocks::new();
 
         let mut tree = Tree::empty();
         let mut expected: Vec<([u8; 4], Vec<u8>)> = Vec::new();
@@ -1151,7 +1144,7 @@ mod walker_novelty_tests {
                 (rng >> 32) as u32
             };
 
-            let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage: Store = MemoryBlocks::new();
             let mut tree = Tree::empty();
             let mut expected: std::collections::BTreeMap<[u8; 4], Vec<u8>> = Default::default();
 
@@ -1208,7 +1201,7 @@ mod walker_novelty_tests {
                 (rng >> 32) as u32
             };
 
-            let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage: Store = MemoryBlocks::new();
 
             // Random base, random keys (big-endian so byte order is key order).
             let base_keys: Vec<u32> = (0..300).map(|_| next() % 4000).collect();
@@ -1302,16 +1295,13 @@ mod prefetch_tests {
     use dialog_common::Blake3Hash;
     use futures_util::TryStreamExt as _;
 
-    use crate::{
-        Buffer, ContentAddressedStorage, Delta, NodeBody, PersistentNode, PersistentTree,
-        helpers::ObservingBackend,
-    };
+    use crate::{Delta, NodeBody, PersistentNode, PersistentTree, helpers::ObservingBlocks};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
-    type Storage = ContentAddressedStorage<ObservingBackend>;
+    type Storage = ObservingBlocks;
 
     /// Enough entries that the leaf-seam coin (one seam expected every
     /// `2^fanout_n = 256` keys) reliably cuts the run into many sibling
@@ -1338,9 +1328,7 @@ mod prefetch_tests {
 
         let tree = edit.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         Ok(Tree::from_hash(tree.root().clone()))
@@ -1351,11 +1339,10 @@ mod prefetch_tests {
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<[u8; 4], Vec<u8>>> {
         let bytes = storage
-            .retrieve(hash)
-            .await?
+            .get(hash)
             .ok_or_else(|| anyhow::anyhow!("Node not stored"))?;
 
-        Ok(PersistentNode::try_from(Buffer::from(bytes))?)
+        Ok(PersistentNode::try_from(bytes)?)
     }
 
     /// A reader that needs a node a read-ahead has claimed must not depend
@@ -1370,9 +1357,9 @@ mod prefetch_tests {
     async fn it_serves_a_claimed_node_to_a_reader_the_read_ahead_cannot_reach() -> Result<()> {
         use std::task::{Context, Poll};
 
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
-        let accessor = crate::Accessor::new(tree.node_cache(), storage.clone());
+        let accessor = crate::Accessor::new(tree.node_cache(), &storage);
 
         // The root's second child, and a key from its leftmost leaf.
         let root = load(&storage, tree.root()).await?;
@@ -1407,9 +1394,9 @@ mod prefetch_tests {
 
     #[dialog_common::test]
     async fn it_warms_sibling_nodes_during_a_range_scan() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
-        let backend = storage.backend().clone();
+        let backend = storage.clone();
         backend.reset();
 
         let entries: Vec<_> = tree.stream(&storage).try_collect().await?;
@@ -1446,9 +1433,9 @@ mod prefetch_tests {
     /// re-fetched by the next probe.
     #[dialog_common::test]
     async fn it_does_not_warm_siblings_past_the_range_bound() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
-        let backend = storage.backend().clone();
+        let backend = storage.clone();
 
         backend.reset();
         let found = tree.get(&100u32.to_be_bytes(), &storage).await?;
@@ -1476,9 +1463,9 @@ mod prefetch_tests {
 
     #[dialog_common::test]
     async fn it_does_not_prefetch_on_point_lookups() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
-        let backend = storage.backend().clone();
+        let backend = storage.clone();
         backend.reset();
 
         let found = tree.get(&257u32.to_be_bytes(), &storage).await?;
@@ -1534,7 +1521,7 @@ mod prefetch_tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_serves_one_scans_read_ahead_to_another_scan() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
 
         let root = load(&storage, tree.root()).await?;
@@ -1557,7 +1544,7 @@ mod prefetch_tests {
             }
         }
         assert!(
-            storage.backend().reads_in_flight() > 0,
+            storage.reads_in_flight() > 0,
             "scan A holds read-aheads in flight while parked"
         );
 

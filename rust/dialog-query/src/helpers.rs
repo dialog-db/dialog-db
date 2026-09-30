@@ -5,7 +5,7 @@
 //! designed for benchmarks that need three signals:
 //!
 //! 1. **Read count** — the number of block fetches a query triggers,
-//!    recorded via [`JournaledStorage`]. This is the planner's true
+//!    recorded via [`CountingStore`]. This is the planner's true
 //!    objective (minimize round-trips) and is deterministic and
 //!    machine-independent.
 //! 2. **In-memory wall-clock** — engine CPU isolation, via a volatile
@@ -25,13 +25,13 @@
 // `dialog_query::…` resolves to the real crate in both.
 use anyhow::Result;
 use async_trait::async_trait;
-use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Instruction,
-    Select, Value,
+    LoadBlob, Select, Value,
 };
 use dialog_capability::{Fork, Provider, Subject};
+use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -46,8 +46,9 @@ use dialog_repository::{
     Branch, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
 };
 use dialog_search_tree::audit as tree_audit;
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+use dialog_storage::Blake3Hash;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
-use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBackend};
 use dialog_storage::{DUPLICATE_SETS, TOTAL_SETS, dup_audit};
 use std::sync::atomic::Ordering;
 // The platform temp filesystem (and the on-disk `BenchEnv::temp` variant
@@ -304,7 +305,7 @@ pub struct JoinRun {
 /// once per outer binding) through a *separate* `Provider<Select>::execute`
 /// call, and each call builds its own [`NetworkedIndex`] over the borrowed
 /// operator. To attribute every one of those block reads to a single
-/// query we cannot reuse one [`JournaledStorage`] instance (its backend
+/// query we cannot reuse one journaling store instance (its backend
 /// would have to outlive each per-call index borrow). Instead the journal
 /// is this small shared accumulator: each call wraps its fresh index in a
 /// [`CountingStore`] that holds a clone of the same `Arc`, so all reads
@@ -349,7 +350,8 @@ impl ReadJournal {
     }
 }
 
-/// A [`StorageBackend`] that records every successful read into a shared
+/// A block source that records every successful load, through either lane,
+/// into a shared
 /// [`ReadJournal`] before delegating to the wrapped backend.
 ///
 /// Built fresh per `Provider<Select>` call but parameterized over a cloned
@@ -368,25 +370,33 @@ impl<Backend> CountingStore<Backend> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> StorageBackend for CountingStore<Backend>
+impl<Backend> Provider<LoadBlock> for CountingStore<Backend>
 where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Backend: Provider<LoadBlock> + ConditionalSync,
 {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.backend.set(key, value).await
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let value = self.backend.get(key).await?;
-        if value.is_some() {
-            self.journal.record(key);
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        let hash = load.hash.clone();
+        let block = load.perform(&self.backend).await?;
+        if block.is_some() {
+            self.journal.record(hash.as_bytes());
         }
-        Ok(value)
+        Ok(block)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> Provider<LoadBlob> for CountingStore<Backend>
+where
+    Backend: Provider<LoadBlob> + ConditionalSync,
+{
+    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
+        let hash = load.hash.clone();
+        let blob = load.perform(&self.backend).await?;
+        if blob.is_some() {
+            self.journal.record(hash.as_bytes());
+        }
+        Ok(blob)
     }
 }
 
@@ -486,7 +496,7 @@ impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, E
 // block reads land in the shared read journal too.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<Load> for JoinEnv<'_, Env>
+impl<Env> Provider<LoadBlock> for JoinEnv<'_, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -498,10 +508,10 @@ where
         + ConditionalSync
         + 'static,
 {
-    async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
         let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
         let counting = CountingStore::new(store, self.journal.clone());
-        Ok(counting.get(&input).await?)
+        load.perform(&counting).await
     }
 }
 
@@ -649,7 +659,7 @@ where
     }
 
     /// Run a select-by-attribute query against the seeded branch,
-    /// recording block reads via a [`JournaledStorage`] wrapper.
+    /// recording block reads via a [`CountingStore`] wrapper.
     ///
     /// The query scans the branch's index for every fact carrying the
     /// given attribute. The journal is cleared immediately before the
@@ -669,14 +679,14 @@ where
             .select(ArtifactSelector::new().the(the))
             .to_owned();
         let store = NetworkedIndex::new(&self.operator, select.catalog(), None);
-        let journaled = JournaledStorage::new(store);
-        journaled.clear_journal();
+        let journal = ReadJournal::default();
+        let counting = CountingStore::new(store, journal.clone());
 
-        let stream = select.execute(journaled.clone()).await?;
+        let stream = select.execute(counting).await?;
         let results: Vec<Artifact> = stream.try_collect().await?;
 
-        let reads = journaled.read_count();
-        let unique_reads = journaled.unique_keys_read_count();
+        let reads = journal.reads();
+        let unique_reads = journal.unique_reads();
 
         Ok(QueryRun {
             results,

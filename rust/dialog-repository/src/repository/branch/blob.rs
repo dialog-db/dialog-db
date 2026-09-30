@@ -67,6 +67,7 @@ use crate::{
     Branch, CommitError, Index, NetworkedIndex, RemoteFallback, RemoteSite, Revision, Snapshot,
     TreeReference,
 };
+use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::RevisionRecord;
 use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
@@ -83,7 +84,6 @@ use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
 };
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::Delta;
 use futures_util::{Stream, StreamExt};
 
 /// A line's blob store: the target that blob reads and writes bind to.
@@ -509,7 +509,7 @@ where
     // default upstream is local but which tracks a remote must still be
     // able to hydrate blocks it holds by reference.
     let remote = branch.fallback();
-    let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
+    let store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
     let mut tree = match base_revision.as_ref() {
         Some(base) => Index::from_hash(NodeHash::from(*base.tree.hash())),
@@ -517,13 +517,13 @@ where
         None => Index::empty(),
     };
 
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
     match &edit {
         BlobIndexEdit::Put { hash, record } => {
-            tree.put_blob(&mut store, &mut delta, hash, *record).await?;
+            tree.put_blob(&store, &mut delta, hash, *record).await?;
         }
         BlobIndexEdit::Retract { hash } => {
-            tree.retract_blob(&mut store, &mut delta, hash).await?;
+            tree.retract_blob(&store, &mut delta, hash).await?;
         }
     }
 
@@ -575,7 +575,7 @@ where
     let mut record =
         RevisionRecord::create(&revision, &profile, parent.into_iter().collect(), skips);
     record.signature = Attest::new(record.payload()?).perform(env).await?;
-    tree.record(&mut store, &mut delta, record.entries(&manifest)?)
+    tree.record(&store, &mut delta, record.entries(&manifest)?)
         .await?;
 
     // Persist the tree's pending nodes before referencing the root in a
@@ -583,7 +583,7 @@ where
     branch
         .archive()
         .index()
-        .import(delta.flush().map(|(_, buffer)| buffer))
+        .import(delta.flush_blocks().chain(delta.flush_blobs()))
         .perform(env)
         .await
         .map_err(DialogArtifactsError::from)?;

@@ -495,29 +495,6 @@ impl ObjectStore {
         request_outcome(request).await
     }
 
-    /// Store every `(value, key)` pair, overwriting. The puts are issued
-    /// together and only the last is awaited: requests in a transaction
-    /// complete in order, and a failure among the earlier ones aborts
-    /// the transaction, which fails the last request and its settle.
-    pub async fn put_all(
-        &self,
-        entries: impl Iterator<Item = (JsValue, Option<JsValue>)>,
-    ) -> Result<(), IdbError> {
-        let mut last = None;
-        for (value, key) in entries {
-            let request = match &key {
-                Some(key) => self.inner.put_with_key(&value, key),
-                None => self.inner.put(&value),
-            }
-            .map_err(|e| platform("issuing put", e))?;
-            last = Some(request);
-        }
-        match last {
-            Some(request) => request_outcome(request).await.map(|_| ()),
-            None => Ok(()),
-        }
-    }
-
     /// Delete the entry under `key`. An absent key is a no-op.
     pub async fn delete(&self, key: JsValue) -> Result<(), IdbError> {
         let request = self

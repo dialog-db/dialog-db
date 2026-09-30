@@ -3,8 +3,9 @@
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::ArchiveDelta;
 use anyhow::Result;
-use dialog_storage::MemoryStorageBackend;
+use dialog_search_tree::MemoryBlocks;
 use ed25519_dalek::SigningKey;
 use futures_util::TryStreamExt as _;
 
@@ -525,14 +526,9 @@ async fn it_records_multiple_values_per_attribute() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_records_history_in_the_artifact_tree() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "post/title".parse()?;
@@ -552,14 +548,11 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
     // covers both.
     let mut tree = ArtifactTree::empty();
     let apply = async |tree: &mut ArtifactTree,
-                       store: &mut Storage<
-        CborEncoder,
-        MemoryStorageBackend<dialog_storage::Blake3Hash, Vec<u8>>,
-    >,
+                       store: &MemoryBlocks,
                        version: Version,
                        instruction: Instruction|
            -> Result<()> {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         tree.apply_versioned(
             store,
             &mut delta,
@@ -567,26 +560,12 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
             stream::iter(vec![instruction]),
         )
         .await?;
-        for (digest, buffer) in delta.flush() {
-            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-        }
+        delta.flush_into(store);
         Ok(())
     };
 
-    apply(
-        &mut tree,
-        &mut store,
-        first,
-        Instruction::Assert(title("Hej")),
-    )
-    .await?;
-    apply(
-        &mut tree,
-        &mut store,
-        second,
-        Instruction::Replace(title("Hi")),
-    )
-    .await?;
+    apply(&mut tree, &store, first, Instruction::Assert(title("Hej"))).await?;
+    apply(&mut tree, &store, second, Instruction::Replace(title("Hi"))).await?;
 
     // The replacement's record supersedes the first claim, detectable via
     // the tiered conflict detection over the same tree
@@ -609,13 +588,7 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
 
     // Retraction records the assertion it withdraws, and the data region
     // reflects the retraction while the history region keeps all records
-    apply(
-        &mut tree,
-        &mut store,
-        third,
-        Instruction::Retract(title("Hi")),
-    )
-    .await?;
+    apply(&mut tree, &store, third, Instruction::Retract(title("Hi"))).await?;
     let history = TreeHistory::new(tree.clone(), store.clone());
     let records = history
         .select(HistorySelector::All)
@@ -644,14 +617,9 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_selects_the_records_of_one_revision() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "post/title".parse()?;
@@ -668,19 +636,14 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     let apply = async |tree: &mut ArtifactTree,
-                       store: &mut Storage<
-        CborEncoder,
-        MemoryStorageBackend<dialog_storage::Blake3Hash, Vec<u8>>,
-    >,
+                       store: &MemoryBlocks,
                        version: Version,
                        instructions: Vec<Instruction>|
            -> Result<()> {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         tree.apply_versioned(store, &mut delta, Some(version), stream::iter(instructions))
             .await?;
-        for (digest, buffer) in delta.flush() {
-            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-        }
+        delta.flush_into(store);
         Ok(())
     };
 
@@ -689,14 +652,14 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
     let other: Attribute = "post/slug".parse()?;
     apply(
         &mut tree,
-        &mut store,
+        &store,
         first,
         vec![Instruction::Assert(title("Hej"))],
     )
     .await?;
     apply(
         &mut tree,
-        &mut store,
+        &store,
         second,
         vec![
             Instruction::Replace(title("Hi")),
@@ -711,7 +674,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
     .await?;
     apply(
         &mut tree,
-        &mut store,
+        &store,
         third,
         vec![Instruction::Retract(title("Hi"))],
     )
@@ -771,14 +734,9 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_selects_records_whose_values_spilled() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "post/body".parse()?;
@@ -787,9 +745,9 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
     let version = Version::new(Origin::from([9u8; 32]), Edition::new(0));
 
     let mut tree = ArtifactTree::empty();
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
     tree.apply_versioned(
-        &mut store,
+        &store,
         &mut delta,
         Some(version),
         stream::iter(vec![Instruction::Assert(Artifact {
@@ -800,9 +758,7 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
         })]),
     )
     .await?;
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+    delta.flush_into(&store);
 
     let history = TreeHistory::new(tree.clone(), store.clone());
     let records: Vec<_> = history.select(version).try_collect().await?;
@@ -822,34 +778,27 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+    use dialog_capability::Provider;
+    use dialog_common::{Blake3Hash, Buffer};
+    use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
     use futures_util::stream;
     use std::future::poll_fn;
     use std::sync::Arc;
     use std::task::Poll;
 
+    use crate::LoadBlob;
+
     /// Counts reads in flight; every read parks once so concurrently
     /// polled reads overlap.
     #[derive(Clone)]
     struct Gauge {
-        inner: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+        inner: MemoryBlocks,
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl StorageBackend for Gauge {
-        type Key = Blake3Hash;
-        type Value = Vec<u8>;
-        type Error = DialogStorageError;
-
-        async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-            self.inner.set(key, value).await
-        }
-
-        async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+    impl Gauge {
+        async fn read(&self, hash: &Blake3Hash) -> Option<Buffer> {
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
             let mut yielded = false;
@@ -863,14 +812,36 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
                 }
             })
             .await;
-            let value = self.inner.get(key).await;
+            let value = self.inner.get(hash);
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             value
         }
     }
 
-    let mut store = Gauge {
-        inner: MemoryStorageBackend::default(),
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<LoadBlock> for Gauge {
+        async fn execute(
+            &self,
+            LoadBlock { hash }: LoadBlock,
+        ) -> Result<Option<Buffer>, DialogSearchTreeError> {
+            Ok(self.read(&hash).await)
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<LoadBlob> for Gauge {
+        async fn execute(
+            &self,
+            LoadBlob { hash }: LoadBlob,
+        ) -> Result<Option<Buffer>, DialogArtifactsError> {
+            Ok(self.read(&hash).await)
+        }
+    }
+
+    let store = Gauge {
+        inner: MemoryBlocks::new(),
         in_flight: Arc::new(AtomicUsize::new(0)),
         peak: Arc::new(AtomicUsize::new(0)),
     };
@@ -882,7 +853,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
         .map(|index| format!("{index}:").repeat(2048))
         .collect();
     let mut tree = ArtifactTree::empty();
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
     let mut claims = Vec::new();
     for body in &bodies {
         claims.push(Instruction::Assert(Artifact {
@@ -892,11 +863,9 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
             cause: None,
         }));
     }
-    tree.apply_versioned(&mut store, &mut delta, Some(version), stream::iter(claims))
+    tree.apply_versioned(&store, &mut delta, Some(version), stream::iter(claims))
         .await?;
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+    delta.flush_into(&store.inner);
 
     // A cold reader: no node or spill cache holds anything yet, so every
     // spilled block reads from the store.
@@ -1094,14 +1063,9 @@ async fn it_never_leaps_over_a_merge() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "post/title".parse()?;
@@ -1114,10 +1078,10 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
 
     let mut tree = ArtifactTree::empty();
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
     let changed = tree
         .apply_versioned(
-            &mut store,
+            &store,
             &mut delta,
             Some(version),
             stream::iter(vec![
@@ -1127,9 +1091,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
         )
         .await?;
     assert!(changed);
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+    delta.flush_into(&store);
 
     let history = TreeHistory::new(tree.clone(), store.clone());
     let records = history
@@ -1164,14 +1126,9 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
 /// it alone.
 #[dialog_common::test]
 async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "post/title".parse()?;
@@ -1185,26 +1142,24 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
     let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
 
     let mut tree = ArtifactTree::empty();
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
 
     // Establish the fact, so the retraction below has something standing
     // to withdraw — a retract of an absent fact is a no-op and would
     // prove nothing.
     tree.apply_versioned(
-        &mut store,
+        &store,
         &mut delta,
         Some(first),
         stream::iter(vec![Instruction::Assert(title.clone())]),
     )
     .await?;
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+    delta.flush_into(&store);
 
     // The update: withdraw it, then assert it again, one batch.
     let changed = tree
         .apply_versioned(
-            &mut store,
+            &store,
             &mut delta,
             Some(second),
             stream::iter(vec![
@@ -1214,9 +1169,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
         )
         .await?;
     assert!(changed);
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+    delta.flush_into(&store);
 
     assert!(
         !tree
@@ -1250,14 +1203,9 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
 /// for any chain passing through a large value.
 #[dialog_common::test]
 async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
     let big = Value::String("z".repeat(inline_n + 1));
@@ -1280,17 +1228,15 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
             Instruction::Replace(doc(Value::String("v2".into()))),
         ),
     ] {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         tree.apply_versioned(
-            &mut store,
+            &store,
             &mut delta,
             Some(version),
             stream::iter(vec![instruction]),
         )
         .await?;
-        for (digest, buffer) in delta.flush() {
-            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-        }
+        delta.flush_into(&store);
     }
 
     let history = TreeHistory::new(tree.clone(), store.clone());
@@ -1312,14 +1258,9 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
 /// issued twice must not grow the log or advance the edition.
 #[dialog_common::test]
 async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "post/title".parse()?;
@@ -1332,10 +1273,10 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
 
     let mut tree = ArtifactTree::empty();
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
     let changed = tree
         .apply_versioned(
-            &mut store,
+            &store,
             &mut delta,
             Some(version),
             stream::iter(vec![Instruction::Retract(title)]),
@@ -1349,9 +1290,7 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
         ArtifactTree::empty_root(&dialog_search_tree::Manifest::default())?,
         "the tree is still the empty tree"
     );
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+    delta.flush_into(&store);
 
     let history = TreeHistory::new(tree.clone(), store.clone());
     assert!(
@@ -1376,18 +1315,12 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
 /// overrode, with log and mirror agreeing.
 #[dialog_common::test]
 async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
-    use dialog_search_tree::{ContentAddressedStorage, Delta};
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::{StreamExt as _, stream};
 
     use crate::State;
     use crate::merge::coverage_scope;
-    use crate::tree::TreeStorageBridge;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "post/title".parse()?;
@@ -1411,17 +1344,15 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
             ],
         ),
     ] {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         tree.apply_versioned(
-            &mut store,
+            &store,
             &mut delta,
             Some(version),
             stream::iter(instructions),
         )
         .await?;
-        for (digest, buffer) in delta.flush() {
-            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-        }
+        delta.flush_into(&store);
     }
 
     // The fact stands, re-asserted under the new version.
@@ -1451,7 +1382,7 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
     );
 
     // The coverage mirror agrees with the folded log record.
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let storage = store.clone();
     let scope = coverage_scope();
     let entries: Vec<_> = tree
         .stream_range(scope[0].clone(), &storage)
@@ -1480,14 +1411,9 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
 /// identical value).
 #[dialog_common::test]
 async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "task/label".parse()?;
@@ -1511,17 +1437,15 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
         (mallory, Instruction::Assert(urgent.clone())),
         (retractor, Instruction::Retract(urgent.clone())),
     ] {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         tree.apply_versioned(
-            &mut store,
+            &store,
             &mut delta,
             Some(version),
             stream::iter(vec![instruction]),
         )
         .await?;
-        for (digest, buffer) in delta.flush() {
-            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-        }
+        delta.flush_into(&store);
     }
 
     let history = TreeHistory::new(tree.clone(), store.clone());
@@ -1556,16 +1480,10 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
 /// claim — this pins the union itself.
 #[dialog_common::test]
 async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> {
-    use dialog_search_tree::{ContentAddressedStorage, Delta, TreeDifference};
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use dialog_search_tree::TreeDifference;
     use futures_util::{StreamExt as _, stream};
 
-    use crate::tree::TreeStorageBridge;
-
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "task/label".parse()?;
@@ -1585,23 +1503,21 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
     let mut replicas = Vec::new();
     for version in [bob, mallory] {
         let mut tree = ArtifactTree::empty();
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         tree.apply_versioned(
-            &mut store,
+            &store,
             &mut delta,
             Some(version),
             stream::iter(vec![Instruction::Assert(urgent.clone())]),
         )
         .await?;
-        for (digest, buffer) in delta.flush() {
-            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-        }
+        delta.flush_into(&store);
         replicas.push(tree);
     }
     let mut b = replicas.pop().expect("two replicas were built");
     let mut a = replicas.pop().expect("two replicas were built");
 
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let storage = store.clone();
     let empty = ArtifactTree::empty();
 
     // Each side's full state as a change stream, the shape a pull ships
@@ -1622,20 +1538,18 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
     let from_b = shipped.pop().expect("two differentials were computed");
     let from_a = shipped.pop().expect("two differentials were computed");
 
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
     a = a
         .edit()
         .integrate(stream::iter(from_b.into_iter().map(Ok)), &storage)
         .await?
-        .persist(&mut delta)?;
+        .persist(delta.blocks())?;
     b = b
         .edit()
         .integrate(stream::iter(from_a.into_iter().map(Ok)), &storage)
         .await?
-        .persist(&mut delta)?;
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+        .persist(delta.blocks())?;
+    delta.flush_into(&store);
 
     assert_eq!(
         a.root(),
@@ -1671,14 +1585,9 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "post/title".parse()?;
@@ -1695,14 +1604,11 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
 
     let mut tree = ArtifactTree::empty();
     let apply = async |tree: &mut ArtifactTree,
-                       store: &mut Storage<
-        CborEncoder,
-        MemoryStorageBackend<dialog_storage::Blake3Hash, Vec<u8>>,
-    >,
+                       store: &MemoryBlocks,
                        version: Version,
                        instruction: Instruction|
            -> Result<bool> {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         let changed = tree
             .apply_versioned(
                 store,
@@ -1711,38 +1617,18 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
                 stream::iter(vec![instruction]),
             )
             .await?;
-        for (digest, buffer) in delta.flush() {
-            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-        }
+        delta.flush_into(store);
         Ok(changed)
     };
 
     // Two values stand at the same (entity, attribute) — assertions are
     // additive, so this is the cardinality-many shape.
-    apply(
-        &mut tree,
-        &mut store,
-        first,
-        Instruction::Assert(title("Hej")),
-    )
-    .await?;
-    apply(
-        &mut tree,
-        &mut store,
-        second,
-        Instruction::Assert(title("Hi")),
-    )
-    .await?;
+    apply(&mut tree, &store, first, Instruction::Assert(title("Hej"))).await?;
+    apply(&mut tree, &store, second, Instruction::Assert(title("Hi"))).await?;
 
     // Replacing with one of the standing values repairs the anomaly:
     // the different-valued claim is superseded, the same-valued one stays.
-    let changed = apply(
-        &mut tree,
-        &mut store,
-        third,
-        Instruction::Replace(title("Hi")),
-    )
-    .await?;
+    let changed = apply(&mut tree, &store, third, Instruction::Replace(title("Hi"))).await?;
     assert!(changed, "superseding a standing value is a change");
 
     let data = tree.select_data(store.clone(), &entity, &the).await?;
@@ -1769,7 +1655,7 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
     // And replaying the exact same replacement is now a pure no-op.
     let changed = apply(
         &mut tree,
-        &mut store,
+        &store,
         Version::new(Origin::from([7u8; 32]), Edition::new(3)),
         Instruction::Replace(title("Hi")),
     )
@@ -1787,14 +1673,9 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let head = "test/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let long_x: Attribute = format!("{head}x").parse()?;
@@ -1814,9 +1695,9 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
     };
 
     let mut tree = ArtifactTree::empty();
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
     tree.apply_versioned(
-        &mut store,
+        &store,
         &mut delta,
         Some(version),
         stream::iter(vec![
@@ -1826,9 +1707,7 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
         ]),
     )
     .await?;
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+    delta.flush_into(&store);
 
     let history = TreeHistory::new(tree.clone(), store.clone());
     let x_claims = history.claims_at(&version, &left, &long_x).await?;
@@ -1924,14 +1803,10 @@ async fn it_verifies_signed_revision_records() -> Result<()> {
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
     use base58::ToBase58 as _;
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+
     use ed25519_dalek::Signer as _;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let key = signing_key(7);
     let did_key = {
@@ -1955,22 +1830,20 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
     signed.signature = key.sign(&signed.payload()?).to_bytes().to_vec();
 
     let mut tree = ArtifactTree::empty();
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
     tree.record(
-        &mut store,
+        &store,
         &mut delta,
         signed.entries(&dialog_search_tree::Manifest::default())?,
     )
     .await?;
     tree.record(
-        &mut store,
+        &store,
         &mut delta,
         forged.entries(&dialog_search_tree::Manifest::default())?,
     )
     .await?;
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+    delta.flush_into(&store);
 
     let history = TreeHistory::new(tree, store);
     assert_eq!(
@@ -1997,18 +1870,13 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
     use crate::merge::observe_revisions;
-    use crate::tree::TreeStorageBridge;
     use base58::ToBase58 as _;
-    use dialog_search_tree::{Cache, ContentAddressedStorage, Delta, Manifest, PersistentTree};
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use dialog_search_tree::{Cache, Manifest, PersistentTree};
     use ed25519_dalek::Signer as _;
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let key = signing_key(9);
     let did_key = {
@@ -2037,17 +1905,15 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
     };
 
     let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(small.clone(), Cache::new());
-    let mut delta = Delta::zero();
-    tree.record(&mut store, &mut delta, entries).await?;
-    for (digest, buffer) in delta.flush() {
-        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-    }
+    let mut delta = ArchiveDelta::zero();
+    tree.record(&store, &mut delta, entries).await?;
+    delta.flush_into(&store);
     assert!(
-        store.get(&reference).await?.is_some(),
+        store.get(&reference.into()).is_some(),
         "the spilled block is stored with the entries"
     );
 
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let storage = store.clone();
     let observed = Arc::new(Mutex::new(BTreeSet::new()));
     let empty: ArtifactTree = PersistentTree::empty_with_manifest(small, Cache::new());
     let changes = observe_revisions(
@@ -2340,19 +2206,13 @@ async fn it_does_not_memoize_incomplete_history() -> Result<()> {
 /// merges.
 #[dialog_common::test]
 async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
-    use dialog_search_tree::{ContentAddressedStorage, Delta};
-    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
     use futures_util::{StreamExt as _, stream};
 
     use crate::State;
     use crate::key::varkey::{ValuePayload, parse_key};
     use crate::merge::coverage_scope;
-    use crate::tree::TreeStorageBridge;
 
-    let mut store = Storage {
-        encoder: CborEncoder,
-        backend: MemoryStorageBackend::default(),
-    };
+    let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
     let the: Attribute = "post/title".parse()?;
@@ -2373,20 +2233,18 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
         (second, Instruction::Replace(title("Hi"))),
         (third, Instruction::Retract(title("Hi"))),
     ] {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         tree.apply_versioned(
-            &mut store,
+            &store,
             &mut delta,
             Some(version),
             stream::iter(vec![instruction]),
         )
         .await?;
-        for (digest, buffer) in delta.flush() {
-            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
-        }
+        delta.flush_into(&store);
     }
 
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let storage = store.clone();
     let scope = coverage_scope();
     let entries: Vec<_> = tree
         .stream_range(scope[0].clone(), &storage)

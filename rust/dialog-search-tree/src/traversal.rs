@@ -18,8 +18,8 @@
 //! complete inventory of what is missing.
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
 use futures_util::stream::FuturesUnordered;
 use rkyv::{
@@ -34,8 +34,8 @@ use rkyv::{
 use std::collections::VecDeque;
 
 use crate::{
-    ContentAddressedStorage, DialogSearchTreeError, Distribution, Key, NodeBody, PersistentNode,
-    PersistentTree, Value,
+    DialogSearchTreeError, Distribution, Key, LoadBlock, NodeBody, PersistentNode, PersistentTree,
+    Value,
 };
 
 /// What a gap-tolerant traversal found at one position in the tree.
@@ -69,13 +69,12 @@ where
     ///
     /// Breadth-first from the root. Child hashes are read out of each
     /// node's already-decoded body, so descending costs no extra reads.
-    fn traverse_available<'a, Backend>(
+    fn traverse_available<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend;
+        Env: Provider<LoadBlock> + ConditionalSync;
 
     /// [`traverse_available`](Self::traverse_available) restricted to
     /// `scope`: a child subtree whose key span cannot intersect any range
@@ -89,14 +88,13 @@ where
     /// Pruning is conservative in the same direction as
     /// [`TreeDifference::compute_within`](crate::TreeDifference::compute_within):
     /// it may keep a node the scope does not need, never drop one it does.
-    fn traverse_available_within<'a, Backend>(
+    fn traverse_available_within<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend;
+        Env: Provider<LoadBlock> + ConditionalSync;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -112,27 +110,25 @@ where
         + ConditionalSync,
     D: Distribution,
 {
-    fn traverse_available<'a, Backend>(
+    fn traverse_available<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
-        traverse::<Key, Value, Backend>(self.stored_root().cloned(), storage, None)
+        traverse::<Key, Value, Env>(self.stored_root().cloned(), storage, None)
     }
 
-    fn traverse_available_within<'a, Backend>(
+    fn traverse_available_within<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSend,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
-        traverse::<Key, Value, Backend>(self.stored_root().cloned(), storage, Some(scope))
+        traverse::<Key, Value, Env>(self.stored_root().cloned(), storage, Some(scope))
     }
 }
 
@@ -160,9 +156,9 @@ fn span_intersects(
 /// The walk shared by [`Traversable::traverse_available`] and
 /// [`Traversable::traverse_available_within`]; `scope` of `None` keeps
 /// every child.
-fn traverse<'a, Key, Value, Backend>(
+fn traverse<'a, Key, Value, Env>(
     root: Option<Blake3Hash>,
-    storage: &'a ContentAddressedStorage<Backend>,
+    storage: &'a Env,
     scope: Option<&'a [core::ops::RangeInclusive<Vec<u8>>]>,
 ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
 where
@@ -172,8 +168,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     use futures_util::StreamExt as _;
 
@@ -207,11 +202,11 @@ where
             loop {
                 while let Some(hash) = queue.pop_front() {
                     reads.push(async move {
-                        // `retrieve` verifies stored bytes against the
-                        // hash it was asked for, so `None` here is
-                        // genuinely "not stored" -- a corrupt block
-                        // raises instead, and still fails the walk.
-                        let bytes = storage.retrieve(&hash).await;
+                        // `load` verifies loaded bytes against the hash
+                        // it was asked for, so `None` here is genuinely
+                        // "not stored" -- a corrupt block raises instead,
+                        // and still fails the walk.
+                        let bytes = LoadBlock::new(hash.clone()).perform(storage).await;
                         (hash, bytes)
                     });
                 }
@@ -222,8 +217,7 @@ where
                     yield Visit::Absent(hash);
                     continue;
                 };
-                let node: PersistentNode<Key, Value> =
-                    PersistentNode::try_from(Buffer::from(bytes))?;
+                let node: PersistentNode<Key, Value> = PersistentNode::try_from(bytes)?;
 
                 if let NodeBody::Index(index) = node.body() {
                     let links = index.links()?;
@@ -294,13 +288,12 @@ where
 mod tests {
     #![allow(unexpected_cfgs)]
 
+    use crate::MemoryBlocks;
     use anyhow::Result;
-    use dialog_storage::MemoryStorageBackend;
     use futures_util::StreamExt as _;
 
     use super::{Traversable as _, Visit};
-    use crate::{ContentAddressedStorage, Delta, PersistentTree};
-    use dialog_common::Blake3Hash;
+    use crate::{Delta, PersistentTree};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -309,7 +302,7 @@ mod tests {
     /// byte partitions it into regions the way the artifact tree's tag
     /// byte does.
     async fn tagged_tree(
-        storage: &mut ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        storage: &mut MemoryBlocks,
         tags: &[u8],
         per_tag: u32,
     ) -> Result<PersistentTree<[u8; 5], Vec<u8>>> {
@@ -326,9 +319,7 @@ mod tests {
                     .await?
                     .persist(&mut delta)?;
                 for (_, buffer) in delta.flush() {
-                    storage
-                        .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                        .await?;
+                    storage.store(buffer);
                 }
             }
         }
@@ -336,19 +327,11 @@ mod tests {
     }
 
     /// [`tagged_tree`] over any backend, so a test can observe the reads.
-    async fn tagged_tree_over<B>(
-        storage: &mut ContentAddressedStorage<B>,
+    async fn tagged_tree_over(
+        storage: &crate::helpers::ObservingBlocks,
         tags: &[u8],
         per_tag: u32,
-    ) -> Result<PersistentTree<[u8; 5], Vec<u8>>>
-    where
-        B: dialog_storage::StorageBackend<
-                Key = Blake3Hash,
-                Value = Vec<u8>,
-                Error = dialog_storage::DialogStorageError,
-            > + dialog_common::ConditionalSend
-            + dialog_common::ConditionalSync,
-    {
+    ) -> Result<PersistentTree<[u8; 5], Vec<u8>>> {
         let mut tree = PersistentTree::<[u8; 5], Vec<u8>>::empty();
         let mut delta = Delta::zero();
         for tag in tags {
@@ -362,9 +345,7 @@ mod tests {
                     .await?
                     .persist(&mut delta)?;
                 for (_, buffer) in delta.flush() {
-                    storage
-                        .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                        .await?;
+                    storage.store(buffer);
                 }
             }
         }
@@ -374,18 +355,10 @@ mod tests {
     /// A deep, narrow tree: a segment target small enough that a thousand
     /// tiny entries branch several levels deep, so a walk that pays a
     /// barrier per level pays several.
-    async fn paced_tree_over<B>(
-        storage: &mut ContentAddressedStorage<B>,
+    async fn paced_tree_over(
+        storage: &crate::helpers::ObservingBlocks,
         keys: core::ops::Range<u32>,
-    ) -> Result<PersistentTree<[u8; 4], Vec<u8>>>
-    where
-        B: dialog_storage::StorageBackend<
-                Key = Blake3Hash,
-                Value = Vec<u8>,
-                Error = dialog_storage::DialogStorageError,
-            > + dialog_common::ConditionalSend
-            + dialog_common::ConditionalSync,
-    {
+    ) -> Result<PersistentTree<[u8; 4], Vec<u8>>> {
         let manifest = crate::Manifest {
             max_segment: 512,
             frame_ceiling_factor: 0,
@@ -401,9 +374,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
         Ok(tree)
@@ -418,7 +389,7 @@ mod tests {
     /// pruning may cost extra nodes, never in-scope entries.
     #[dialog_common::test]
     async fn it_keeps_every_in_scope_entry() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
         let tree = tagged_tree(&mut storage, &[0, 1, 3], 1200).await?;
         let scope = [tag_span(0)];
 
@@ -478,7 +449,7 @@ mod tests {
     /// The whole key space as one scope is the unscoped walk.
     #[dialog_common::test]
     async fn it_matches_the_unscoped_walk_at_full_scope() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
         let tree = tagged_tree(&mut storage, &[0, 1, 3], 200).await?;
         let full = [Vec::new()..=vec![0xFF; 5]];
 
@@ -521,7 +492,7 @@ mod tests {
     /// spans, which does not agree with `route` at the edges.
     #[dialog_common::test]
     async fn it_keeps_a_child_whose_only_in_scope_content_is_buffered() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // Stored content is tag 2 and tag 3 only: every stored key, and
         // every separator, sits outside the tag-1 scope.
@@ -538,9 +509,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = hitchhiker.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         let tree = PersistentTree::<[u8; 5], Vec<u8>>::from_hash(root);
 
@@ -615,7 +584,7 @@ mod tests {
     /// and it is the same bound `TreeDifference::retain_scope` works with.
     #[dialog_common::test]
     async fn it_prunes_a_scope_the_tree_cannot_meet() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
         let tree = tagged_tree(&mut storage, &[0, 1], 400).await?;
         let scope = [tag_span(0xFE)];
 
@@ -663,7 +632,7 @@ mod tests {
     /// would carry the sockets regardless of who polls and hide a walk
     /// that had quietly gone one read at a time.
     ///
-    /// `ObservingBackend` yields once inside every read, so an overlap
+    /// `ObservingBlocks` yields once inside every read, so an overlap
     /// here means the reads genuinely coexisted rather than merely
     /// completing back to back.
     /// The walk is a continuation queue, not a level walk: a node's
@@ -676,14 +645,14 @@ mod tests {
     /// of the walk.
     #[dialog_common::test]
     async fn it_walks_without_level_barriers() -> Result<()> {
-        use crate::helpers::ObservingBackend;
+        use crate::helpers::ObservingBlocks;
 
         // Two slots, like a browser holding few connections to a host:
         // the cap is what makes the reader's shape visible in the order
-        // reads start and complete (see `ObservingBackend::with_capacity`).
-        let backend = ObservingBackend::with_capacity(2);
-        let mut storage = ContentAddressedStorage::new(backend.clone());
-        let tree = paced_tree_over(&mut storage, 0..1200).await?;
+        // reads start and complete (see `ObservingBlocks::with_capacity`).
+        let backend = ObservingBlocks::with_capacity(2);
+        let storage = backend.clone();
+        let tree = paced_tree_over(&storage, 0..1200).await?;
         let levels = backend
             .levels_of::<[u8; 4], Vec<u8>>(tree.root().clone())
             .await?;
@@ -721,12 +690,12 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_overlaps_a_level_under_a_one_item_consumer() -> Result<()> {
-        use crate::helpers::ObservingBackend;
+        use crate::helpers::ObservingBlocks;
 
-        let backend = ObservingBackend::new();
-        let mut storage = ContentAddressedStorage::new(backend.clone());
+        let backend = ObservingBlocks::new();
+        let storage = backend.clone();
         // Wide enough that a level holds many siblings to overlap.
-        let tree = tagged_tree_over(&mut storage, &[0u8, 1, 3], 1200).await?;
+        let tree = tagged_tree_over(&storage, &[0u8, 1, 3], 1200).await?;
 
         backend.reset();
         let visits = tree.traverse_available(&storage);
@@ -763,11 +732,11 @@ mod tests {
     /// measured innocent, and the pin keeps it that way.)
     #[dialog_common::test]
     async fn it_overlaps_a_level_through_a_nested_generator() -> Result<()> {
-        use crate::helpers::ObservingBackend;
+        use crate::helpers::ObservingBlocks;
 
-        let backend = ObservingBackend::new();
-        let mut storage = ContentAddressedStorage::new(backend.clone());
-        let tree = tagged_tree_over(&mut storage, &[0u8, 1, 3], 1200).await?;
+        let backend = ObservingBlocks::new();
+        let storage = backend.clone();
+        let tree = tagged_tree_over(&storage, &[0u8, 1, 3], 1200).await?;
 
         backend.reset();
         // Wrap the walk the way the snapshot export does: an outer

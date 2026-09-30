@@ -1,20 +1,19 @@
 use async_trait::async_trait;
+use dialog_artifacts::{DialogArtifactsError, LoadBlob};
 use dialog_capability::Provider;
-use dialog_common::{Buffer, ConditionalSync};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogScope;
-use dialog_effects::archive::{Get, Put};
-use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
-use serde::{Serialize, de::DeserializeOwned};
-use std::fmt::Debug;
+use dialog_effects::archive::{ArchiveError, Get};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 
 /// Local content-addressed index backed by archive capabilities.
 ///
-/// Bridges the capability system (`Get`/`Put` effects) with the search
-/// tree's `ContentAddressedStorage` trait. All reads and writes go to
-/// the local archive only.
+/// Loads a branch's tree nodes ([`LoadBlock`]) and spilled values ([`LoadBlob`])
+/// from one catalog of the local archive, performing `Get` against the
+/// environment it borrows. It never writes: a commit writes what its batch
+/// staged.
 pub struct LocalIndex<'a, Env> {
     env: &'a Env,
-    encoder: CborEncoder,
     catalog: CatalogScope,
 }
 
@@ -22,7 +21,6 @@ impl<Env> Clone for LocalIndex<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             env: self.env,
-            encoder: self.encoder.clone(),
             catalog: self.catalog.clone(),
         }
     }
@@ -31,11 +29,7 @@ impl<Env> Clone for LocalIndex<'_, Env> {
 impl<'a, Env> LocalIndex<'a, Env> {
     /// Create a local index for the given catalog capability.
     pub fn new(env: &'a Env, catalog: CatalogScope) -> Self {
-        Self {
-            env,
-            encoder: CborEncoder,
-            catalog,
-        }
+        Self { env, catalog }
     }
 
     /// The catalog capability this index operates on.
@@ -47,63 +41,56 @@ impl<'a, Env> LocalIndex<'a, Env> {
     pub fn env(&self) -> &'a Env {
         self.env
     }
-
-    /// The encoder used for serialization.
-    pub fn encoder(&self) -> &CborEncoder {
-        &self.encoder
-    }
 }
 
-/// Raw block access for the search tree: node buffers are already
-/// serialized, so they pass straight through the catalog effects without
-/// the CBOR encoder. The encoder remains in use for typed blocks like
-/// revisions (via `dialog_storage::ContentAddressedStorage`).
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> StorageBackend for LocalIndex<'_, Env>
+impl<Env> LocalIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
+    Env: Provider<Get> + ConditionalSync + 'static,
 {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, _key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.catalog
+    /// The block stored under `hash` in the local archive, if any, as the
+    /// archive holds it: unverified. Readers outside the crate load through
+    /// [`LoadBlock`] or [`LoadBlob`], which check it.
+    pub(crate) async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
+        Ok(self
+            .catalog
             .clone()
-            .put(Buffer::from(value))
+            .get(hash.clone())
             .perform(self.env)
-            .await?;
-        Ok(())
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        Ok(self.catalog.clone().get(*key).perform(self.env).await?)
+            .await?
+            .map(Buffer::from))
     }
 }
 
+/// Tree nodes load from the local archive.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Encoder for LocalIndex<'_, Env>
+impl<Env> Provider<LoadBlock> for LocalIndex<'_, Env>
 where
-    Env: ConditionalSync + 'static,
+    Env: Provider<Get> + ConditionalSync + 'static,
 {
-    type Bytes = Vec<u8>;
-    type Hash = Blake3Hash;
-    type Error = DialogStorageError;
-
-    async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
-    where
-        T: Serialize + ConditionalSync + Debug,
-    {
-        self.encoder.encode(block).await
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        self.load(&hash)
+            .await
+            .map_err(|error| DialogSearchTreeError::Storage(error.into()))
     }
+}
 
-    async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>
-    where
-        T: DeserializeOwned + ConditionalSync,
-    {
-        self.encoder.decode(bytes).await
+/// Spilled values load from the local archive, where commits write them
+/// beside the tree's nodes.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<LoadBlob> for LocalIndex<'_, Env>
+where
+    Env: Provider<Get> + ConditionalSync + 'static,
+{
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
+        Ok(self.load(&hash).await?)
     }
 }
 
@@ -112,8 +99,6 @@ mod tests {
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
-
-    use dialog_storage::ContentAddressedStorage;
 
     use super::*;
     use anyhow::Result;
@@ -126,67 +111,66 @@ mod tests {
         ArchiveScope::new(Subject::from(did!("key:zArchiveCasTest"))).catalog(name)
     }
 
-    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-    struct TestBlock {
-        value: u32,
-        label: String,
-    }
-
-    #[dialog_common::test]
-    async fn it_writes_and_reads_block() -> Result<()> {
-        let env = Volatile::new();
-        let mut archive = LocalIndex::new(&env, test_catalog("index"));
-
-        let block = TestBlock {
-            value: 42,
-            label: "hello".into(),
-        };
-
-        let hash = archive.write(&block).await?;
-        let result: Option<TestBlock> = archive.read(&hash).await?;
-
-        assert_eq!(result, Some(block));
+    async fn put(env: &Volatile, catalog: &CatalogScope, block: &Buffer) -> Result<()> {
+        catalog.clone().put(block.clone()).perform(env).await?;
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn it_returns_none_for_missing_hash() -> Result<()> {
+    async fn it_loads_a_stored_block_through_both_lanes() -> Result<()> {
         let env = Volatile::new();
-        let archive = LocalIndex::new(&env, test_catalog("index"));
+        let catalog = test_catalog("index");
+        let block = Buffer::from(b"a block".to_vec());
+        put(&env, &catalog, &block).await?;
 
-        let missing_hash = [0u8; 32];
-        let result: Option<TestBlock> = archive.read(&missing_hash).await?;
+        let index = LocalIndex::new(&env, catalog);
+        let node = LoadBlock::new(block.blake3_hash().clone())
+            .perform(&index)
+            .await?;
+        let blob = LoadBlob::new(block.blake3_hash().clone())
+            .perform(&index)
+            .await?;
 
-        assert!(result.is_none());
+        assert_eq!(node, Some(block.clone()));
+        assert_eq!(blob, Some(block));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_nothing_for_a_missing_hash() -> Result<()> {
+        let env = Volatile::new();
+        let index = LocalIndex::new(&env, test_catalog("index"));
+
+        let missing = Buffer::from(b"never stored".to_vec());
+        let node = LoadBlock::new(missing.blake3_hash().clone())
+            .perform(&index)
+            .await?;
+
+        assert!(node.is_none());
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_isolates_catalogs() -> Result<()> {
         let env = Volatile::new();
+        let block = Buffer::from(b"isolated".to_vec());
+        put(&env, &test_catalog("a"), &block).await?;
 
-        let block = TestBlock {
-            value: 99,
-            label: "isolated".into(),
-        };
+        let other = LocalIndex::new(&env, test_catalog("b"));
+        assert!(
+            LoadBlock::new(block.blake3_hash().clone())
+                .perform(&other)
+                .await?
+                .is_none()
+        );
 
-        let hash = {
-            let mut archive = LocalIndex::new(&env, test_catalog("a"));
-            archive.write(&block).await?
-        };
-
-        {
-            let archive = LocalIndex::new(&env, test_catalog("b"));
-            let result: Option<TestBlock> = archive.read(&hash).await?;
-            assert!(result.is_none());
-        }
-
-        {
-            let archive = LocalIndex::new(&env, test_catalog("a"));
-            let result: Option<TestBlock> = archive.read(&hash).await?;
-            assert_eq!(result, Some(block));
-        }
-
+        let same = LocalIndex::new(&env, test_catalog("a"));
+        assert_eq!(
+            LoadBlock::new(block.blake3_hash().clone())
+                .perform(&same)
+                .await?,
+            Some(block)
+        );
         Ok(())
     }
 }

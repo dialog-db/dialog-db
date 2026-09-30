@@ -30,14 +30,11 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStoreMut, Attribute, Entity, Instruction, Value,
-};
-use futures_util::stream;
+use dialog_artifacts::{Artifact, Attribute, Entity, Instruction, Value};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::{DialogFacts, SqliteFacts};
+use crate::SqliteFacts;
 
 /// A single fact in a Stack Exchange transaction.
 #[derive(Clone, Debug)]
@@ -369,45 +366,11 @@ pub fn se_instructions(commit: &[SeFact]) -> Result<Vec<Instruction>> {
     Ok(instructions)
 }
 
-impl DialogFacts {
-    /// Replay the log, one dialog commit per transaction. Cardinality-one
-    /// writes are [`Instruction::Replace`]; tag writes are asserts.
-    pub async fn replay_se(&mut self, log: &SeLog) -> Result<()> {
-        for commit in &log.transactions {
-            let instructions = se_instructions(commit)?;
-            match self {
-                Self::Memory(artifacts) => {
-                    artifacts.commit(stream::iter(instructions)).await?;
-                }
-                Self::Disk(artifacts, _) => {
-                    artifacts.commit(stream::iter(instructions)).await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The current title of a post (point read of a superseded pair).
-    pub async fn se_title(&self, post: &str) -> Result<Option<Value>> {
-        let selector = ArtifactSelector::new()
-            .the(Attribute::from_str("se.post/title")?)
-            .of(Entity::from_str(post)?);
-        Ok(self.collect(selector).await?.pop().map(|found| found.is))
-    }
-
-    /// All entities whose `se.post/kind` is `kind` (a VAE-indexed lookup).
-    pub async fn se_by_kind(&self, kind: &str) -> Result<usize> {
-        let selector = ArtifactSelector::new()
-            .the(Attribute::from_str("se.post/kind")?)
-            .is(Value::String(kind.to_owned()));
-        Ok(self.collect(selector).await?.len())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DialogMode, SqliteMode};
+    use crate::SqliteMode;
+    use crate::repo::DialogRepo;
 
     #[test]
     fn synthetic_log_shape() {
@@ -433,7 +396,7 @@ mod tests {
         let log = SeLog::synthetic(120);
         let mut sqlite = SqliteFacts::open(SqliteMode::Memory)?;
         sqlite.replay_se(&log)?;
-        let mut dialog = DialogFacts::open(DialogMode::Memory).await?;
+        let dialog = DialogRepo::volatile().await?;
         dialog.replay_se(&log).await?;
 
         assert_eq!(

@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use crate::RemoteSite;
 use async_trait::async_trait;
+use dialog_artifacts::{DialogArtifactsError, LoadBlob};
 use dialog_capability::Fork;
 use dialog_capability::Provider;
-use dialog_common::{Buffer, ConditionalSync, Priority};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
-use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
-use serde::{Serialize, de::DeserializeOwned};
-use std::fmt::{Debug, Display};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+use std::fmt::Display;
 
 pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
 
@@ -133,27 +133,17 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
     }
 }
 
-/// Raw block access for the search tree, with the same transparent
-/// remote fallback as the content-addressed `read`: reads that miss
-/// locally are fetched from the remote and cached, writes go to the
-/// local index only. Node buffers pass through without the CBOR encoder.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> StorageBackend for NetworkedIndex<'_, Env>
+impl<Env> NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<Put> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        StorageBackend::set(&mut self.local, key, value).await
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        if let Some(bytes) = StorageBackend::get(&self.local, key).await? {
-            return Ok(Some(bytes));
+    /// The block stored under `hash`: the local archive's copy, or else the
+    /// tracked remote's, hydrated into the local archive as it is read.
+    /// Unverified; readers outside the crate load through [`LoadBlock`] or
+    /// [`LoadBlob`], which check it.
+    pub(crate) async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
+        if let Some(block) = self.local.load(hash).await? {
+            return Ok(Some(block));
         }
 
         let remote = match &self.remote {
@@ -165,9 +155,8 @@ where
             // `None` would surface downstream as a bare "Block not found"
             // that reads like data loss instead of what it is.
             RemoteFallback::Unavailable { remote, reason } => {
-                let key = dialog_common::Blake3Hash::from(*key);
-                return Err(DialogStorageError::Storage(format!(
-                    "block {key} is not in the local archive and the tracked \
+                return Err(ArchiveError::Storage(format!(
+                    "block {hash} is not in the local archive and the tracked \
                      remote \"{remote}\" it would hydrate from is unavailable: \
                      {reason}"
                 )));
@@ -178,21 +167,50 @@ where
         // guards it, the local write-back, and any sharing of the work
         // with concurrent readers of the same digest are the env's own
         // effect (see [`Hydrate`]).
-        let (local, priority) = (&self.local, self.priority);
-        let digest = dialog_common::Blake3Hash::from(*key);
-        let hydrated = remote
-            .reach(|route| {
-                let request = HydrationRequest {
-                    address: route.address,
-                    subject: route.subject,
-                    catalog: local.catalog().clone(),
-                    digest: digest.clone(),
-                    priority,
-                };
-                Provider::<Hydrate>::execute(local.env(), request)
-            })
-            .await?;
-        Ok(hydrated.map(|bytes| bytes.as_ref().clone()))
+        let route = remote.address();
+        let request = HydrationRequest {
+            address: route.address,
+            subject: route.subject,
+            catalog: self.local.catalog().clone(),
+            digest: hash.clone(),
+            priority: self.priority,
+        };
+        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
+        Ok(hydrated.map(|bytes| Buffer::from(bytes.as_ref().clone())))
+    }
+}
+
+/// Tree nodes load from the local archive, falling back to the tracked
+/// remote.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<LoadBlock> for NetworkedIndex<'_, Env>
+where
+    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+{
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        self.load(&hash)
+            .await
+            .map_err(|error| DialogSearchTreeError::Storage(error.into()))
+    }
+}
+
+/// Spilled values load the way nodes do: they live beside them in the
+/// local archive and hydrate from the same remote.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<LoadBlob> for NetworkedIndex<'_, Env>
+where
+    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+{
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
+        Ok(self.load(&hash).await?)
     }
 }
 
@@ -265,31 +283,6 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Encoder for NetworkedIndex<'_, Env>
-where
-    Env: ConditionalSync + 'static,
-{
-    type Bytes = Vec<u8>;
-    type Hash = Blake3Hash;
-    type Error = DialogStorageError;
-
-    async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
-    where
-        T: Serialize + ConditionalSync + Debug,
-    {
-        self.local.encoder().encode(block).await
-    }
-
-    async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>
-    where
-        T: DeserializeOwned + ConditionalSync,
-    {
-        self.local.encoder().decode(bytes).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -304,7 +297,6 @@ mod tests {
     use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Priority};
     use dialog_effects::archive::{Get, Put};
     use dialog_peer::helpers::test_session_with_peer;
-    use dialog_storage::StorageBackend as _;
     use parking_lot::Mutex;
 
     use super::{Hydrate, HydrationRequest, NetworkedIndex, RemoteFallback};
@@ -371,20 +363,20 @@ mod tests {
             priorities: Arc::new(Mutex::new(Vec::new())),
         };
 
-        let absent = *Buffer::from(&b"never stored"[..]).blake3_hash().as_bytes();
+        let absent = Buffer::from(&b"never stored"[..]).blake3_hash().clone();
         let demand = NetworkedIndex::new(
             &env,
             branch.archive().index(),
             RemoteFallback::Remote(origin.clone()),
         );
-        assert_eq!(demand.get(&absent).await?, None);
+        assert_eq!(demand.load(&absent).await?, None);
         let speculative = NetworkedIndex::new(
             &env,
             branch.archive().index(),
             RemoteFallback::Remote(origin),
         )
         .with_priority(Priority::Maybe);
-        assert_eq!(speculative.get(&absent).await?, None);
+        assert_eq!(speculative.load(&absent).await?, None);
 
         assert_eq!(
             env.priorities.lock().clone(),
@@ -406,7 +398,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let mut index = NetworkedIndex::new(
+        let index = NetworkedIndex::new(
             &operator,
             branch.archive().index(),
             RemoteFallback::Unavailable {
@@ -417,20 +409,24 @@ mod tests {
 
         // A locally held block reads back: unavailability of the remote
         // must not cost a replica anything it already holds.
-        let held = b"locally held block".to_vec();
-        let held_key = *Buffer::from(held.as_slice()).blake3_hash().as_bytes();
-        index.set(held_key, held.clone()).await?;
+        let held = Buffer::from(b"locally held block".to_vec());
+        branch
+            .archive()
+            .index()
+            .put(held.clone())
+            .perform(&operator)
+            .await?;
         assert_eq!(
-            index.get(&held_key).await?,
+            index.load(held.blake3_hash()).await?,
             Some(held),
             "a local hit succeeds regardless of the remote's availability"
         );
 
         // A miss is the read that needed the remote: it fails naming the
         // remote and why it is unavailable.
-        let absent_key = *Buffer::from(&b"never stored"[..]).blake3_hash().as_bytes();
+        let absent_key = Buffer::from(&b"never stored"[..]).blake3_hash().clone();
         let error = index
-            .get(&absent_key)
+            .load(&absent_key)
             .await
             .expect_err("a miss with an unavailable tracked remote must fail loudly");
         let message = error.to_string();
@@ -444,7 +440,7 @@ mod tests {
         let local_only =
             NetworkedIndex::new(&operator, branch.archive().index(), RemoteFallback::None);
         assert_eq!(
-            local_only.get(&absent_key).await?,
+            local_only.load(&absent_key).await?,
             None,
             "an untracked branch's miss is not an error"
         );

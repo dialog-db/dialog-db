@@ -17,18 +17,17 @@ use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
+use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::history::{Context, RevisionRecord};
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 
 use crate::{Branch, CommitError, Index, NetworkedIndex, PublishError, Revision, TreeReference};
 
@@ -122,7 +121,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let mut store = NetworkedIndex::new(env, branch.archive().index(), branch.fallback());
+    let store = NetworkedIndex::new(env, branch.archive().index(), branch.fallback());
     let tree = |reference: &TreeReference| {
         Index::from_hash_with_cache(NodeHash::from(*reference.hash()), branch.node_cache())
     };
@@ -138,8 +137,8 @@ where
     // What this commit changed since its base, history first so its
     // supersession records retire the claims they cover before its data
     // lands, screened against the winner as a pull screens an upstream.
-    let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-    let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+    let tree_store = store.clone();
+    let screen_store = store.clone();
     let history_scope = merge::history_scope();
     let data_scope = merge::data_scope();
     let history = merge::screen_history(
@@ -168,14 +167,14 @@ where
         ),
         context.clone(),
     );
-    let mut delta = Delta::zero();
+    let mut delta = ArchiveDelta::zero();
     merged = Box::pin(
         merged
             .edit()
             .integrate(futures_util::StreamExt::chain(history, data), &tree_store),
     )
     .await?
-    .persist(&mut delta)?;
+    .persist(delta.blocks())?;
 
     let mut merged_context = context;
     merged_context.absorb(mem::take(
@@ -201,7 +200,7 @@ where
     record.signature = Attest::new(record.payload()?).perform(env).await?;
     let manifest = merged.format_manifest(store.clone(), &delta).await?;
     merged
-        .record(&mut store, &mut delta, record.entries(&manifest)?)
+        .record(&store, &mut delta, record.entries(&manifest)?)
         .await?;
     revision.tree = TreeReference::from(*merged.root().as_bytes());
     merged_context.record(revision.version());
@@ -211,7 +210,7 @@ where
     branch
         .archive()
         .index()
-        .import(delta.flush().map(|(_, buffer)| buffer))
+        .import(delta.flush_blocks().chain(delta.flush_blobs()))
         .perform(env)
         .await
         .map_err(DialogArtifactsError::from)?;

@@ -5,8 +5,8 @@
 //! same EAV/AEV/VAE search tree. The per-instruction mutation loop and the
 //! selector → key-range scan dispatch are identical across all of them, so
 //! they live here as an extension trait on [`ArtifactTree`], parameterized
-//! over any store that exposes the raw hash-addressed
-//! [`StorageBackend<Key = Blake3Hash, Value = Vec<u8>>`].
+//! over any environment that loads the tree's nodes and spilled values
+//! ([`ArchiveReader`]).
 //!
 //! Callers responsible for revisions, upstreams, remote fallback, or any
 //! other branch specifics keep that logic on their side and call
@@ -28,11 +28,10 @@
 
 use async_stream::try_stream;
 use async_trait::async_trait;
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, Manifest, NodeCache, PersistentTree, Value as TreeValue,
-};
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_search_tree::{Buffer, Manifest, NodeCache, PersistentTree, Value as TreeValue};
+use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::iter::repeat_n;
@@ -42,10 +41,11 @@ use std::sync::{Arc, Mutex};
 use crate::history::{Cause as HistoryCause, Claim, Record, RecordEntries, Version};
 use crate::key::value_payload as build_value_payload;
 use crate::{
-    ATTRIBUTE_KEY_TAG, Artifact, ArtifactSelector, ArtifactView, ArtifactWriter, AttributeKey,
-    AttributeKeyPart, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart,
-    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, SelectorMatch, State, VALUE_KEY_TAG,
-    Value, ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, ArchiveReader, Artifact, ArtifactSelector, ArtifactView,
+    ArtifactWriter, AttributeKey, AttributeKeyPart, Datum, DeltaOverlay, DialogArtifactsError,
+    ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct,
+    KeyViewMut, LoadBlob, SelectorMatch, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey,
+    decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     match_selector_and_key_ref,
@@ -108,53 +108,15 @@ impl TreeValue for State<Datum> {
     }
 }
 
-/// Adapts a [`StorageBackend`] keyed by raw `[u8; 32]` hashes (the
-/// [`dialog_storage::Blake3Hash`] alias used throughout the artifact
-/// stores) to the [`dialog_common::Blake3Hash`] newtype keys the search
-/// tree addresses nodes by. The conversion is a transparent byte copy.
-#[derive(Clone, Debug)]
-pub struct TreeStorageBridge<S>(pub S);
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S> StorageBackend for TreeStorageBridge<S>
-where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
-{
-    type Key = NodeHash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.0.set(*key.as_bytes(), value).await
+/// Stages a spilling value's raw bytes in the batch's blobs lane, under the
+/// 32-byte reference its key carries (both from the instruction's single
+/// [`EncodedValue`] pass); the commit writes them with the rest of the batch.
+/// A no-op for a value that stays inline (its bytes live in the key).
+/// Idempotent: content-addressed, so the same value stages the same blob.
+fn stage_spilled_value(staged: &mut ArchiveDelta, spill: Option<(Blake3Hash, Vec<u8>)>) {
+    if let Some((_, raw)) = spill {
+        staged.stage_blob(Buffer::from(raw));
     }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.0.get(key.as_bytes()).await
-    }
-}
-
-/// Writes a spilling value's raw bytes as a content-addressed block into the
-/// raw archive block `store`, keyed by the value's 32-byte reference (both
-/// taken from the instruction's single [`EncodedValue`] pass). A no-op for a
-/// value that stays inline (its bytes live in the key). Idempotent:
-/// content-addressed, so the same value writes the same block.
-///
-/// This uses the raw backend directly, NOT the tree's `ContentAddressedStorage`
-/// bridge: a spilled value is a plain block addressed by its value reference,
-/// living in the same store the tree nodes do.
-async fn store_spilled_value<S>(
-    store: &mut S,
-    spill: Option<(Blake3Hash, Vec<u8>)>,
-) -> Result<(), DialogArtifactsError>
-where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
-{
-    if let Some((reference, raw)) = spill {
-        store.set(reference, raw).await?;
-    }
-    Ok(())
 }
 
 /// A byte-bounded cache of spilled value blocks, keyed by their 32-byte
@@ -274,24 +236,24 @@ fn spilled_reference(key: &Key) -> Result<Option<Blake3Hash>, DialogArtifactsErr
     Ok(Some(reference))
 }
 
-/// Fetches the raw bytes of a spilled value for `key` from the raw archive block
-/// `store`. Returns `None` for an inline key (its value lives in the key, no
-/// block to fetch), `Some(bytes)` for a spilled key. Errors if a spilled key's
-/// block is missing from the store.
-///
-/// Uses the raw backend directly (the value block is addressed by the key's
-/// 32-byte reference), not the tree node bridge.
+/// Fetches the raw bytes of a spilled value for `key` through `store`'s
+/// [`LoadBlob`]. Returns `None` for an inline key (its value lives in the key,
+/// nothing to fetch), `Some(bytes)` for a spilled key. Errors if a spilled
+/// key's value is missing.
 pub async fn fetch_spilled<S>(store: &S, key: &Key) -> Result<Option<Vec<u8>>, DialogArtifactsError>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+    S: Provider<LoadBlob> + ConditionalSync,
 {
     let Some(reference) = spilled_reference(key)? else {
         return Ok(None);
     };
-    let bytes = store.get(&reference).await?.ok_or_else(|| {
-        DialogArtifactsError::InvalidValue("spilled value block missing from store".to_string())
-    })?;
-    Ok(Some(bytes))
+    let blob = LoadBlob::new(NodeHash::from(reference))
+        .perform(store)
+        .await?
+        .ok_or_else(|| {
+            DialogArtifactsError::InvalidValue("spilled value missing from store".to_string())
+        })?;
+    Ok(Some(blob.into_vec()))
 }
 
 /// Like [`fetch_spilled`], but serves and populates a [`SpillCache`]: a hit
@@ -304,7 +266,7 @@ pub async fn fetch_spilled_cached<S>(
     key: &Key,
 ) -> Result<Option<Vec<u8>>, DialogArtifactsError>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+    S: Provider<LoadBlob> + ConditionalSync,
 {
     let Some(reference) = spilled_reference(key)? else {
         return Ok(None);
@@ -324,19 +286,21 @@ pub async fn fetch_spilled_reference<S>(
     reference: &[u8],
 ) -> Result<Vec<u8>, DialogArtifactsError>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+    S: Provider<LoadBlob> + ConditionalSync,
 {
     let reference: Blake3Hash = reference.try_into().map_err(|_| {
         DialogArtifactsError::InvalidKey("spilled value reference is not 32 bytes".to_string())
     })?;
     cache
         .get_or_fetch(&reference, async |reference: &Blake3Hash| {
-            store.get(reference).await
+            LoadBlob::new(NodeHash::from(*reference))
+                .perform(store)
+                .await
+                .map(|blob| blob.map(Buffer::into_vec))
         })
-        .await
-        .map_err(DialogArtifactsError::from)?
+        .await?
         .ok_or_else(|| {
-            DialogArtifactsError::InvalidValue("spilled value block missing from store".to_string())
+            DialogArtifactsError::InvalidValue("spilled value missing from store".to_string())
         })
 }
 
@@ -392,49 +356,6 @@ fn value_lower_edge(value: &Value, manifest: &Manifest) -> Vec<u8> {
         }
     }
     encode_value_owned(value)
-}
-
-/// Layers a [`Delta`]'s buffered nodes over a backing store for reads, so
-/// that a tree persisted into the delta but not yet flushed remains
-/// traversable. This lets a caller keep editing a tree across multiple
-/// persist points (e.g. [`ArtifactTreeExt::apply_versioned`] followed by
-/// [`ArtifactTreeExt::record`]) while the whole batch still travels to
-/// storage as a single flush. Writes pass through to the backing store.
-struct DeltaReadThrough<'a, S> {
-    delta: &'a Delta<NodeHash, Buffer>,
-    store: S,
-}
-
-impl<S: Clone> Clone for DeltaReadThrough<'_, S> {
-    fn clone(&self) -> Self {
-        Self {
-            delta: self.delta,
-            store: self.store.clone(),
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S> StorageBackend for DeltaReadThrough<'_, S>
-where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
-{
-    type Key = NodeHash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.store.set(*key.as_bytes(), value).await
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        if let Some(buffer) = self.delta.get(key) {
-            return Ok(Some(buffer.as_ref().to_vec()));
-        }
-        self.store.get(key.as_bytes()).await
-    }
 }
 
 /// Tighten a scan's `(start, end)` key pair with the selector's
@@ -617,14 +538,12 @@ pub trait ArtifactTreeExt {
     /// `delta`.
     async fn apply<S, I>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         instructions: I,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
         I: Stream<Item = Instruction> + ConditionalSend;
 
     /// Like [`ArtifactTreeExt::apply`], but tags every [`Datum`] written by
@@ -640,15 +559,13 @@ pub trait ArtifactTreeExt {
     /// nothing a revision could attribute, and callers should not mint one.
     async fn apply_versioned<S, I>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         version: Option<Version>,
         instructions: I,
     ) -> Result<bool, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
         I: Stream<Item = Instruction> + ConditionalSend;
 
     /// The currently asserted [`Datum`]s recorded for the given entity and
@@ -661,9 +578,7 @@ pub trait ArtifactTreeExt {
         the: &crate::Attribute,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
+        S: ArchiveReader + Clone;
 
     /// Look up data at `(the, of)` through the attribute-ordered index,
     /// the ordering revision records are stored in.
@@ -674,9 +589,7 @@ pub trait ArtifactTreeExt {
         the: &crate::Attribute,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
+        S: ArchiveReader + Clone;
 
     /// This tree's format [`Manifest`], as carried by its root node.
     ///
@@ -691,12 +604,10 @@ pub trait ArtifactTreeExt {
     async fn format_manifest<S>(
         &self,
         store: S,
-        delta: &Delta<NodeHash, Buffer>,
+        delta: &ArchiveDelta,
     ) -> Result<Manifest, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
+        S: ArchiveReader + Clone;
 
     /// Write pre-built entries (e.g. revision lineage records — see
     /// [`RevisionRecord::entries`](crate::history::RevisionRecord::entries))
@@ -704,14 +615,12 @@ pub trait ArtifactTreeExt {
     /// and store a spilled value's block in `store`.
     async fn record<S>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         entries: RecordEntries,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
+        S: ArchiveReader + Clone;
 
     /// Scan the tree for facts matching the given constrained selector,
     /// yielding each as a borrowed-access [`ArtifactView`] rather than a
@@ -737,10 +646,7 @@ pub trait ArtifactTreeExt {
     ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's;
+        S: ArchiveReader + Clone + 's;
 
     /// Like [`scan`](Self::scan), but yields every row as an owned
     /// [`Artifact`] materialized from the scan's OWN key parse.
@@ -763,10 +669,7 @@ pub trait ArtifactTreeExt {
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's;
+        S: ArchiveReader + Clone + 's;
 
     /// An advisory upper-bound estimate of how many artifacts the `selector`'s
     /// key range spans, read from the range's edge paths (see
@@ -782,9 +685,7 @@ pub trait ArtifactTreeExt {
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
         Self: Sized,
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
+        S: ArchiveReader + Clone;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -792,14 +693,12 @@ pub trait ArtifactTreeExt {
 impl ArtifactTreeExt for ArtifactTree {
     async fn apply<S, I>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         instructions: I,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         self.apply_versioned(store, delta, None, instructions)
@@ -809,42 +708,34 @@ impl ArtifactTreeExt for ArtifactTree {
 
     async fn apply_versioned<S, I>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         version: Option<Version>,
         instructions: I,
     ) -> Result<bool, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        // Every read goes THROUGH the delta: this tree's root may have been
+        // persisted by an earlier batch that the caller has not flushed to
+        // `store` yet, so it exists only in `delta`, and a value this batch
+        // spills is staged there until the commit writes it.
+        let staged = DeltaOverlay::new(delta, store);
 
         // Every key this batch builds must use THIS tree's value-spill
         // threshold, and the edit batch must keep this tree's format rather
         // than restamping it with the defaults; both come from the manifest
         // the tree's own root node carries.
-        //
-        // Read it THROUGH the delta: this tree's root may have been persisted
-        // by an earlier batch that the caller has not flushed to `store` yet,
-        // so it exists only in `delta`. Reading it off the bare store would
-        // fail to find the node.
-        let (manifest, transient) = {
-            let read_through = ContentAddressedStorage::new(DeltaReadThrough {
-                delta: &*delta,
-                store: store.clone(),
-            });
-            (self.manifest(&read_through).await?, self.edit())
-        };
+        let manifest = self.manifest(&staged).await?;
+        let transient = self.edit();
         // Open one transient edit batch over this tree's spine and apply every
         // instruction's writes to it in flight, so the whole instruction stream
         // costs a single persist instead of one full tree rebuild per key.
         let (transient, changed) = write_instructions(
             transient,
-            store,
-            &storage,
+            &staged,
+            delta,
             version.into(),
             &manifest,
             instructions,
@@ -853,7 +744,7 @@ impl ArtifactTreeExt for ArtifactTree {
         .await?;
         // Seal the whole batch with a single bottom-up persist into the
         // caller's delta.
-        *self = transient.persist(delta)?;
+        *self = transient.persist(delta.blocks())?;
         Ok(changed)
     }
 
@@ -864,11 +755,9 @@ impl ArtifactTreeExt for ArtifactTree {
         the: &crate::Attribute,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        let storage = store;
 
         let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
             .set_entity(EntityKeyPart::from(of))
@@ -899,12 +788,9 @@ impl ArtifactTreeExt for ArtifactTree {
         the: &crate::Attribute,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
-        let raw_store = store.clone();
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        let storage = store;
 
         let search_start = <AttributeKey<Key> as KeyViewConstruct>::min()
             .set_attribute(AttributeKeyPart::from(the))
@@ -926,7 +812,7 @@ impl ArtifactTreeExt for ArtifactTree {
         while let Some(entry) = stream.next().await {
             let entry = entry?;
             if let State::Added(datum) = &entry.value {
-                let spilled = fetch_spilled(&raw_store, &entry.key).await?;
+                let spilled = fetch_spilled(&storage, &entry.key).await?;
                 records.push(Artifact::from_key_datum_with_value(
                     &entry.key, datum, spilled,
                 )?);
@@ -938,40 +824,33 @@ impl ArtifactTreeExt for ArtifactTree {
     async fn format_manifest<S>(
         &self,
         store: S,
-        delta: &Delta<NodeHash, Buffer>,
+        delta: &ArchiveDelta,
     ) -> Result<Manifest, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
         // Read through `delta`: this tree's root may have been persisted by an
         // earlier batch that the caller has not flushed to `store` yet, so the
         // node exists only there.
-        let storage = ContentAddressedStorage::new(DeltaReadThrough { delta, store });
-        Ok(self.manifest(&storage).await?)
+        let staged = DeltaOverlay::new(delta, &store);
+        Ok(self.manifest(&staged).await?)
     }
 
     async fn record<S>(
         &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        store: &S,
+        delta: &mut ArchiveDelta,
         entries: RecordEntries,
     ) -> Result<(), DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
         let RecordEntries { entries, spill } = entries;
-        store_spilled_value(store, spill).await?;
+        stage_spilled_value(delta, spill);
         let transient = {
             // Read through the delta: this tree's latest nodes may only
             // exist there (persisted by an earlier batch, not yet flushed).
-            let storage = ContentAddressedStorage::new(DeltaReadThrough {
-                delta: &*delta,
-                store: store.clone(),
-            });
+            let storage = DeltaOverlay::new(delta, store);
             // Open the edit under the tree's OWN manifest (as
             // `apply_versioned` does), not the default: an edit through the
             // default restamps the touched path with the default format,
@@ -982,7 +861,7 @@ impl ArtifactTreeExt for ArtifactTree {
             }
             transient
         };
-        *self = transient.persist(delta)?;
+        *self = transient.persist(delta.blocks())?;
         Ok(())
     }
 
@@ -992,12 +871,10 @@ impl ArtifactTreeExt for ArtifactTree {
         selector: ArtifactSelector<Constrained>,
     ) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
         let tree = self;
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        let storage = store;
         // The range must be built under the manifest the facts were written
         // with, the same requirement `scan` has.
         let manifest = tree.manifest(&storage).await?;
@@ -1019,16 +896,12 @@ impl ArtifactTreeExt for ArtifactTree {
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + Clone + 's,
     {
         let tree = self;
         // Keep the raw backend to fetch spilled value blocks by reference; the
         // bridge below is only for reading tree nodes.
-        let raw_store = store.clone();
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        let storage = store;
         try_stream! {
             // Both the scan range and the per-entry match must be built under
             // the manifest the stored facts were WRITTEN with, or a
@@ -1083,7 +956,7 @@ impl ArtifactTreeExt for ArtifactTree {
             // flight, in row order.
             let fetched = staged
                 .map(|staged| {
-                    let raw_store = &raw_store;
+                    let raw_store = &storage;
                     let cache = &cache;
                     let selector = &selector;
                     async move {
@@ -1135,16 +1008,12 @@ impl ArtifactTreeExt for ArtifactTree {
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + Clone + 's,
     {
         let tree = self;
         // Keep the raw backend to fetch spilled value blocks by reference; the
         // bridge below is only for reading tree nodes.
-        let raw_store = store.clone();
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        let storage = store;
         try_stream! {
             // Both the scan range and the per-entry match must be built under
             // the manifest the stored facts were WRITTEN with — see `scan`.
@@ -1181,7 +1050,7 @@ impl ArtifactTreeExt for ArtifactTree {
             });
             let fetched = staged
                 .map(|staged| {
-                    let raw_store = &raw_store;
+                    let raw_store = &storage;
                     let cache = &cache;
                     let selector = &selector;
                     async move {
@@ -1449,10 +1318,12 @@ fn fold_record(earlier: &[Version], later: Record) -> Record {
 /// cardinality-one slot, and a `Retract` blind to one would cite nothing and so
 /// cover nothing at merge time.
 ///
-/// `store` is the raw archive backend, used directly (not through the tree node
-/// bridge) for the value blocks of spilling values: a value above the manifest's
-/// inline threshold lives as a content-addressed block, and its key carries only
-/// the 32-byte reference to it.
+/// `storage` loads the tree's nodes and spilled values; a value above the
+/// manifest's inline threshold lives as a content-addressed blob, and its key
+/// carries only the 32-byte reference to it. The blobs of the values this batch
+/// spills are staged in `staged`'s blobs lane for the commit to write, so pass
+/// a `storage` that reads through `staged` (a [`DeltaOverlay`]) for the batch
+/// to see its own spills.
 ///
 /// `manifest` carries that inline threshold (`inline_n`) and the spilled
 /// key-prefix width (`spill_prefix`), and it must be the TARGET TREE's own,
@@ -1466,8 +1337,8 @@ fn fold_record(earlier: &[Version], later: Record) -> Record {
 #[allow(clippy::too_many_lines)]
 pub async fn write_instructions<W, S, I>(
     mut transient: W,
-    store: &mut S,
-    storage: &ContentAddressedStorage<TreeStorageBridge<S>>,
+    storage: &S,
+    staged: &mut ArchiveDelta,
     stamp: Stamp,
     manifest: &Manifest,
     instructions: I,
@@ -1475,9 +1346,7 @@ pub async fn write_instructions<W, S, I>(
 ) -> Result<(W, bool), DialogArtifactsError>
 where
     W: ArtifactWriter + ConditionalSend,
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + ConditionalSync,
+    S: ArchiveReader + Clone,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     // History records are buffered and only written if the batch changed
@@ -1542,7 +1411,7 @@ where
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact; the key holds only the
                 // 32-byte reference to it.
-                store_spilled_value(store, encoded.spill).await?;
+                stage_spilled_value(staged, encoded.spill);
 
                 // A version-tagged assertion records its history: an
                 // assertion is purely additive, so it supersedes nothing.
@@ -1626,7 +1495,7 @@ where
                             // A prior with a spilled value carries only a
                             // reference in its key; fetch the block so the
                             // value comparison below sees the real value.
-                            let spilled = fetch_spilled(store, &candidate.key).await?;
+                            let spilled = fetch_spilled(storage, &candidate.key).await?;
                             let current = Artifact::from_key_datum_with_value(
                                 &candidate.key,
                                 current_element,
@@ -1708,7 +1577,7 @@ where
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact.
-                store_spilled_value(store, encoded.spill).await?;
+                stage_spilled_value(staged, encoded.spill);
 
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
@@ -1827,8 +1696,11 @@ mod spill_cache_tests {
         ArtifactTree, ArtifactTreeExt, SpillCache, fetch_spilled, fetch_spilled_cached, spill_cache,
     };
     use crate::{Artifact, EntityKey, Instruction, KeyView, Value};
-    use dialog_search_tree::Delta;
-    use dialog_storage::{Blake3Hash, MeasuredStorage, MemoryStorageBackend, StorageBackend};
+
+    use crate::ArchiveDelta;
+
+    use crate::helpers::CountingBlocks;
+    use dialog_storage::Blake3Hash;
     use futures_util::stream;
 
     /// A scan over spilled values fetches their blocks concurrently: each
@@ -1839,59 +1711,11 @@ mod spill_cache_tests {
     #[dialog_common::test]
     async fn it_fetches_spilled_values_concurrently_in_scans() -> anyhow::Result<()> {
         use crate::ArtifactSelector;
-        use dialog_storage::DialogStorageError;
+
         use futures_util::TryStreamExt as _;
-        use std::future::poll_fn;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::task::Poll;
-
-        /// Counts reads in flight; every read parks once so concurrently
-        /// polled reads overlap.
-        #[derive(Clone)]
-        struct Gauge {
-            inner: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
-            in_flight: Arc<AtomicUsize>,
-            peak: Arc<AtomicUsize>,
-        }
-
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-        impl StorageBackend for Gauge {
-            type Key = Blake3Hash;
-            type Value = Vec<u8>;
-            type Error = DialogStorageError;
-
-            async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-                self.inner.set(key, value).await
-            }
-
-            async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                self.peak.fetch_max(now, Ordering::SeqCst);
-                let mut yielded = false;
-                poll_fn(|context| {
-                    if yielded {
-                        Poll::Ready(())
-                    } else {
-                        yielded = true;
-                        context.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                })
-                .await;
-                let value = self.inner.get(key).await;
-                self.in_flight.fetch_sub(1, Ordering::SeqCst);
-                value
-            }
-        }
 
         let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
-        let mut store = Gauge {
-            inner: MemoryStorageBackend::default(),
-            in_flight: Arc::new(AtomicUsize::new(0)),
-            peak: Arc::new(AtomicUsize::new(0)),
-        };
+        let store = CountingBlocks::new();
         let facts: Vec<Artifact> = (0..24)
             .map(|index| Artifact {
                 the: "doc/body".parse().unwrap(),
@@ -1900,25 +1724,21 @@ mod spill_cache_tests {
                 cause: None,
             })
             .collect();
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         let mut tree = ArtifactTree::empty();
         tree.apply(
-            &mut store,
+            &store,
             &mut delta,
             stream::iter(facts.iter().cloned().map(Instruction::Assert)),
         )
         .await?;
-        for (_, buffer) in delta.flush() {
-            store
-                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-        }
+        store.flush(&mut delta);
         let selector = ArtifactSelector::new().the("doc/body".parse()?);
 
         for owned in [false, true] {
             // A fresh spill cache and node cache: every spilled block reads.
             let cold = ArtifactTree::from_hash(tree.root().clone());
-            store.peak.store(0, Ordering::SeqCst);
+            store.reset();
             let values: Vec<Value> = if owned {
                 cold.scan_owned(store.clone(), spill_cache(), selector.clone())
                     .map_ok(|artifact| artifact.is)
@@ -1941,7 +1761,7 @@ mod spill_cache_tests {
                 facts.iter().map(|fact| format!("{:?}", fact.is)).collect();
             expected.sort();
             assert_eq!(values, expected, "every spilled value comes out whole");
-            let peak = store.peak.load(Ordering::SeqCst);
+            let peak = store.peak_reads_in_flight();
             assert!(
                 peak > 1,
                 "the scan (owned: {owned}) must fetch spilled blocks together, \
@@ -1979,15 +1799,11 @@ mod spill_cache_tests {
 
     /// Commits one spilling fact and returns the store (with the spilled block
     /// written) plus the EAV key that references it.
-    async fn spilled_setup() -> (
-        MeasuredStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
-        crate::Key,
-        Value,
-    ) {
+    async fn spilled_setup() -> (CountingBlocks, crate::Key, Value) {
         let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
         let value = Value::String("q".repeat(inline_n + 1));
-        let mut store = MeasuredStorage::new(MemoryStorageBackend::default());
-        let mut delta = Delta::zero();
+        let store = CountingBlocks::new();
+        let mut delta = ArchiveDelta::zero();
         let mut tree = ArtifactTree::empty();
         let artifact = Artifact {
             the: "doc/body".parse().unwrap(),
@@ -1996,18 +1812,13 @@ mod spill_cache_tests {
             cause: None,
         };
         tree.apply(
-            &mut store,
+            &store,
             &mut delta,
             stream::iter(vec![Instruction::Assert(artifact.clone())]),
         )
         .await
         .unwrap();
-        for (_, buffer) in delta.flush() {
-            store
-                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                .await
-                .unwrap();
-        }
+        store.flush(&mut delta);
         let key = EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default())
             .into_key();
         assert!(EntityKey(&key).value_is_spilled(), "value must spill");
@@ -2053,8 +1864,8 @@ mod spill_cache_tests {
     /// block regardless of the cache.
     #[dialog_common::test]
     async fn it_returns_none_for_an_inline_key() -> anyhow::Result<()> {
-        let mut store = MeasuredStorage::new(MemoryStorageBackend::default());
-        let mut delta = Delta::zero();
+        let store = CountingBlocks::new();
+        let mut delta = ArchiveDelta::zero();
         let mut tree = ArtifactTree::empty();
         let artifact = Artifact {
             the: "user/name".parse().unwrap(),
@@ -2063,7 +1874,7 @@ mod spill_cache_tests {
             cause: None,
         };
         tree.apply(
-            &mut store,
+            &store,
             &mut delta,
             stream::iter(vec![Instruction::Assert(artifact.clone())]),
         )
@@ -2304,8 +2115,10 @@ mod corrupt_row_tests {
         ENTITY_KEY_TAG, Instruction, Key, State, VALUE_KEY_TAG, Value, ValueDataType,
         encode_value_owned,
     };
-    use dialog_search_tree::Delta;
-    use dialog_storage::{Blake3Hash, MemoryStorageBackend, StorageBackend};
+
+    use crate::ArchiveDelta;
+    use dialog_search_tree::MemoryBlocks;
+
     use futures_util::{TryStreamExt, stream};
 
     /// Manufactures a tree whose persisted nodes carry both valid facts and
@@ -2314,10 +2127,9 @@ mod corrupt_row_tests {
     /// buggy or hostile writer would produce them. The entities cover both
     /// failure classes: a string that is no URI at all, and one that parses
     /// but is not its own canonical rendering.
-    async fn poisoned_tree()
-    -> anyhow::Result<(ArtifactTree, MemoryStorageBackend<Blake3Hash, Vec<u8>>)> {
-        let mut store = MemoryStorageBackend::default();
-        let mut delta = Delta::zero();
+    async fn poisoned_tree() -> anyhow::Result<(ArtifactTree, MemoryBlocks)> {
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
         let mut tree = ArtifactTree::empty();
 
         let valid: Vec<Instruction> = ["user:alice", "user:bob", "user:carol"]
@@ -2331,8 +2143,7 @@ mod corrupt_row_tests {
                 })
             })
             .collect();
-        tree.apply(&mut store, &mut delta, stream::iter(valid))
-            .await?;
+        tree.apply(&store, &mut delta, stream::iter(valid)).await?;
 
         let corrupt = [
             b"not a uri at all".to_vec(),
@@ -2364,13 +2175,9 @@ mod corrupt_row_tests {
                 ));
             }
         }
-        tree.record(&mut store, &mut delta, entries.into()).await?;
+        tree.record(&store, &mut delta, entries.into()).await?;
 
-        for (_, buffer) in delta.flush() {
-            store
-                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-        }
+        delta.flush_into(&store);
         Ok((tree, store))
     }
 

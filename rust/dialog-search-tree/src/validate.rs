@@ -49,8 +49,8 @@
 //! key …" at the causing edit. Cost is O(n) in entries plus one in-memory
 //! rebuild; no reference store, no second persist.
 
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
 use rkyv::{
     Deserialize, Serialize,
     bytecheck::CheckBytes,
@@ -62,8 +62,8 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key, NodeBody,
-    NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientTree, Value, into_owned,
+    Accessor, DialogSearchTreeError, Distribution, Key, LoadBlock, NodeBody, NoveltyEntry,
+    NoveltyOp, PersistentNode, PersistentTree, TransientTree, Value, into_owned,
 };
 
 /// Renders a separator for a violation message: a bounded hex prefix, so
@@ -101,14 +101,12 @@ where
     /// See the module docs for the precise property statement — this is
     /// meaningful for canonicalized roots, and will (correctly) report a
     /// buffered hitchhiker root as non-canonical.
-    pub async fn canonical_divergences<Backend>(
+    pub async fn canonical_divergences<Env>(
         &self,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Vec<String>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + Clone + ConditionalSync,
     {
         // An unpersisted empty tree has no stored form to validate; it is
         // trivially canonical.
@@ -116,7 +114,7 @@ where
             return Ok(Vec::new());
         }
         let manifest = self.manifest(storage).await?;
-        let accessor: Accessor<K, V, Backend> = Accessor::new(Default::default(), storage.clone());
+        let accessor: Accessor<'_, K, V, Env> = Accessor::new(Default::default(), storage);
 
         // The empty tree's node: canonical exactly when it is byte-identical
         // to the fixed zero-entry encoding for its manifest — under every
@@ -227,26 +225,21 @@ where
 mod tests {
     #![allow(unexpected_cfgs)]
 
+    use crate::MemoryBlocks;
     use anyhow::Result;
     use dialog_common::Blake3Hash;
-    use dialog_storage::MemoryStorageBackend;
 
-    use crate::{
-        Buffer, Cache, ContentAddressedStorage, Delta, HitchhikerTree, Manifest, PersistentTree,
-        TransientTree,
-    };
+    use crate::{Buffer, Cache, Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    type Store = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+    type Store = MemoryBlocks;
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
     async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(())
     }
@@ -257,7 +250,7 @@ mod tests {
     /// independent plant constructor.
     #[dialog_common::test]
     async fn it_validates_canonically_edited_trees_clean() -> Result<()> {
-        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage: Store = MemoryBlocks::new();
         let mut tree = Tree::empty();
         for i in 0..250u32 {
             let key = (i * 37 % 1000).to_be_bytes();
@@ -286,7 +279,7 @@ mod tests {
     /// settle every op into the same shape the plant constructor derives.
     #[dialog_common::test]
     async fn it_validates_canonicalized_buffered_trees_clean() -> Result<()> {
-        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage: Store = MemoryBlocks::new();
         let mut buffered = HitchhikerTree::open(&Tree::empty()).with_op_buf_size(8);
         for i in 0..300u32 {
             let key = (i * 17 % 700).to_be_bytes();
@@ -310,7 +303,7 @@ mod tests {
     /// fully-flushed check.
     #[dialog_common::test]
     async fn it_flags_buffered_roots_as_non_canonical() -> Result<()> {
-        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage: Store = MemoryBlocks::new();
         // Seed enough entries through the canonical path that the tree has
         // real depth, then buffer a few writes with the DEFAULT op buffer:
         // they stay parked in the root's novelty, which is exactly the
@@ -354,7 +347,7 @@ mod tests {
     /// for its manifest is flagged.
     #[dialog_common::test]
     async fn it_validates_the_empty_node_by_manifest() -> Result<()> {
-        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage: Store = MemoryBlocks::new();
 
         // The canonical empty node, produced by the production persist
         // path, under a custom manifest and under the default.

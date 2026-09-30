@@ -16,7 +16,14 @@
 //! All maps live behind a `Mutex` and cost nothing unless the env gate is on.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Mutex, OnceLock};
+
+/// Archive block stores whose block was already stored, since the last
+/// snapshot.
+pub static DUPLICATE_SETS: AtomicU64 = AtomicU64::new(0);
+/// Archive block stores since the last snapshot.
+pub static TOTAL_SETS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether the audit is switched on (`DIALOG_DUP_AUDIT` set), read once.
 pub fn enabled() -> bool {

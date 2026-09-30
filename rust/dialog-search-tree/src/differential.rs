@@ -24,8 +24,8 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use rkyv::{
@@ -37,9 +37,8 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry, Key, Link,
-    NodeBody, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Value, into_owned,
-    resolve_pending,
+    DialogSearchTreeError, Distribution, Entry, Key, Link, LoadBlock, NodeBody, NoveltyEntry,
+    NoveltyOp, PersistentNode, PersistentTree, Value, into_owned, resolve_pending,
 };
 
 /// How many frontier blocks a comparison pass fetches concurrently in the
@@ -50,8 +49,8 @@ const LOAD_CONCURRENCY: usize = 16;
 /// back tagged with the frontier slot it was collected for. Absence and
 /// failure both come back as `None`; the comparison read that actually
 /// needs the block owns the error and the [`MissingBlocks`] policy.
-async fn preload_block<Key, Value, Backend>(
-    storage: &ContentAddressedStorage<Backend>,
+async fn preload_block<Key, Value, Env>(
+    storage: &Env,
     is_target: bool,
     offset: usize,
     hash: Blake3Hash,
@@ -62,11 +61,10 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
-    let node = match storage.retrieve(&hash).await {
-        Ok(Some(bytes)) => PersistentNode::try_from(Buffer::from(bytes)).ok(),
+    let node = match LoadBlock::new(hash.clone()).perform(storage).await {
+        Ok(Some(buffer)) => PersistentNode::try_from(buffer).ok(),
         _ => None,
     };
     (is_target, offset, node)
@@ -82,8 +80,8 @@ type FetchedChild<Key, Value> =
 /// fetches and parses a node, tagged with its child position. Unlike
 /// [`preload_block`] this is not speculative — every child of a visited
 /// index is consumed — so errors are returned for the descent to own.
-async fn fetch_block<Key, Value, Backend>(
-    storage: &ContentAddressedStorage<Backend>,
+async fn fetch_block<Key, Value, Env>(
+    storage: &Env,
     at: usize,
     hash: Blake3Hash,
 ) -> (
@@ -96,16 +94,12 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
-    let result = match storage.retrieve(&hash).await {
-        Ok(Some(bytes)) => match PersistentNode::try_from(Buffer::from(bytes)) {
-            Ok(node) => Ok(Some(node)),
-            Err(error) => Err(error),
-        },
+    let result = match LoadBlock::new(hash.clone()).perform(storage).await {
+        Ok(Some(buffer)) => PersistentNode::try_from(buffer).map(Some),
         Ok(None) => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error),
     };
     (at, result)
 }
@@ -339,12 +333,12 @@ where
 /// loaded nodes and unloaded references) plus every index node that was
 /// loaded and expanded along the way (the novel interior nodes of this
 /// side).
-struct SparseTree<'a, Key, Value, Backend>
+struct SparseTree<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+    Env: Provider<LoadBlock>,
 {
-    storage: &'a ContentAddressedStorage<Backend>,
+    storage: &'a Env,
     nodes: Vec<SparseTreeNode<Key, Value>>,
     expanded: Vec<PersistentNode<Key, Value>>,
     /// Every hash that ever entered this side's frontier, including nodes
@@ -364,15 +358,14 @@ where
     unresolved: Vec<Link>,
 }
 
-impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
+impl<'a, Key, Value, Env> SparseTree<'a, Key, Value, Env>
 where
     Key: self::Key,
     Value: self::Value + PartialEq,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     /// The frontier slots still held by reference, with their hashes: the
     /// blocks a later pass reads unless pruning settles them first.
@@ -418,7 +411,7 @@ where
 
     /// Reads a node from storage by hash.
     async fn load(
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         Self::try_load(storage, hash).await?.ok_or_else(|| {
@@ -428,11 +421,11 @@ where
 
     /// Reads a node from storage by hash; `None` when the block is absent.
     async fn try_load(
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         hash: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        match storage.retrieve(hash).await? {
-            Some(bytes) => Ok(Some(PersistentNode::try_from(Buffer::from(bytes))?)),
+        match LoadBlock::new(hash.clone()).perform(storage).await? {
+            Some(buffer) => Ok(Some(PersistentNode::try_from(buffer)?)),
             None => Ok(None),
         }
     }
@@ -447,9 +440,9 @@ where
     /// walk while the other side's matching subtrees still prune.
     async fn from_root(
         root: Option<&Blake3Hash>,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
         missing: MissingBlocks,
-    ) -> Result<SparseTree<'a, Key, Value, Backend>, DialogSearchTreeError> {
+    ) -> Result<SparseTree<'a, Key, Value, Env>, DialogSearchTreeError> {
         if let Some(root) = root
             && missing == MissingBlocks::Boundary
             && Self::try_load(storage, root).await?.is_none()
@@ -1232,16 +1225,16 @@ where
 /// [`changes`](Self::changes) (to transform source into target) or
 /// node-level novelty via [`novel_nodes`](Self::novel_nodes) (the target
 /// nodes the source side does not have).
-pub struct TreeDifference<'a, Key, Value, Backend>
+pub struct TreeDifference<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+    Env: Provider<LoadBlock>,
 {
-    source: SparseTree<'a, Key, Value, Backend>,
-    target: SparseTree<'a, Key, Value, Backend>,
+    source: SparseTree<'a, Key, Value, Env>,
+    target: SparseTree<'a, Key, Value, Env>,
 }
 
-impl<'a, Key, Value, Backend> TreeDifference<'a, Key, Value, Backend>
+impl<'a, Key, Value, Env> TreeDifference<'a, Key, Value, Env>
 where
     Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + PartialEq + ConditionalSync + 'static,
@@ -1259,9 +1252,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend
-        + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     /// Computes the difference between two trees.
     ///
@@ -1275,9 +1266,9 @@ where
     pub async fn compute<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+        source_storage: &'a Env,
+        target_storage: &'a Env,
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1301,10 +1292,10 @@ where
     pub async fn compute_with<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
         missing: MissingPolicy,
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1352,10 +1343,10 @@ where
     pub async fn compute_within<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
         scope: &[core::ops::RangeInclusive<Key>],
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1375,11 +1366,11 @@ where
     pub async fn compute_within_with<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
         scope: &[core::ops::RangeInclusive<Key>],
         prefetch: Prefetch,
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1398,12 +1389,12 @@ where
     async fn compute_scoped<D>(
         source_tree: &PersistentTree<Key, Value, D>,
         target_tree: &PersistentTree<Key, Value, D>,
-        source_storage: &'a ContentAddressedStorage<Backend>,
-        target_storage: &'a ContentAddressedStorage<Backend>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
         scope: Option<&[core::ops::RangeInclusive<Key>]>,
         missing: MissingPolicy,
         prefetch: Prefetch,
-    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
     where
         D: Distribution,
     {
@@ -1433,8 +1424,8 @@ where
         // The two roots are independent reads, so against a hydrating
         // backend they cost one round trip together rather than one each.
         let (mut source, mut target): (
-            SparseTree<'a, Key, Value, Backend>,
-            SparseTree<'a, Key, Value, Backend>,
+            SparseTree<'a, Key, Value, Env>,
+            SparseTree<'a, Key, Value, Env>,
         ) = futures_util::future::try_join(
             SparseTree::from_root(source_tree.stored_root(), source_storage, missing.source),
             SparseTree::from_root(target_tree.stored_root(), target_storage, missing.target),
@@ -1469,8 +1460,7 @@ where
             // `expand_at`'s own read keeps owning the error and the
             // `MissingBlocks` policy; the `attempted` set keeps a block
             // that stayed a reference from being refetched every pass.
-            let mut pending: Vec<(bool, usize, &ContentAddressedStorage<Backend>, Blake3Hash)> =
-                Vec::new();
+            let mut pending: Vec<(bool, usize, &Env, Blake3Hash)> = Vec::new();
             if prefetch == Prefetch::Eager {
                 for (is_target, offset, storage, hash) in source
                     .unloaded()
@@ -1809,7 +1799,7 @@ where
                     SparseTreeNode::Settled { .. } => continue,
                     SparseTreeNode::Loaded { node, .. } => node.clone(),
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
-                        match SparseTree::<Key, Value, Backend>::try_load(
+                        match SparseTree::<Key, Value, Env>::try_load(
                             self.target.storage,
                             &link.node,
                         )
@@ -1845,23 +1835,22 @@ mod tests {
 
     use anyhow::Result;
     use async_trait::async_trait;
+    use dialog_capability::Provider;
     use dialog_common::Blake3Hash;
-    use dialog_storage::{DialogStorageError, MemoryStorageBackend, StorageBackend};
     use futures_util::StreamExt;
 
     use std::collections::HashSet;
 
-    use dialog_storage::JournaledStorage;
     use futures_util::TryStreamExt;
 
     use futures_util::stream::iter;
 
     use super::{Change, TreeDifference};
-    use crate::helpers::{TestStorage, Traversable as _, TraversalOrder, TreeNodes as _};
-    use crate::{
-        Buffer, ContentAddressedStorage, Delta, Entry, Manifest, PersistentTree, tree_spec,
+    use crate::helpers::{
+        JournaledBlocks, TestStorage, Traversable as _, TraversalOrder, TreeNodes as _,
     };
-    use crate::{Traversable as _, Visit};
+    use crate::{Buffer, Delta, Entry, LoadBlock, Manifest, PersistentTree, tree_spec};
+    use crate::{MemoryBlocks, Traversable as _, Visit};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1870,16 +1859,24 @@ mod tests {
     /// differentiation only loads blocks on differing paths.
     #[derive(Clone)]
     struct CountingBackend {
-        inner: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+        inner: MemoryBlocks,
         reads: Arc<AtomicUsize>,
     }
 
     impl CountingBackend {
         fn new() -> Self {
             Self {
-                inner: MemoryStorageBackend::default(),
+                inner: MemoryBlocks::new(),
                 reads: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        fn store(&self, block: Buffer) {
+            self.inner.store(block);
+        }
+
+        fn get(&self, hash: &Blake3Hash) -> Option<Buffer> {
+            self.inner.get(hash)
         }
 
         fn reads(&self) -> usize {
@@ -1893,18 +1890,13 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl StorageBackend for CountingBackend {
-        type Key = Blake3Hash;
-        type Value = Vec<u8>;
-        type Error = DialogStorageError;
-
-        async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-            self.inner.set(key, value).await
-        }
-
-        async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+    impl Provider<LoadBlock> for CountingBackend {
+        async fn execute(
+            &self,
+            load: LoadBlock,
+        ) -> Result<Option<Buffer>, crate::DialogSearchTreeError> {
             self.reads.fetch_add(1, AtomicOrdering::Relaxed);
-            self.inner.get(key).await
+            load.perform(&self.inner).await
         }
     }
 
@@ -1912,7 +1904,7 @@ mod tests {
 
     async fn build(
         keys: impl IntoIterator<Item = (u32, Vec<u8>)>,
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<TestTree> {
         let mut tree = TestTree::empty();
         let mut delta = Delta::zero();
@@ -1924,9 +1916,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
         Ok(tree)
@@ -1939,7 +1929,7 @@ mod tests {
     async fn build_with_manifest(
         keys: impl IntoIterator<Item = (u32, Vec<u8>)>,
         manifest: Manifest,
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<TestTree> {
         let mut tree = TestTree::empty();
         let mut delta = Delta::zero();
@@ -1959,9 +1949,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
         Ok(tree)
@@ -1971,7 +1959,7 @@ mod tests {
         source: &TestTree,
         target: &TestTree,
         scope: &[core::ops::RangeInclusive<[u8; 4]>],
-        storage: &ContentAddressedStorage<CountingBackend>,
+        storage: &CountingBackend,
     ) -> Result<Vec<Change<[u8; 4], Vec<u8>>>> {
         let stream = source.differentiate_within(target, scope, storage, storage);
         futures_util::pin_mut!(stream);
@@ -1990,7 +1978,7 @@ mod tests {
     /// as the numbers they encode.
     #[dialog_common::test]
     async fn it_scopes_changes_to_the_given_ranges() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build((0..250u32).map(|i| (i, vec![0])), &mut storage).await?;
 
         // Two changed regions far apart in key space.
@@ -2003,9 +1991,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2049,7 +2035,7 @@ mod tests {
     /// out-of-scope region changed heavily.
     #[dialog_common::test]
     async fn it_avoids_reading_out_of_scope_subtrees() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         // Pin a small segment target so the 250 tiny entries branch into
         // several leaves: the whole premise is that an out-of-scope subtree
         // can be skipped, which needs more than one subtree. Under the global
@@ -2075,21 +2061,19 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
         let scope = vec![0u32.to_le_bytes()..=20u32.to_le_bytes()];
 
-        let before_full = storage.backend().reads();
+        let before_full = storage.reads();
         let full = collect_changes(&base, &target, &storage).await?;
-        let full_reads = storage.backend().reads() - before_full;
+        let full_reads = storage.reads() - before_full;
 
-        let before_scoped = storage.backend().reads();
+        let before_scoped = storage.reads();
         let scoped = collect_scoped_changes(&base, &target, &scope, &storage).await?;
-        let scoped_reads = storage.backend().reads() - before_scoped;
+        let scoped_reads = storage.reads() - before_scoped;
 
         assert_eq!(scoped.len(), 4, "two in-scope keys, Remove + Add each");
         assert!(full.len() > scoped.len());
@@ -2104,7 +2088,7 @@ mod tests {
     async fn collect_changes(
         source: &TestTree,
         target: &TestTree,
-        storage: &ContentAddressedStorage<CountingBackend>,
+        storage: &CountingBackend,
     ) -> Result<Vec<Change<[u8; 4], Vec<u8>>>> {
         let stream = source.differentiate(target, storage, storage);
         futures_util::pin_mut!(stream);
@@ -2122,7 +2106,7 @@ mod tests {
     /// the empty node syncs like any root instead of poisoning the walk.
     #[dialog_common::test]
     async fn test_differential_over_the_manifest_carrying_empty_root() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let custom = Manifest {
             fanout_n: 2,
             ..Manifest::default()
@@ -2194,7 +2178,7 @@ mod tests {
         base: &TestTree,
         ops: &[(bool, u32, Vec<u8>)],
         op_buf_size: usize,
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<TestTree> {
         let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
         for (is_insert, key, value) in ops {
@@ -2208,9 +2192,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(TestTree::seal(root, Default::default()))
     }
@@ -2221,7 +2203,7 @@ mod tests {
         base: &TestTree,
         ops: &[(bool, u32, Vec<u8>)],
         op_buf_size: usize,
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<TestTree> {
         let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
         for (is_insert, key, value) in ops {
@@ -2235,9 +2217,7 @@ mod tests {
         let mut delta = Delta::zero();
         let canonical = tree.canonicalize(storage, &mut delta).await?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(canonical)
     }
@@ -2271,7 +2251,7 @@ mod tests {
     /// difference between two replicas *is*.
     #[dialog_common::test]
     async fn it_diffs_buffered_trees_like_canonicalized_ones() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build((0..300u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
 
         for seed in 0..25u64 {
@@ -2323,7 +2303,7 @@ mod tests {
     /// two. Equal content under divergent flush history must diff to nothing.
     #[dialog_common::test]
     async fn it_reports_no_difference_across_divergent_flush_depth() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build((0..300u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
 
         let ops: Vec<(bool, u32, Vec<u8>)> = vec![
@@ -2356,12 +2336,12 @@ mod tests {
     /// changes, and crucially, zero storage reads.
     #[dialog_common::test]
     async fn it_yields_no_changes_and_no_reads_for_identical_trees() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let entries: Vec<(u32, Vec<u8>)> = (0..500u32).map(|i| (i, vec![i as u8])).collect();
         let a = build(entries.clone(), &mut storage).await?;
         let b = build(entries, &mut storage).await?;
 
-        storage.backend().reset();
+        storage.reset();
         let changes = collect_changes(&a, &b, &storage).await?;
 
         assert!(
@@ -2369,7 +2349,7 @@ mod tests {
             "identical trees should yield no changes"
         );
         assert_eq!(
-            storage.backend().reads(),
+            storage.reads(),
             0,
             "identical trees must be recognized without reading any blocks"
         );
@@ -2381,7 +2361,7 @@ mod tests {
     /// source tree into the target tree.
     #[dialog_common::test]
     async fn it_streams_changes_that_transform_source_into_target() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
 
         let mut source_entries: BTreeMap<u32, Vec<u8>> =
             (0..300u32).map(|i| (i, vec![i as u8])).collect();
@@ -2437,9 +2417,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         assert_eq!(
             merged.root(),
@@ -2454,7 +2432,7 @@ mod tests {
     /// only the blocks along the differing paths, not the whole trees.
     #[dialog_common::test]
     async fn it_reads_only_blocks_on_differing_paths() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let entries: Vec<(u32, Vec<u8>)> = (0..2000u32).map(|i| (i, vec![i as u8])).collect();
 
         let base = build(entries.clone(), &mut storage).await?;
@@ -2469,14 +2447,12 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
-        storage.backend().reset();
+        storage.reset();
         let changes = collect_changes(&base, &modified, &storage).await?;
-        let reads = storage.backend().reads();
+        let reads = storage.reads();
 
         assert_eq!(changes.len(), 2, "one update is a Remove plus an Add");
 
@@ -2500,7 +2476,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_streams_the_same_changes_eagerly() -> Result<()> {
         let backend = CountingBackend::new();
-        let mut storage = ContentAddressedStorage::new(backend.clone());
+        let mut storage = backend.clone();
         let entries: Vec<(u32, Vec<u8>)> = (0..500u32).map(|i| (i, vec![i as u8])).collect();
         let base = build(entries, &mut storage).await?;
 
@@ -2513,9 +2489,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2589,27 +2563,28 @@ mod tests {
 
         #[derive(Clone)]
         struct GaugeBackend {
-            inner: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+            inner: MemoryBlocks,
             in_flight: Arc<AtomicUsize>,
             max_in_flight: Arc<AtomicUsize>,
         }
 
+        impl GaugeBackend {
+            fn store(&self, block: Buffer) {
+                self.inner.store(block);
+            }
+        }
+
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl StorageBackend for GaugeBackend {
-            type Key = Blake3Hash;
-            type Value = Vec<u8>;
-            type Error = DialogStorageError;
-
-            async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-                self.inner.set(key, value).await
-            }
-
-            async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        impl Provider<LoadBlock> for GaugeBackend {
+            async fn execute(
+                &self,
+                load: LoadBlock,
+            ) -> Result<Option<Buffer>, crate::DialogSearchTreeError> {
                 let now = self.in_flight.fetch_add(1, AtomicOrdering::Relaxed) + 1;
                 self.max_in_flight.fetch_max(now, AtomicOrdering::Relaxed);
                 YieldOnce(false).await;
-                let result = self.inner.get(key).await;
+                let result = load.perform(&self.inner).await;
                 self.in_flight.fetch_sub(1, AtomicOrdering::Relaxed);
                 result
             }
@@ -2617,11 +2592,11 @@ mod tests {
 
         let in_flight = Arc::new(AtomicUsize::new(0));
         let max_in_flight = Arc::new(AtomicUsize::new(0));
-        let mut storage = ContentAddressedStorage::new(GaugeBackend {
-            inner: MemoryStorageBackend::default(),
+        let storage = GaugeBackend {
+            inner: MemoryBlocks::new(),
             in_flight: in_flight.clone(),
             max_in_flight: max_in_flight.clone(),
-        });
+        };
 
         let mut tree = TestTree::empty();
         let mut delta = Delta::zero();
@@ -2632,9 +2607,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
         let base = tree.clone();
@@ -2647,9 +2620,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2685,7 +2656,7 @@ mod tests {
     /// hash, regardless of integration order.
     #[dialog_common::test]
     async fn it_resolves_conflicting_adds_by_value_hash() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base_entries: Vec<(u32, Vec<u8>)> = (0..50u32).map(|i| (i, vec![i as u8])).collect();
 
         let base = build(base_entries.clone(), &mut storage).await?;
@@ -2698,9 +2669,7 @@ mod tests {
             .await?
             .persist(&mut delta_ours)?;
         for (_, buffer) in delta_ours.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let mut theirs = base.clone();
@@ -2711,9 +2680,7 @@ mod tests {
             .await?
             .persist(&mut delta_theirs)?;
         for (_, buffer) in delta_theirs.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Integrate their changes into ours, and our changes into theirs;
@@ -2737,14 +2704,10 @@ mod tests {
             .persist(&mut delta_merged_theirs)?;
 
         for (_, buffer) in delta_merged_ours.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         for (_, buffer) in delta_merged_theirs.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         assert_eq!(
@@ -2761,7 +2724,7 @@ mod tests {
     /// fully readable, and the stream never includes shared blocks.
     #[dialog_common::test]
     async fn it_yields_novel_nodes_sufficient_to_materialize_the_target() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let entries: Vec<(u32, Vec<u8>)> = (0..1000u32).map(|i| (i, vec![i as u8])).collect();
 
         let base = build(entries.clone(), &mut storage).await?;
@@ -2775,14 +2738,12 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
         // A "remote" that already has the base tree.
-        let mut remote = ContentAddressedStorage::new(CountingBackend::new());
+        let remote = CountingBackend::new();
         {
             let difference =
                 TreeDifference::compute(&TestTree::empty(), &base, &storage, &storage).await?;
@@ -2790,9 +2751,7 @@ mod tests {
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
                 let node = node?;
-                remote
-                    .store(node.buffer().as_ref().to_vec(), node.hash())
-                    .await?;
+                remote.store(node.buffer().clone());
             }
         }
 
@@ -2803,9 +2762,7 @@ mod tests {
         let mut uploaded = 0;
         while let Some(node) = nodes.next().await {
             let node = node?;
-            remote
-                .store(node.buffer().as_ref().to_vec(), node.hash())
-                .await?;
+            remote.store(node.buffer().clone());
             uploaded += 1;
         }
         assert!(uploaded > 0, "extension must produce novel nodes");
@@ -2834,7 +2791,7 @@ mod tests {
         use super::{MissingBlocks, MissingPolicy};
 
         // The full history lives at the origin.
-        let mut origin = ContentAddressedStorage::new(CountingBackend::new());
+        let mut origin = CountingBackend::new();
         let entries: Vec<(u32, Vec<u8>)> = (0..1000u32).map(|i| (i, vec![i as u8])).collect();
         let base = build(entries.clone(), &mut origin).await?;
         let mut extended = base.clone();
@@ -2846,15 +2803,13 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                origin
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                origin.store(buffer);
             }
         }
 
         // The device holds ONLY the extension's minted nodes: the base was
         // adopted by root, so not one of its blocks is present.
-        let mut device = ContentAddressedStorage::new(CountingBackend::new());
+        let device = CountingBackend::new();
         let mut minted: HashSet<Blake3Hash> = HashSet::new();
         {
             let difference = TreeDifference::compute(&base, &extended, &origin, &origin).await?;
@@ -2863,9 +2818,7 @@ mod tests {
             while let Some(node) = nodes.next().await {
                 let node = node?;
                 minted.insert(node.hash().clone());
-                device
-                    .store(node.buffer().as_ref().to_vec(), node.hash())
-                    .await?;
+                device.store(node.buffer().clone());
             }
         }
         assert!(!minted.is_empty(), "the extension must mint nodes");
@@ -2903,7 +2856,7 @@ mod tests {
 
         // Sufficiency: a peer holding the base plus the reported set reads
         // the whole extended tree — the same-remote push contract.
-        let mut peer = ContentAddressedStorage::new(CountingBackend::new());
+        let peer = CountingBackend::new();
         {
             let difference =
                 TreeDifference::compute(&TestTree::empty(), &base, &origin, &origin).await?;
@@ -2911,13 +2864,12 @@ mod tests {
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
                 let node = node?;
-                peer.store(node.buffer().as_ref().to_vec(), node.hash())
-                    .await?;
+                peer.store(node.buffer().clone());
             }
         }
         for hash in &reported {
-            let bytes = device.retrieve(hash).await?.expect("reported node is held");
-            peer.store(bytes, hash).await?;
+            let block = device.get(hash).expect("reported node is held");
+            peer.store(block);
         }
         let restored = TestTree::from_hash(extended.root().clone());
         for (key, value) in (0..1020u32).map(|i| (i, vec![i as u8])) {
@@ -2931,13 +2883,13 @@ mod tests {
         Ok(())
     }
 
-    fn journaled_storage(backend: &MemoryStorageBackend<Blake3Hash, Vec<u8>>) -> TestStorage {
-        ContentAddressedStorage::new(JournaledStorage::new(backend.clone()))
+    fn journaled_storage(backend: &MemoryBlocks) -> TestStorage {
+        JournaledBlocks::over(backend.clone())
     }
 
     #[dialog_common::test]
     async fn test_diff_shared_left_subtree() -> Result<()> {
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -2973,7 +2925,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_fully_disjoint_trees() -> Result<()> {
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage = journaled_storage(&backend);
 
         // Scenario: Trees have completely different key ranges - NO shared segments
@@ -3007,7 +2959,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_subset_superset() -> Result<()> {
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3043,7 +2995,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_single_key_change() -> Result<()> {
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3081,7 +3033,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_different_heights() -> Result<()> {
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3117,7 +3069,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_diff_different_heights_reverse() -> Result<()> {
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_a = journaled_storage(&backend);
         let storage_b = journaled_storage(&backend);
 
@@ -3159,7 +3111,7 @@ mod tests {
     // incomplete store, the second a damaged one.
     #[dialog_common::test]
     async fn it_reports_absent_nodes_instead_of_failing() -> Result<()> {
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage = journaled_storage(&backend);
         let spec = tree_spec![
             [     ..e]
@@ -3189,7 +3141,7 @@ mod tests {
         // root is unreachable, so the walk reports exactly that and stops:
         // everything below an absent node is unreachable by definition, and
         // a gap-tolerant walk does not pretend otherwise.
-        let empty = MemoryStorageBackend::default();
+        let empty = MemoryBlocks::new();
         let elsewhere = journaled_storage(&empty);
         let visits: Vec<_> = spec.tree().traverse_available(&elsewhere).collect().await;
         assert_eq!(visits.len(), 1, "an unreachable root ends the walk");
@@ -3212,7 +3164,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_all_target_nodes_when_source_is_empty() -> Result<()> {
         // When source is empty, all target nodes are novel
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3258,7 +3210,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_no_nodes_when_target_is_empty() -> Result<()> {
         // When target is empty, no nodes are novel
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3297,7 +3249,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_no_nodes_when_both_trees_are_empty() -> Result<()> {
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3329,7 +3281,7 @@ mod tests {
         // root lazily, so not even the roots are read (the prolly tree's
         // eager root load marked these as reads; the search tree improves
         // on that with a zero-read fast path).
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3375,7 +3327,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_excludes_shared_subtrees_from_novel_nodes() -> Result<()> {
         // When trees share a subtree (same hash), that subtree is NOT novel
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3444,7 +3396,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_trees_with_different_heights() -> Result<()> {
         // Target taller than source
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3520,7 +3472,7 @@ mod tests {
         //
         // IMPORTANT: Both trees must share the same backend so that identical
         // content produces identical hashes (content-addressed storage).
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3573,7 +3525,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_all_target_nodes_for_disjoint_trees() -> Result<()> {
         // Trees with completely different content - all target nodes are novel
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3631,7 +3583,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_unique_novel_nodes() -> Result<()> {
         // Verify that novel_nodes() never returns duplicates
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3679,7 +3631,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_novel_nodes_for_different_segments() -> Result<()> {
         // Simplest case: single segment trees with different content
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3718,7 +3670,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_prunes_shared_deep_subtrees() -> Result<()> {
         // 3-level trees where the left subtree is shared but right differs
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryBlocks::new();
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
@@ -3799,19 +3751,17 @@ mod tests {
 
     async fn flush(
         delta: &mut Delta<Blake3Hash, Buffer>,
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<()> {
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(())
     }
 
     #[dialog_common::test]
     async fn test_differentiate_added_entry() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let tree1 = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
         let tree2 = build([(1, vec![10])], &mut storage).await?;
 
@@ -3836,7 +3786,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_removed_entry() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let tree1 = build([(1, vec![10])], &mut storage).await?;
         let tree2 = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
 
@@ -3861,7 +3811,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_modified_entry() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let tree1 = build([(1, vec![10]), (2, vec![30])], &mut storage).await?;
         let tree2 = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
 
@@ -3888,7 +3838,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_empty_to_populated() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let tree1 = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
         let tree2 = TestTree::empty();
 
@@ -3909,7 +3859,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_populated_to_empty() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let tree1 = TestTree::empty();
         let tree2 = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
 
@@ -3930,7 +3880,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_large_tree() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
 
         // Create a larger tree to test branch handling; tree2 skips one entry
         let tree1 = build((0..100u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
@@ -3960,7 +3910,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_both_empty() -> Result<()> {
-        let storage = ContentAddressedStorage::new(CountingBackend::new());
+        let storage = CountingBackend::new();
         let tree1 = TestTree::empty();
         let tree2 = TestTree::empty();
 
@@ -3972,7 +3922,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_single_entry_trees() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let tree1 = build([(1, vec![10])], &mut storage).await?;
         let tree2 = build([(1, vec![20])], &mut storage).await?;
 
@@ -3998,7 +3948,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_disjoint_trees() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
 
         // Completely disjoint key sets
         let tree1 = build([(1, vec![10]), (3, vec![30]), (5, vec![50])], &mut storage).await?;
@@ -4024,7 +3974,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_subset_superset() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
 
         // Subset: keys 2, 3. Superset: keys 1, 2, 3, 4.
         let subset = build([(2, vec![20]), (3, vec![30])], &mut storage).await?;
@@ -4054,7 +4004,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_differentiate_all_modified() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
 
         // Same keys, all different values (except i=0 where both are [0])
         let tree1 = build((0..10u32).map(|i| (i, vec![(i * 2) as u8])), &mut storage).await?;
@@ -4070,7 +4020,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_integrate_add_new_entry() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
         let changes = vec![Change::Add(Entry {
@@ -4096,7 +4046,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_integrate_add_idempotent() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10])], &mut storage).await?;
         let root = tree.root().clone();
 
@@ -4128,7 +4078,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_integrate_add_conflict_resolution() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
         // Try to add different value - conflict resolution by value hash
@@ -4163,7 +4113,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_integrate_remove_existing() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
 
         let changes = vec![Change::Remove(Entry {
@@ -4189,7 +4139,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_integrate_remove_nonexistent() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
         // Remove non-existent entry - should be no-op
@@ -4216,7 +4166,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_integrate_remove_wrong_value() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
         // Try to remove with wrong value - should be no-op (concurrent update)
@@ -4243,7 +4193,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_integrate_concurrent_updates() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
 
         // Initial state - both replicas start with same value, then each
         // updates the same key to a different value.
@@ -4308,7 +4258,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_roundtrip_empty_to_populated() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let target = build([(1, vec![10]), (2, vec![20]), (3, vec![30])], &mut storage).await?;
         let mut start = TestTree::empty();
 
@@ -4333,7 +4283,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_roundtrip_populated_to_empty() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let target = TestTree::empty();
         let mut start = build([(1, vec![10]), (2, vec![20]), (3, vec![30])], &mut storage).await?;
 
@@ -4358,7 +4308,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_roundtrip_mixed_changes() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
 
         // Start state: keys 1, 2, 3. Target: 2 (modified), 3 (same), 4
         // (added); key 1 removed.
@@ -4387,7 +4337,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_roundtrip_large_tree() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
 
         let mut start = build((0..100u32).map(|i| (i, vec![(i % 26) as u8])), &mut storage).await?;
         let target = build(
@@ -4423,7 +4373,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_roundtrip_preserves_hash() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
 
         let target = build((0..20u32).map(|i| (i, vec![(i * 3) as u8])), &mut storage).await?;
         let target_root = target.root().clone();
@@ -4448,7 +4398,7 @@ mod tests {
     async fn buffered_keys(
         base: &TestTree,
         ops: &[([u8; 4], Vec<u8>)],
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<TestTree> {
         let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(1_000_000);
         for (key, value) in ops {
@@ -4457,9 +4407,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(TestTree::seal(root, Default::default()))
     }
@@ -4477,7 +4425,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_syncs_a_root_buffered_fact_without_descending() -> Result<()> {
         for base_size in [500u32, 5_000, 20_000] {
-            let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+            let mut storage = CountingBackend::new();
             let base = build((0..base_size).map(|i| (i, vec![i as u8])), &mut storage).await?;
 
             // One new fact per side, buffered at the root (no overflow), on keys
@@ -4489,9 +4437,9 @@ mod tests {
             let left = buffered_keys(&base, &[(ours, vec![1])], &mut storage).await?;
             let right = buffered_keys(&base, &[(theirs, vec![2])], &mut storage).await?;
 
-            storage.backend().reset();
+            storage.reset();
             let changes = collect_changes(&left, &right, &storage).await?;
-            let reads = storage.backend().reads();
+            let reads = storage.reads();
 
             assert_eq!(
                 normalize(&changes).len(),
@@ -4518,7 +4466,7 @@ mod tests {
     /// same-key-different-value pair is not silently pruned away.
     #[dialog_common::test]
     async fn it_diffs_a_same_key_buffered_with_different_values() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build((0..500u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
 
         let left = buffered(&base, &[(true, 42u32, vec![111])], 1_000_000, &mut storage).await?;
@@ -4538,7 +4486,7 @@ mod tests {
     /// one, restricted to the demanded ranges.
     #[dialog_common::test]
     async fn it_scopes_diffs_over_buffered_writes() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build((0..400u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
 
         // One buffered write to a key inside the base range.
@@ -4565,7 +4513,7 @@ mod tests {
     #[dialog_common::test]
     #[ignore]
     async fn probe_empty_buffer_implies_clean_subtree() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build((0..2000u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
 
         // Overflow the root repeatedly so ops cascade into children, then add a
@@ -4583,17 +4531,15 @@ mod tests {
             let mut next = Vec::new();
             let mut empty_with_buffered_below = 0;
             for hash in &level {
-                let bytes = StorageBackend::get(storage.backend(), hash).await?.unwrap();
-                let node: PersistentNode<[u8; 4], Vec<u8>> =
-                    PersistentNode::try_from(crate::Buffer::from(bytes))?;
+                let bytes = storage.get(hash).unwrap();
+                let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::try_from(bytes)?;
                 if let crate::NodeBody::Index(index) = node.body() {
                     let own = index.novelty_len();
                     let mut below = 0;
                     for at in 0..index.len() {
                         let h = index.hash_at(at)?.clone();
-                        let b = StorageBackend::get(storage.backend(), &h).await?.unwrap();
-                        let child: PersistentNode<[u8; 4], Vec<u8>> =
-                            PersistentNode::try_from(crate::Buffer::from(b))?;
+                        let b = storage.get(&h).unwrap();
+                        let child: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::try_from(b)?;
                         if let crate::NodeBody::Index(ci) = child.body() {
                             below += ci.novelty_len();
                         }
@@ -4620,7 +4566,7 @@ mod tests {
     /// belongs to, and none must be lost between them.
     #[dialog_common::test]
     async fn it_surfaces_buffered_ops_across_disjoint_scopes() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let storage = CountingBackend::new();
 
         // Keys tagged by their leading byte, like the artifact key layout.
         let base_keys: Vec<[u8; 4]> = (0..200u32)
@@ -4638,9 +4584,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -4653,9 +4597,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = buffered.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         let next = TestTree::from_hash_with_cache(root, Default::default());
 
@@ -4685,7 +4627,7 @@ mod tests {
     #[dialog_common::test]
     #[ignore]
     async fn probe_novelty_within_bounds() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build((0..500u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
 
         // Buffer ops well past every existing key, at the root and cascaded.
@@ -4701,11 +4643,8 @@ mod tests {
             let mut violations = 0;
             let mut checked = 0;
             while let Some(hash) = frontier.pop() {
-                let bytes = StorageBackend::get(storage.backend(), &hash)
-                    .await?
-                    .unwrap();
-                let node: PersistentNode<[u8; 4], Vec<u8>> =
-                    PersistentNode::try_from(crate::Buffer::from(bytes))?;
+                let bytes = storage.get(&hash).unwrap();
+                let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::try_from(bytes)?;
                 if let crate::NodeBody::Index(index) = node.body() {
                     // Separators are lower bounds, so a node's own table
                     // bounds its ops from BELOW: every buffered key must sort
@@ -4754,7 +4693,7 @@ mod tests {
     /// at `dialog.db/revision`, and `p` sorts after `d`.
     #[dialog_common::test]
     async fn it_scopes_diffs_over_ops_past_the_node_bound() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let storage = CountingBackend::new();
 
         // Base keys all start with a low byte, so every stored bound is low.
         let base_keys: Vec<[u8; 4]> = (0..300u32)
@@ -4772,9 +4711,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -4789,9 +4726,7 @@ mod tests {
             let mut delta = Delta::zero();
             let root = tree.persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
             TestTree::from_hash_with_cache(root, Default::default())
         };
@@ -4824,7 +4759,7 @@ mod tests {
     /// (the randomized oracle never generated keys past the rightmost bound).
     #[dialog_common::test]
     async fn it_sees_a_buffered_op_past_the_rightmost_key() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build((0..500u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
 
         // Every op sorts past the base's last key, so all of them land on the
@@ -4875,12 +4810,10 @@ mod tests {
 
         async fn settle(
             delta: &mut Delta<Blake3Hash, Buffer>,
-            storage: &mut ContentAddressedStorage<CountingBackend>,
+            storage: &mut CountingBackend,
         ) -> Result<()> {
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
             Ok(())
         }
@@ -4890,7 +4823,7 @@ mod tests {
             keys: &[u32],
             op_buf_size: usize,
             canonicalize: bool,
-            storage: &mut ContentAddressedStorage<CountingBackend>,
+            storage: &mut CountingBackend,
         ) -> Result<TestTree> {
             let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
             for key in keys {
@@ -4916,7 +4849,7 @@ mod tests {
 
         for (scattered, shape) in [(false, "appended"), (true, "scattered")] {
             for divergence in [1u32, 16, 256] {
-                let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+                let mut storage = CountingBackend::new();
                 let base = build((0..base_size).map(|i| (i, vec![i as u8])), &mut storage).await?;
 
                 // Disjoint divergence, two shapes. Appended keys sort past the whole
@@ -4951,7 +4884,7 @@ mod tests {
                     let right =
                         diverge(&base, &theirs, op_buf_size, canonicalize, &mut storage).await?;
 
-                    storage.backend().reset();
+                    storage.reset();
                     let started = Instant::now();
                     let changes = collect_changes(&left, &right, &storage).await?.len();
                     let millis = started.elapsed().as_millis();
@@ -4964,7 +4897,7 @@ mod tests {
                         (divergence as usize) * 2,
                         "regime {label} must report both sides' divergence"
                     );
-                    let reads = storage.backend().reads();
+                    let reads = storage.reads();
 
                     println!(
                         "| {shape:<9} {divergence:<4} | {label:<28} | {reads:>5} | {changes:>7} | {millis:>7} |"
@@ -4983,7 +4916,7 @@ mod tests {
     /// Builds a base tree from raw byte keys (no le_bytes reordering trap).
     async fn build_bytes(
         keys: impl IntoIterator<Item = ([u8; 4], Vec<u8>)>,
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<TestTree> {
         let mut tree = TestTree::empty();
         let mut delta = Delta::zero();
@@ -4994,9 +4927,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
         Ok(tree)
@@ -5006,7 +4937,7 @@ mod tests {
         base: &TestTree,
         ops: &[ByteOp],
         op_buf_size: usize,
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<TestTree> {
         let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
         for (is_insert, key, value) in ops {
@@ -5019,9 +4950,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(TestTree::seal(root, Default::default()))
     }
@@ -5030,7 +4959,7 @@ mod tests {
         base: &TestTree,
         ops: &[ByteOp],
         op_buf_size: usize,
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<TestTree> {
         let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
         for (is_insert, key, value) in ops {
@@ -5043,9 +4972,7 @@ mod tests {
         let mut delta = Delta::zero();
         let canonical = tree.canonicalize(storage, &mut delta).await?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(canonical)
     }
@@ -5059,7 +4986,7 @@ mod tests {
         source_buf: usize,
         target_buf: usize,
         label: &str,
-        storage: &mut ContentAddressedStorage<CountingBackend>,
+        storage: &mut CountingBackend,
     ) -> Result<usize> {
         let source_buffered = buffered_bytes(base, source_ops, source_buf, storage).await?;
         let target_buffered = buffered_bytes(base, target_ops, target_buf, storage).await?;
@@ -5086,7 +5013,7 @@ mod tests {
     /// asserts on the other side.
     #[dialog_common::test]
     async fn probe_buffered_retracts_at_mixed_depths() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build_bytes((0..400u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
         let mut total = 0usize;
 
@@ -5155,7 +5082,7 @@ mod tests {
     /// exercising both the settle path and the normal walk.
     #[dialog_common::test]
     async fn probe_rightmost_boundary_keys() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let last = 399u32;
         let base = build_bytes((0..=last).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
         let mut total = 0usize;
@@ -5214,7 +5141,7 @@ mod tests {
     /// Tiny trees: empty base, single entry, root-is-a-leaf.
     #[dialog_common::test]
     async fn probe_tiny_trees() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let mut total = 0usize;
 
         for base_size in [0u32, 1, 2, 5] {
@@ -5262,7 +5189,7 @@ mod tests {
     /// asymmetric buffer sizes.
     #[dialog_common::test]
     async fn probe_random_oracle_bytes_retract_heavy() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build_bytes((0..300u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
         let mut total = 0usize;
 
@@ -5323,7 +5250,7 @@ mod tests {
     /// Symmetry: diff(a,b) must be the mirror of diff(b,a).
     #[dialog_common::test]
     async fn probe_diff_symmetry_on_buffered_trees() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build_bytes((0..300u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
 
         for seed in 0..20u64 {
@@ -5386,12 +5313,12 @@ mod tests {
     async fn probe_applying_diff_reconstructs_target() -> Result<()> {
         use futures_util::TryStreamExt as _;
 
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build_bytes((0..300u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
 
         async fn contents(
             tree: &TestTree,
-            storage: &ContentAddressedStorage<CountingBackend>,
+            storage: &CountingBackend,
         ) -> Result<BTreeMap<[u8; 4], Vec<u8>>> {
             let stream = tree.stream(storage);
             futures_util::pin_mut!(stream);
@@ -5506,14 +5433,14 @@ mod tests {
     async fn novel_nodes_case(cases: Vec<(&str, Vec<ByteOp>, usize)>) -> Result<()> {
         use futures_util::TryStreamExt as _;
 
-        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut storage = CountingBackend::new();
         let base = build_bytes((0..300u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
 
         for (label, ops, buf) in cases {
             let target = buffered_bytes(&base, &ops, buf, &mut storage).await?;
 
             // A "remote" seeded with the whole base tree.
-            let mut remote = ContentAddressedStorage::new(CountingBackend::new());
+            let remote = CountingBackend::new();
             {
                 let difference =
                     TreeDifference::compute(&TestTree::empty(), &base, &storage, &storage).await?;
@@ -5521,9 +5448,7 @@ mod tests {
                 futures_util::pin_mut!(stream);
                 while let Some(node) = stream.next().await {
                     let node = node?;
-                    remote
-                        .store(node.buffer().as_ref().to_vec(), node.hash())
-                        .await?;
+                    remote.store(node.buffer().clone());
                 }
             }
 
@@ -5535,9 +5460,7 @@ mod tests {
                 futures_util::pin_mut!(stream);
                 while let Some(node) = stream.next().await {
                     let node = node?;
-                    remote
-                        .store(node.buffer().as_ref().to_vec(), node.hash())
-                        .await?;
+                    remote.store(node.buffer().clone());
                 }
             }
 

@@ -3,8 +3,8 @@ pub use transient::*;
 
 use std::{marker::PhantomData, ops::RangeBounds};
 
+use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use rkyv::{
     Deserialize, Serialize,
@@ -17,9 +17,9 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential, Distribution,
-    Entry, Geometric, Key, Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions,
-    SearchResult, TreeDifference, TreeWalker, Value, into_owned,
+    Accessor, Cache, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key,
+    LoadBlock, Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions, SearchResult,
+    TreeDifference, TreeWalker, Value, into_owned,
 };
 
 /// A node on a range estimate's edge path, with the range's bound on each
@@ -259,14 +259,13 @@ where
     /// Returns `Ok(Some(value))` if the key exists, `Ok(None)` if the key is
     /// not found, or an error if the tree structure is invalid or storage
     /// access fails.
-    pub async fn get<Backend>(
+    pub async fn get<Env>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         // The search path is the copy-on-write frontier for an update; a read
         // ignores it and takes only the leaf. Building it is allocation-free
@@ -311,13 +310,12 @@ where
     ///
     /// Internally, this calls [`stream_range`](Self::stream_range) with an
     /// unbounded range covering all possible keys.
-    pub fn stream<'a, Backend>(
+    pub fn stream<'a, Env>(
         &'a self,
-        storage: &'a ContentAddressedStorage<Backend>,
+        storage: &'a Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.stream_range(.., storage)
     }
@@ -337,20 +335,19 @@ where
     /// Interior scales are estimates, so the whole is an upper bound, not
     /// an exact count: it answers "is this range large or small" for a
     /// planner comparing scan sizes.
-    pub async fn range_estimate<Backend>(
+    pub async fn range_estimate<Env>(
         &self,
         lower: &[u8],
         upper: &[u8],
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<u64>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let Some(root) = self.stored_root() else {
             return Ok(None);
         };
-        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.node_cache.clone(), storage);
         // Each pending node is bounded on the sides the range cuts through
         // it: `None` on a side means the range runs past that side, so the
         // node's whole extent on it counts.
@@ -405,17 +402,16 @@ where
     ///
     /// The range can be bounded or unbounded on either end, following Rust's
     /// standard [`RangeBounds`] trait. Entries are yielded in sorted order.
-    pub fn stream_range<R, Backend>(
+    pub fn stream_range<R, Env>(
         &self,
         range: R,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
-        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.node_cache.clone(), storage);
 
         TreeWalker::new(self.stored_root().cloned()).stream(range, accessor)
     }
@@ -425,18 +421,17 @@ where
     /// leaves' entries borrow the memoized decoded-keys arena with no
     /// per-entry key copy. For consumers that work directly on the raw key
     /// bytes (the artifact scan paths).
-    pub fn stream_range_handles<R, Backend>(
+    pub fn stream_range_handles<R, Env>(
         &self,
         range: R,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> impl Stream<Item = Result<Entry<crate::KeyHandle, Value>, DialogSearchTreeError>>
     + ConditionalSend
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
-        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.node_cache.clone(), storage);
 
         TreeWalker::<Key, Value>::new(self.stored_root().cloned()).stream_handles(range, accessor)
     }
@@ -448,15 +443,14 @@ where
     /// [`integrate`](TransientTree::integrate) on an edit batch) results in
     /// `other`. Only blocks on differing paths are read; see
     /// [`TreeDifference`](crate::TreeDifference) for the frugality contract.
-    pub fn differentiate<'a, Backend>(
+    pub fn differentiate<'a, Env>(
         &'a self,
         other: &'a Self,
-        self_storage: &'a ContentAddressedStorage<Backend>,
-        other_storage: &'a ContentAddressedStorage<Backend>,
+        self_storage: &'a Env,
+        other_storage: &'a Env,
     ) -> impl Differential<Key, Value> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         Value: PartialEq,
     {
         async_stream::try_stream! {
@@ -477,16 +471,15 @@ where
     /// differing regions within the scope, not to the full difference. On
     /// a partial replica this keeps the diff from fetching subtrees the
     /// caller never demanded.
-    pub fn differentiate_within<'a, Backend>(
+    pub fn differentiate_within<'a, Env>(
         &'a self,
         other: &'a Self,
         scope: &'a [core::ops::RangeInclusive<Key>],
-        self_storage: &'a ContentAddressedStorage<Backend>,
-        other_storage: &'a ContentAddressedStorage<Backend>,
+        self_storage: &'a Env,
+        other_storage: &'a Env,
     ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         // `Key`/`Value` bound `ConditionalSync` (not just the trait's
         // `ConditionalSend`) so that `&PersistentTree` — which the
         // returned `async_stream` captures — is `Send` on native.
@@ -507,17 +500,16 @@ where
     /// the price of a bounded number of reads the lazy walk would skip;
     /// it is for consumers that stream the whole difference over a
     /// high-latency backend (see [`Prefetch`]).
-    pub fn differentiate_within_with<'a, Backend>(
+    pub fn differentiate_within_with<'a, Env>(
         &'a self,
         other: &'a Self,
         scope: &'a [core::ops::RangeInclusive<Key>],
-        self_storage: &'a ContentAddressedStorage<Backend>,
-        other_storage: &'a ContentAddressedStorage<Backend>,
+        self_storage: &'a Env,
+        other_storage: &'a Env,
         prefetch: Prefetch,
     ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         Key: ConditionalSync,
         Value: PartialEq + ConditionalSync,
         D: ConditionalSync,
@@ -559,13 +551,9 @@ where
     /// reading its header. An empty tree that was never persisted has no
     /// node to read from, but it knows the manifest it was created under
     /// and reports that without touching storage.
-    pub async fn manifest<Backend>(
-        &self,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<Manifest, DialogSearchTreeError>
+    pub async fn manifest<Env>(&self, storage: &Env) -> Result<Manifest, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         match &self.root {
             TreeRoot::Empty { manifest, .. } => Ok(manifest.clone()),
@@ -573,7 +561,7 @@ where
                 if let Some(manifest) = manifest_memo::get(hash) {
                     return Ok(manifest);
                 }
-                let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+                let accessor = Accessor::new(self.node_cache.clone(), storage);
                 let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
                 let manifest = node.manifest()?;
                 manifest_memo::insert(hash, manifest.clone());
@@ -619,17 +607,16 @@ where
     /// it enables efficient reconstruction of the tree after changes.
     ///
     /// Returns `None` if the tree is empty.
-    async fn search<Backend>(
+    async fn search<Env>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
-        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.node_cache.clone(), storage);
 
         TreeWalker::new(self.stored_root().cloned())
             .search(key, accessor, options)
@@ -714,10 +701,10 @@ mod manifest_memo {
 mod tests {
     #![allow(unexpected_cfgs)]
 
+    use crate::MemoryBlocks;
     use anyhow::Result;
-    use dialog_storage::MemoryStorageBackend;
 
-    use crate::{Accessor, ContentAddressedStorage, Delta, PersistentTree, Scale};
+    use crate::{Accessor, Delta, PersistentTree, Scale};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -729,7 +716,7 @@ mod tests {
     /// must be readable from the root node alone without descending.
     #[dialog_common::test]
     async fn it_estimates_tree_size_from_the_root_alone() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut delta = Delta::zero();
 
         // Enough entries to force several levels, so the estimate is a sum of
@@ -745,12 +732,10 @@ mod tests {
         }
         tree = edit.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
-        let accessor = Accessor::new(tree.node_cache(), storage.clone());
+        let accessor = Accessor::new(tree.node_cache(), &storage);
         let root = accessor.get_node(tree.root()).await?;
         let estimate = root.scale().estimate();
 
@@ -779,7 +764,7 @@ mod tests {
     /// descend to the first level where the range spans siblings.
     #[dialog_common::test]
     async fn it_discriminates_narrow_ranges_from_broad_ones() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut delta = Delta::zero();
 
         const COUNT: u32 = 2_000;
@@ -792,9 +777,7 @@ mod tests {
         }
         tree = edit.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let full = tree
@@ -849,7 +832,7 @@ mod tests {
     /// the buffer would double-count it once it flushes.
     #[dialog_common::test]
     async fn it_excludes_pending_novelty_from_the_scale() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut delta = Delta::zero();
 
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
@@ -861,12 +844,10 @@ mod tests {
         }
         tree = edit.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
-        let accessor = Accessor::new(tree.node_cache(), storage.clone());
+        let accessor = Accessor::new(tree.node_cache(), &storage);
         let root = accessor.get_node(tree.root()).await?;
         let flushed = root.scale();
 
@@ -891,7 +872,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retrieves_inserted_values() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -904,9 +885,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1009,7 +988,7 @@ mod tests {
     async fn it_round_trips_tag_dispatched_layouts() -> Result<()> {
         use tag_dispatched::TaggedKey;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<TaggedKey, Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1032,9 +1011,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1064,7 +1041,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_deletes_values() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1077,9 +1054,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1092,9 +1067,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1122,7 +1095,7 @@ mod tests {
     async fn it_streams_entries_in_order() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1136,9 +1109,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1172,7 +1143,7 @@ mod tests {
     async fn it_streams_range_queries() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1185,9 +1156,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1227,7 +1196,7 @@ mod tests {
     async fn it_streams_empty_range() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1240,9 +1209,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
         for i in 90..100u32 {
@@ -1253,9 +1220,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1286,7 +1251,7 @@ mod tests {
     async fn it_handles_empty_tree_operations() -> Result<()> {
         use futures_util::StreamExt;
 
-        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Get on empty tree should return None
@@ -1338,20 +1303,16 @@ mod tests {
     async fn it_roots_the_empty_tree_in_an_index() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut delta = Delta::zero();
         let empty = PersistentTree::<[u8; 4], Vec<u8>>::empty()
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
-        }
+        storage.flush(&mut delta);
 
-        let accessor = Accessor::new(empty.node_cache(), storage.clone());
+        let accessor = Accessor::new(empty.node_cache(), &storage);
         let root = accessor.get_node(empty.root()).await?;
         let crate::NodeBody::Index(index) = root.body() else {
             anyhow::bail!("the empty tree's root is a segment, not an index");
@@ -1377,11 +1338,7 @@ mod tests {
             .insert(1u32.to_le_bytes(), vec![1], &storage)
             .await?
             .persist(&mut delta)?;
-        for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
-        }
+        storage.flush(&mut delta);
         assert_eq!(one.get(&1u32.to_le_bytes(), &storage).await?, Some(vec![1]));
         Ok(())
     }
@@ -1396,7 +1353,7 @@ mod tests {
         use dialog_common::Blake3Hash;
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let legacy =
             PersistentTree::<[u8; 4], Vec<u8>>::from_hash(Blake3Hash::from(LEGACY_EMPTY_ROOT));
         assert!(legacy.stored_root().is_none());
@@ -1424,9 +1381,7 @@ mod tests {
         let emptied = edit.persist(&mut delta)?;
         assert_eq!(emptied.root(), &empty_root_hash()?);
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let difference = TreeDifference::compute(&legacy, &emptied, &storage, &storage).await?;
@@ -1436,7 +1391,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_updates_existing_keys() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1449,9 +1404,7 @@ mod tests {
 
         // Flush to storage
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Verify initial value
@@ -1467,9 +1420,7 @@ mod tests {
 
         // Flush update
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Verify updated value
@@ -1481,7 +1432,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_preserves_old_tree_after_insert() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree_v1 = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta_v1 = Delta::zero();
 
@@ -1494,9 +1445,7 @@ mod tests {
 
         // Flush v1
         for (_, buffer) in delta_v1.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let v1_root = tree_v1.root().clone();
@@ -1511,9 +1460,7 @@ mod tests {
 
         // Flush v2
         for (_, buffer) in delta_v2.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Verify v1 is unchanged
@@ -1540,7 +1487,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_creates_independent_tree_versions() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut base = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta_base = Delta::zero();
 
@@ -1553,9 +1500,7 @@ mod tests {
                 .persist(&mut delta_base)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta_base.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1575,14 +1520,10 @@ mod tests {
 
         // Flush both branches
         for (_, buffer) in delta_a.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         for (_, buffer) in delta_b.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Verify branch A
@@ -1608,7 +1549,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_changes_root_after_modification() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1623,9 +1564,7 @@ mod tests {
 
         // Flush
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let root_after_insert = tree.root().clone();
@@ -1640,9 +1579,7 @@ mod tests {
 
         // Flush
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let root_after_second_insert = tree.root().clone();
@@ -1657,9 +1594,7 @@ mod tests {
 
         // Flush
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let root_after_delete = tree.root().clone();
@@ -1670,7 +1605,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_has_same_root_for_identical_trees() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
 
         // Build tree A
         let mut tree_a = PersistentTree::<[u8; 4], Vec<u8>>::empty();
@@ -1683,9 +1618,7 @@ mod tests {
                 .persist(&mut delta_a)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta_a.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1700,9 +1633,7 @@ mod tests {
                 .persist(&mut delta_b)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta_b.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -1714,7 +1645,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_single_entry_tree() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1727,9 +1658,7 @@ mod tests {
 
         // Flush
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Get should work
@@ -1747,9 +1676,7 @@ mod tests {
 
         // Flush
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Should be empty again
@@ -1760,7 +1687,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_deletes_nonexistent_key_in_empty_tree() -> Result<()> {
-        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Delete from empty tree should be a no-op on the entry set; the
@@ -1779,7 +1706,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_deletes_nonexistent_key_in_populated_tree() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert some data
@@ -1792,9 +1719,7 @@ mod tests {
 
         // Flush
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let root_before = tree.root().clone();
@@ -1820,7 +1745,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_mixed_operations() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1833,9 +1758,7 @@ mod tests {
 
         // Flush
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         assert_eq!(
@@ -1852,9 +1775,7 @@ mod tests {
 
         // Flush
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         assert_eq!(tree.get(&1u32.to_le_bytes(), &storage).await?, None);
@@ -1868,9 +1789,7 @@ mod tests {
 
         // Flush
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         assert_eq!(
@@ -1883,7 +1802,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_has_same_root_regardless_of_insertion_order() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
 
         // Build tree A with one insertion order
         let mut tree_a = PersistentTree::<[u8; 4], Vec<u8>>::empty();
@@ -1895,9 +1814,7 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_a.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         tree_a = tree_a
             .edit()
@@ -1906,9 +1823,7 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_a.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         tree_a = tree_a
             .edit()
@@ -1917,9 +1832,7 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_a.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Build tree B with different insertion order
@@ -1932,9 +1845,7 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_b.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         tree_b = tree_b
             .edit()
@@ -1943,9 +1854,7 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_b.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         tree_b = tree_b
             .edit()
@@ -1954,9 +1863,7 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_b.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Different insertion orders should produce same root hash
@@ -1967,7 +1874,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_to_the_empty_node_after_deleting_all_entries() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -1979,9 +1886,7 @@ mod tests {
             .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         tree = tree
             .edit()
@@ -1990,9 +1895,7 @@ mod tests {
             .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         tree = tree
             .edit()
@@ -2001,9 +1904,7 @@ mod tests {
             .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Verify tree is not empty
@@ -2016,9 +1917,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         tree = tree
@@ -2027,9 +1926,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         tree = tree
@@ -2038,9 +1935,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Tree should be back to the empty state: the canonical
@@ -2055,7 +1950,7 @@ mod tests {
     async fn it_handles_out_of_bounds_range_queries() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -2068,9 +1963,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2114,7 +2007,7 @@ mod tests {
     async fn it_handles_larger_random_dataset() -> Result<()> {
         use rand::{Rng, thread_rng};
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
         let mut ledger = Vec::new();
@@ -2131,9 +2024,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2155,7 +2046,7 @@ mod tests {
     /// a key above the maximum (which must fall through to the last child).
     #[dialog_common::test]
     async fn it_gets_present_and_absent_keys_across_index_boundaries() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Even keys only, so every odd key probes a gap; spread wide enough to
@@ -2170,9 +2061,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2202,7 +2091,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_restores_tree_from_persisted_root_hash() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -2214,9 +2103,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2244,7 +2131,7 @@ mod tests {
     async fn it_streams_unflushed_insertions() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -2257,9 +2144,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2272,9 +2157,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2300,7 +2183,7 @@ mod tests {
     async fn it_streams_unflushed_deletions() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -2313,9 +2196,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2328,9 +2209,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2355,7 +2234,7 @@ mod tests {
         use crate::distribution;
         use dialog_common::Blake3Hash;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let all_keys: Vec<u32> = (0..1000).collect();
 
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
@@ -2368,9 +2247,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2393,9 +2270,7 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
 
             // Deleted key should be gone
@@ -2425,7 +2300,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_to_the_empty_node_after_sequential_deletion_of_many_entries() -> Result<()>
     {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -2437,9 +2312,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2452,9 +2325,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2469,7 +2340,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_preserves_root_when_upserting_identical_value() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -2481,9 +2352,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2509,7 +2378,7 @@ mod tests {
     async fn it_streams_entries_in_byte_lexicographic_order() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert keys whose byte and numeric orders differ.
@@ -2527,9 +2396,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2567,7 +2434,7 @@ mod tests {
         use futures_util::StreamExt;
         use std::ops::Bound;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -2579,9 +2446,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2611,7 +2476,7 @@ mod tests {
     async fn it_streams_range_with_unbounded_end() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -2623,9 +2488,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2647,7 +2510,7 @@ mod tests {
     async fn it_streams_single_point_range() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
 
@@ -2659,9 +2522,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2685,7 +2546,7 @@ mod tests {
         use crate::distribution;
         use dialog_common::Blake3Hash;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
 
         let keys: Vec<u32> = (0..1000).collect();
 
@@ -2716,9 +2577,7 @@ mod tests {
                 .persist(&mut delta_a)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta_a.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2733,9 +2592,7 @@ mod tests {
                 .persist(&mut delta_b)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta_b.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2755,7 +2612,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_interleaved_operations_across_tree_versions() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
 
         // Create base tree
         let mut base = PersistentTree::<[u8; 4], Vec<u8>>::empty();
@@ -2768,9 +2625,7 @@ mod tests {
                 .persist(&mut delta_base)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta_base.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2788,9 +2643,7 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_a.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         branch_b = branch_b
             .edit()
@@ -2799,9 +2652,7 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_b.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         branch_a = branch_a
             .edit()
@@ -2810,9 +2661,7 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_a.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         branch_b = branch_b
             .edit()
@@ -2821,9 +2670,7 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta_b.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         // Branch A: base + 100, 101
@@ -2862,7 +2709,7 @@ mod tests {
         use dialog_common::Blake3Hash;
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let all_keys: Vec<u32> = (0..1000).collect();
 
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
@@ -2875,9 +2722,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
 
@@ -2904,9 +2749,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
 
             // Read every surviving key. Any missing new node in storage
@@ -2945,9 +2788,7 @@ mod tests {
     /// in order and flushing the result to storage.
     async fn build_and_flush_u32(
         keys: &[u32],
-        storage: &mut ContentAddressedStorage<
-            MemoryStorageBackend<dialog_common::Blake3Hash, Vec<u8>>,
-        >,
+        storage: &mut MemoryBlocks,
     ) -> Result<PersistentTree<[u8; 4], Vec<u8>>> {
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
@@ -2959,9 +2800,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
         Ok(tree)
@@ -2979,7 +2818,7 @@ mod tests {
     /// index root) instead of collapsing to the canonical height.
     #[dialog_common::test]
     async fn it_produces_canonical_tree_when_boundary_delete_collapses_the_root() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
         let keys: Vec<u32> = vec![69161, 101527, 102790, 164389, 171478, 193283];
 
         let tree = build_and_flush_u32(&keys, &mut storage).await?;
@@ -2990,9 +2829,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let remaining: Vec<u32> = keys.iter().copied().filter(|&k| k != 69161).collect();
@@ -3019,7 +2856,7 @@ mod tests {
     /// became unreachable through search.
     #[dialog_common::test]
     async fn it_keeps_entries_readable_after_a_delete_empties_a_segment() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
         let keys: Vec<u32> = vec![
             10554, 28619, 40390, 43764, 45237, 48124, 64082, 66285, 67399, 67838, 81131, 83265,
             92896, 94186, 98645, 103270, 110189, 114100, 123267, 127869, 135162, 136309, 147808,
@@ -3034,9 +2871,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let mut unreadable = vec![];
@@ -3067,7 +2902,7 @@ mod tests {
     async fn it_streams_ranges_with_unbounded_start() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
         let tree = build_and_flush_u32(&(0..10).collect::<Vec<_>>(), &mut storage).await?;
 
         let stream = tree.stream_range(..5u32.to_le_bytes(), &storage);
@@ -3089,7 +2924,7 @@ mod tests {
     async fn it_streams_the_maximum_key() -> Result<()> {
         use futures_util::StreamExt;
 
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
         for i in 0..5u32 {
@@ -3100,9 +2935,7 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, buffer) in delta.flush() {
-                storage
-                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                    .await?;
+                storage.store(buffer);
             }
         }
         tree = tree
@@ -3112,9 +2945,7 @@ mod tests {
             .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         let stream = tree.stream(&storage);
@@ -3142,7 +2973,7 @@ mod tests {
         use rand::{Rng, SeedableRng, rngs::StdRng};
 
         let mut rng = StdRng::seed_from_u64(0x_D1A1_06DB);
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for trial in 0..2 {
             // Seed the tree with a random key set.
@@ -3181,9 +3012,7 @@ mod tests {
                 // storage-resident read paths get exercised.
                 if op % 10 == 9 {
                     for (_, buffer) in delta.flush() {
-                        storage
-                            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                            .await?;
+                        storage.store(buffer);
                     }
                 }
 

@@ -14,8 +14,10 @@
 //!
 //! Store configurations: `sqlite_mem`, `sqlite_disk` (WAL +
 //! `synchronous=NORMAL`), `sqlite_disk_nosync` (`synchronous=OFF` — the
-//! durability semantics dialog's fs backend has today), `dialog_mem`,
-//! `dialog_disk`.
+//! durability semantics dialog's fs backend has today), `repo_mem`,
+//! `repo_disk` (a repository branch over volatile or native storage: what
+//! an application writes through, version tags, history claims, signed
+//! revision record and head publication included).
 //!
 //! Run with:
 //!
@@ -26,7 +28,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use dialog_baseline::repo::DialogRepo;
+use dialog_baseline::repo::clean_temp_storage;
 use dialog_baseline::{DialogFacts, DialogMode, FactRow, SqliteFacts, SqliteMode, generate_rows};
 
 const WRITE_SMALL_SIZE: usize = 100;
@@ -45,9 +47,18 @@ const SQLITE_MODES: &[(&str, SqliteMode)] = &[
 ];
 
 const DIALOG_MODES: &[(&str, DialogMode)] = &[
-    ("dialog_mem", DialogMode::Memory),
-    ("dialog_disk", DialogMode::Disk),
+    ("repo_mem", DialogMode::Memory),
+    ("repo_disk", DialogMode::Disk),
 ];
+
+/// A fresh branch in `mode`. A disk branch first clears the temp stores
+/// earlier iterations left, so a long run keeps at most one live store.
+async fn fresh(mode: DialogMode) -> DialogFacts {
+    if mode == DialogMode::Disk {
+        clean_temp_storage();
+    }
+    DialogFacts::open(mode).await.expect("open dialog")
+}
 
 /// A seeded pair of read-side stores, built once per configuration with
 /// the same rows so read benches compare identical content.
@@ -72,7 +83,7 @@ fn seed(size: usize) -> Seeded {
         .iter()
         .map(|(label, mode)| {
             let store = rt.block_on(async {
-                let mut store = DialogFacts::open(*mode).await.expect("open dialog");
+                let store = DialogFacts::open(*mode).await.expect("open dialog");
                 store
                     .insert_one_transaction(&rows)
                     .await
@@ -125,8 +136,8 @@ fn bench_writes(c: &mut Criterion) {
         for (label, mode) in DIALOG_MODES {
             group.bench_with_input(BenchmarkId::new(*label, size), &rows, |b, rows| {
                 b.iter_batched(
-                    || rt.block_on(async { DialogFacts::open(*mode).await.expect("open dialog") }),
-                    |mut store| {
+                    || rt.block_on(fresh(*mode)),
+                    |store| {
                         rt.block_on(async {
                             if per_row {
                                 store
@@ -144,49 +155,6 @@ fn bench_writes(c: &mut Criterion) {
             });
         }
 
-        // The repository layer: the same rows through `Branch::commit`,
-        // which is the surface applications actually write through
-        // (version tags, history claims, signed revision record, head
-        // publication on top of the same index writes).
-        group.bench_with_input(BenchmarkId::new("repo_mem", size), &rows, |b, rows| {
-            b.iter_batched(
-                || rt.block_on(async { DialogRepo::volatile().await.expect("open repo") }),
-                |repo| {
-                    rt.block_on(async {
-                        if per_row {
-                            repo.insert_per_row_transactions(rows)
-                                .await
-                                .expect("insert");
-                        } else {
-                            repo.insert_one_transaction(rows).await.expect("insert");
-                        }
-                    });
-                    repo
-                },
-                BatchSize::PerIteration,
-            );
-        });
-        group.bench_with_input(BenchmarkId::new("repo_disk", size), &rows, |b, rows| {
-            b.iter_batched(
-                || {
-                    dialog_baseline::repo::clean_temp_storage();
-                    rt.block_on(async { DialogRepo::temp().await.expect("open repo") })
-                },
-                |repo| {
-                    rt.block_on(async {
-                        if per_row {
-                            repo.insert_per_row_transactions(rows)
-                                .await
-                                .expect("insert");
-                        } else {
-                            repo.insert_one_transaction(rows).await.expect("insert");
-                        }
-                    });
-                    repo
-                },
-                BatchSize::PerIteration,
-            );
-        });
         group.finish();
     }
 
@@ -230,8 +198,7 @@ fn bench_writes(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             rt.block_on(async {
-                                let mut store =
-                                    DialogFacts::open(*mode).await.expect("open dialog");
+                                let store = fresh(*mode).await;
                                 store
                                     .insert_one_transaction(&seed_rows)
                                     .await
@@ -239,7 +206,7 @@ fn bench_writes(c: &mut Criterion) {
                                 store
                             })
                         },
-                        |mut store| {
+                        |store| {
                             rt.block_on(async {
                                 store.insert_one_transaction(rows).await.expect("insert");
                             });

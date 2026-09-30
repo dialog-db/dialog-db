@@ -41,7 +41,9 @@
 //! receiver's own snapshot and context — nothing about the sender's
 //! state beyond the differential itself.
 
+use crate::{ArchiveReader, LoadBlob};
 use core::ops::RangeInclusive;
+use dialog_capability::Provider;
 use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::iter::repeat_n;
@@ -49,11 +51,8 @@ use std::str::FromStr;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
 
-use dialog_common::Blake3Hash;
-use dialog_search_tree::{
-    Change, ContentAddressedStorage, DialogSearchTreeError, Differential, Entry,
-};
-use dialog_storage::{DialogStorageError, StorageBackend};
+use dialog_common::ConditionalSync;
+use dialog_search_tree::{Change, DialogSearchTreeError, Differential, Entry};
 
 use crate::Value;
 use crate::artifacts::decode_value;
@@ -205,13 +204,10 @@ const SCREEN_LOOKAHEAD: usize = 16;
 pub fn screen_history<'a, Backend, C>(
     changes: C,
     local: ArtifactTree,
-    storage: ContentAddressedStorage<Backend>,
+    storage: Backend,
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + dialog_common::ConditionalSync
-        + 'a,
+    Backend: ArchiveReader + Clone + dialog_common::ConditionalSync + 'a,
     C: Differential<Key, State<Datum>> + 'a,
 {
     use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -234,12 +230,10 @@ where
 async fn screen_record<Backend>(
     change: Change<Key, State<Datum>>,
     local: &ArtifactTree,
-    storage: &ContentAddressedStorage<Backend>,
+    storage: &Backend,
 ) -> Result<Vec<Change<Key, State<Datum>>>, DialogSearchTreeError>
 where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + dialog_common::ConditionalSync,
+    Backend: ArchiveReader + Clone + dialog_common::ConditionalSync,
 {
     let entry = match change {
         Change::Add(entry) => entry,
@@ -424,11 +418,7 @@ pub fn observe_revisions<'a, C, S>(
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
-    S: StorageBackend<
-            Key = dialog_storage::Blake3Hash,
-            Value = Vec<u8>,
-            Error = DialogStorageError,
-        > + 'a,
+    S: Provider<LoadBlob> + ConditionalSync + 'a,
 {
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
@@ -810,17 +800,28 @@ mod span_tests {
 #[cfg(test)]
 mod screen_tests {
     use super::*;
+    use crate::ArchiveDelta;
     use crate::history::{Edition, Origin, Version};
     use crate::tree::ArtifactTreeExt as _;
     use crate::{Artifact, Attribute, Entity, Instruction, Value};
     use anyhow::Result;
-    use dialog_search_tree::Delta;
-    use dialog_search_tree::helpers::ObservingBackend;
-    use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage};
+    use dialog_search_tree::MemoryBlocks;
+    use dialog_search_tree::helpers::ObservingBlocks;
     use futures_util::{StreamExt as _, stream};
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// Writes everything `delta` staged into `store`, and mirrors it into
+    /// `observing` so reads through it can be counted.
+    fn mirror(delta: &mut ArchiveDelta, store: &MemoryBlocks, observing: &ObservingBlocks) {
+        let blocks: Vec<_> = delta.flush_blocks().collect();
+        let blobs: Vec<_> = delta.flush_blobs().collect();
+        for block in blocks.into_iter().chain(blobs) {
+            store.store(block.clone());
+            observing.store(block);
+        }
+    }
 
     /// Screening covering records must scan their slots concurrently, and
     /// must emit exactly what screening them one at a time emits, in the
@@ -836,11 +837,8 @@ mod screen_tests {
     async fn it_screens_covering_records_concurrently_and_in_order() -> Result<()> {
         // Built through the tree's own store, mirrored block for block into
         // the observing backend the screen reads through.
-        let mut observing = ObservingBackend::new();
-        let mut store = Storage {
-            encoder: CborEncoder,
-            backend: MemoryStorageBackend::default(),
-        };
+        let observing = ObservingBlocks::new();
+        let store = MemoryBlocks::new();
         let the: Attribute = "task/label".parse()?;
         let writer = Version::new(Origin::from([1u8; 32]), Edition::new(0));
         let retractor = Version::new(Origin::from([2u8; 32]), Edition::new(1));
@@ -857,42 +855,32 @@ mod screen_tests {
             })
             .collect::<Result<_>>()?;
         let mut local = ArtifactTree::empty();
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         local
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(writer),
                 stream::iter(facts.iter().cloned().map(Instruction::Assert)),
             )
             .await?;
-        for (digest, buffer) in delta.flush() {
-            store
-                .set(*digest.as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-            observing.set(digest, buffer.into_vec()).await?;
-        }
+        mirror(&mut delta, &store, &observing);
 
         // ... and the upstream retracted every one of them, so its history
         // delta is a run of covering records.
         let mut upstream = local.clone();
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         upstream
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(retractor),
                 stream::iter(facts.iter().cloned().map(Instruction::Retract)),
             )
             .await?;
-        for (digest, buffer) in delta.flush() {
-            store
-                .set(*digest.as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-            observing.set(digest, buffer.into_vec()).await?;
-        }
+        mirror(&mut delta, &store, &observing);
 
-        let storage = ContentAddressedStorage::new(observing.clone());
+        let storage = observing.clone();
         let scope = history_scope();
         let incoming = local
             .differentiate_within(&upstream, &scope, &storage, &storage)

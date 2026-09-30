@@ -1,25 +1,21 @@
-use dialog_effects::MethodExt as _;
-use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
-use std::collections::HashSet;
-
-use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
-    Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
+    Datum, Key as ArtifactKey, LoadBlob, ShipmentRef, State, shipment_ref, shipment_refs,
 };
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync};
+use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::ArchiveExt as _;
+use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{
-    ContentAddressedStorage as TreeStorage, MissingBlocks, MissingPolicy, NodeBody, NoveltyOp,
-    PersistentNode, TreeDifference, into_owned,
+    MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, TreeDifference, into_owned,
 };
-use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+use std::collections::HashSet;
 
 use super::resolve::resolve;
 use crate::ResolveEnv;
@@ -347,7 +343,7 @@ where
                     None => Index::empty(),
                 };
                 let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
-                let tree_store = TreeStorage::new(TreeStorageBridge(store));
+                let tree_store = store;
                 let difference = TreeDifference::compute_with(
                     &base_tree,
                     &current_tree,
@@ -772,7 +768,10 @@ where
         // reference) in the same store as the tree nodes. Local bytes ->
         // remote block put, mirroring the novel node upload.
         ShipmentRef::SpilledValue(reference) => {
-            let bytes = match blob_store.get(&reference).await? {
+            let bytes = match LoadBlob::new(NodeHash::from(reference))
+                .perform(blob_store)
+                .await?
+            {
                 Some(bytes) => bytes,
                 // Held by reference: not this replica's to ship. Sole
                 // remote -> the target has it by attribution; otherwise
@@ -791,7 +790,7 @@ where
                     return Ok(());
                 }
             };
-            remote_index.put(Buffer::from(bytes)).perform(env).await?;
+            remote_index.put(bytes).perform(env).await?;
             Ok(())
         }
     }
@@ -855,11 +854,11 @@ where
 {
     let local = LocalIndex::new(env, branch.archive().index());
     if let Some(bytes) = local
-        .get(hash.as_bytes())
+        .load(hash)
         .await
-        .map_err(dialog_search_tree::DialogSearchTreeError::from)?
+        .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
     {
-        return Ok(Some(bytes));
+        return Ok(Some(bytes.into_vec()));
     }
     for source in sources {
         if let Some(bytes) = remote_block(hash, source, env).await? {

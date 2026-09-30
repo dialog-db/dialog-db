@@ -4,6 +4,7 @@ use crate::{
     Branch, CommitError, Index, NetworkedIndex, PublishError, RemoteSite, RepositoryMemoryExt as _,
     Revision, Snapshot, TreeReference, origin_of,
 };
+use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{
     Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
 };
@@ -15,7 +16,6 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::Delta;
 use futures_util::Stream;
 
 /// Command that commits a stream of changes (assert/retract) to a branch
@@ -478,7 +478,7 @@ where
         // — with its cause — on the first read that needed it, while a
         // commit every block of which is local proceeds untouched.
         let remote = source.fallback();
-        let mut store = NetworkedIndex::new(env, source.archive().index(), remote);
+        let store = NetworkedIndex::new(env, source.archive().index(), remote);
 
         // Discover who we are up front: the revision is attributed to the
         // profile / operator, and the commit's `Version` — the identifier
@@ -555,13 +555,13 @@ where
         // `canonicalize()` on the builder flushes to the leaves at seal time,
         // for callers that want the history-independent form (see
         // `Commit::canonicalize`).
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         let batch = match self.amend {
             Some(_) => {
                 dialog_artifacts::BufferedBatch::amend_reusing(
                     source.spine(),
                     &tree,
-                    &mut store,
+                    &store,
                     version,
                     changes,
                     self.scope,
@@ -572,7 +572,7 @@ where
                 dialog_artifacts::BufferedBatch::apply_reusing(
                     source.spine(),
                     &tree,
-                    &mut store,
+                    &store,
                     Some(version),
                     changes,
                     self.scope,
@@ -613,7 +613,7 @@ where
             source
                 .archive()
                 .index()
-                .import(delta.flush().map(|(_, buffer)| buffer))
+                .import(delta.flush_blocks().chain(delta.flush_blobs()))
                 .perform(env)
                 .await
                 .map_err(DialogArtifactsError::from)?;
@@ -733,7 +733,7 @@ where
         source
             .archive()
             .index()
-            .import(delta.flush().map(|(_, buffer)| buffer))
+            .import(delta.flush_blocks().chain(delta.flush_blobs()))
             .perform(env)
             .await
             .map_err(DialogArtifactsError::from)?;
