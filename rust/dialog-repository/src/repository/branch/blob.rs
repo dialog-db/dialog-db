@@ -64,7 +64,7 @@
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryMemoryExt as _, Revision, Snapshot, TreeReference, Upstream,
+    Revision, Snapshot, TreeReference,
 };
 use dialog_artifacts::history::RevisionRecord;
 use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
@@ -234,18 +234,7 @@ where
     Env: Provider<Resolve> + ConditionalSync + 'static,
 {
     let source = source.into();
-    let remote = match source.upstream() {
-        Some(Upstream::Remote { remote: name, .. }) => {
-            let loaded = source
-                .subject()
-                .remote(name.clone())
-                .load()
-                .perform(env)
-                .await;
-            RemoteFallback::from_load(name, loaded)
-        }
-        _ => RemoteFallback::None,
-    };
+    let remote = source.fallback();
     NetworkedIndex::new(env, source.archive().index(), remote)
 }
 
@@ -345,10 +334,16 @@ impl ReadBlob<'_> {
             Err(other) => return Err(other.into()),
         };
 
-        // Local miss. Hydrate from the remote upstream, if any (a
-        // snapshot has none: its reads are local).
-        let Some(Upstream::Remote { remote: name, .. }) = line.upstream() else {
-            return Err(BlobError::NotFound(miss_key).into());
+        // Local miss. Hydrate from the upstream peer, if any (a snapshot
+        // has none: its reads are local).
+        let remote = match line.fallback() {
+            RemoteFallback::Remote(remote) => remote,
+            RemoteFallback::None => return Err(BlobError::NotFound(miss_key).into()),
+            RemoteFallback::Unavailable { remote, reason } => {
+                return Err(CommitError::Blob(BlobError::Storage(format!(
+                    "upstream {remote} is unreachable: {reason}"
+                ))));
+            }
         };
 
         // The index must already reference the blob for us to import it; without
@@ -357,44 +352,41 @@ impl ReadBlob<'_> {
             return Err(BlobError::NotFound(miss_key).into());
         };
 
-        let remote = line
-            .subject()
-            .remote(name)
-            .load()
-            .perform(env)
-            .await
-            .map_err(|e| CommitError::Blob(BlobError::Storage(e.to_string())))?;
-        let address = remote.address();
-
-        // Full-blob read from the remote, forked to its site.
-        let mut source = address
-            .subject
-            .clone()
-            .reader()
-            .archive()
-            .blob()
-            .read(hash.clone())
-            .fork(address.site())
-            .perform(env)
+        // Full-blob read from the remote, forked to its site, written
+        // through a local digest-verified import sink. An attempt is the
+        // whole transfer, since the read can fail at any point.
+        let hash = &hash;
+        remote
+            .reach(|address| async move {
+                let mut source = address
+                    .subject
+                    .clone()
+                    .reader()
+                    .archive()
+                    .blob()
+                    .read(hash.clone())
+                    .fork(address.site())
+                    .perform(env)
+                    .await?;
+                let mut sink = line
+                    .archive()
+                    .blob()
+                    .import(hash.clone(), size)
+                    .perform(env)
+                    .await?;
+                while let Some(chunk) = source.next().await? {
+                    sink.write_all(&chunk).await?;
+                }
+                sink.finish().await?;
+                Ok::<_, BlobError>(())
+            })
             .await?;
-
-        // Write the bytes through a local digest-verified import sink.
-        let mut sink = line
-            .archive()
-            .blob()
-            .import(hash.clone(), size)
-            .perform(env)
-            .await?;
-        while let Some(chunk) = source.next().await? {
-            sink.write_all(&chunk).await?;
-        }
-        sink.finish().await?;
 
         // Serve the requested read from the now-local copy.
         line.archive()
             .blob()
             .invoke(BlobRead {
-                digest: hash,
+                digest: hash.clone(),
                 range,
             })
             .perform(env)
@@ -510,19 +502,7 @@ where
     // ALL tracked upstreams, not only a remote default — a branch whose
     // default upstream is local but which tracks a remote must still be
     // able to hydrate blocks it holds by reference.
-    let upstreams = branch.upstreams();
-    let remote = match upstreams.remote_name() {
-        Some(name) => {
-            let loaded = branch
-                .subject()
-                .remote(name.to_string())
-                .load()
-                .perform(env)
-                .await;
-            RemoteFallback::from_load(name, loaded)
-        }
-        None => RemoteFallback::None,
-    };
+    let remote = branch.fallback();
     let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
     let base_tree_hash = base_revision

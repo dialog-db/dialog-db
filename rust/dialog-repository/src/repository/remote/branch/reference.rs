@@ -1,36 +1,38 @@
 //! Reference for navigating to a named branch on a loaded remote.
 //!
-//! A [`RemoteBranchReference`] pairs a [`RemoteRepository`] with a
+//! A [`RemoteBranchReference`] pairs a [`ConnectedReplica`] with a
 //! [`BranchReference`] rooted at the remote's subject. Produced by
-//! [`RemoteRepository::branch`].
+//! [`ConnectedReplica::branch`].
 
+use crate::schema::Branch as BranchConcept;
 use crate::{
-    BranchReference, Cell, LoadRemoteBranch, OpenRemoteBranch, RemoteRepository,
+    BranchReference, Cell, ConnectedReplica, LoadRemoteBranch, OpenRemoteBranch,
     RepositoryMemoryExt, Revision,
 };
 use dialog_capability::Subject;
 use dialog_effects::memory::Edition;
+use dialog_effects::memory::prelude::SpaceScope;
 
 /// Cached snapshot of the remote branch's last known state: the remote
 /// revision paired with the remote's CAS version, so a fresh
-/// [`RemoteBranch`] can prime its in-memory upstream cell cache without
+/// [`ConnectedBranch`](crate::ConnectedBranch) can prime its in-memory upstream cell cache without
 /// hitting the network.
 pub type RemoteEdition = Edition<Revision>;
 
 /// A reference to a named branch on a loaded remote repository.
 ///
-/// Carries the parent [`RemoteRepository`] (already-loaded address) and
-/// names a branch on it. Produced by [`RemoteRepository::branch`].
+/// Carries the parent [`ConnectedReplica`] (already-loaded address) and
+/// names a branch on it. Produced by [`ConnectedReplica::branch`].
 #[derive(Debug, Clone)]
 pub struct RemoteBranchReference {
     /// The loaded remote repository this branch lives on.
-    pub repository: RemoteRepository,
+    pub repository: ConnectedReplica,
     /// Names the branch at the remote repository's subject. Rooted at
     /// the remote repo's subject; path `memory/branch/{branch_name}`.
     pub branch: BranchReference,
 }
 
-impl RemoteRepository {
+impl ConnectedReplica {
     /// A reference to a named branch at this remote repository.
     pub fn branch(&self, name: impl Into<String>) -> RemoteBranchReference {
         RemoteBranchReference {
@@ -46,16 +48,23 @@ impl RemoteBranchReference {
         self.branch.name()
     }
 
+    /// The branch as a concept: its entity, derived from the peer's
+    /// replica and the name.
+    pub fn concept(&self) -> BranchConcept {
+        self.repository.replica().branch(self.name())
+    }
+
     /// Cell holding the cached remote edition for this branch.
     ///
-    /// Rooted at the enclosing repo's subject; path
-    /// `memory/remote/{remote_name}/branch/{branch_name}/revision`.
-    /// This is the local snapshot — it lives under the enclosing
-    /// repository's subject, not the remote's.
+    /// Rooted at the enclosing repo's subject, keyed by the branch's
+    /// entity: `memory/upstream/{entity}/revision`. This is the local
+    /// snapshot -- it lives under the enclosing repository's subject,
+    /// not the remote's.
     pub fn cache(&self) -> Cell<RemoteEdition> {
-        self.repository
-            .site()
-            .cell(format!("branch/{}/revision", self.name()))
+        let entity = self.concept().this;
+        SpaceScope::new(self.repository.host().clone(), format!("upstream/{entity}"))
+            .cell("revision")
+            .into()
     }
 
     /// Cell representing the remote's own branch revision.

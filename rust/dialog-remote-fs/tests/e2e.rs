@@ -75,11 +75,20 @@ async fn setup_repo_with_fs_remote(
 
     let (location, address) = seed_vault(&repo).await?;
 
-    let origin = repo
-        .remote("origin")
-        .create(SiteAddress::Fs(address))
-        .perform(operator)
-        .await?;
+    let origin = {
+        let site = SiteAddress::Fs(address);
+        repo.peer(&dialog_repository::peer_did(&site)?)
+            .add_address(site)
+            .name("origin")
+            .perform(operator)
+            .await?;
+        repo.peer("origin")
+            .connect()
+            .repository(repo.did())
+            .open()
+            .perform(operator)
+            .await?
+    };
 
     let branch = repo.branch("main").open().perform(operator).await?;
     let remote_branch = origin.branch("main").open().perform(operator).await?;
@@ -166,12 +175,22 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
         .await?;
     profile.access().save(chain).perform(&operator).await?;
 
-    let bob_origin = bob_repo
-        .remote("origin")
-        .create(SiteAddress::Fs(address))
-        .subject(alice_repo.did())
-        .perform(&operator)
-        .await?;
+    let bob_origin = {
+        let site = SiteAddress::Fs(address);
+        bob_repo
+            .peer(&dialog_repository::peer_did(&site)?)
+            .add_address(site)
+            .name("origin")
+            .perform(&operator)
+            .await?;
+        bob_repo
+            .peer("origin")
+            .connect()
+            .repository(alice_repo.did())
+            .open()
+            .perform(&operator)
+            .await?
+    };
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let remote_branch = bob_origin.branch("main").open().perform(&operator).await?;
@@ -220,12 +239,22 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
         .perform(&operator)
         .await?;
     profile.access().save(chain).perform(&operator).await?;
-    let bob_origin = bob_repo
-        .remote("origin")
-        .create(SiteAddress::Fs(address))
-        .subject(alice_repo.did())
-        .perform(&operator)
-        .await?;
+    let bob_origin = {
+        let site = SiteAddress::Fs(address);
+        bob_repo
+            .peer(&dialog_repository::peer_did(&site)?)
+            .add_address(site)
+            .name("origin")
+            .perform(&operator)
+            .await?;
+        bob_repo
+            .peer("origin")
+            .connect()
+            .repository(alice_repo.did())
+            .open()
+            .perform(&operator)
+            .await?
+    };
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     let bob_remote = bob_origin.branch("main").open().perform(&operator).await?;
     bob_branch

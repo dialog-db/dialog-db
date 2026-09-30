@@ -1,9 +1,15 @@
-use crate::{LoadRepositoryError, Repository};
+use crate::registry::RegistryEnv;
+use crate::{LoadRepositoryError, Repository, RepositoryMemoryExt as _};
 use dialog_capability::{Capability, Provider};
-use dialog_common::ConditionalSync;
+use dialog_effects::memory::List;
 use dialog_effects::space::{self, SpaceExt};
 
 /// Command to load an existing repository.
+///
+/// Loading upgrades the repository's storage to the current layout, and
+/// also opens the repository's registry branch and leaves it
+/// held by the environment, as [`OpenRepository`](crate::OpenRepository)
+/// does.
 ///
 /// Returns `Repository<Credential>` since the credential
 /// may be verifier-only.
@@ -13,8 +19,11 @@ impl LoadRepository {
     /// Execute against an operator.
     pub async fn perform<Env>(self, env: &Env) -> Result<Repository, LoadRepositoryError>
     where
-        Env: Provider<space::Load> + ConditionalSync,
+        Env: Provider<space::Load> + Provider<List> + RegistryEnv,
     {
-        Ok(Repository::from(self.0.load().perform(env).await?))
+        let repository = Repository::from(self.0.load().perform(env).await?);
+        repository.upgrade().perform(env).await?;
+        repository.subject().registry().open().perform(env).await?;
+        Ok(repository)
     }
 }

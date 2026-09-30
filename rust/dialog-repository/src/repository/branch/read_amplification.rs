@@ -177,7 +177,7 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     let head = feature
         .revision()
         .expect("feature has a head after the merge");
-    let history = feature.history(&env).await;
+    let history = feature.history(&env);
     measured!(
         samples,
         env,

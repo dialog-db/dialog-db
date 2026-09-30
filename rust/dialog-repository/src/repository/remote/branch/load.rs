@@ -1,7 +1,7 @@
 //! Command to load an existing remote branch.
 
 use crate::{
-    BranchReference, LoadRemoteBranchError, OpenRemoteBranch, RemoteBranch, RemoteRepository,
+    BranchReference, ConnectedBranch, ConnectedReplica, LoadRemoteBranchError, OpenRemoteBranch,
 };
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
@@ -17,14 +17,14 @@ pub struct LoadRemoteBranch {
 
 impl LoadRemoteBranch {
     /// Construct from an owned remote repository and a branch reference.
-    pub(super) fn new(repository: RemoteRepository, branch: BranchReference) -> Self {
+    pub(super) fn new(repository: ConnectedReplica, branch: BranchReference) -> Self {
         Self {
             open: OpenRemoteBranch::new(repository, branch),
         }
     }
 
     /// Execute the load operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteBranch, LoadRemoteBranchError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<ConnectedBranch, LoadRemoteBranchError>
     where
         Env: Provider<Resolve>,
     {
@@ -45,6 +45,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::LoadRemoteBranchError;
+    use crate::helpers::connect;
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_operator::helpers::test_operator_with_profile;
@@ -63,11 +64,7 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
-        let origin = repo
-            .remote("origin")
-            .create(test_site())
-            .perform(&operator)
-            .await?;
+        let origin = connect(&repo, "origin", test_site(), repo.did(), &operator).await?;
 
         let result = origin.branch("main").load().perform(&operator).await;
         assert!(

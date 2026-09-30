@@ -16,7 +16,7 @@ use std::fmt::{Debug, Display};
 pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
 
 use super::local::LocalIndex;
-use crate::RemoteRepository;
+use crate::ConnectedReplica;
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::CatalogScope;
 
@@ -36,7 +36,7 @@ pub enum RemoteFallback {
     /// No remote is tracked; a local miss is an ordinary `None`.
     None,
     /// Local misses fetch through this remote and cache locally.
-    Remote(RemoteRepository),
+    Remote(ConnectedReplica),
     /// A remote is tracked but could not be loaded. Reads served by the
     /// local archive succeed; a local miss is an error naming the
     /// remote and the reason it is unavailable.
@@ -55,7 +55,7 @@ impl RemoteFallback {
     /// instead of being erased into a bare not-found.
     pub fn from_load(
         remote: impl Into<String>,
-        result: Result<RemoteRepository, impl Display>,
+        result: Result<ConnectedReplica, impl Display>,
     ) -> Self {
         match result {
             Ok(loaded) => Self::Remote(loaded),
@@ -67,8 +67,8 @@ impl RemoteFallback {
     }
 }
 
-impl From<Option<RemoteRepository>> for RemoteFallback {
-    fn from(remote: Option<RemoteRepository>) -> Self {
+impl From<Option<ConnectedReplica>> for RemoteFallback {
+    fn from(remote: Option<ConnectedReplica>) -> Self {
         match remote {
             Some(remote) => Self::Remote(remote),
             None => Self::None,
@@ -76,8 +76,8 @@ impl From<Option<RemoteRepository>> for RemoteFallback {
     }
 }
 
-impl From<RemoteRepository> for RemoteFallback {
-    fn from(remote: RemoteRepository) -> Self {
+impl From<ConnectedReplica> for RemoteFallback {
+    fn from(remote: ConnectedReplica) -> Self {
         Self::Remote(remote)
     }
 }
@@ -178,15 +178,20 @@ where
         // guards it, the local write-back, and any sharing of the work
         // with concurrent readers of the same digest are the env's own
         // effect (see [`Hydrate`]).
-        let route = remote.address();
-        let request = HydrationRequest {
-            address: route.address,
-            subject: route.subject,
-            catalog: self.local.catalog().clone(),
-            digest: dialog_common::Blake3Hash::from(*key),
-            priority: self.priority,
-        };
-        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
+        let (local, priority) = (&self.local, self.priority);
+        let digest = dialog_common::Blake3Hash::from(*key);
+        let hydrated = remote
+            .reach(|route| {
+                let request = HydrationRequest {
+                    address: route.address,
+                    subject: route.subject,
+                    catalog: local.catalog().clone(),
+                    digest: digest.clone(),
+                    priority,
+                };
+                Provider::<Hydrate>::execute(local.env(), request)
+            })
+            .await?;
         Ok(hydrated.map(|bytes| bytes.as_ref().clone()))
     }
 }
@@ -291,6 +296,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::helpers::connect;
     use std::sync::Arc;
 
     use anyhow::Result;
@@ -358,11 +364,7 @@ mod tests {
             .region("us-east-1")
             .bucket("bucket")
             .build()?;
-        let origin = repo
-            .remote("origin")
-            .create(site)
-            .perform(&operator)
-            .await?;
+        let origin = connect(&repo, "origin", site, repo.did(), &operator).await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let env = Recording {
             inner: operator,

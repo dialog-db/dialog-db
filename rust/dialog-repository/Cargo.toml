@@ -40,6 +40,7 @@ anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
+ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
@@ -53,6 +54,7 @@ url = { workspace = true, features = ["serde"] }
 [dev-dependencies]
 dialog-operator = { workspace = true, features = ["helpers"] }
 dialog-ucan-core = { workspace = true, features = ["helpers"] }
+dialog-remote-fs = { workspace = true }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
 dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
@@ -65,6 +67,9 @@ ruzstd = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Names a filesystem peer by where its platform directory resolves,
+# the same way the filesystem storage lays it out.
+dirs = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

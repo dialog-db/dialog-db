@@ -19,15 +19,15 @@ use parking_lot::Mutex;
 /// Create a test repository (this crate's types) using the given operator
 /// as the effect environment.
 #[cfg(test)]
-pub async fn test_repo(
-    operator: &dialog_operator::Operator<VolatileSpaceForTests>,
-    profile: &dialog_identity::Profile,
-) -> crate::Repository<dialog_credentials::Credential> {
+pub async fn test_repo<Env>(operator: &Env, profile: &Profile) -> Repository<Credential>
+where
+    Env: Provider<space::Load> + Provider<space::Create> + Provider<List> + RegistryEnv,
+{
     use crate::RepositoryExt as _;
     use dialog_identity::SpaceHandle;
     use dialog_operator::helpers::unique_name;
     let handle = SpaceHandle {
-        profile_did: dialog_varsig::Principal::did(profile),
+        profile_did: profile.did(),
         name: unique_name("repo"),
     };
     handle
@@ -35,6 +35,89 @@ pub async fn test_repo(
         .perform(operator)
         .await
         .expect("test_repo: failed to open repository")
+}
+
+/// The space a flaky test operator runs over: volatile, with a memory
+/// provider that loses the publishes a test plans.
+#[cfg(test)]
+pub type FlakySpace = Space<Volatile, Flaky, Volatile, Volatile, Volatile>;
+
+/// A test operator whose memory loses the publishes a test plans, with
+/// its profile and the storage it runs over: the storage is how a test
+/// reaches the [`Flaky`] memory of a repository, by its DID, to plan
+/// them.
+#[cfg(test)]
+pub async fn flaky_operator_with_profile() -> (Operator<FlakySpace>, Profile, Storage<FlakySpace>) {
+    use dialog_capability::Subject;
+    use dialog_operator::DeriveOperator as _;
+    use dialog_operator::helpers::unique_name;
+    let storage = Storage::<FlakySpace>::new();
+    let profile = Profile::open(unique_name("test"))
+        .perform(&storage)
+        .await
+        .expect("flaky_operator_with_profile: failed to open profile");
+    let operator = profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage.clone())
+        .await
+        .expect("flaky_operator_with_profile: failed to build operator");
+    (operator, profile, storage)
+}
+
+#[cfg(test)]
+use crate::registry::RegistryEnv;
+#[cfg(test)]
+use crate::{ConnectedReplica, Repository, SiteAddress, peer_did};
+#[cfg(test)]
+use dialog_credentials::Credential;
+#[cfg(test)]
+use dialog_effects::memory::List;
+#[cfg(test)]
+use dialog_effects::space;
+#[cfg(test)]
+use dialog_identity::Profile;
+#[cfg(test)]
+use dialog_operator::Operator;
+#[cfg(test)]
+use dialog_storage::Flaky;
+#[cfg(test)]
+use dialog_storage::provider::storage::Storage;
+#[cfg(test)]
+use dialog_storage::provider::{Space, Volatile};
+#[cfg(test)]
+use dialog_varsig::{Did, Principal};
+
+/// Add the peer reached at `address` under `name`, and connect to the
+/// repository `subject` there: what tests once did by creating a named
+/// remote. The peer's DID is derived from the address.
+#[cfg(test)]
+pub async fn connect<C, Env>(
+    repo: &Repository<C>,
+    name: &str,
+    address: impl Into<SiteAddress>,
+    subject: Did,
+    env: &Env,
+) -> anyhow::Result<ConnectedReplica>
+where
+    C: Principal,
+    Env: RegistryEnv,
+{
+    let address = address.into();
+    let did = peer_did(&address)?;
+    repo.peer(&did)
+        .add_address(address)
+        .name(name)
+        .perform(env)
+        .await?;
+    Ok(repo
+        .peer(name)
+        .connect()
+        .repository(subject)
+        .open()
+        .perform(env)
+        .await?)
 }
 
 /// Fill `branch` with what a tonk profile's account branch carries, at a
@@ -134,9 +217,6 @@ use dialog_effects::blob::Write;
 use dialog_effects::memory::{Publish, Resolve};
 #[cfg(test)]
 use dialog_network::Network;
-/// The volatile space type test operators run over.
-#[cfg(test)]
-use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;
 
 /// A [`Provider`] wrapper that tallies every effect execution by its
 /// type name, so a test can measure an operation's cost in effect
@@ -159,6 +239,16 @@ pub struct Counting<P> {
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
     reads: Arc<Mutex<InFlight>>,
     forks: Arc<Mutex<InFlight>>,
+}
+
+impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {
+    fn held(&self, key: &str) -> Option<dialog_common::Held> {
+        self.inner.held(key)
+    }
+
+    fn hold(&self, key: String, handle: dialog_common::Held) {
+        self.inner.hold(key, handle)
+    }
 }
 
 /// How many reads are open now, and the most that were ever open at once.

@@ -1,6 +1,6 @@
 use super::memory::Cell;
 use crate::rules::SharedRuleCache;
-use crate::{Ephemeral, ResolveError, Revision};
+use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory;
@@ -53,6 +53,9 @@ pub use load::*;
 mod metadata;
 
 pub mod registry;
+pub use registry::{OpenRegistry, RegistryReference};
+
+pub(crate) mod resolve;
 
 mod open;
 pub use open::*;
@@ -85,7 +88,7 @@ pub use set_upstream::*;
 mod transaction;
 pub use transaction::*;
 
-mod upstream;
+pub(crate) mod upstream;
 pub use upstream::*;
 
 // Either feature: `integration-tests` runs these natively, and
@@ -116,7 +119,9 @@ pub type Index = dialog_artifacts::Index;
 pub struct Branch {
     reference: BranchReference,
     revision: Cell<Revision>,
-    upstream: Cell<Upstreams>,
+    /// What this branch pulls from and pushes to, as last resolved from
+    /// the registry, and how far it has synced with each.
+    tracking: Cell<Tracking>,
     /// The induction watermark: the last revision through which
     /// inductive rules evaluated on this replica. A transaction commit
     /// catches up over `(watermark, head]` before processing its own
@@ -266,18 +271,45 @@ impl Branch {
         self.revision.content()
     }
 
-    /// Returns the default upstream — the target of a bare pull/push/fetch —
-    /// or `None` if no upstream is configured.
-    pub fn upstream(&self) -> Option<Upstream> {
-        self.upstreams().default_upstream().cloned()
+    /// The upstreams this branch pulls from, as last resolved: a bare
+    /// [`pull`](Self::pull) takes from every one.
+    pub fn pulls(&self) -> Upstreams {
+        self.tracked().pulls(&self.subject())
     }
 
-    /// Returns every configured upstream tracking entry, default first. A
-    /// branch can track several upstreams and pull from / push to any of
-    /// them — see [`Pull::from`](crate::Pull::from) and
-    /// [`Push::to`](crate::Push::to).
+    /// The upstreams this branch pushes to, as last resolved: a bare
+    /// [`push`](Self::push) goes to every one.
+    pub fn pushes(&self) -> Upstreams {
+        self.tracked().pushes(&self.subject())
+    }
+
+    /// Where a read of content this branch holds by reference falls back
+    /// to: an upstream at a peer, or else a peer this branch pulled from
+    /// once without tracking it, whose tree it may have adopted unread.
+    pub(crate) fn fallback(&self) -> RemoteFallback {
+        match self.upstreams().fallback() {
+            RemoteFallback::None => self.tracked().synced_with(&self.subject()).fallback(),
+            fallback => fallback,
+        }
+    }
+
+    /// Every upstream, pulled from or pushed to.
     pub fn upstreams(&self) -> Upstreams {
-        self.upstream.content().unwrap_or_default()
+        self.pulls()
+            .iter()
+            .chain(self.pushes().iter())
+            .cloned()
+            .collect()
+    }
+
+    /// What this branch's tracking cell holds.
+    pub(crate) fn tracked(&self) -> Tracking {
+        self.tracking.content().unwrap_or_default()
+    }
+
+    /// This branch's tracking cell.
+    pub(crate) fn tracking(&self) -> &Cell<Tracking> {
+        &self.tracking
     }
 
     /// Re-resolve this handle's head and upstream from storage, updating its
@@ -296,7 +328,7 @@ impl Branch {
         Env: Provider<memory::Resolve> + ConditionalSync,
     {
         self.revision.resolve().perform(env).await?;
-        self.upstream.resolve().perform(env).await?;
+        self.tracking.resolve().perform(env).await?;
         Ok(())
     }
 
@@ -325,7 +357,7 @@ impl Branch {
     /// read does, so a replica that materialized only the operational
     /// regions fetches the history it turns out to need. A branch tracking
     /// no remote reads purely locally.
-    pub async fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
@@ -334,7 +366,7 @@ impl Branch {
             + ConditionalSync
             + 'static,
     {
-        SourceRef::from(self).history(env).await
+        SourceRef::from(self).history(env)
     }
 
     /// The branch's committed history, newest first — at most `limit`

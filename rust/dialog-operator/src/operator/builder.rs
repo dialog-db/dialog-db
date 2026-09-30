@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::{Operator, WalkReach};
 use dialog_capability::{Ability, Capability, Constraint, Fork, Provider};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::{ConditionalSend, ConditionalSync, Holdings};
 use dialog_credentials::secret::Context;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Directory;
@@ -167,6 +167,7 @@ impl OperatorBuilder {
             reach: Arc::new(OnceLock::new()),
             hydration: Arc::default(),
             speculation: Arc::default(),
+            holdings: Holdings::default(),
         };
 
         // Open the profile repository's access branch: the store every
