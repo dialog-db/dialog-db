@@ -90,7 +90,7 @@ Several kinds of things are keys:
 
 - **A repository** has its own key. Its DID is the repository's name everywhere: in storage paths, in permissions, and in the branch identity a signed head carries.
 - **An account** is a person. It is the key Alice's peers act for.
-- **A peer** is one running copy of Dialog, such as the one on Alice's laptop. Its key never leaves it. In a browser the key is a non-extractable WebCrypto key, so even the page that uses it cannot read its secret half.
+- **A peer** is a place where replicas live, such as Alice's laptop or Bob's phone. One peer can hold replicas of many repositories. Its key never leaves it. In a browser the key is a non-extractable WebCrypto key, so even the page that uses it cannot read its secret half.
 - **A session** is a separate key, usually derived from the peer's key for one app or one purpose. It acts under a permission from the peer, so the app never holds the peer's key.
 
 When Alice's laptop creates the grocery list repository, it makes a fresh key for it. It seals the secret half so that only Alice's account can open it. The repository's key then signs one permission, to Alice's account, allowing everything. Storage keeps only the public half. From then on, the repository is Alice's because the repository itself said so.
