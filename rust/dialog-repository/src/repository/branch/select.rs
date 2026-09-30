@@ -9,7 +9,7 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
-use dialog_search_tree::{DialogSearchTreeError, Manifest, PersistentNode};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
@@ -152,7 +152,8 @@ impl Select<'_> {
             Some(tree_hash) => {
                 node_cache
                     .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
-                        dialog_search_tree::load(store, hash)
+                        LoadBlock::new(hash.clone())
+                            .perform(store)
                             .await?
                             .map(PersistentNode::try_from)
                             .transpose()

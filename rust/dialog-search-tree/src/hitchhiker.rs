@@ -43,7 +43,7 @@ use rkyv::{
 
 use crate::{
     Accessor, Buffer, Cache, Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key,
-    Load, Manifest, Node, NodeBody, NodeCache, NoveltyEntry, NoveltyOp, PersistentNode,
+    LoadBlock, Manifest, Node, NodeBody, NodeCache, NoveltyEntry, NoveltyOp, PersistentNode,
     PersistentTree, TransientNode, TransientRootParts, TransientSegment, TransientTree, Value,
     link_bounds,
 };
@@ -368,7 +368,7 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write(
             vec![NoveltyEntry {
@@ -383,7 +383,7 @@ where
     /// Buffers a delete (tombstone) of `key` into the tree.
     pub async fn delete<Env>(self, key: Key, storage: &Env) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write(
             vec![NoveltyEntry {
@@ -409,7 +409,7 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write_with(
             vec![NoveltyEntry {
@@ -430,7 +430,7 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write_with(
             vec![NoveltyEntry {
@@ -449,7 +449,7 @@ where
     /// its whole accumulated share in one flush.
     pub async fn settle<Env>(self, storage: &Env) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         match self.root {
             // Nothing buffered in memory: nothing to settle. (A persisted
@@ -473,7 +473,7 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write_with(msgs, storage, true).await
     }
@@ -490,7 +490,7 @@ where
         settle: bool,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let accessor = Accessor::new(self.cache.clone(), storage);
 
@@ -672,7 +672,7 @@ where
         delta: &mut Delta<Blake3Hash, Buffer>,
     ) -> Result<PersistentTree<Key, Value, D>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         // Collect every buffered op across the whole spine in key order, clearing
         // the buffers as we go, then replay them as canonical edits onto the
@@ -750,7 +750,7 @@ where
         storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let mut node = match &self.root {
             HitchhikerRoot::Empty => return Ok(None),
@@ -815,7 +815,7 @@ where
         storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
         Key: Clone,
         Value: Clone,
@@ -894,7 +894,7 @@ where
         storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
         // Snapshot the spine into an owned plan (persistent subtrees as hashes,
@@ -945,7 +945,7 @@ where
         storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let subtree: PersistentTree<Key, Value, D> =
             PersistentTree::seal(hash.clone(), self.cache.clone());
@@ -1066,7 +1066,7 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     D: Distribution,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     Box::pin(async move {
         let mut node = node;
@@ -1214,7 +1214,7 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     if let Node::Persistent(link) = child {
         let persistent = accessor.get_node(&link.node).await?;
@@ -1416,7 +1416,7 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     D: Distribution,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     // Bulk-load fast path: a batch landing in an EMPTY tree builds the
     // canonical tree bottom-up in one pass instead of one canonical edit
@@ -1455,7 +1455,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     Box::pin(async move {
         let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
@@ -1502,7 +1502,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     Box::pin(async move {
         if let TransientNode::Index(index) = node {

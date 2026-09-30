@@ -8,13 +8,13 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{DialogSearchTreeError, Key, Load, NodeCache, PersistentNode, Value, load};
+use crate::{DialogSearchTreeError, Key, LoadBlock, NodeCache, PersistentNode, Value};
 
 /// Accessor for retrieving durable nodes from cache and the environment.
 ///
 /// The accessor checks for nodes in the following order:
 /// 1. Cache - recently accessed nodes, already checked
-/// 2. Environment - the [`Load`] provider, whose bytes are checked once as
+/// 2. Environment - the [`LoadBlock`] provider, whose bytes are checked once as
 ///    they become a node and enter the cache
 ///
 /// The accessor borrows its environment for as long as it reads; it never
@@ -52,7 +52,7 @@ where
     Value::Archived: for<'b> CheckBytes<
         Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     /// Creates a new accessor over the given cache and environment.
     pub fn new(cache: NodeCache<Key, Value>, env: &'a Env) -> Self {
@@ -105,7 +105,8 @@ where
         &self,
         key: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        load(self.env, key)
+        LoadBlock::new(key.clone())
+            .perform(self.env)
             .await?
             .map(PersistentNode::try_from)
             .transpose()

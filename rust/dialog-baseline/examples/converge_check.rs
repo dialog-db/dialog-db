@@ -30,7 +30,9 @@ use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_repository::TransactionBatch;
-use dialog_search_tree::{Buffer as TreeBuffer, Distribution as _, Load, NodeBody, Value as _};
+use dialog_search_tree::{
+    Buffer as TreeBuffer, Distribution as _, LoadBlock, NodeBody, Value as _,
+};
 
 /// Walks the tree under `root` and returns every stored-leaf invariant
 /// violation: a non-final leaf whose terminal coin is unfunded, or an
@@ -38,7 +40,7 @@ use dialog_search_tree::{Buffer as TreeBuffer, Distribution as _, Load, NodeBody
 /// stored leaves free of both at every step.
 async fn leaf_violations<Env>(env: &Env, root: Blake3Hash) -> anyhow::Result<Vec<String>>
 where
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     let mut ordered: Vec<(Vec<u8>, bool, bool)> = Vec::new();
     let mut forced_links = 0usize;

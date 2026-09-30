@@ -12,7 +12,7 @@
 //!   recorded per scanned range. A range can also be enumerated, so
 //!   an unconstrained scan is expensive but defined.
 //! - A **resolver** selects by content address over the immutable block
-//!   universe ([`Load`](dialog_artifacts::inspect::Load)). A hash
+//!   universe ([`LoadBlock`](dialog_search_tree::LoadBlock)). A hash
 //!   resolves to the same bytes forever, so a resolver's rows are a pure
 //!   function of its bound inputs — no fact demand exists to record
 //!   (see `dialog_artifacts::inspect` for the full soundness
@@ -51,8 +51,7 @@ use std::fmt::{self, Display};
 use std::sync::LazyLock;
 
 use base58::{FromBase58, ToBase58};
-use dialog_artifacts::inspect::{self, Load};
-use dialog_capability::Provider;
+use dialog_artifacts::{DialogArtifactsError, LoadBlock, inspect};
 use serde::{Deserialize, Serialize};
 
 use crate::artifact::Type as ValueType;
@@ -653,7 +652,7 @@ impl ResolverQuery {
     /// Evaluate this resolver over the incoming selection.
     ///
     /// Per input row: resolve the node reference, perform the
-    /// idempotent [`Load`] effect through the environment, decode the
+    /// idempotent [`LoadBlock`] command through the environment, decode the
     /// block, and project one output row per result — a segment asked
     /// for spans, an index asked for keys, an absent block, or a
     /// resolvable reference whose block is not a tree node at all
@@ -676,9 +675,14 @@ impl ResolverQuery {
                 let Some(reference) = resolver.node_reference(&base) else {
                     continue;
                 };
-                let Some(bytes) = Provider::<Load>::execute(env, reference).await? else {
+                let Some(block) = LoadBlock::new(reference.into())
+                    .perform(env)
+                    .await
+                    .map_err(DialogArtifactsError::from)?
+                else {
                     continue;
                 };
+                let bytes = block.into_vec();
                 match &resolver {
                     ResolverQuery::TreeNode(query) => {
                         let Ok(node) = inspect::inspect_node(bytes) else {

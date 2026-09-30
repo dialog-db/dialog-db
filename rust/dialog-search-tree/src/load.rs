@@ -11,36 +11,45 @@ use crate::DialogSearchTreeError;
 /// an unflushed delta, a cache, a remote the environment hydrates from) is
 /// the provider's concern, and the tree asks only for the hash.
 ///
-/// `Ok(None)` means the provider cannot reach the block. The tree checks
-/// every block it loads against the hash it asked for, so a provider never
-/// has to be trusted to return the right bytes.
-pub struct Load;
-
-impl Command for Load {
-    type Input = Blake3Hash;
-    type Output = Result<Option<Buffer>, DialogSearchTreeError>;
+/// `Ok(None)` means the provider cannot reach the block. [`perform`](Self::perform)
+/// checks the bytes against the hash asked for, so a provider never has to
+/// be trusted to return the right ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadBlock {
+    /// The content hash of the block to load.
+    pub hash: Blake3Hash,
 }
 
-/// Loads the block stored under `hash` through `env`, refusing bytes that do
-/// not hash to it.
-///
-/// A corrupt block raises rather than reading as absent, so `None` means
-/// the block is genuinely not reachable.
-pub async fn load<Env>(
-    env: &Env,
-    hash: &Blake3Hash,
-) -> Result<Option<Buffer>, DialogSearchTreeError>
-where
-    Env: Provider<Load> + ConditionalSync,
-{
-    match env.execute(hash.clone()).await? {
-        Some(buffer) if buffer.blake3_hash() != hash => Err(DialogSearchTreeError::Storage(
-            DialogStorageError::Verification(
-                "Retrieved bytes did not match the provided hash".to_string(),
-            ),
-        )),
-        loaded => Ok(loaded),
+impl LoadBlock {
+    /// Load the block stored under `hash`.
+    pub fn new(hash: Blake3Hash) -> Self {
+        Self { hash }
     }
+
+    /// Perform this load against an env that can provide it, refusing bytes
+    /// that do not hash to the block asked for.
+    ///
+    /// A corrupt block raises rather than reading as absent, so `None` means
+    /// the block is genuinely not reachable.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Buffer>, DialogSearchTreeError>
+    where
+        Env: Provider<LoadBlock> + ConditionalSync,
+    {
+        let hash = self.hash.clone();
+        match env.execute(self).await? {
+            Some(buffer) if buffer.blake3_hash() != &hash => Err(DialogSearchTreeError::Storage(
+                DialogStorageError::Verification(
+                    "Retrieved bytes did not match the provided hash".to_string(),
+                ),
+            )),
+            loaded => Ok(loaded),
+        }
+    }
+}
+
+impl Command for LoadBlock {
+    type Input = Self;
+    type Output = Result<Option<Buffer>, DialogSearchTreeError>;
 }
 
 #[cfg(test)]
@@ -48,9 +57,9 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use dialog_capability::Provider;
-    use dialog_common::{Blake3Hash, Buffer};
+    use dialog_common::Buffer;
 
-    use super::{Load, load};
+    use super::LoadBlock;
     use crate::DialogSearchTreeError;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -61,8 +70,8 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl Provider<Load> for Answering {
-        async fn execute(&self, _: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+    impl Provider<LoadBlock> for Answering {
+        async fn execute(&self, _: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
             Ok(self.0.clone())
         }
     }
@@ -72,7 +81,9 @@ mod tests {
         let block = Buffer::from(b"a block".to_vec());
         let hash = block.blake3_hash().clone();
 
-        let loaded = load(&Answering(Some(block.clone())), &hash).await?;
+        let loaded = LoadBlock::new(hash)
+            .perform(&Answering(Some(block.clone())))
+            .await?;
 
         assert_eq!(loaded, Some(block));
         Ok(())
@@ -85,7 +96,9 @@ mod tests {
         let asked = Buffer::from(b"the block asked for".to_vec());
         let other = Buffer::from(b"some other block".to_vec());
 
-        let loaded = load(&Answering(Some(other)), asked.blake3_hash()).await;
+        let loaded = LoadBlock::new(asked.blake3_hash().clone())
+            .perform(&Answering(Some(other)))
+            .await;
 
         assert!(
             matches!(loaded, Err(DialogSearchTreeError::Storage(_))),
@@ -98,7 +111,9 @@ mod tests {
     async fn it_reads_an_unreachable_block_as_absent() -> Result<()> {
         let asked = Buffer::from(b"never stored".to_vec());
 
-        let loaded = load(&Answering(None), asked.blake3_hash()).await?;
+        let loaded = LoadBlock::new(asked.blake3_hash().clone())
+            .perform(&Answering(None))
+            .await?;
 
         assert_eq!(loaded, None);
         Ok(())

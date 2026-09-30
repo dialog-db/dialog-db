@@ -23,7 +23,7 @@ use rkyv::{
 use std::sync::Arc;
 
 use crate::{
-    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, Load, NodeBody, NoveltyOp,
+    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, LoadBlock, NodeBody, NoveltyOp,
     PersistentNode, Value, into_owned,
 };
 
@@ -392,7 +392,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         // A thin adapter, not another generator: wrapping the walk in a
         // second `try_stream!` layer measurably bloats every future that
@@ -418,7 +418,7 @@ where
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.stream_scan::<R, Env, KeyHandle>(range, accessor)
     }
@@ -433,7 +433,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         Out: ScanKey + 'static,
     {
         try_stream! {
@@ -706,7 +706,7 @@ where
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let Some(root) = &self.root else {
             return Ok(None);
@@ -842,7 +842,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.

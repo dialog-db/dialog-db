@@ -34,8 +34,8 @@ use rkyv::{
 use std::collections::VecDeque;
 
 use crate::{
-    DialogSearchTreeError, Distribution, Key, Load, NodeBody, PersistentNode, PersistentTree,
-    Value, load,
+    DialogSearchTreeError, Distribution, Key, LoadBlock, NodeBody, PersistentNode, PersistentTree,
+    Value,
 };
 
 /// What a gap-tolerant traversal found at one position in the tree.
@@ -74,7 +74,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + ConditionalSync;
+        Env: Provider<LoadBlock> + ConditionalSync;
 
     /// [`traverse_available`](Self::traverse_available) restricted to
     /// `scope`: a child subtree whose key span cannot intersect any range
@@ -94,7 +94,7 @@ where
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + ConditionalSync;
+        Env: Provider<LoadBlock> + ConditionalSync;
 }
 
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
@@ -115,7 +115,7 @@ where
         storage: &'a Env,
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         traverse::<Key, Value, Env>(self.stored_root().cloned(), storage, None)
     }
@@ -126,7 +126,7 @@ where
         scope: &'a [core::ops::RangeInclusive<Vec<u8>>],
     ) -> impl Stream<Item = Result<Visit<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         traverse::<Key, Value, Env>(self.stored_root().cloned(), storage, Some(scope))
     }
@@ -168,7 +168,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     use futures_util::StreamExt as _;
 
@@ -206,7 +206,7 @@ where
                         // it was asked for, so `None` here is genuinely
                         // "not stored" -- a corrupt block raises instead,
                         // and still fails the walk.
-                        let bytes = load(storage, &hash).await;
+                        let bytes = LoadBlock::new(hash.clone()).perform(storage).await;
                         (hash, bytes)
                     });
                 }

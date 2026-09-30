@@ -31,7 +31,7 @@
 //!    versions.
 //!
 //! 3. **Environment**: nodes the cache does not hold are loaded by their
-//!    [`Blake3Hash`] through the [`Load`] command the caller's environment
+//!    [`Blake3Hash`](dialog_common::Blake3Hash) through the [`LoadBlock`] command the caller's environment
 //!    provides. Where the bytes come from is the environment's concern; the
 //!    tree checks each loaded block against the hash it asked for.
 //!
@@ -39,7 +39,7 @@
 //! Each [`persist`](TransientTree::persist) writes new nodes into that delta,
 //! and you call [`Delta::flush`] and store the returned buffers to persist
 //! changes. Unflushed changes remain queryable but are lost when the delta is
-//! dropped. [`MemoryBlocks`] provides [`Load`] over blocks held in memory.
+//! dropped. [`MemoryBlocks`] provides [`LoadBlock`] over blocks held in memory.
 //!
 //! Basic usage:
 //!

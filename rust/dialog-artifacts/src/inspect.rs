@@ -1,7 +1,8 @@
-//! Tree-node inspection: the [`Load`] effect and pure node decoders.
+//! Tree-node inspection: pure decoders over node blocks the tree's
+//! [`LoadBlock`] command fetches.
 //!
 //! Together these back the query engine's tree procedures (`tree/node`,
-//! `tree/span`, `tree/key`, `tree/manifest`): [`Load`] fetches a raw
+//! `tree/span`, `tree/key`, `tree/manifest`): [`LoadBlock`] fetches a raw
 //! node block by content hash through the evaluation environment, and
 //! the `inspect_*` functions project the node's *logical model* out of
 //! the fetched bytes without touching storage:
@@ -17,19 +18,20 @@
 //!
 //! # Why this is sound under differential subscriptions
 //!
-//! [`Load`] is *idempotent*: a node block is content-addressed, so the
+//! [`LoadBlock`] is *idempotent*: a node block is content-addressed, so the
 //! bytes behind a hash — and therefore every row projected from them —
 //! can never change. A different tree is a different hash. This includes
 //! buffered novelty: a node's hash covers the ops riding on it. Rows
-//! derived through `Load` are permanent; they can become unnecessary,
+//! derived through `LoadBlock` are permanent; they can become unnecessary,
 //! never wrong, so no invalidation machinery is required for them. The
 //! only mutable fact in the domain is "what is the current root?", which
 //! reaches queries as an ordinary tracked fact (`dialog.branch/tree`),
-//! never through this effect. Contrast a locality probe ("is this block
+//! never through this command. Contrast a locality probe ("is this block
 //! cached here?"): that answer changes without a commit, is *not*
 //! idempotent, and must not be served through this module.
 
-use dialog_capability::Command;
+#[cfg(doc)]
+use dialog_search_tree::LoadBlock;
 use dialog_search_tree::{Buffer, Distribution, Geometric, Manifest, PersistentNode, Rank};
 use dialog_storage::Blake3Hash;
 use rkyv::deserialize;
@@ -42,23 +44,9 @@ use crate::{
     VALUE_KEY_TAG, Value, ValueKey, decode_value,
 };
 
-/// The raw content hash a [`Load`] resolves: the same 32 bytes a
+/// The raw content hash a [`LoadBlock`] resolves: the same 32 bytes a
 /// revision's tree reference and an index span's child hash carry.
 pub type NodeReference = Blake3Hash;
-
-/// Command for loading a raw tree node block by its content hash.
-///
-/// The counterpart of [`Select`](crate::Select) for the tree procedures:
-/// where `Select` scans key ranges and yields artifacts, `Load` fetches
-/// one content-addressed block for structural inspection. `Ok(None)`
-/// means the block is not available anywhere the provider can reach —
-/// the unreplicated-contributes-nothing convention.
-pub struct Load;
-
-impl Command for Load {
-    type Input = Blake3Hash;
-    type Output = Result<Option<Vec<u8>>, DialogArtifactsError>;
-}
 
 /// The node type the artifact tree persists, instantiated for inspection.
 type ArtifactNode = PersistentNode<Key, State<Datum>>;

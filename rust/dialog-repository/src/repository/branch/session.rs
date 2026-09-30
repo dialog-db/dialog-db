@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
@@ -8,8 +7,7 @@ use dialog_artifacts::{
     Speculation, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
-use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
@@ -21,8 +19,7 @@ use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
-use dialog_search_tree::{Manifest, PersistentNode};
-use dialog_storage::Blake3Hash;
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
 use std::sync::Arc;
@@ -757,7 +754,7 @@ where
 // block every time.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a, Env> Provider<Load> for QueryEnv<'a, Env>
+impl<'a, Env> Provider<LoadBlock> for QueryEnv<'a, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -767,23 +764,22 @@ where
         + ConditionalSync
         + 'static,
 {
-    async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
         for source in &self.sources {
             let source = source.as_ref();
             let remote = source.fallback();
             let store = NetworkedIndex::new(self.env, source.archive().index(), remote);
-            let hash = NodeHash::from(input);
             let cache = source.node_cache();
-            if let Some(node) = cache.get_cached(&hash) {
-                return Ok(Some(node.buffer().as_ref().to_vec()));
+            if let Some(node) = cache.get_cached(&load.hash) {
+                return Ok(Some(node.buffer().clone()));
             }
-            if let Some(bytes) = store.load(&hash).await? {
+            if let Some(block) = load.clone().perform(&store).await? {
                 // A block that checks as a node joins the cache; any other
                 // block is returned as it is, for the caller to read.
-                if let Ok(node) = PersistentNode::try_from(bytes.clone()) {
-                    cache.insert(hash, node);
+                if let Ok(node) = PersistentNode::try_from(block.clone()) {
+                    cache.insert(load.hash.clone(), node);
                 }
-                return Ok(Some(bytes.into_vec()));
+                return Ok(Some(block));
             }
         }
         Ok(None)

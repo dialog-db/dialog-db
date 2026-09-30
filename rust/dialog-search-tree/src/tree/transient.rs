@@ -15,11 +15,11 @@
 
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, Delta, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, IndexPieceOrigin, Key, Link, Load, Manifest, Node, NodeCache,
-    Novelty, NoveltyEntry, NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody,
-    PersistentTree, PieceOrigin, Rank, TransientIndex, TransientNode, TransientSegment, TreeWalker,
-    Value, link_bounds, regroup_children, regroup_children_reusing, regroup_entries,
-    regroup_entries_reusing,
+    Distribution, Entry, Geometric, IndexPieceOrigin, Key, Link, LoadBlock, Manifest, Node,
+    NodeCache, Novelty, NoveltyEntry, NoveltyOp, PersistentIndex, PersistentNode,
+    PersistentNodeBody, PersistentTree, PieceOrigin, Rank, TransientIndex, TransientNode,
+    TransientSegment, TreeWalker, Value, link_bounds, regroup_children, regroup_children_reusing,
+    regroup_entries, regroup_entries_reusing,
 };
 use async_stream::try_stream;
 use dialog_capability::Provider;
@@ -100,7 +100,7 @@ pub(crate) enum TransientRootParts<Key, Value> {
 /// A batch of in-place edits over a tree's [`Node`] spine.
 ///
 /// The edit holds no storage handle: like [`PersistentTree`], every method that
-/// may read from storage takes an environment providing [`Load`](crate::Load)
+/// may read from storage takes an environment providing [`LoadBlock`](crate::LoadBlock)
 /// as a parameter.
 /// It retains only the in-memory transient spine and the node cache; the new
 /// nodes a batch produces are written into a caller-owned [`Delta`] at
@@ -269,7 +269,7 @@ where
         expected: Option<Manifest>,
     ) -> Result<(Option<TransientNode<Key, Value>>, Manifest), DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let known = || {
             expected.clone().ok_or_else(|| {
@@ -315,7 +315,7 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let entry = Entry { key, value };
         let accessor = Accessor::new(self.cache.clone(), storage);
@@ -360,7 +360,7 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let accessor = Accessor::new(self.cache.clone(), storage);
         let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
@@ -408,7 +408,7 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         debug_assert!(self.is_unplanted(), "plant requires an empty tree");
         ops.sort_by(|a, b| a.key.cmp(&b.key));
@@ -501,7 +501,7 @@ where
         storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let mut node = match &self.root {
             TransientRoot::Empty => return Ok(None),
@@ -558,7 +558,7 @@ where
         storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let subtree: PersistentTree<Key, Value, D> =
             PersistentTree::seal(hash.clone(), self.cache.clone());
@@ -580,7 +580,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         // The transient spine borrows `self`, but the returned stream must own
         // everything it touches. Snapshot the spine into an owned plan of steps
@@ -687,7 +687,7 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         Changes: Differential<Key, Value>,
         Value: PartialEq,
     {
@@ -888,7 +888,7 @@ where
         Key: 'changes,
         Value: 'changes,
         Changes: Iterator<Item = &'changes Change<Key, Value>>,
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let keys: Vec<&Key> = changes.map(Change::key).collect();
         if keys.is_empty() {
@@ -1028,7 +1028,7 @@ where
         storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         // One cache serves the whole stitch. Nodes are content-addressed, so
         // sharing the first source's cache (when there is one) is always safe
@@ -1323,7 +1323,7 @@ where
         manifest: &Manifest,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
-        Env: Provider<Load> + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         D: Distribution,
     {
         // The manifest supplies the branching parameter and the length-guard
@@ -2150,7 +2150,7 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     D: Distribution,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     let mut origins_by_remaining: Vec<(usize, Vec<IndexPieceOrigin>)> = Vec::new();
     let mut merged_any = false;
@@ -2348,7 +2348,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
     D: Distribution,
 {
     if path.is_empty() || manifest.max_segment == 0 {
@@ -2570,7 +2570,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
     D: Distribution,
 {
     let at = path[path.len() - 1];
@@ -2727,7 +2727,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
     D: Distribution,
 {
     use crate::distribution::summary::{self, PieceSummary};
@@ -2974,7 +2974,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     if path.is_empty() {
         return Ok(None);
@@ -3157,7 +3157,7 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     if let Node::Persistent(link) = node {
         let persistent = accessor.get_node(&link.node).await?;
@@ -3194,7 +3194,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     // Find the deepest ancestor with a right sibling of the descended child, and
     // build the path to that sibling: the ancestor prefix, then the next index.
@@ -3259,7 +3259,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     let mut neighbor_path: Option<Vec<usize>> = None;
     for depth in (0..path.len()).rev() {
@@ -4021,7 +4021,7 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
     D: Distribution,
 {
     if replacement.is_empty() {
@@ -4155,7 +4155,7 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
     // A zero-entry root is the empty tree's format marker: nothing to carve.
@@ -4410,7 +4410,7 @@ where
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     let mut path = Vec::new();
     loop {

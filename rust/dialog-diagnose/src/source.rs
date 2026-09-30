@@ -15,7 +15,7 @@ use dialog_effects::storage::Location;
 use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{LocalIndex, RepositoryExt as _};
-use dialog_search_tree::{DialogSearchTreeError, Load};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::{Stream, StreamExt as _};
 
@@ -36,26 +36,21 @@ impl Blocks {
     fn index(&self) -> LocalIndex<'_, DiagnoseSession> {
         LocalIndex::new(&self.session, self.catalog.clone())
     }
-
-    /// The block stored under `hash`, if any.
-    pub async fn get(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(self.index().load(hash).await?)
-    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Load> for Blocks {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        Provider::<Load>::execute(&self.index(), hash).await
+impl Provider<LoadBlock> for Blocks {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        load.perform(&self.index()).await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<LoadBlob> for Blocks {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Provider::<LoadBlob>::execute(&self.index(), hash).await
+    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
+        load.perform(&self.index()).await
     }
 }
 

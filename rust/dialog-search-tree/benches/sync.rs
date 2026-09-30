@@ -40,7 +40,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, helpers::BenchData};
 use dialog_search_tree::{
-    Buffer, Delta, DialogSearchTreeError, FlushPolicy, HitchhikerTree, Load, MemoryBlocks,
+    Buffer, Delta, DialogSearchTreeError, FlushPolicy, HitchhikerTree, LoadBlock, MemoryBlocks,
     PersistentTree,
 };
 use futures_util::StreamExt;
@@ -92,8 +92,11 @@ impl CountingBackend {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Load> for CountingBackend {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+impl Provider<LoadBlock> for CountingBackend {
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
         let result = self.inner.get(&hash);
         self.gets.fetch_add(1, Ordering::Relaxed);
         if let Some(bytes) = &result {

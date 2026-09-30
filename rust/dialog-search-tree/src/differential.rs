@@ -37,8 +37,8 @@ use rkyv::{
 };
 
 use crate::{
-    DialogSearchTreeError, Distribution, Entry, Key, Link, Load, NodeBody, NoveltyEntry, NoveltyOp,
-    PersistentNode, PersistentTree, Value, into_owned, load, resolve_pending,
+    DialogSearchTreeError, Distribution, Entry, Key, Link, LoadBlock, NodeBody, NoveltyEntry,
+    NoveltyOp, PersistentNode, PersistentTree, Value, into_owned, resolve_pending,
 };
 
 /// How many frontier blocks a comparison pass fetches concurrently in the
@@ -61,9 +61,9 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
-    let node = match load(storage, &hash).await {
+    let node = match LoadBlock::new(hash.clone()).perform(storage).await {
         Ok(Some(buffer)) => PersistentNode::try_from(buffer).ok(),
         _ => None,
     };
@@ -94,9 +94,9 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
-    let result = match load(storage, &hash).await {
+    let result = match LoadBlock::new(hash.clone()).perform(storage).await {
         Ok(Some(buffer)) => PersistentNode::try_from(buffer).map(Some),
         Ok(None) => Ok(None),
         Err(error) => Err(error),
@@ -336,7 +336,7 @@ where
 struct SparseTree<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Provider<Load>,
+    Env: Provider<LoadBlock>,
 {
     storage: &'a Env,
     nodes: Vec<SparseTreeNode<Key, Value>>,
@@ -365,7 +365,7 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     /// The frontier slots still held by reference, with their hashes: the
     /// blocks a later pass reads unless pruning settles them first.
@@ -424,7 +424,7 @@ where
         storage: &Env,
         hash: &Blake3Hash,
     ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
-        match load(storage, hash).await? {
+        match LoadBlock::new(hash.clone()).perform(storage).await? {
             Some(buffer) => Ok(Some(PersistentNode::try_from(buffer)?)),
             None => Ok(None),
         }
@@ -1228,7 +1228,7 @@ where
 pub struct TreeDifference<'a, Key, Value, Env>
 where
     Key: self::Key,
-    Env: Provider<Load>,
+    Env: Provider<LoadBlock>,
 {
     source: SparseTree<'a, Key, Value, Env>,
     target: SparseTree<'a, Key, Value, Env>,
@@ -1252,7 +1252,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     /// Computes the difference between two trees.
     ///
@@ -1849,7 +1849,7 @@ mod tests {
     use crate::helpers::{
         JournaledBlocks, TestStorage, Traversable as _, TraversalOrder, TreeNodes as _,
     };
-    use crate::{Buffer, Delta, Entry, Manifest, PersistentTree, tree_spec};
+    use crate::{Buffer, Delta, Entry, LoadBlock, Manifest, PersistentTree, tree_spec};
     use crate::{MemoryBlocks, Traversable as _, Visit};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -1890,13 +1890,13 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl Provider<crate::Load> for CountingBackend {
+    impl Provider<LoadBlock> for CountingBackend {
         async fn execute(
             &self,
-            hash: Blake3Hash,
+            load: LoadBlock,
         ) -> Result<Option<Buffer>, crate::DialogSearchTreeError> {
             self.reads.fetch_add(1, AtomicOrdering::Relaxed);
-            self.inner.execute(hash).await
+            load.perform(&self.inner).await
         }
     }
 
@@ -2576,15 +2576,15 @@ mod tests {
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl Provider<crate::Load> for GaugeBackend {
+        impl Provider<LoadBlock> for GaugeBackend {
             async fn execute(
                 &self,
-                hash: Blake3Hash,
+                load: LoadBlock,
             ) -> Result<Option<Buffer>, crate::DialogSearchTreeError> {
                 let now = self.in_flight.fetch_add(1, AtomicOrdering::Relaxed) + 1;
                 self.max_in_flight.fetch_max(now, AtomicOrdering::Relaxed);
                 YieldOnce(false).await;
-                let result = self.inner.execute(hash).await;
+                let result = load.perform(&self.inner).await;
                 self.in_flight.fetch_sub(1, AtomicOrdering::Relaxed);
                 result
             }

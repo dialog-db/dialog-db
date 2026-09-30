@@ -6,11 +6,11 @@ use dialog_common::{Blake3Hash, Buffer};
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
-use crate::{Delta, DialogSearchTreeError, Load};
+use crate::{Delta, DialogSearchTreeError, LoadBlock};
 
 /// Blocks held in memory under their content hash, loadable by the tree.
 ///
-/// The tree's [`Load`] for tests and tools that have no archive: persist a
+/// The tree's [`LoadBlock`] for tests and tools that have no archive: persist a
 /// tree into a [`Delta`], [`flush`](Self::flush) the delta here, and read the
 /// tree back through this. Clones share the same blocks.
 #[derive(Clone, Default)]
@@ -69,8 +69,11 @@ impl MemoryBlocks {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Load> for MemoryBlocks {
-    async fn execute(&self, hash: Blake3Hash) -> Result<Option<Buffer>, DialogSearchTreeError> {
+impl Provider<LoadBlock> for MemoryBlocks {
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
         Ok(self.get(&hash))
     }
 }

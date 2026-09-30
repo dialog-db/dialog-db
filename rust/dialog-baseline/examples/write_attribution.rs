@@ -24,7 +24,7 @@ use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_search_tree::{Buffer as TreeBuffer, Load, NodeBody};
+use dialog_search_tree::{Buffer as TreeBuffer, LoadBlock, NodeBody};
 use futures_util::stream;
 
 #[derive(Default, Clone, Copy)]
@@ -118,7 +118,7 @@ fn per_commit(class: &ClassVolume, window: usize) -> String {
 /// and depth along the leftmost path.
 async fn probe<Env>(env: &Env, root: Blake3Hash) -> anyhow::Result<(usize, usize, usize, usize)>
 where
-    Env: Provider<Load> + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     let mut hash = root;
     let mut depth = 0usize;
