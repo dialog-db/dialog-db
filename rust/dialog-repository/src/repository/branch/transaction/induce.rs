@@ -54,7 +54,7 @@ use crate::repository::source::SourceRef;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
-use crate::{CommitError, RemoteSite, Revision};
+use crate::{CommitError, RemoteSite, Revision, Staged};
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -200,10 +200,12 @@ where
         // mid-transaction query would.
         let mut view_changes = changes.clone();
         transient_overlay.clone().assert(&mut view_changes);
-        let layered = QueryLayer::from(source)
-            .with(view_changes)
-            .overlay(&operator);
-        let view = QueryEnv::new(vec![source.to_source()], layered, env);
+        let view = QueryEnv::new(
+            vec![source.to_source()],
+            vec![Staged::from(view_changes)],
+            QueryLayer::from(source).metadata(&operator),
+            env,
+        );
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it

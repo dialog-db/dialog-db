@@ -20,7 +20,7 @@
 //! versions; nothing staged is ever rewritten.
 
 use super::induce::induce;
-use super::{Transaction, TransactionCommit, carry_footprint, touches_rules, transaction_view};
+use super::{Transaction, TransactionCommit, carry_footprint, touches_rules};
 use crate::repository::branch::commit::{Mint, Minted, Outcome};
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
@@ -319,10 +319,7 @@ impl Transaction<TransactionBatch> {
     /// Run queries against this transaction's "as-if committed" view of
     /// the staged chain. See [`Transaction::<&Branch>::query`].
     pub fn query(&self) -> TransactionQuery<'_> {
-        TransactionQuery::new(
-            SourceRef::Snapshot(&self.line.snapshot),
-            &transaction_view(&self.changes, &self.transients),
-        )
+        TransactionQuery::new(SourceRef::Snapshot(&self.line.snapshot), self.layers())
     }
 }
 

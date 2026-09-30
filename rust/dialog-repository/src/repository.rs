@@ -28,6 +28,9 @@ pub use create::*;
 mod ephemeral;
 pub use ephemeral::*;
 
+mod staged;
+pub(crate) use staged::*;
+
 mod error;
 pub use error::*;
 
