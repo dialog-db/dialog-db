@@ -8,6 +8,15 @@
 //! vault is sealed again. Everything recorded here is ciphertext: the space, and
 //! the storage it lives in, hold nothing readable without a recipient's
 //! key.
+//!
+//! A principal whose key is held, such as a space, is recorded two ways.
+//! Its [`SecretPrincipal`] row names the one holder the account-level
+//! operations act on: handing an account over or rotating it moves the row
+//! of every principal held for it. Every other holder the principal is
+//! shared with keeps a copy of its key, a [`SealedKey`] recorded by
+//! [`grant`] and read by [`keys_of`], as a vault's members do; a peer's
+//! own copy of a space it created is one too. Sharing adds a copy and
+//! leaves the row; handing a principal over moves the row.
 
 use base58::ToBase58 as _;
 use dialog_artifacts::{Changes, Entity};
@@ -128,6 +137,35 @@ pub async fn keys_of<Env: RegistryEnv>(
         }
     }
     Ok(keys)
+}
+
+/// Everyone `state` records a copy of `principal`'s key sealed to, each
+/// once.
+pub async fn holders_of<Env: RegistryEnv>(
+    state: &Branch,
+    principal: &Did,
+    env: &Env,
+) -> Result<Vec<Did>, SecretError> {
+    let copies: Vec<SealedKey> = Box::pin(
+        state
+            .query()
+            .select(Query::<SealedKey> {
+                this: Term::var("this"),
+                key_of: principal.this().into(),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    let mut holders = Vec::new();
+    for copy in copies {
+        if let Some((to, _)) = message(state, &copy.this, env).await?
+            && !holders.contains(&to)
+        {
+            holders.push(to);
+        }
+    }
+    Ok(holders)
 }
 
 /// Every copy of a principal's key sealed to `holder`, with the principal
