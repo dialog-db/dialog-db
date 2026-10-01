@@ -3,6 +3,10 @@
 //! bodies reach the layer as they arrive and a blob read's answer
 //! leaves as its source yields, so the streaming paths are the ones
 //! the tests drive.
+//!
+//! Beside it, the service's socket: a [`Session`] per connection, told
+//! of every cell the store writes, which is how a watch over the socket
+//! learns of a change made over HTTP or over another connection.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -18,21 +22,60 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
+use async_trait::async_trait;
+use dialog_capability::{Capability, Did, Provider as Perform};
+use dialog_common::time::{self, UNIX_EPOCH};
+use dialog_effects::archive::{self, ArchiveError};
+use dialog_effects::blob::{self, BlobWriter};
+use dialog_effects::memory::prelude::{PublishExt as _, RetractExt as _};
+use dialog_effects::memory::{self, CellState, Edition, MemoryError, Version};
+use futures_util::{SinkExt as _, StreamExt as _};
+use tokio::sync::broadcast;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{
+    ErrorResponse, Request as Handshake, Response as Accepted,
+};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+
 use super::{MemoryStore, UcanServiceAddress};
 use crate::server::{Access, Answer, Content, Payload, Request as AccessRequest};
+use crate::socket::{Change, SUBPROTOCOL, Session};
+
+/// How long a watch's authority stands, once found to hold, before it is
+/// checked again on delivering to it.
+const RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A running access service over an in-memory store.
 pub struct UcanServer {
     /// The endpoint URL the service listens at.
     pub endpoint: String,
+    /// The URL of the service's socket.
+    pub socket: String,
     /// The store the service performs operations against.
     pub store: MemoryStore,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    socket_shutdown_tx: tokio::sync::oneshot::Sender<()>,
 }
 
 struct ServerState {
-    access: Access<MemoryStore>,
+    access: Access<Announcing>,
     max_body_bytes: u64,
+}
+
+/// A cell the store wrote, and what it now holds.
+#[derive(Debug, Clone)]
+struct Changed {
+    subject: Did,
+    space: String,
+    cell: String,
+    state: CellState,
+}
+
+/// The store, telling every open connection of each cell it writes.
+#[derive(Debug, Clone)]
+struct Announcing {
+    store: MemoryStore,
+    changes: broadcast::Sender<Changed>,
 }
 
 impl UcanServer {
@@ -40,11 +83,16 @@ impl UcanServer {
     /// `max_body_bytes`.
     pub async fn start(max_body_bytes: u64) -> anyhow::Result<Self> {
         let store = MemoryStore::default();
+        let (changes, _) = broadcast::channel(64);
         let state = Arc::new(ServerState {
-            access: Access::new(store.clone()),
+            access: Access::new(Announcing {
+                store: store.clone(),
+                changes: changes.clone(),
+            }),
             max_body_bytes,
         });
 
+        let socket_state = state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("http://{}", listener.local_addr()?);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -70,11 +118,201 @@ impl UcanServer {
             }
         });
 
+        let sockets = TcpListener::bind("127.0.0.1:0").await?;
+        let socket = format!("ws://{}/", sockets.local_addr()?);
+        let (socket_shutdown_tx, mut socket_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut socket_shutdown_rx => break,
+                    accepted = sockets.accept() => {
+                        let Ok((stream, _)) = accepted else { continue };
+                        let state = socket_state.clone();
+                        let changes = changes.subscribe();
+                        tokio::spawn(serve_socket(stream, state, changes));
+                    }
+                }
+            }
+        });
+
         Ok(Self {
             endpoint,
+            socket,
             store,
             shutdown_tx,
+            socket_shutdown_tx,
         })
+    }
+}
+
+/// One connection to the socket: a session answering its frames, and
+/// delivering each change the store announces to the watches it began.
+async fn serve_socket(
+    stream: tokio::net::TcpStream,
+    state: Arc<ServerState>,
+    mut changes: broadcast::Receiver<Changed>,
+) {
+    let speaks = |request: &Handshake, mut response: Accepted| -> Result<Accepted, ErrorResponse> {
+        let asked = request
+            .headers()
+            .get_all("Sec-WebSocket-Protocol")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|protocol| protocol.trim() == SUBPROTOCOL);
+        if asked {
+            response.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                HeaderValue::from_static(SUBPROTOCOL),
+            );
+        }
+        Ok(response)
+    };
+    let Ok(socket) = tokio_tungstenite::accept_hdr_async(stream, speaks).await else {
+        return;
+    };
+    let (mut sink, mut source) = socket.split();
+    let mut session = Session::new();
+    loop {
+        tokio::select! {
+            message = source.next() => match message {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if let Some(reply) = session.receive(&state.access, &bytes).await
+                        && sink.send(Message::binary(reply.encode())).await.is_err()
+                    {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+            change = changes.recv() => match change {
+                Ok(change) => {
+                    let delivered = session
+                        .deliver(
+                            &state.access,
+                            Change {
+                                subject: &change.subject,
+                                space: &change.space,
+                                cell: &change.cell,
+                                state: &change.state,
+                            },
+                            RECHECK,
+                            now_s(),
+                        )
+                        .await;
+                    for reply in delivered {
+                        if sink.send(Message::binary(reply.encode())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+        }
+    }
+}
+
+fn now_s() -> u64 {
+    time::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
+}
+
+impl Announcing {
+    fn announce(&self, subject: &Did, space: &str, cell: &str, state: CellState) {
+        // Nobody listening is not a failure: there is no watch to tell.
+        let _ = self.changes.send(Changed {
+            subject: subject.clone(),
+            space: space.to_string(),
+            cell: cell.to_string(),
+            state,
+        });
+    }
+}
+
+#[async_trait]
+impl Perform<archive::Get> for Announcing {
+    async fn execute(
+        &self,
+        capability: Capability<archive::Get>,
+    ) -> Result<Option<Vec<u8>>, ArchiveError> {
+        Perform::<archive::Get>::execute(&self.store, capability).await
+    }
+}
+
+#[async_trait]
+impl Perform<archive::Put> for Announcing {
+    async fn execute(&self, capability: Capability<archive::Put>) -> Result<(), ArchiveError> {
+        Perform::<archive::Put>::execute(&self.store, capability).await
+    }
+}
+
+#[async_trait]
+impl Perform<blob::Read> for Announcing {
+    async fn execute(
+        &self,
+        capability: Capability<blob::Read>,
+    ) -> Result<BlobReader, blob::BlobError> {
+        Perform::<blob::Read>::execute(&self.store, capability).await
+    }
+}
+
+#[async_trait]
+impl Perform<blob::Import> for Announcing {
+    async fn execute(
+        &self,
+        capability: Capability<blob::Import>,
+    ) -> Result<BlobWriter, blob::BlobError> {
+        Perform::<blob::Import>::execute(&self.store, capability).await
+    }
+}
+
+#[async_trait]
+impl Perform<memory::Resolve> for Announcing {
+    async fn execute(
+        &self,
+        capability: Capability<memory::Resolve>,
+    ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
+        Perform::<memory::Resolve>::execute(&self.store, capability).await
+    }
+}
+
+#[async_trait]
+impl Perform<memory::Publish> for Announcing {
+    async fn execute(
+        &self,
+        capability: Capability<memory::Publish>,
+    ) -> Result<Version, MemoryError> {
+        let subject = capability.subject().clone();
+        let space = capability.space().to_string();
+        let cell = capability.cell().to_string();
+        let content = capability.content().to_vec();
+        let version = Perform::<memory::Publish>::execute(&self.store, capability).await?;
+        self.announce(
+            &subject,
+            &space,
+            &cell,
+            Some(Edition {
+                content,
+                version: version.clone(),
+            }),
+        );
+        Ok(version)
+    }
+}
+
+#[async_trait]
+impl Perform<memory::Retract> for Announcing {
+    async fn execute(&self, capability: Capability<memory::Retract>) -> Result<(), MemoryError> {
+        let subject = capability.subject().clone();
+        let space = capability.space().to_string();
+        let cell = capability.cell().to_string();
+        Perform::<memory::Retract>::execute(&self.store, capability).await?;
+        self.announce(&subject, &space, &cell, None);
+        Ok(())
     }
 }
 
@@ -200,6 +438,7 @@ fn too_large(limit: u64) -> Response<Body> {
 impl Provider for UcanServer {
     async fn stop(self) -> anyhow::Result<()> {
         let _ = self.shutdown_tx.send(());
+        let _ = self.socket_shutdown_tx.send(());
         Ok(())
     }
 }
@@ -228,6 +467,7 @@ pub async fn ucan(
     let server = UcanServer::start(settings.max_body_bytes).await?;
     let address = UcanServiceAddress {
         endpoint: server.endpoint.clone(),
+        socket: server.socket.clone(),
     };
     Ok(Service::new(address, server))
 }
