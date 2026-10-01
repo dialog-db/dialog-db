@@ -69,11 +69,20 @@ pub fn credential_container(value: &str) -> Result<Container, ContainerError> {
 }
 
 /// An operation's answer: the status the object route would have given,
-/// the object's version when the operation has one, and the body.
+/// the object's version when the operation has one, and the body, as a
+/// response carried it or as a socket's frame did.
 pub(crate) struct Answer {
     pub status: u16,
     pub etag: Option<String>,
-    response: reqwest::Response,
+    body: Body,
+}
+
+/// Where an answer's body is.
+enum Body {
+    /// In a response, still to be read.
+    Response(reqwest::Response),
+    /// Read already: a frame carries it whole.
+    Bytes(Vec<u8>),
 }
 
 impl std::fmt::Debug for Answer {
@@ -86,6 +95,16 @@ impl std::fmt::Debug for Answer {
 }
 
 impl Answer {
+    /// The answer a socket's frame carries: the same status, version and
+    /// body a response would have.
+    pub fn framed(status: u16, version: Option<String>, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            etag: version,
+            body: Body::Bytes(body),
+        }
+    }
+
     /// Whether the status reports success.
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
@@ -98,12 +117,20 @@ impl Answer {
 
     /// The whole body.
     pub async fn bytes(self) -> Result<Vec<u8>, S3Error> {
-        Ok(self.response.bytes().await?.to_vec())
+        match self.body {
+            Body::Response(response) => Ok(response.bytes().await?.to_vec()),
+            Body::Bytes(bytes) => Ok(bytes),
+        }
     }
 
     /// The body as a stream of chunks.
     pub fn source(self) -> BlobReader {
-        Box::new(Source::from_response(self.response))
+        match self.body {
+            Body::Response(response) => Box::new(Source::from_response(response)),
+            Body::Bytes(bytes) => Box::new(Source {
+                stream: Box::pin(futures_util::stream::once(async move { Ok(bytes) })),
+            }),
+        }
     }
 
     /// The reason the request was refused, as the service sent it.
@@ -186,7 +213,7 @@ pub(crate) async fn invoke(
     Ok(Answer {
         status,
         etag,
-        response,
+        body: Body::Response(response),
     })
 }
 
