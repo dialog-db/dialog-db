@@ -206,15 +206,17 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::Session;
     use crate::helpers::test_session_with_peer;
     use crate::{Mode, Peer};
     use dialog_capability::Subject;
     use dialog_capability::identity::Entity;
+    use dialog_did_web::{DidWebProvider, MapFetch};
     use dialog_effects::MethodExt as _;
     use dialog_effects::peer::prelude::*;
     use dialog_effects::peer::{PeerConnection, PeerError};
     use dialog_remote_ucan::UcanAddress;
-    use dialog_repository::contact;
+    use dialog_repository::{DiscoverContactError, SiteAddress, contact, site_address};
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_varsig::did;
 
@@ -374,6 +376,88 @@ mod tests {
         assert_eq!(branch.name(), "main");
         assert_eq!(branch.repository().did(), subject);
         assert_eq!(branch.repository().peer(), &peer());
+        Ok(())
+    }
+
+    /// A session whose discovery answers the `did:web:tonk.network`
+    /// document `services` name, and the peer it is a session of.
+    async fn discovering(services: &str) -> anyhow::Result<Peer<VolatileSpace, Session>> {
+        let (_, peer) = test_session_with_peer().await;
+        let document = format!(
+            r#"{{"id": "did:web:tonk.network", "verificationMethod": [], "service": {services}}}"#
+        );
+        let discovery = DidWebProvider::with_fetch(MapFetch::new().with(
+            "https://tonk.network/.well-known/did.json",
+            document.into_bytes(),
+        ));
+        Ok(peer
+            .session(b"discovering")
+            .space(peer.state())
+            .allow(Subject::any())
+            .discovery(discovery)
+            .await?)
+    }
+
+    /// A peer named by its DID is reached where its document says: the
+    /// access service, and its socket.
+    #[dialog_common::test]
+    async fn it_discovers_where_a_contact_is_reached() -> anyhow::Result<()> {
+        let worker = discovering(
+            r#"[
+                {"id": "did:web:tonk.network#ucan", "type": "UcanAccessService", "serviceEndpoint": "https://tonk.network/ucan/"},
+                {"id": "did:web:tonk.network#socket", "type": "UcanAccessSocket", "serviceEndpoint": "wss://tonk.network/ucan/"}
+            ]"#,
+        )
+        .await?;
+
+        let recorded = contact(did!("web:tonk.network"))
+            .discover()
+            .name("tonk")
+            .perform(&worker)
+            .await?;
+        assert_eq!(recorded, peer());
+
+        let connection = connect(&worker).await?;
+        let addresses = connection
+            .addresses()
+            .iter()
+            .map(site_address)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            addresses,
+            vec![SiteAddress::from(
+                UcanAddress::new("https://tonk.network/ucan/")
+                    .with_socket("wss://tonk.network/ucan/")
+            )]
+        );
+        Ok(())
+    }
+
+    /// A document that names no access service records nothing: the peer
+    /// is not made a contact with nowhere to reach it.
+    #[dialog_common::test]
+    async fn it_records_nothing_for_a_document_that_names_no_access_service() -> anyhow::Result<()>
+    {
+        let worker =
+            discovering(r#"[{"type": "Other", "serviceEndpoint": "https://tonk.network/other/"}]"#)
+                .await?;
+
+        let discovered = contact(did!("web:tonk.network"))
+            .discover()
+            .name("tonk")
+            .perform(&worker)
+            .await;
+        assert!(
+            matches!(
+                discovered,
+                Err(DiscoverContactError::NoAccessService { .. })
+            ),
+            "{discovered:?}"
+        );
+        assert!(
+            matches!(connect(&worker).await, Err(PeerError::Unreachable { .. })),
+            "the peer was not recorded"
+        );
         Ok(())
     }
 }

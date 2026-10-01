@@ -28,8 +28,13 @@ use thiserror::Error;
 use url::Url;
 
 use crate::schema::DidExt as _;
-use crate::{AddAddressError, ConnectError, ConnectedBranch, ConnectedReplica, SiteAddress};
+use crate::{
+    AddAddressError, ConnectError, ConnectedBranch, ConnectedReplica, DiscoverContactError,
+    SiteAddress,
+};
 use dialog_artifacts::Entity;
+use dialog_did_web::Discover;
+use dialog_remote_ucan::UcanAddress;
 
 pub mod contacts;
 
@@ -157,6 +162,74 @@ impl ContactReference {
     /// Connect to the peer, to reach the repositories it holds.
     pub fn connect(self) -> ContactConnection {
         ContactConnection { contact: self }
+    }
+
+    /// Learn where the peer is reached from the services its DID's
+    /// document names, and record it: a peer is named by its DID, and
+    /// its addresses are what the DID resolves to.
+    pub fn discover(self) -> DiscoverContact {
+        DiscoverContact {
+            contact: self,
+            name: None,
+        }
+    }
+}
+
+/// Command to learn where a contact is reached and record it. Created by
+/// [`ContactReference::discover`].
+pub struct DiscoverContact {
+    contact: ContactReference,
+    name: Option<String>,
+}
+
+impl DiscoverContact {
+    /// Also give the peer this name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Discover the peer's DID, record the access service its document
+    /// names as the address it is reached at, with the name if one was
+    /// given, and answer the peer's entity.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Entity, DiscoverContactError>
+    where
+        Env: PeersEnv + Provider<Discover>,
+    {
+        let peer = match &self.contact.by {
+            By::Entity(entity) => entity.clone(),
+            By::Name(name) => find(
+                &host(env).await.map_err(AddAddressError::from)?,
+                name.clone(),
+                env,
+            )
+            .await
+            .map_err(AddAddressError::from)?,
+        };
+        let did: Did = peer
+            .to_string()
+            .parse()
+            .map_err(|_| DiscoverContactError::NotADid {
+                peer: peer.to_string(),
+            })?;
+        let services = Discover::new(did.clone())
+            .perform(env)
+            .await
+            .map_err(|source| DiscoverContactError::Discover {
+                did: did.to_string(),
+                source,
+            })?;
+        let address = UcanAddress::from_services(&services).ok_or_else(|| {
+            DiscoverContactError::NoAccessService {
+                did: did.to_string(),
+            }
+        })?;
+        let add = contact(peer).add_address(address);
+        let add = match self.name {
+            Some(name) => add.name(name),
+            None => add,
+        };
+        Ok(add.perform(env).await?)
     }
 }
 

@@ -36,7 +36,7 @@ pub mod socket;
 #[cfg(test)]
 mod test;
 
-pub use address::{Exchange, UcanAddress};
+pub use address::{ACCESS_SERVICE, ACCESS_SOCKET, Exchange, UcanAddress};
 pub use dialog_remote_ucan_s3::{Ucan, UcanAuthorization, UcanInvocation};
 pub use direct::{OBJECT_MEDIA_TYPE, SCHEME, credential, credential_container, is_credential};
 pub use server::{
