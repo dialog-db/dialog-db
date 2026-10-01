@@ -11,6 +11,7 @@
 //!               ├── List → Effect → Result<Vec<String>, MemoryError>
 //!               └── Cell { cell: String }
 //!                     ├── Resolve → Effect → Result<Option<Edition<Vec<u8>>>, MemoryError>
+//!                     ├── Watch → Effect → Result<Editions, MemoryError>
 //!                     ├── Publish { content, when } → Effect → Result<Bytes, MemoryError>
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
@@ -22,12 +23,13 @@ use std::marker::PhantomData;
 use std::str;
 
 use crate::Rejection;
+use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::access::AuthorizeError;
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, Constraint, Effect, Policy, StorageError, Subject,
 };
-use dialog_common::Checksum;
+use dialog_common::{Checksum, ConditionalSend};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -252,6 +254,56 @@ impl Effect for Resolve {
     type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
 }
 
+/// Watch operation - follows a cell: answers what it holds now, then
+/// what it holds each time that changes, for as long as the answer is
+/// read.
+///
+/// Reading a cell once and reading it as it changes disclose the same
+/// thing, so a watch is a read: its command is
+/// `/use/get/memory/cell/watch`, which any grant to read the cell covers.
+/// It is a command of its own so that whoever serves it can tell it from
+/// a [`Resolve`].
+///
+/// A site that cannot follow a cell answers
+/// [`Rejection::Unsupported`], and its cells are read by resolving them
+/// again instead.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
+pub struct Watch;
+
+impl Attenuation for Watch {
+    type Of = Cell<method::Get>;
+
+    fn attenuation() -> &'static str {
+        "watch"
+    }
+}
+
+impl Effect for Watch {
+    type Output = Result<Editions, MemoryError>;
+}
+
+/// What a watched cell holds: its edition, or nothing when it is empty.
+pub type CellState = Option<Edition<Vec<u8>>>;
+
+/// The states a watched cell takes, in order, as a [`Watch`] answers
+/// them. The first is what the cell holds when the watch begins.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait EditionSource: ConditionalSend {
+    /// The cell's next state, or `None` once the watch has ended and
+    /// nothing more will be answered.
+    ///
+    /// A state may be skipped when the cell changes faster than it is
+    /// read, but the last state the cell takes before the watch ends is
+    /// never skipped: a reader that keeps reading learns where the cell
+    /// stands.
+    async fn next(&mut self) -> Result<Option<CellState>, MemoryError>;
+}
+
+/// The answer to a [`Watch`]. `Box<dyn EditionSource>` so that every site
+/// answers one type.
+pub type Editions = Box<dyn EditionSource>;
+
 /// List operation - names every cell stored under a space.
 ///
 /// Answers each cell's path relative to the space, including cells in
@@ -383,6 +435,21 @@ mod tests {
 
     fn subject() -> Subject {
         Subject::from(did!("key:zSpace"))
+    }
+
+    /// A watch is a read of the cell, under a command of its own: any
+    /// grant to read the cell covers it, and whoever serves it tells it
+    /// from a resolve.
+    #[dialog_common::test]
+    fn it_names_a_watch_below_the_read_of_a_cell() {
+        let watch = subject()
+            .reader()
+            .memory()
+            .space("local")
+            .cell("main")
+            .watch();
+        assert_eq!(watch.ability(), "/use/get/memory/cell/watch");
+        assert!(watch.ability().starts_with("/use/get/memory/cell/"));
     }
 
     /// The method sits above the namespace, so the same cell reads,

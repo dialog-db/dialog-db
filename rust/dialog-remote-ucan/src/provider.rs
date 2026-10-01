@@ -10,12 +10,15 @@
 use base58::ToBase58;
 use dialog_capability::{Constraint, Effect, ForkInvocation, Provider};
 use dialog_common::Blake3Hash;
+use dialog_effects::Rejection;
 use dialog_effects::archive::prelude::PutExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobWriter, Import, Read};
 use dialog_effects::memory::prelude::{PublishExt, RetractExt};
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::{
+    Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
+};
 use dialog_remote_ucan_s3::UcanSite as PermitSite;
 
 use crate::address::Exchange;
@@ -264,5 +267,19 @@ impl BlobSink for Upload {
                 answer.status
             ))),
         }
+    }
+}
+
+/// Following a cell needs a connection the service can answer on as the
+/// cell changes, which a request per effect is not: until the site keeps
+/// one, a watch is refused, and the cell is read by resolving it again.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
+    async fn execute(&self, _: ForkInvocation<UcanSite, Watch>) -> Result<Editions, MemoryError> {
+        Err(Rejection::Unsupported {
+            reason: "the access service is reached by a request per effect".into(),
+        }
+        .into())
     }
 }

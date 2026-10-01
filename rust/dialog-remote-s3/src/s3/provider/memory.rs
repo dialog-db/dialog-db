@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use dialog_capability::ForkInvocation;
 use dialog_capability::Provider;
 use dialog_capability::access::AuthorizeError;
+use dialog_effects::Rejection;
 use dialog_effects::memory::*;
 use reqwest::StatusCode;
 
@@ -162,5 +163,18 @@ impl Provider<S3Invocation<Retract>> for S3 {
                 status
             ))),
         }
+    }
+}
+
+/// S3 cannot follow a cell as it changes: a watch is refused, and the
+/// cell is read by resolving it again instead.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<ForkInvocation<S3, Watch>> for S3 {
+    async fn execute(&self, _: ForkInvocation<S3, Watch>) -> Result<Editions, MemoryError> {
+        Err(Rejection::Unsupported {
+            reason: "an S3 bucket cannot notify of a changed object".into(),
+        }
+        .into())
     }
 }

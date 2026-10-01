@@ -31,6 +31,18 @@ pub enum Rejection {
         reason: String,
     },
 
+    /// The responder does not carry out requests of this kind at all.
+    ///
+    /// Not retryable as-is, and not an access decision: the same request
+    /// fails the same way for anyone. A caller with another way to get
+    /// what it asked for (resolving a cell again instead of watching it,
+    /// say) takes that way.
+    #[error("The request is not supported: {reason}")]
+    Unsupported {
+        /// What is not supported, as far as the responder would say.
+        reason: String,
+    },
+
     /// Not carried out, for a reason this version does not recognize.
     ///
     /// The honest variant. Folding an unrecognized failure into a named
