@@ -36,6 +36,18 @@ pub enum FetchRemoteBranchError {
     Publish(#[from] PublishError),
 }
 
+/// Errors returned by the observe remote branch command.
+#[derive(Error, Debug)]
+pub enum ObserveRemoteBranchError {
+    /// The observed head is not signed by its issuer.
+    #[error("Observed head does not verify: {0}")]
+    Artifact(#[from] DialogArtifactsError),
+
+    /// Recording the observed head in the local cache failed.
+    #[error("Failed to record observed revision in local cache: {0}")]
+    Publish(#[from] PublishError),
+}
+
 /// Errors returned by the publish remote branch command.
 #[derive(Error, Debug)]
 pub enum PublishRemoteBranchError {

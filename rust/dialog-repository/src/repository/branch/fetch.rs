@@ -44,11 +44,9 @@ impl Fetch<'_> {
         }
         // Every upstream is fetched, whether or not another can be
         // reached: one that cannot does not hide what the rest are at.
-        let results = join_all(
-            upstreams
-                .iter()
-                .map(|upstream| async move { (upstream, fetch_one(branch, upstream, env).await) }),
-        )
+        let results = join_all(upstreams.iter().map(|upstream| async move {
+            (upstream, fetch_one(branch, upstream, true, env).await)
+        }))
         .await;
         let total = results.len();
         let mut fetched = Vec::new();
@@ -71,10 +69,12 @@ impl Fetch<'_> {
 }
 
 /// The current revision of `upstream`: read locally for a branch on this
-/// replica, fetched from its peer for one on another.
+/// replica, fetched from its peer for one on another. Unless `confirm`,
+/// the peer is not asked: the revision last known for its branch answers.
 pub(crate) async fn fetch_one<Env: ResolveEnv>(
     branch: &Branch,
     upstream: &Upstream,
+    confirm: bool,
     env: &Env,
 ) -> Result<Option<Revision>, FetchError> {
     match upstream {
@@ -93,6 +93,9 @@ pub(crate) async fn fetch_one<Env: ResolveEnv>(
             ..
         } => {
             let remote_branch = remote.branch(name.clone()).open().perform(env).await?;
+            if !confirm {
+                return Ok(remote_branch.revision());
+            }
             Ok(remote_branch.fetch().perform(env).await?)
         }
         Upstream::Unreachable { target, reason, .. } => Err(FetchError::Unreachable {

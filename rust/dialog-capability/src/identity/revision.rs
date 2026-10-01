@@ -7,6 +7,7 @@
 //! `RevisionRecord` lives in `dialog-repository` as `RevisionExt`, because
 //! those types sit above this crate.
 
+use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 use base58::ToBase58;
@@ -309,6 +310,52 @@ impl Revision {
         }
         Ok(())
     }
+
+    /// Where this head stands relative to `other`, another head of the
+    /// same branch.
+    ///
+    /// A branch's head moves only by a fast-forward publish, so every
+    /// head it takes was built on the one it replaced: each head's
+    /// context includes the one before, and its edition is higher.
+    /// Comparing contexts orders two heads without trusting whoever
+    /// delivered them, which is what lets a head observed out of order
+    /// be recognized as stale. Heads minted before contexts were
+    /// published are ordered by edition alone.
+    ///
+    /// [`Precedence::Concurrent`] means neither head built on the other:
+    /// the branch was reset, or recreated, or written by something other
+    /// than a fast-forward publish, and neither head says which is newer.
+    pub fn precedence(&self, other: &Revision) -> Precedence {
+        let same = self.tree == other.tree && self.version() == other.version();
+        match (&self.context, &other.context) {
+            (Some(ours), Some(theirs)) => match (ours.includes(theirs), theirs.includes(ours)) {
+                (true, true) if same => Precedence::Same,
+                (true, false) => Precedence::After,
+                (false, true) => Precedence::Before,
+                _ => Precedence::Concurrent,
+            },
+            _ => match self.edition.cmp(&other.edition) {
+                Ordering::Greater => Precedence::After,
+                Ordering::Less => Precedence::Before,
+                Ordering::Equal if same => Precedence::Same,
+                Ordering::Equal => Precedence::Concurrent,
+            },
+        }
+    }
+}
+
+/// Where one head of a branch stands relative to another, as
+/// [`Revision::precedence`] answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precedence {
+    /// The same head.
+    Same,
+    /// An earlier head: the other one built on it.
+    Before,
+    /// A later head: it built on the other one.
+    After,
+    /// Neither built on the other.
+    Concurrent,
 }
 
 /// The domain tag opening every head signing payload. Signing payload
@@ -436,5 +483,75 @@ mod tests {
             head.verify().is_err(),
             "a hostile watermark entry must be refused despite the valid signature"
         );
+    }
+
+    /// A head minted on `previous` by `issuer`, carrying the context a
+    /// commit publishes: everything `previous` saw, and itself.
+    fn successor(previous: &Revision, issuer: &ed25519_dalek::SigningKey, tree: u8) -> Revision {
+        let mut next = previous.advance(
+            TreeReference::from([tree; 32]),
+            previous.branch.clone(),
+            did_of(issuer),
+        );
+        let mut context = previous.context.clone().unwrap_or_default();
+        context.record(next.version());
+        next.context = Some(context);
+        next
+    }
+
+    fn genesis(issuer: &ed25519_dalek::SigningKey) -> Revision {
+        let mut head = Revision::new(
+            TreeReference::from([1u8; 32]),
+            "branch:opaque".parse::<Entity>().unwrap(),
+            did_of(issuer),
+        );
+        let mut context = Context::new();
+        context.record(head.version());
+        head.context = Some(context);
+        head
+    }
+
+    /// A head built on another is after it, that one is before it, and a
+    /// head is the same as itself, whichever issuer minted each step.
+    #[dialog_common::test]
+    fn it_orders_a_head_after_the_one_it_built_on() {
+        let first = genesis(&key(1));
+        let second = successor(&first, &key(2), 2);
+        let third = successor(&second, &key(1), 3);
+
+        assert_eq!(second.precedence(&first), Precedence::After);
+        assert_eq!(first.precedence(&second), Precedence::Before);
+        assert_eq!(third.precedence(&first), Precedence::After);
+        assert_eq!(first.precedence(&third), Precedence::Before);
+        assert_eq!(second.precedence(&second.clone()), Precedence::Same);
+    }
+
+    /// Two heads built on one head, neither on the other, are concurrent:
+    /// nothing either carries says which is newer.
+    #[dialog_common::test]
+    fn it_finds_heads_built_apart_concurrent() {
+        let base = genesis(&key(1));
+        let ours = successor(&base, &key(1), 2);
+        let theirs = successor(&base, &key(2), 3);
+
+        assert_eq!(ours.precedence(&theirs), Precedence::Concurrent);
+        assert_eq!(theirs.precedence(&ours), Precedence::Concurrent);
+    }
+
+    /// Heads minted before contexts were published are ordered by their
+    /// editions, and two different heads at one edition are concurrent.
+    #[dialog_common::test]
+    fn it_orders_heads_without_a_context_by_edition() {
+        let mut first = genesis(&key(1));
+        first.context = None;
+        let mut second = successor(&first, &key(1), 2);
+        second.context = None;
+        let mut other = successor(&first, &key(2), 3);
+        other.context = None;
+
+        assert_eq!(second.precedence(&first), Precedence::After);
+        assert_eq!(first.precedence(&second), Precedence::Before);
+        assert_eq!(first.precedence(&first.clone()), Precedence::Same);
+        assert_eq!(second.precedence(&other), Precedence::Concurrent);
     }
 }
