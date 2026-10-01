@@ -5,7 +5,7 @@ use dialog_artifacts::LoadBlob;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey,
+    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select,
     Speculation, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::REGISTRY;
-use crate::layer::{MergeKeys, filter_tombstones, merge_grouped, tombstones_from};
+use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, tombstones_from};
 use crate::repository::branch::select::line_manifest;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
@@ -39,7 +39,7 @@ use crate::rules::{
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
-use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot};
+use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -360,6 +360,10 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// merged into one batch. Queried via [`Changes::select`] under the
     /// lines' format.
     changes: Arc<Changes>,
+    /// A transaction's writes and dispatched transients, each held so a
+    /// selector is a range read (see [`Staged`]) and shared, never
+    /// copied, per query.
+    layers: Vec<Staged>,
     /// The lines' format and the tombstones keyed under it, resolved on
     /// the first read (it needs the lines' tree roots) and shared by clones.
     format: Arc<OnceCell<Format>>,
@@ -408,15 +412,16 @@ struct Format {
 struct LineFormat {
     /// The manifest of the line's tree.
     manifest: Manifest,
-    /// The `sort_key`s of every retracted fact in the per-query changes.
+    /// Every fact the per-query changes and the staged layers retract.
     /// The line's session overlay stream is filtered against these so a
-    /// staged retract suppresses a session fact.
-    staged: Arc<HashSet<SortKey>>,
-    /// `staged` plus the line's session tombstones. The line's tree
-    /// stream is filtered against these so retracts in the per-query
-    /// changes and session tombstones suppress matching facts in the
-    /// tree.
-    tombstones: Arc<HashSet<SortKey>>,
+    /// staged retract suppresses a session fact. Cells a replace claimed
+    /// are not: the session's facts outlive the commit, so they show
+    /// over it.
+    staged: Hidden,
+    /// `staged`, the cells the layers' replaces claimed, and the line's
+    /// session tombstones. The line's tree stream is filtered against
+    /// these, so a read sees the tree as the commit will leave it.
+    tombstones: Hidden,
 }
 
 impl<'a, Env> QueryEnv<'a, Env> {
@@ -442,12 +447,20 @@ impl<'a, Env> QueryEnv<'a, Env> {
         Self {
             sources,
             changes,
+            layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
             demand: None,
             fixpoint: None,
             fetches,
             env,
         }
+    }
+
+    /// Read `layers` above the lines too: a transaction's writes, held
+    /// so reading them costs a range read however many there are.
+    pub(crate) fn with_layers(mut self, layers: Vec<Staged>) -> Self {
+        self.layers = layers;
+        self
     }
 
     /// Record every selector this environment executes into
@@ -508,24 +521,24 @@ where
                     .iter()
                     .zip(lines)
                     .map(|(source, line)| {
-                        let staged = if line == manifest {
+                        let changes = if line == manifest {
                             shared.clone()
                         } else {
                             Arc::new(tombstones_from(&self.changes, &line))
                         };
-                        // The common case, nothing staged, shares the
-                        // overlay's own set rather than copying it per
-                        // query.
-                        let session = source.as_ref().overlay().tombstones(&line);
-                        let tombstones = if staged.is_empty() {
-                            session
-                        } else if session.is_empty() {
-                            staged.clone()
-                        } else {
-                            let mut all = HashSet::clone(&staged);
-                            all.extend(session.iter().cloned());
-                            Arc::new(all)
-                        };
+                        // Every set is shared, never merged, so this costs
+                        // nothing per query however much the layers or the
+                        // session hold.
+                        let mut staged = Hidden::default().facts(changes);
+                        for layer in &self.layers {
+                            staged = staged.facts(layer.tombstones(&line));
+                        }
+                        let mut tombstones = staged
+                            .clone()
+                            .facts(source.as_ref().overlay().tombstones(&line));
+                        for layer in &self.layers {
+                            tombstones = tombstones.cells(layer.cells());
+                        }
                         LineFormat {
                             manifest: line,
                             staged,
@@ -548,6 +561,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
         Self {
             sources: self.sources.clone(),
             changes: self.changes.clone(),
+            layers: self.layers.clone(),
             format: self.format.clone(),
             demand: self.demand.clone(),
             fixpoint: self.fixpoint.clone(),
@@ -635,9 +649,9 @@ where
         // borrows only `self.env`.
         for (source, line) in self.sources.iter().zip(&format.lines) {
             let raw = select_from_source(source.as_ref(), self.env, input.clone()).await?;
-            streams.push(filter_tombstones(
+            streams.push(filter_hidden(
                 raw,
-                line.tombstones.clone(),
+                line.tombstones.within(&input),
                 line.manifest.clone(),
             ));
         }
@@ -653,7 +667,7 @@ where
             }
             let rows: ArtifactStream<'a> =
                 Box::pin(stream::iter(rows.into_iter().map(|fact| Ok(fact.into()))));
-            streams.push(filter_tombstones(
+            streams.push(filter_hidden(
                 rows,
                 line.staged.clone(),
                 line.manifest.clone(),
@@ -674,6 +688,17 @@ where
             streams.push(Box::pin(stream::iter(
                 overlay.into_iter().map(|fact| Ok(fact.into())),
             )));
+        }
+
+        // Staged layers — a range read each, in the lines' format, and
+        // pushed only when they have rows, for the same reason.
+        for layer in &self.layers {
+            let rows = layer.select(&input, &manifest);
+            if !rows.is_empty() {
+                streams.push(Box::pin(stream::iter(
+                    rows.into_iter().map(|fact| Ok(fact.into())),
+                )));
+            }
         }
 
         Ok(merge_grouped(streams, manifest, format.keys))
@@ -823,6 +848,23 @@ where
         }
         Ok(None)
     }
+}
+
+/// The rules a staged layer holds concluding `concept`: two range
+/// reads, as a session's are. The layer is per query, so it is read
+/// fresh and records no demand; a body that does not hydrate is
+/// skipped, as an overlay's is.
+fn staged_rules(layer: &Staged, concept: &Entity) -> Vec<DeductiveRule> {
+    let entities = rule_entities(layer.scan(&conclusion_selector(concept)));
+    let mut rules = Vec::with_capacity(entities.len());
+    for rule_entity in entities {
+        if let Some(bytes) = source_bytes(layer.scan(&source_selector(&rule_entity)))
+            && let Ok(rule) = hydrate(&bytes)
+        {
+            rules.push(rule);
+        }
+    }
+    rules
 }
 
 impl<'a, Env> QueryEnv<'a, Env>
@@ -1022,6 +1064,7 @@ where
             .filter(|_| {
                 self.demand.is_none()
                     && !has_overlay_rules(&self.changes)
+                    && !self.layers.iter().any(Staged::holds_rules)
                     && !self
                         .sources
                         .iter()
@@ -1051,8 +1094,12 @@ where
             rules.extend(self.durable_rules(source, &concept).await?);
             rules.extend(self.session_rules(source, &concept, manifest)?);
         }
-        // Transient layer — the per-query overlay, read fresh.
+        // Transient layers — the per-query overlay and the staged
+        // writes, read fresh.
         rules.extend(overlay_rules(&self.changes, &concept));
+        for layer in &self.layers {
+            rules.extend(staged_rules(layer, &concept));
+        }
 
         // Plan cache rides a line (peers share content-addressed plans;
         // any line's cache is correct). The overlay-only query has no
@@ -1162,6 +1209,9 @@ where
                         rules.extend(self.session_rules(source, &entity, manifest)?);
                     }
                     rules.extend(overlay_rules(&self.changes, &entity));
+                    for layer in &self.layers {
+                        rules.extend(staged_rules(layer, &entity));
+                    }
                     // The analysis reads premises and never plans, so
                     // these bundles share the root's cache rather than
                     // allocating one each.

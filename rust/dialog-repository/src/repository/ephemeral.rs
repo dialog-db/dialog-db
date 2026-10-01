@@ -45,7 +45,7 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, AttributeKey, Changes, DialogArtifactsError, Entity, EntityKey,
-    Instruction, Key, SortKey, Statement, Update, ValueKey, sort_key,
+    Instruction, Key, KeyViewConstruct, SortKey, Statement, Update, ValueKey, sort_key,
 };
 use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
@@ -91,20 +91,15 @@ pub struct Ephemeral {
 
 #[derive(Debug)]
 struct State {
-    /// Every held fact under each of its three index keys. The key's
-    /// tag byte keeps the three orders apart, so one map serves every
-    /// selector shape.
-    facts: BTreeMap<Key, Artifact>,
+    /// Every held fact under each of its three index keys.
+    facts: Facts,
     /// Facts held beneath this line that the session hides, by sort
     /// key, with the fact kept so lifting the tombstone can report
     /// what became readable again. Shared with readers by `Arc` and
-    /// rebuilt on change, so a read never copies the set.
+    /// updated in place (copied only while a reader holds it), so a
+    /// read never copies the set and a write never rebuilds it.
     tombstones: Arc<HashSet<SortKey>>,
     shadowed: HashMap<SortKey, Artifact>,
-    /// The key format facts are keyed under. Fixed to the default
-    /// manifest, the same one every tree carries today and the one
-    /// [`Demand`](crate::Demand) ranges are built under.
-    manifest: Manifest,
     sequence: u64,
     hash: Blake3Hash,
     /// The most recent instants, oldest first, at most
@@ -115,10 +110,9 @@ struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            facts: BTreeMap::new(),
+            facts: Facts::default(),
             tombstones: Arc::new(HashSet::new()),
             shadowed: HashMap::new(),
-            manifest: Manifest::default(),
             sequence: 0,
             hash: Blake3Hash::from([0u8; 32]),
             log: VecDeque::new(),
@@ -135,12 +129,113 @@ fn index_keys(fact: &Artifact, manifest: &Manifest) -> [Key; 3] {
     ]
 }
 
+/// Facts held under the tree's three index keys, in one ordered map.
+/// The key's tag byte keeps the three orders apart, so one map serves
+/// every selector shape and a scan comes out in tree order. Shared by
+/// [`Ephemeral`] and a transaction's [`Staged`](crate::Staged) store.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Facts {
+    map: BTreeMap<Key, Artifact>,
+    /// The key format facts are keyed under. Fixed to the default
+    /// manifest, the same one every tree carries today and the one
+    /// [`Demand`](crate::Demand) ranges are built under.
+    manifest: Manifest,
+}
+
+impl Facts {
+    /// The format facts are keyed under.
+    pub(crate) fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Whether this exact triple is held.
+    pub(crate) fn holds(&self, fact: &Artifact) -> bool {
+        self.map
+            .contains_key(&EntityKey::from_artifact(fact, &self.manifest).into_key())
+    }
+
+    /// Hold `fact`. Returns whether it was not held before.
+    pub(crate) fn insert(&mut self, fact: Artifact) -> bool {
+        if self.holds(&fact) {
+            return false;
+        }
+        for key in index_keys(&fact, &self.manifest) {
+            self.map.insert(key, fact.clone());
+        }
+        true
+    }
+
+    /// Drop `fact`. Returns whether it was held.
+    pub(crate) fn remove(&mut self, fact: &Artifact) -> bool {
+        if !self.holds(fact) {
+            return false;
+        }
+        for key in index_keys(fact, &self.manifest) {
+            self.map.remove(&key);
+        }
+        true
+    }
+
+    /// Every held fact at an `(entity, attribute)` cell.
+    pub(crate) fn cell(&self, of: &Entity, the: &dialog_artifacts::Attribute) -> Vec<Artifact> {
+        self.scan(&ArtifactSelector::new().of(of.clone()).the(the.clone()))
+    }
+
+    /// The facts a selector matches, in the store's own key order.
+    pub(crate) fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
+        self.map
+            .range(selector_range(selector, &self.manifest))
+            .map(|(_, fact)| fact.clone())
+            .collect()
+    }
+
+    /// The facts a selector matches, in the order a scan of a tree
+    /// written under `manifest` would produce them. A fact's index keys
+    /// differ between formats only in their value tail, so under
+    /// another format than the store's own the rows are re-keyed, and
+    /// only the order of values within a cell can change.
+    pub(crate) fn select(
+        &self,
+        selector: &ArtifactSelector<Constrained>,
+        manifest: &Manifest,
+    ) -> Vec<Artifact> {
+        let mut rows = self.scan(selector);
+        if *manifest != self.manifest {
+            let range = selector_range(selector, manifest);
+            rows.sort_by_cached_key(|fact| {
+                index_keys(fact, manifest)
+                    .into_iter()
+                    .find(|key| range.contains(key))
+            });
+        }
+        rows
+    }
+
+    /// Every held fact once, in entity order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Artifact> {
+        self.map
+            .range(
+                <EntityKey<Key> as KeyViewConstruct>::min().into_key()
+                    ..=<EntityKey<Key> as KeyViewConstruct>::max().into_key(),
+            )
+            .map(|(_, fact)| fact)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        // Every fact sits under exactly three keys.
+        self.map.len() / 3
+    }
+}
+
 /// The delta one write is accumulating, before it is minted.
 #[derive(Default)]
 struct Delta {
     asserted: Vec<Artifact>,
     retracted: Vec<Artifact>,
-    tombstones_changed: bool,
 }
 
 impl Delta {
@@ -150,44 +245,26 @@ impl Delta {
 }
 
 impl State {
-    /// Whether the store holds exactly this triple.
-    fn holds(&self, fact: &Artifact) -> bool {
-        self.facts
-            .contains_key(&EntityKey::from_artifact(fact, &self.manifest).into_key())
-    }
-
     fn insert(&mut self, fact: Artifact, delta: &mut Delta) {
-        if self.holds(&fact) {
-            return;
+        if self.facts.insert(fact.clone()) {
+            delta.asserted.push(fact);
         }
-        for key in index_keys(&fact, &self.manifest) {
-            self.facts.insert(key, fact.clone());
-        }
-        delta.asserted.push(fact);
     }
 
     fn remove(&mut self, fact: &Artifact, delta: &mut Delta) -> bool {
-        if !self.holds(fact) {
+        if !self.facts.remove(fact) {
             return false;
-        }
-        for key in index_keys(fact, &self.manifest) {
-            self.facts.remove(&key);
         }
         delta.retracted.push(fact.clone());
         true
     }
 
-    /// Every held fact at an `(entity, attribute)` cell.
-    fn cell(&self, of: &Entity, the: &dialog_artifacts::Attribute) -> Vec<Artifact> {
-        self.scan(&ArtifactSelector::new().of(of.clone()).the(the.clone()))
-    }
-
-    /// The facts a selector matches, in the store's own key order.
-    fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
-        self.facts
-            .range(selector_range(selector, &self.manifest))
-            .map(|(_, fact)| fact.clone())
-            .collect()
+    /// Stop hiding the fact under `key`, if it was hidden.
+    fn lift(&mut self, key: &SortKey, delta: &mut Delta) {
+        if let Some(fact) = self.shadowed.remove(key) {
+            Arc::make_mut(&mut self.tombstones).remove(key);
+            delta.asserted.push(fact);
+        }
     }
 
     fn apply(&mut self, instruction: Instruction, delta: &mut Delta) {
@@ -195,7 +272,7 @@ impl State {
             Instruction::Assert(fact) => self.insert(fact, delta),
             Instruction::Replace(fact) => {
                 let mut standing = false;
-                for prior in self.cell(&fact.of, &fact.the) {
+                for prior in self.facts.cell(&fact.of, &fact.the) {
                     if prior.is == fact.is {
                         standing = true;
                     } else {
@@ -213,9 +290,10 @@ impl State {
                 // Not held here: hide it beneath. A tombstone is a
                 // change readers see (the fact disappears), so it is
                 // reported as retracted.
-                if let Entry::Vacant(slot) = self.shadowed.entry(sort_key(&fact, &self.manifest)) {
+                let key = sort_key(&fact, self.facts.manifest());
+                if let Entry::Vacant(slot) = self.shadowed.entry(key.clone()) {
                     slot.insert(fact.clone());
-                    delta.tombstones_changed = true;
+                    Arc::make_mut(&mut self.tombstones).insert(key);
                     delta.retracted.push(fact);
                 }
             }
@@ -226,9 +304,6 @@ impl State {
     /// and the chained hash and recording it in the ring. Returns the
     /// instant, or `None` when nothing readers see changed.
     fn mint(&mut self, delta: Delta) -> Option<Instant> {
-        if delta.tombstones_changed {
-            self.tombstones = Arc::new(self.shadowed.keys().cloned().collect());
-        }
         if delta.is_empty() {
             return None;
         }
@@ -239,7 +314,7 @@ impl State {
         chunks.push(self.sequence.to_be_bytes().to_vec());
         for (polarity, facts) in [(b'+', &delta.asserted), (b'-', &delta.retracted)] {
             for fact in facts {
-                let (the, of, tail) = sort_key(fact, &self.manifest);
+                let (the, of, tail) = sort_key(fact, self.facts.manifest());
                 let mut chunk = Vec::with_capacity(1 + the.len() + of.len() + tail.len() + 2);
                 chunk.push(polarity);
                 chunk.extend(the);
@@ -330,12 +405,8 @@ impl Ephemeral {
         for fact in state.shadowed.values() {
             changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
         }
-        // Every fact sits under three keys; export each once.
-        let mut exported = HashSet::new();
-        for fact in state.facts.values() {
-            if exported.insert((fact.of.clone(), fact.the.clone(), fact.is.to_bytes())) {
-                changes.associate(fact.the.clone(), fact.of.clone(), fact.is.clone());
-            }
+        for fact in state.facts.iter() {
+            changes.associate(fact.the.clone(), fact.of.clone(), fact.is.clone());
         }
         changes
     }
@@ -349,11 +420,10 @@ impl Ephemeral {
         let mut delta = Delta::default();
         let dropped: Vec<Artifact> = state
             .facts
-            .values()
+            .iter()
             .filter(|fact| !keep(&fact.of))
             .cloned()
             .collect();
-        // Each fact appears under three keys; `remove` is idempotent.
         for fact in dropped {
             state.remove(&fact, &mut delta);
         }
@@ -364,10 +434,7 @@ impl Ephemeral {
             .map(|(key, _)| key.clone())
             .collect();
         for key in lifted {
-            if let Some(fact) = state.shadowed.remove(&key) {
-                delta.tombstones_changed = true;
-                delta.asserted.push(fact);
-            }
+            state.lift(&key, &mut delta);
         }
         state.mint(delta).is_some()
     }
@@ -376,14 +443,13 @@ impl Ephemeral {
     pub fn clear(&self) -> &Self {
         let mut state = self.state.write();
         let mut delta = Delta::default();
-        let held: Vec<Artifact> = state.facts.values().cloned().collect();
+        let held: Vec<Artifact> = state.facts.iter().cloned().collect();
         for fact in held {
             state.remove(&fact, &mut delta);
         }
-        let lifted: Vec<Artifact> = state.shadowed.drain().map(|(_, fact)| fact).collect();
-        if !lifted.is_empty() {
-            delta.tombstones_changed = true;
-            delta.asserted.extend(lifted);
+        let lifted: Vec<SortKey> = state.shadowed.keys().cloned().collect();
+        for key in lifted {
+            state.lift(&key, &mut delta);
         }
         state.mint(delta);
         self
@@ -430,7 +496,7 @@ impl Ephemeral {
     /// never copies the set; keyed afresh under another.
     pub(crate) fn tombstones(&self, manifest: &Manifest) -> Arc<HashSet<SortKey>> {
         let state = self.state.read();
-        if *manifest == state.manifest {
+        if manifest == state.facts.manifest() {
             return state.tombstones.clone();
         }
         Arc::new(
@@ -449,15 +515,14 @@ impl Ephemeral {
 
     /// The number of facts held.
     pub fn len(&self) -> usize {
-        // Every fact sits under exactly three keys.
-        self.state.read().facts.len() / 3
+        self.state.read().facts.len()
     }
 
     /// The facts a selector matches, in the order a tree scan of the
     /// same selector would produce them under the store's own format.
     /// For rows merged with a tree's, see [`select`](Self::select).
     pub fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
-        self.state.read().scan(selector)
+        self.state.read().facts.scan(selector)
     }
 
     /// The facts a selector matches, in the order a scan of a tree
@@ -471,17 +536,7 @@ impl Ephemeral {
         selector: &ArtifactSelector<Constrained>,
         manifest: &Manifest,
     ) -> Vec<Artifact> {
-        let state = self.state.read();
-        let mut rows = state.scan(selector);
-        if *manifest != state.manifest {
-            let range = selector_range(selector, manifest);
-            rows.sort_by_cached_key(|fact| {
-                index_keys(fact, manifest)
-                    .into_iter()
-                    .find(|key| range.contains(key))
-            });
-        }
-        rows
+        self.state.read().facts.select(selector, manifest)
     }
 }
 
