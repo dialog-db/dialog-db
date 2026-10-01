@@ -18,6 +18,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::query::PlanCache;
 use dialog_search_tree::Cache;
@@ -258,7 +259,8 @@ impl<'a> SourceRef<'a> {
     /// locally, so an offline replica behaves as it always did.
     pub(crate) fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -283,7 +285,8 @@ impl<'a> SourceRef<'a> {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
             + Provider<crate::Hydrate>

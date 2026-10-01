@@ -19,10 +19,12 @@ use std::collections::HashSet;
 
 use super::resolve::resolve;
 use crate::ResolveEnv;
+use crate::repository::archive::local::read_all;
+use crate::repository::archive::networked::fill_import;
 use crate::repository::remote::Step;
 use crate::{
-    Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex,
-    RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
+    Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteSite,
+    RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
 use futures_util::future::join_all;
 
@@ -414,7 +416,6 @@ where
                             shipment,
                             branch,
                             remote,
-                            &remote_index,
                             &blob_store,
                             &sources,
                             sole_remote,
@@ -670,7 +671,6 @@ async fn ship<Env>(
     shipment: Result<ShipmentRef, dialog_artifacts::DialogArtifactsError>,
     branch: &Branch,
     remote: &ConnectedReplica,
-    remote_index: &RemoteArchiveIndex<'_>,
     blob_store: &LocalIndex<'_, Env>,
     sources: &[ConnectedReplica],
     sole_remote: bool,
@@ -763,23 +763,22 @@ where
                 .await?;
             Ok(())
         }
-        // A value larger than the inline threshold lives as a
-        // content-addressed block (addressed by its 32-byte value
-        // reference) in the same store as the tree nodes. Local bytes ->
-        // remote block put, mirroring the novel node upload.
+        // A value larger than the inline threshold lives in the blob store
+        // under its 32-byte value reference (or, spilled before values
+        // moved to blobs, as a block beside the tree's nodes). Local bytes
+        // -> remote blob import, verified against that reference.
         ShipmentRef::SpilledValue(reference) => {
-            let bytes = match LoadBlob::new(NodeHash::from(reference))
-                .perform(blob_store)
-                .await?
-            {
+            let digest = NodeHash::from(reference);
+            let bytes = match LoadBlob::new(digest.clone()).perform(blob_store).await? {
                 Some(bytes) => bytes,
                 // Held by reference: not this replica's to ship. Sole
                 // remote -> the target has it by attribution; otherwise
                 // adjudicate.
                 None => {
                     if !sole_remote {
-                        ensure_block_on_target(
-                            NodeHash::from(reference),
+                        ensure_spill_on_target(
+                            digest,
+                            LocalCopy::Missing,
                             branch,
                             remote,
                             sources,
@@ -790,10 +789,162 @@ where
                     return Ok(());
                 }
             };
-            remote_index.put(bytes).perform(env).await?;
-            Ok(())
+            upload_spill(&digest, bytes.as_ref(), remote, env).await
         }
     }
+}
+
+/// Write a spilled value's bytes into `target`'s blob store, verified
+/// against `digest`.
+async fn upload_spill<Env>(
+    digest: &NodeHash,
+    bytes: &[u8],
+    target: &ConnectedReplica,
+    env: &Env,
+) -> Result<(), PushError>
+where
+    Env: Provider<Fork<RemoteSite, BlobImport>> + ConditionalSync + 'static,
+{
+    // An attempt is the whole transfer, since an import can fail at any
+    // point up to its finish.
+    target
+        .reach(|address| {
+            let digest = digest.clone();
+            async move {
+                let sink = address
+                    .subject
+                    .clone()
+                    .writer()
+                    .archive()
+                    .blob()
+                    .import(digest.clone(), bytes.len() as u64)
+                    .fork(address.site())
+                    .perform(env)
+                    .await?;
+                fill_import(sink, &digest, bytes).await
+            }
+        })
+        .await?;
+    Ok(())
+}
+
+/// Whether `target` holds a spilled value: in its blob store, or as a block
+/// beside its tree nodes when it was pushed before values moved to blobs.
+async fn target_has_spill<Env>(
+    digest: &NodeHash,
+    target: &ConnectedReplica,
+    env: &Env,
+) -> Result<bool, PushError>
+where
+    Env: Provider<Fork<RemoteSite, BlobRead>>
+        + Provider<Fork<RemoteSite, Get>>
+        + ConditionalSync
+        + 'static,
+{
+    let probe = Subject::from(target.did())
+        .reader()
+        .archive()
+        .blob()
+        .read(digest.clone())
+        .perform(&target.connection(env))
+        .await;
+    match probe {
+        // Present; the unconsumed reader is dropped.
+        Ok(_) => Ok(true),
+        Err(BlobError::NotFound(_)) => remote_has_block(digest, target, env).await,
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A spilled value's bytes from wherever this replica can reach them: the
+/// local archive first (its blob store, then its block catalog), then each
+/// source remote the same way.
+async fn spill_from_anywhere<Env>(
+    digest: &NodeHash,
+    local: LocalCopy,
+    branch: &Branch,
+    sources: &[ConnectedReplica],
+    env: &Env,
+) -> Result<Option<Vec<u8>>, PushError>
+where
+    Env: Provider<Get>
+        + Provider<BlobRead>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
+{
+    if let LocalCopy::Unprobed = local
+        && let Some(bytes) = LocalIndex::new(env, branch.archive().index())
+            .load_blob(digest)
+            .await
+            .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
+    {
+        return Ok(Some(bytes.into_vec()));
+    }
+    for source in sources {
+        let read = Subject::from(source.did())
+            .reader()
+            .archive()
+            .blob()
+            .read(digest.clone())
+            .perform(&source.connection(env))
+            .await;
+        match read {
+            Ok(reader) => return Ok(Some(read_all(reader).await?)),
+            Err(BlobError::NotFound(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if let Some(bytes) = remote_block(digest, source, env).await? {
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the local archive has yet to be asked for a spilled value, or
+/// was asked and does not hold it, so a lookup asks it at most once.
+#[derive(Clone, Copy)]
+enum LocalCopy {
+    /// Not looked for yet.
+    Unprobed,
+    /// Looked for and not held.
+    Missing,
+}
+
+/// Make sure the target holds a spilled value: probe once, and forward the
+/// bytes from wherever they are reachable only on a miss, into the
+/// target's blob store. `local` says whether the caller already missed in
+/// the local archive, which is then not asked again. Never persists the
+/// bytes locally: the pusher is a bridge here, not a replica.
+async fn ensure_spill_on_target<Env>(
+    digest: NodeHash,
+    local: LocalCopy,
+    branch: &Branch,
+    target: &ConnectedReplica,
+    sources: &[ConnectedReplica],
+    env: &Env,
+) -> Result<(), PushError>
+where
+    Env: Provider<Get>
+        + Provider<BlobRead>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + Provider<Fork<RemoteSite, BlobImport>>
+        + ConditionalSync
+        + 'static,
+{
+    if target_has_spill(&digest, target, env).await? {
+        return Ok(());
+    }
+    let Some(bytes) = spill_from_anywhere(&digest, local, branch, sources, env).await? else {
+        return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
+            "spilled value {digest} is referenced by the head but reachable from no \
+             store: not local, not on the push target, not on any tracked remote"
+        ))
+        .into());
+    };
+    upload_spill(&digest, &bytes, target, env).await
 }
 
 /// One request answering "does `remote` hold this block": a forked
@@ -866,45 +1017,6 @@ where
         }
     }
     Ok(None)
-}
-
-/// Make sure the target holds a content-addressed block (a tree node's
-/// sibling store also holds spilled values): probe once, and forward the
-/// bytes from wherever they are reachable only on a miss. Never persists
-/// the bytes locally — the pusher is a bridge here, not a replica.
-async fn ensure_block_on_target<Env>(
-    hash: NodeHash,
-    branch: &Branch,
-    target: &ConnectedReplica,
-    sources: &[ConnectedReplica],
-    env: &Env,
-) -> Result<(), PushError>
-where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Fork<RemoteSite, Get>>
-        + Provider<crate::Hydrate>
-        + Provider<Fork<RemoteSite, Put>>
-        + ConditionalSync
-        + 'static,
-{
-    if remote_has_block(&hash, target, env).await? {
-        return Ok(());
-    }
-    let Some(bytes) = block_from_anywhere(&hash, branch, sources, env).await? else {
-        return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
-            "block {hash} is referenced by the head but reachable from no store: \
-             not local, not on the push target, not on any tracked remote"
-        ))
-        .into());
-    };
-    target
-        .archive()
-        .index()
-        .put(Buffer::from(bytes))
-        .perform(env)
-        .await?;
-    Ok(())
 }
 
 /// Make sure the target holds a blob's bytes: probe once (a forked read,
@@ -1111,8 +1223,9 @@ where
                                     .await
                             }
                             ShipmentRef::SpilledValue(reference) => {
-                                ensure_block_on_target(
+                                ensure_spill_on_target(
                                     NodeHash::from(reference),
+                                    LocalCopy::Unprobed,
                                     branch,
                                     target,
                                     sources,

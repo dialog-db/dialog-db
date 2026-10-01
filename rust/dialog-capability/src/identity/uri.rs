@@ -162,7 +162,7 @@ impl Uri {
 ///   can fire.
 ///
 /// This covers the entity shapes this crate itself generates (`did:key:…`,
-/// `user:…`, `blob:…`) at the cost of one byte scan; anything else — real
+/// `user:…`, `asset:…`) at the cost of one byte scan; anything else — real
 /// `https://` URLs included — simply returns `false` and the caller runs
 /// the genuine parse. A `false` here is NEVER a verdict, only a fallback.
 /// The equivalence claim is pinned against `url` itself by a generative

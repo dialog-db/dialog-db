@@ -2,7 +2,7 @@
 //!
 //! A blob is a whole, hash-addressable binary object that rides the artifact
 //! tree via the blob index. It is referenced by its content-derived entity
-//! `blob:<hash>` (see [`Entity::from_blob`]), so a blob is a first-class
+//! `asset:<hash>` (see [`Entity::from_blob`]), so a blob is a first-class
 //! resource other facts can point at — attach a name, a media type, an author
 //! as ordinary assertions, then find blobs with a normal datalog query rather
 //! than a full-index scan.
@@ -61,17 +61,21 @@
 //! # }
 //! ```
 
+use crate::repository::archive::persist;
+use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
 use crate::{
-    Branch, CommitError, Index, NetworkedIndex, RemoteFallback, RemoteSite, Revision, Snapshot,
-    TreeReference,
+    Branch, CommitError, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite, Revision,
+    Snapshot, TreeReference,
 };
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::RevisionRecord;
 use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity};
+use dialog_artifacts::{
+    Asset, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity, Instruction,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
@@ -84,7 +88,7 @@ use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
 };
 use dialog_effects::memory::{Publish, Resolve};
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, stream};
 
 /// A line's blob store: the target that blob reads and writes bind to.
 ///
@@ -212,7 +216,7 @@ impl<S> BlobImportBuilder<S> {
     }
 }
 
-/// The `blob:<hash>` hash carried by `entity`, or a `NotFound` error naming it.
+/// The hash an `asset:<hash>` entity names, or a `NotFound` error naming it.
 fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
     entity
         .blob_hash()
@@ -239,15 +243,17 @@ where
     NetworkedIndex::new(env, source.archive().index(), remote)
 }
 
-/// The size recorded for `hash` in the line's blob index, or `None` if the
-/// current tree does not reference it.
+/// The size of the content the line's current tree vouches for under `hash`,
+/// by a blob-index entry or by an asset's `dialog.asset/size` fact, or `None`
+/// when it vouches for no such content.
 async fn index_size<Env>(
     source: SourceRef<'_>,
     hash: &Blake3Hash,
     env: &Env,
 ) -> Result<Option<u64>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -259,13 +265,36 @@ where
     };
     let store = index_store(source, env).await;
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
-    Ok(tree
-        .get_blob(&store, hash.as_bytes())
-        .await?
-        .map(|r| r.size))
+    Ok(tree.content_size(&store, hash.as_bytes()).await?)
 }
 
-/// Look up a blob's size from the blob index. Created by [`Blob::size`].
+/// Whether the line's blob index itself references `hash`. An asset's fact
+/// is not an index entry: retracting it is a fact retraction, not a
+/// [`RetractBlob`].
+async fn index_references<Env>(
+    source: SourceRef<'_>,
+    hash: &Blake3Hash,
+    env: &Env,
+) -> Result<bool, CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let Some(revision) = source.revision() else {
+        return Ok(false);
+    };
+    let store = index_store(source, env).await;
+    let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+    Ok(tree.get_blob(&store, hash.as_bytes()).await?.is_some())
+}
+
+/// Look up a blob's size from the line's tree, without fetching its bytes.
+/// Created by [`Blob::size`].
 pub struct BlobSize<'a> {
     archive: BlobArchive<'a>,
     entity: Entity,
@@ -275,7 +304,8 @@ impl BlobSize<'_> {
     /// Execute the lookup, returning the size or `None` if unreferenced.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<u64>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -412,7 +442,7 @@ impl<S> WriteBlob<'_, S>
 where
     S: Stream<Item = Result<Vec<u8>, BlobError>> + ConditionalSend + Unpin,
 {
-    /// Execute the write, returning the blob's entity (`blob:<hash>`).
+    /// Execute the write, returning the blob's entity (`asset:<hash>`).
     ///
     /// Streams the source into the local blob store (hashing and counting bytes
     /// as it goes), records the resulting `{size}` in the blob index, then
@@ -422,7 +452,9 @@ where
     /// rather than clobber it.
     pub async fn perform<Env>(mut self, env: &Env) -> Result<Entity, CommitError>
     where
-        Env: Provider<BlobWrite>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<BlobWrite>
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
@@ -489,7 +521,9 @@ async fn advance_blob_index<Env>(
     edit: BlobIndexEdit,
 ) -> Result<(), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobImport>
+        + Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>
@@ -580,13 +614,7 @@ where
 
     // Persist the tree's pending nodes before referencing the root in a
     // revision; a revision must only point at durable blocks.
-    branch
-        .archive()
-        .index()
-        .import(delta.flush_blocks().chain(delta.flush_blobs()))
-        .perform(env)
-        .await
-        .map_err(DialogArtifactsError::from)?;
+    persist(&branch.archive().index(), &mut delta, env).await?;
 
     // The new head's causal context: the parent's plus this write's
     // own version, exactly as `Commit` derives it — a blob write
@@ -634,6 +662,10 @@ where
 /// Retract a blob's index reference as one new revision. Created by
 /// [`Blob::retract`].
 ///
+/// An asset entity is dropped the same way: when the line records an asset
+/// fact for the hash, that fact is retracted in a revision of its own, as a
+/// transaction's `retract(asset)` would.
+///
 /// Removes the blob from the index only: the bytes stay in the blob store,
 /// so a replica that already holds them can still read them locally.
 /// Reclaiming bytes no index references is a separate, local concern. The
@@ -652,7 +684,9 @@ impl RetractBlob<'_> {
     /// no revision.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -666,20 +700,30 @@ impl RetractBlob<'_> {
     {
         let branch = self.archive.branch()?;
         let hash = blob_hash(&self.entity)?;
-        if index_size(SourceRef::from(branch), &hash, env)
-            .await?
-            .is_none()
-        {
-            return Ok(());
+        if index_references(SourceRef::from(branch), &hash, env).await? {
+            advance_blob_index(
+                branch,
+                env,
+                BlobIndexEdit::Retract {
+                    hash: *hash.as_bytes(),
+                },
+            )
+            .await?;
         }
-        advance_blob_index(
-            branch,
-            env,
-            BlobIndexEdit::Retract {
-                hash: *hash.as_bytes(),
-            },
-        )
-        .await
+        // An asset is recorded by a fact rather than an index entry: drop it
+        // the way a transaction's discard does, by the size the line
+        // records for the hash.
+        if let Some(size) = recorded_size(SourceRef::from(branch), hash.as_bytes(), env).await? {
+            let retraction = Instruction::Retract(Asset::stored(*hash.as_bytes(), size).fact()?);
+            Box::pin(
+                branch
+                    .commit(stream::iter(vec![retraction]))
+                    .machinery()
+                    .perform(env),
+            )
+            .await?;
+        }
+        Ok(())
     }
 }
 
@@ -734,7 +778,7 @@ mod tests {
             .write((&branch).into())
             .perform(&operator)
             .await?;
-        assert!(entity.as_str().starts_with("blob:"));
+        assert!(entity.as_str().starts_with("asset:"));
 
         // size from the index, no fetch
         assert_eq!(

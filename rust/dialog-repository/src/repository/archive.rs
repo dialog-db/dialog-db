@@ -11,3 +11,6 @@ pub use local::*;
 /// and caching locally on a read miss.
 pub mod networked;
 pub use networked::*;
+
+mod persist;
+pub(crate) use persist::persist;

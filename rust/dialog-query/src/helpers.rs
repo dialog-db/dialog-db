@@ -35,6 +35,9 @@ use dialog_common::Buffer;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
+use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{List, Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_effects::storage::Location;
@@ -424,7 +427,8 @@ impl<'a, Env> JoinEnv<'a, Env> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<'a, Env> Provider<Select<'a>> for JoinEnv<'a, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<dialog_repository::Hydrate>
@@ -458,7 +462,8 @@ impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<dialog_artifacts::Estimate> for JoinEnv<'_, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<dialog_repository::Hydrate>
@@ -509,6 +514,29 @@ where
         + 'static,
 {
     async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
+        let counting = CountingStore::new(store, self.journal.clone());
+        load.perform(&counting).await
+    }
+}
+
+// Spilled-value loads for `tree/value`, through the same counting store.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<LoadBlob> for JoinEnv<'_, Env>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
         let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
         let counting = CountingStore::new(store, self.journal.clone());
         load.perform(&counting).await
@@ -610,7 +638,10 @@ impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
 
 impl<Env> BenchEnv<Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobSize>
+        + Provider<BlobImport>
+        + Provider<Get>
+        + Provider<BlobRead>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>
@@ -1717,7 +1748,10 @@ mod test {
     #[cfg(not(target_arch = "wasm32"))]
     async fn replay_log_reporting<Env>(env: BenchEnv<Env>, path: &str, limit: usize) -> Result<()>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
+            + Provider<BlobSize>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -1840,7 +1874,10 @@ mod test {
         seed_start: Instant,
     ) -> Result<()>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -1972,7 +2009,10 @@ mod test {
         limit: usize,
     ) -> Result<()>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
+            + Provider<BlobSize>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>

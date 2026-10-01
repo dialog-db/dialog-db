@@ -30,12 +30,13 @@
 //! keep hot-attribute fan-out flat, delta-restricted body evaluation,
 //! and the `retract!` head polarity.
 
+use dialog_effects::blob::Read as BlobRead;
 use std::collections::{BTreeSet, HashMap};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Change, Changes, Entity, Instruction, Select, Statement,
-    Value,
+    Artifact, ArtifactSelector, Attribute, Change, Changes, DialogArtifactsError, Entity,
+    Instruction, Select, Statement, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -75,7 +76,8 @@ pub(crate) async fn induce<Env>(
     env: &Env,
 ) -> Result<Changes, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
@@ -86,6 +88,14 @@ where
         + ConditionalSync
         + 'static,
 {
+    // Transients never commit, so an asset among them would be dropped:
+    // refuse the commit before anything is written instead.
+    if transients.has_assets() {
+        return Err(
+            DialogArtifactsError::AssetsUnsupported("a dispatched transient".into()).into(),
+        );
+    }
+
     // Round 1 stimulus: everything the commit changes, plus the
     // watermark lag — facts that entered the branch since the last
     // inducing instant (a pull, a raw commit, a crash between publish
@@ -389,7 +399,8 @@ impl<'a> Dispatch<'a> {
     /// each of `dialog.rule/on` and `dialog.rule/reads` on a miss).
     async fn resolve<Env>(source: SourceRef<'a>, env: &Env) -> Result<Dispatch<'a>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -447,7 +458,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<Vec<Entity>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -501,7 +513,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<(), CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -568,7 +581,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<Option<dialog_query::DeductiveRule>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -607,7 +621,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<Option<InductiveRule>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -654,7 +669,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<bool, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -692,7 +708,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<Option<Vec<u8>>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -736,7 +753,8 @@ impl<'a> Dispatch<'a> {
 /// commits changed, not their bookkeeping.
 async fn lag_delta<Env>(source: SourceRef<'_>, env: &Env) -> Result<Vec<Instruction>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -844,7 +862,8 @@ async fn committed<Env>(
     env: &Env,
 ) -> Result<Vec<Artifact>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -871,7 +890,8 @@ async fn select<'a, Env>(
     selector: ArtifactSelector<Constrained>,
 ) -> Result<Vec<Artifact>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -902,7 +922,8 @@ async fn fire<'a, Env>(
     transients: &mut Changes,
 ) -> Result<(), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -962,7 +983,8 @@ async fn fire_seeded<'a, Env>(
     transients: &mut Changes,
 ) -> Result<(), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -1081,7 +1103,8 @@ async fn emit_matches<'a, Env>(
     transients: &mut Changes,
 ) -> Result<(), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -1184,7 +1207,8 @@ async fn is_novel<'a, Env>(
     instruction: &Instruction,
 ) -> Result<bool, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -1221,6 +1245,7 @@ mod tests {
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
     use dialog_effects::archive::{Get, Put};
+    use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::rule::statement::on_entities;
@@ -1231,7 +1256,8 @@ mod tests {
     /// Collect the values a `(the, of)` pair holds on the branch.
     async fn values<Env>(branch: &Branch, env: &Env, the: &str, of: &Entity) -> Result<Vec<Value>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -2901,7 +2927,8 @@ mod tests {
     /// The entries of `list`, in key order.
     async fn members<Env>(branch: &Branch, env: &Env, list: &Entity) -> Result<Vec<(String, Value)>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>

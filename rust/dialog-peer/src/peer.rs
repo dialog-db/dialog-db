@@ -116,6 +116,7 @@ pub trait PeerSpace:
     SpaceProvider
     + Resource<Location, Error: fmt::Display>
     + Provider<blob::Read>
+    + Provider<blob::Size>
     + Provider<blob::Write>
     + Provider<blob::Import>
     + Clone
@@ -129,6 +130,7 @@ impl<T> PeerSpace for T where
     T: SpaceProvider
         + Resource<Location, Error: fmt::Display>
         + Provider<blob::Read>
+        + Provider<blob::Size>
         + Provider<blob::Write>
         + Provider<blob::Import>
         + Clone
@@ -203,6 +205,7 @@ pub struct Peer<S: Clone, M: Mode = Local> {
         archive::Put,
         archive::Import,
         blob::Read,
+        blob::Size,
         blob::Write,
         blob::Import,
         memory::Resolve,

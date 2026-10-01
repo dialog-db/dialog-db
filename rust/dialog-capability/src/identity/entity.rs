@@ -114,8 +114,13 @@ impl Display for Entity {
     }
 }
 
-/// Scheme prefix for blob-reference entities.
-const BLOB_SCHEME: &str = "blob:";
+/// Scheme prefix for content entities: `asset:<base58(hash)>`.
+const ASSET_SCHEME: &str = "asset:";
+
+/// Scheme prefix content entities were minted with before `asset:`. Still
+/// read, never written: trees replicated before the switch hold facts on
+/// entities of this form.
+const LEGACY_BLOB_SCHEME: &str = "blob:";
 
 impl Entity {
     /// Initialize a new [`Entity`] with a randomly generated, globally unique
@@ -145,16 +150,30 @@ impl Entity {
         &self.0.key
     }
 
-    /// The canonical entity reference for a stored blob:
-    /// `blob:<base58(hash)>`.
+    /// The canonical entity naming stored content by its hash:
+    /// `asset:<base58(hash)>`.
     pub fn from_blob(hash: &[u8; 32]) -> Result<Entity, IdentityError> {
-        format!("{}{}", BLOB_SCHEME, hash.to_base58()).parse()
+        format!("{}{}", ASSET_SCHEME, hash.to_base58()).parse()
     }
 
-    /// The blob hash carried by a `blob:` entity, if this entity
-    /// is one and its payload decodes to 32 base58 bytes.
+    /// The entity content was named with before the `asset:` scheme:
+    /// `blob:<base58(hash)>`.
+    ///
+    /// Only for reaching facts written before the switch, such as retracting
+    /// a delegation retained under the old name. New facts name content with
+    /// [`from_blob`](Self::from_blob).
+    pub fn from_legacy_blob(hash: &[u8; 32]) -> Result<Entity, IdentityError> {
+        format!("{}{}", LEGACY_BLOB_SCHEME, hash.to_base58()).parse()
+    }
+
+    /// The content hash an `asset:` entity names, if this entity is one and
+    /// its payload decodes to 32 base58 bytes. A legacy `blob:` entity names
+    /// the same hash.
     pub fn blob_hash(&self) -> Option<[u8; 32]> {
-        let payload = self.as_str().strip_prefix(BLOB_SCHEME)?;
+        let payload = self
+            .as_str()
+            .strip_prefix(ASSET_SCHEME)
+            .or_else(|| self.as_str().strip_prefix(LEGACY_BLOB_SCHEME))?;
         let bytes = payload.from_base58().ok()?;
         <[u8; 32]>::try_from(bytes).ok()
     }
@@ -177,7 +196,7 @@ mod tests {
     fn it_round_trips_a_blob_entity() {
         let hash: [u8; 32] = [7u8; 32];
         let entity = Entity::from_blob(&hash).expect("constructs");
-        assert!(entity.as_str().starts_with("blob:"));
+        assert!(entity.as_str().starts_with("asset:"));
         assert_eq!(entity.blob_hash(), Some(hash));
         // String round-trip: parse the display form back.
         let reparsed: Entity = entity.as_str().parse().expect("parses");
@@ -189,8 +208,20 @@ mod tests {
         let entity: Entity = "user:alice".parse().expect("parses");
         assert_eq!(entity.blob_hash(), None);
         // Garbage after the scheme is not a hash.
-        let bogus: Entity = "blob:notbase58!!!".parse().expect("still a valid uri");
+        let bogus: Entity = "asset:notbase58!!!".parse().expect("still a valid uri");
         assert_eq!(bogus.blob_hash(), None);
+    }
+
+    /// Facts replicated before the switch name content `blob:<hash>`; that
+    /// form still reads as the same hash, so lookups by hash keep reaching
+    /// them.
+    #[dialog_common::test]
+    fn it_reads_the_hash_of_a_legacy_blob_entity() {
+        let hash = [9u8; 32];
+        let legacy = Entity::from_legacy_blob(&hash).expect("constructs");
+        assert!(legacy.as_str().starts_with("blob:"));
+        assert_eq!(legacy.blob_hash(), Some(hash));
+        assert_ne!(legacy, Entity::from_blob(&hash).expect("constructs"));
     }
 }
 

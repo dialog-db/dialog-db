@@ -1,4 +1,5 @@
 use super::merge::merge_with_winner;
+use crate::repository::archive::persist;
 use crate::repository::source::SourceRef;
 use crate::{
     Branch, CommitError, Index, NetworkedIndex, PublishError, RemoteSite, RepositoryMemoryExt as _,
@@ -8,15 +9,17 @@ use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{
     Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
 };
-use dialog_artifacts::tree::WriteScope;
+use dialog_artifacts::tree::{Stamp, WriteScope};
 use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, State};
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
-use futures_util::Stream;
+use futures_util::{Stream, stream};
 
 /// Command that commits a stream of changes (assert/retract) to a branch
 /// or a snapshot.
@@ -31,6 +34,7 @@ pub struct Commit<'a, Changes> {
     scope: WriteScope,
     entries: Vec<(Key, State<Datum>)>,
     merge: bool,
+    machinery: Vec<Instruction>,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -43,6 +47,7 @@ impl<'a, Changes> Commit<'a, Changes> {
             scope: WriteScope::Application,
             entries: Vec::new(),
             merge: false,
+            machinery: Vec::new(),
         }
     }
 
@@ -61,6 +66,14 @@ impl<'a, Changes> Commit<'a, Changes> {
     /// stream is all no-ops.
     pub(crate) fn with_entries(mut self, entries: Vec<(Key, State<Datum>)>) -> Self {
         self.entries = entries;
+        self
+    }
+
+    /// Append facts the commit derives itself, such as an asset's
+    /// `dialog.asset/size`, applied under machinery scope after the change
+    /// stream in the same batch, so they publish in the same revision.
+    pub(crate) fn with_machinery(mut self, machinery: Vec<Instruction>) -> Self {
+        self.machinery = machinery;
         self
     }
 
@@ -167,7 +180,9 @@ where
     #[tracing::instrument(skip_all, name = "commit")]
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -193,7 +208,9 @@ where
         env: &Env,
     ) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -246,6 +263,7 @@ where
             base: base_revision,
             changes: self.changes,
             entries: self.entries,
+            machinery: self.machinery,
             scope: self.scope,
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
@@ -314,7 +332,9 @@ where
         env: &Env,
     ) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -340,6 +360,7 @@ where
             base: Some(base.clone()),
             changes: self.changes,
             entries: self.entries,
+            machinery: self.machinery,
             scope: self.scope,
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
@@ -416,6 +437,9 @@ pub(crate) struct Mint<'a, Changes> {
     /// Pre-built machinery entries riding the same batch. See
     /// [`Commit::with_entries`].
     pub(crate) entries: Vec<(Key, State<Datum>)>,
+    /// Facts the commit derives, applied under machinery scope after the
+    /// change stream. See [`Commit::with_machinery`].
+    pub(crate) machinery: Vec<Instruction>,
     /// Which attributes the stream may write. See [`Commit::machinery`].
     pub(crate) scope: WriteScope,
     /// Mint even when the batch changes nothing. See
@@ -453,7 +477,9 @@ where
         line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
     ) -> Result<Outcome, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -580,6 +606,20 @@ where
                 .await?
             }
         };
+        let batch = if self.machinery.is_empty() {
+            batch
+        } else {
+            // Boxed: the second pass over the write path is a large future.
+            // It writes under the version the first pass just used, so it
+            // amends that version.
+            Box::pin(batch.then_apply(
+                &store,
+                Stamp::Amend(version),
+                stream::iter(self.machinery),
+                WriteScope::Machinery,
+            ))
+            .await?
+        };
         // Machinery entries count as changes: a commit carrying only a
         // blob-index edit still advances the head.
         let changed = batch.changed() || !self.entries.is_empty();
@@ -610,13 +650,7 @@ where
             };
             let batch = batch.record(&store, self.entries).await?;
             tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
-            source
-                .archive()
-                .index()
-                .import(delta.flush_blocks().chain(delta.flush_blobs()))
-                .perform(env)
-                .await
-                .map_err(DialogArtifactsError::from)?;
+            persist(&source.archive().index(), &mut delta, env).await?;
             revision.tree = TreeReference::from(*tree.root().as_bytes());
             revision.signature = Attest::new(revision.payload()).perform(env).await?;
             return Ok(Outcome::Minted(Box::new(Minted {
@@ -730,13 +764,7 @@ where
         // reference-counted, so nothing is copied on the way in, and
         // providers with native batching persist it in a single round trip
         // (one IndexedDB transaction).
-        source
-            .archive()
-            .index()
-            .import(delta.flush_blocks().chain(delta.flush_blobs()))
-            .perform(env)
-            .await
-            .map_err(DialogArtifactsError::from)?;
+        persist(&source.archive().index(), &mut delta, env).await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
         revision.context = Some(context.clone());

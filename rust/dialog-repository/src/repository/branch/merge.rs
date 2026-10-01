@@ -13,12 +13,13 @@
 //! racing itself on one branch mints the same edition twice, and the
 //! loser's version is already taken; that race is refused instead.
 
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
 use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::ArchiveDelta;
-use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::history::{Context, RevisionRecord};
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
@@ -29,6 +30,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 
+use crate::repository::archive::persist;
 use crate::{Branch, CommitError, Index, NetworkedIndex, PublishError, Revision, TreeReference};
 
 /// How many times merging tries to publish its merge before giving
@@ -45,7 +47,9 @@ pub(crate) async fn merge_with_winner<Env>(
     env: &Env,
 ) -> Result<Revision, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobImport>
+        + Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>
@@ -111,7 +115,9 @@ async fn merged<Env>(
     env: &Env,
 ) -> Result<(Revision, Context), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobImport>
+        + Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>
@@ -207,13 +213,7 @@ where
     revision.context = Some(merged_context.clone());
     revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
-    branch
-        .archive()
-        .index()
-        .import(delta.flush_blocks().chain(delta.flush_blobs()))
-        .perform(env)
-        .await
-        .map_err(DialogArtifactsError::from)?;
+    persist(&branch.archive().index(), &mut delta, env).await?;
     Ok((revision, merged_context))
 }
 

@@ -85,6 +85,7 @@ use crate::{
 use dialog_effects::MethodExt as _;
 
 pub mod codec;
+use codec::BytesBlob;
 
 #[cfg(test)]
 mod read_tests;
@@ -390,7 +391,8 @@ impl Snapshot {
     /// A snapshot tracks no upstream, so this reads purely locally.
     pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>
@@ -410,7 +412,8 @@ impl Snapshot {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>
@@ -732,7 +735,7 @@ impl SnapshotExport {
                 yield Item::Block(Block::new(node.buffer().clone()));
             }
 
-            // Spilled value blocks, discovered above. Their reads are
+            // Spilled values, discovered above. Their reads are
             // independent, so they run concurrently (bounded) and yield
             // as they complete — against a downloading reach this
             // overlaps the remote round-trips instead of paying them one
@@ -750,8 +753,15 @@ impl SnapshotExport {
             .buffer_unordered(FETCH_CONCURRENCY);
             while let Some((digest, bytes)) = spill_reads.next().await {
                 match bytes? {
+                    // A spilled value lives in the blob store, so it
+                    // travels as a blob and lands in one on import.
                     Some(bytes) => {
-                        yield Item::Block(Block { digest, content: bytes });
+                        let bytes = bytes.into_vec();
+                        yield Item::Blob {
+                            digest,
+                            size: bytes.len() as u64,
+                            chunks: Box::new(BytesBlob::new(bytes)),
+                        };
                     }
                     None if sparse => {}
                     None => Err(SnapshotError::MissingBlock { digest })?,
@@ -773,7 +783,7 @@ impl SnapshotExport {
                 let hydrate = &hydrate;
                 let subject = subject.clone();
                 async move {
-                    let Some(record) = tree.get_blob(index, digest.as_bytes()).await? else {
+                    let Some(size) = tree.content_size(index, digest.as_bytes()).await? else {
                         return Ok((digest, None));
                     };
                     let reader = subject
@@ -797,7 +807,6 @@ impl SnapshotExport {
                             // An attempt is the whole transfer, since
                             // the read can fail at any point.
                             let (digest, subject) = (&digest, &subject);
-                            let size = record.size;
                             remote
                                 .reach(|address| async move {
                                     let mut source = address
@@ -842,7 +851,7 @@ impl SnapshotExport {
                         (reader, _) => reader,
                     };
                     match reader {
-                        Ok(chunks) => Ok((digest, Some((record.size, chunks)))),
+                        Ok(chunks) => Ok((digest, Some((size, chunks)))),
                         Err(BlobError::NotFound(_)) => Ok((digest, None)),
                         Err(error) => Err(SnapshotError::from(error)),
                     }
@@ -982,7 +991,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_credentials::Credential;
     use dialog_effects::archive::prelude::GetBlockExt as _;
     use dialog_effects::blob::BlobSource;
@@ -1124,10 +1133,26 @@ mod tests {
         .await?;
 
         assert!(!blocks.is_empty(), "the block channel carried the tree");
-        assert_eq!(blobs.len(), 1, "the blob channel carried the blob");
         assert_eq!(
-            blobs[0].1, stage.blob_bytes,
+            blobs.len(),
+            2,
+            "the blob channel carried the blob and the spilled value"
+        );
+        assert!(
+            blobs.iter().any(|(_, bytes)| *bytes == stage.blob_bytes),
             "the blob arrived byte for byte"
+        );
+        assert!(
+            blobs
+                .iter()
+                .all(|(digest, bytes)| Buffer::from(bytes.clone()).blake3_hash() == digest),
+            "every exported blob hashes to the address it declares"
+        );
+        assert!(
+            blocks
+                .iter()
+                .all(|block| blobs.iter().all(|(digest, _)| &block.digest != digest)),
+            "a spilled value travels as a blob, never as a block"
         );
         assert!(
             blocks.iter().all(Block::is_intact),
@@ -1153,7 +1178,7 @@ mod tests {
         let imported = elsewhere.import(items).perform(&destination).await?;
 
         assert!(imported.blocks > 0, "blocks landed");
-        assert_eq!(imported.blobs, 1, "the blob landed");
+        assert_eq!(imported.blobs, 2, "the blob and the spilled value landed");
 
         let branch = elsewhere
             .branch("main")
@@ -1163,6 +1188,79 @@ mod tests {
         assert!(
             branch.revision().is_none(),
             "importing content publishes nothing"
+        );
+        Ok(())
+    }
+
+    /// A store written before spilled values moved to the blob store holds
+    /// them as blocks beside the tree's nodes. Nothing migrates them: a read
+    /// misses the blob store and falls back to the block catalog.
+    #[dialog_common::test]
+    async fn it_reads_a_spill_a_legacy_store_holds_as_a_block() -> Result<()> {
+        let stage = stage().await?;
+        let (blocks, blobs) = drain(
+            stage
+                .repository
+                .snapshot(stage.revision.clone())
+                .export()
+                .perform(&stage.env),
+        )
+        .await?;
+
+        // The legacy shape: the spilled value is a block, and the blob
+        // store holds nothing.
+        let spills: Vec<Block> = blobs
+            .into_iter()
+            .filter(|(_, bytes)| *bytes != stage.blob_bytes)
+            .map(|(_, bytes)| Block::new(Buffer::from(bytes)))
+            .collect();
+        assert_eq!(spills.len(), 1, "the stage spills one value");
+        let spilled = spills[0].digest.clone();
+
+        let destination = destination_for(&stage).await?;
+        let legacy = crate::Repository::from(stage.repository.credential().clone());
+        legacy
+            .import(stream::iter(
+                blocks.into_iter().chain(spills).map(Item::Block).map(Ok),
+            ))
+            .perform(&destination)
+            .await?;
+        let branch = legacy.branch("main").open().perform(&destination).await?;
+        branch
+            .reset(stage.revision.clone())
+            .perform(&destination)
+            .await?;
+
+        let probe = branch
+            .archive()
+            .index()
+            .archive()
+            .blob()
+            .read(spilled)
+            .perform(&destination)
+            .await;
+        assert!(
+            matches!(probe, Err(BlobError::NotFound(_))),
+            "the legacy store holds the spill only as a block"
+        );
+
+        let rows = branch
+            .claims()
+            .select(ArtifactSelector::new().the("document/body".parse()?))
+            .to_owned()
+            .perform(&destination)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].is,
+            Value::String(
+                "spilled".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1)
+            ),
+            "the spilled value reconstructs from its legacy block"
         );
         Ok(())
     }

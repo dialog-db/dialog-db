@@ -28,6 +28,7 @@ use std::sync::Arc;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{ArchiveError, Get, Put};
+use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_repository::{Hydrate, HydrationRequest, RemoteSite, hydrate};
 
 use super::{Mode, Peer};
@@ -40,6 +41,9 @@ where
     Self: Provider<Get>
         + Provider<Put>
         + Provider<Fork<RemoteSite, Get>>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + Provider<Fork<RemoteSite, BlobRead>>
         + Clone
         + ConditionalSend
         + ConditionalSync

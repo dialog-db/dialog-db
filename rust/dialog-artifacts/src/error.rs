@@ -2,6 +2,7 @@ use dialog_capability::access::AuthorizeError;
 use dialog_capability::identity::IdentityError;
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
+use dialog_effects::blob::BlobError;
 use dialog_effects::memory::MemoryError;
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
@@ -62,6 +63,13 @@ pub enum DialogArtifactsError {
     #[error("Reserved attribute (the dialog. namespace is reserved): {0}")]
     ReservedAttribute(String),
 
+    /// A batch that changes assets was handed to a target that holds facts
+    /// only, such as an ephemeral line or the replica registry. Assets are
+    /// stored by a transaction's commit; anywhere else their changes would
+    /// be dropped, so the batch is refused instead. Names the target.
+    #[error("Assets can only be changed by a transaction's commit, not by {0}")]
+    AssetsUnsupported(String),
+
     /// Raw bytes could not be interpreted as an entity
     #[error("Could not convert bytes into entity: {0}")]
     InvalidEntity(String),
@@ -109,6 +117,16 @@ impl From<ArchiveError> for DialogArtifactsError {
         match error {
             ArchiveError::Authorization(error) => Self::Authorization(error),
             ArchiveError::Rejected(error) => Self::Rejected(error),
+            error => Self::Storage(error.to_string()),
+        }
+    }
+}
+
+impl From<BlobError> for DialogArtifactsError {
+    fn from(error: BlobError) -> Self {
+        match error {
+            BlobError::Authorization(error) => Self::Authorization(error),
+            BlobError::Rejected(error) => Self::Rejected(error),
             error => Self::Storage(error.to_string()),
         }
     }

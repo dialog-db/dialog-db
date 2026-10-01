@@ -3,6 +3,7 @@ use crate::rules::SharedRuleCache;
 use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
@@ -25,6 +26,9 @@ use futures_util::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+mod asset;
+pub use asset::*;
 
 mod blob;
 pub use blob::*;
@@ -497,7 +501,8 @@ impl Branch {
     /// no remote reads purely locally.
     pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>
@@ -519,7 +524,8 @@ impl Branch {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>

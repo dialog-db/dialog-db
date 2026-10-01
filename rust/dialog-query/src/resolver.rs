@@ -51,7 +51,7 @@ use std::fmt::{self, Display};
 use std::sync::LazyLock;
 
 use base58::{FromBase58, ToBase58};
-use dialog_artifacts::{DialogArtifactsError, LoadBlock, inspect};
+use dialog_artifacts::{DialogArtifactsError, LoadBlob, LoadBlock, inspect};
 use serde::{Deserialize, Serialize};
 
 use crate::artifact::Type as ValueType;
@@ -675,11 +675,18 @@ impl ResolverQuery {
                 let Some(reference) = resolver.node_reference(&base) else {
                     continue;
                 };
-                let Some(block) = LoadBlock::new(reference.into())
-                    .perform(env)
-                    .await
-                    .map_err(DialogArtifactsError::from)?
-                else {
+                // A spilled value lives in the blob store, apart from the
+                // tree's nodes, so `tree/value` reads through that lane.
+                let loaded = match &resolver {
+                    ResolverQuery::TreeValue(_) => {
+                        LoadBlob::new(reference.into()).perform(env).await?
+                    }
+                    _ => LoadBlock::new(reference.into())
+                        .perform(env)
+                        .await
+                        .map_err(DialogArtifactsError::from)?,
+                };
+                let Some(block) = loaded else {
                     continue;
                 };
                 let bytes = block.into_vec();

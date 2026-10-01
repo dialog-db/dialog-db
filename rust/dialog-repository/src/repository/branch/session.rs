@@ -1,5 +1,7 @@
+use dialog_effects::blob::Read as BlobRead;
 use std::collections::HashSet;
 
+use dialog_artifacts::LoadBlob;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
@@ -302,7 +304,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// with the overlay.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
@@ -571,7 +574,8 @@ pub(crate) async fn select_from_source<'a, Env>(
     input: ArtifactSelector<Constrained>,
 ) -> Result<ArtifactStream<'a>, DialogArtifactsError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -605,7 +609,8 @@ where
 // variable.
 impl<'a, Env> Provider<Select<'a>> for QueryEnv<'a, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -686,7 +691,8 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Env> Provider<Estimate> for QueryEnv<'_, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -739,6 +745,39 @@ where
     }
 }
 
+// The spilled-value load behind `tree/value`: the same line-by-line
+// walk as `Load`, reading each line's spill lane (its blob store, then
+// the block catalog for values spilled before they moved to blobs,
+// with the remote fallback a fact scan uses). Spilled values are not
+// nodes, so the node cache is not consulted.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<'a, Env> Provider<LoadBlob> for QueryEnv<'a, Env>
+where
+    Env: Provider<Get>
+        + Provider<BlobRead>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
+        for source in &self.sources {
+            let source = source.as_ref();
+            let store = NetworkedIndex::new(self.env, source.archive().index(), source.fallback());
+            if let Some(bytes) = store.load_blob(&hash).await? {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
+    }
+}
+
 // The idempotent block-load behind resolver premises (`tree/node` &
 // co). No demand is recorded: the block behind a hash is
 // content-addressed and can never change, so no tree diff could ever
@@ -788,7 +827,8 @@ where
 
 impl<'a, Env> QueryEnv<'a, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -938,7 +978,8 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Env> Provider<SelectRules> for QueryEnv<'_, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -1053,7 +1094,8 @@ impl<Env> QueryEnv<'_, Env> {
 
 impl<'a, Env> QueryEnv<'a, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -1212,7 +1254,8 @@ mod rule_tests {
     /// Query `employee` and return the derived entities.
     async fn query_employees<Env>(branch: &Branch, operator: &Env) -> anyhow::Result<Vec<Entity>>
     where
-        Env: dialog_capability::Provider<Get>
+        Env: Provider<BlobRead>
+            + dialog_capability::Provider<Get>
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
@@ -1254,7 +1297,8 @@ mod rule_tests {
         field: &str,
     ) -> anyhow::Result<Vec<String>>
     where
-        Env: dialog_capability::Provider<Get>
+        Env: Provider<BlobRead>
+            + dialog_capability::Provider<Get>
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
@@ -1862,7 +1906,7 @@ mod rule_tests {
 
         branch
             .overlay()
-            .assert(rule_with_person_attr("org/contractor-name"));
+            .assert(rule_with_person_attr("org/contractor-name"))?;
         let after: Vec<ConceptConclusion> = branch
             .select(employees())
             .perform(&operator)
@@ -1917,7 +1961,7 @@ mod rule_tests {
 
         branch
             .overlay()
-            .assert(rule_with_person_attr("org/contractor-name"));
+            .assert(rule_with_person_attr("org/contractor-name"))?;
         let delta = subscription
             .poll(&operator)
             .await?
@@ -1977,7 +2021,7 @@ mod rule_tests {
             let site = Entity::new()?;
             branch
                 .overlay()
-                .assert(the!("xyz.tonk.site/path").of(site).is(path.to_string()));
+                .assert(the!("xyz.tonk.site/path").of(site).is(path.to_string()))?;
             assert!(
                 subscription.poll(&operator).await?.is_none(),
                 "an unrelated session stamp changes nothing"
