@@ -201,6 +201,25 @@ impl FromUcanArgs for memory::Resolve {
         .attenuate(memory::Resolve))
     }
 }
+impl FromUcanArgs for memory::Watch {
+    type Attenuation = memory::Watch;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
+        // Like `Resolve`, a unit struct: the cell it follows is named by
+        // the chain above it.
+        let space: memory::Space<dialog_effects::method::Get> = deserialize_from_args(args)?;
+        let cell: memory::Cell<dialog_effects::method::Get> = deserialize_from_args(args)?;
+        Ok(dialog_effects::Chain::<dialog_effects::method::Get>::under(
+            dialog_capability::Subject::from(subject.clone()),
+        )
+        .attenuate(memory::Memory::<dialog_effects::method::Get>::new())
+        .attenuate(space)
+        .attenuate(cell)
+        .attenuate(memory::Watch))
+    }
+}
 impl FromUcanArgs for memory::Publish {
     type Attenuation = memory::PublishAttenuation;
     fn capability_from_args(
@@ -367,12 +386,34 @@ where
     Resolver: dialog_capability::Provider<Resolve> + dialog_common::ConditionalSync,
     Revocations: dialog_ucan_core::revocation::RevocationChecker + dialog_common::ConditionalSync,
 {
+    verify_invocation_at(
+        container,
+        resolver,
+        revocations,
+        dialog_ucan_core::time::Timestamp::now(),
+    )
+    .await
+}
+
+/// [`verify_invocation`], judging the chain's time bounds at `at` rather
+/// than now: a service that checks again, while a watch runs, whether the
+/// authority behind it still holds, judges at the time it checks.
+pub async fn verify_invocation_at<Resolver, Revocations>(
+    container: dialog_ucan_core::Container,
+    resolver: &Resolver,
+    revocations: &Revocations,
+    at: dialog_ucan_core::time::Timestamp,
+) -> Result<InvocationChain<dialog_varsig::AnySignature>, AuthorizeError>
+where
+    Resolver: dialog_capability::Provider<Resolve> + dialog_common::ConditionalSync,
+    Revocations: dialog_ucan_core::revocation::RevocationChecker + dialog_common::ConditionalSync,
+{
     let chain = InvocationChain::try_from(container).map_err(|e| AuthorizeError::Malformed {
         detail: e.to_string(),
     })?;
     let resolver = PerformingResolver::new(resolver);
     let environment = Environment::new(chain.proof_store(), resolver, revocations);
-    let context = VerificationContext::new(&environment);
+    let context = VerificationContext::at(&environment, Some(at));
     chain.verify(&context).await.map_err(|e| match e {
         ContainerError::InvalidDelegationSignature { issuer, .. } => {
             AuthorizeError::InvalidSignature { issuer }
