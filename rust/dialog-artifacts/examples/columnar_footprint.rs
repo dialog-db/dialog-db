@@ -12,15 +12,21 @@
 //! cargo run --release --package dialog-artifacts \
 //!   --features debug,helpers --example columnar_footprint
 //! ```
-#![cfg(all(feature = "debug", feature = "helpers", not(target_arch = "wasm32")))]
+#![cfg(all(feature = "debug", feature = "helpers"))]
 
+#[cfg(not(target_arch = "wasm32"))]
 use dialog_artifacts::helpers::generate_data;
+#[cfg(not(target_arch = "wasm32"))]
 use dialog_artifacts::tree::ArtifactTree;
+#[cfg(not(target_arch = "wasm32"))]
 use dialog_artifacts::{ArchiveDelta, Instruction, Key, State, apply_buffered};
+#[cfg(not(target_arch = "wasm32"))]
 use dialog_search_tree::{MemoryBlocks, NodeBody, PersistentNode};
 
+#[cfg(not(target_arch = "wasm32"))]
 const ENTITIES: usize = 20_000;
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // generate_data emits ~5 facts per entity across 5 recurring attributes
@@ -157,3 +163,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
