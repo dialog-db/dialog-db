@@ -87,6 +87,37 @@ pub enum ReplicateError {
     Push(#[from] PushError),
 }
 
+/// Why where a contact is reached could not be learned.
+#[derive(Error, Debug)]
+pub enum DiscoverContactError {
+    /// The contact could not be looked up or recorded.
+    #[error(transparent)]
+    Contact(#[from] AddAddressError),
+
+    /// The contact is not named by a DID, so there is no document to read.
+    #[error("Contact {peer} is not named by a DID")]
+    NotADid {
+        /// The contact's entity.
+        peer: String,
+    },
+
+    /// The contact's DID document could not be read.
+    #[error("Failed to discover {did}: {source}")]
+    Discover {
+        /// The DID discovered.
+        did: String,
+        /// Why it failed.
+        source: dialog_did_web::ResolveError,
+    },
+
+    /// The contact's DID document names no access service.
+    #[error("{did} names no access service")]
+    NoAccessService {
+        /// The DID discovered.
+        did: String,
+    },
+}
+
 /// Errors returned by the publish remote branch command.
 #[derive(Error, Debug)]
 pub enum PublishRemoteBranchError {

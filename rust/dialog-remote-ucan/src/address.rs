@@ -2,6 +2,7 @@
 //! service is spoken to with.
 
 use dialog_capability::{SiteAddress, SiteId};
+use dialog_did_web::Service;
 use dialog_remote_ucan_s3::UcanAddress as PermitAddress;
 use serde::{Deserialize, Serialize};
 
@@ -92,6 +93,38 @@ impl UcanAddress {
     }
 }
 
+/// The kind of a DID document's service entry that names an access
+/// service's endpoint.
+pub const ACCESS_SERVICE: &str = "UcanAccessService";
+
+/// The kind of a DID document's service entry that names an access
+/// service's socket.
+pub const ACCESS_SOCKET: &str = "UcanAccessSocket";
+
+impl UcanAddress {
+    /// The address a DID document's services name for its access service:
+    /// the endpoint of its [`ACCESS_SERVICE`] entry, and the socket of its
+    /// [`ACCESS_SOCKET`] entry when it has one. `None` when the services
+    /// name no access service.
+    pub fn from_services(services: &[Service]) -> Option<Self> {
+        let endpoint = services
+            .iter()
+            .find(|service| service.is(ACCESS_SERVICE))
+            .and_then(Service::url)?;
+        let address = Self::new(endpoint);
+        Some(
+            match services
+                .iter()
+                .find(|service| service.is(ACCESS_SOCKET))
+                .and_then(Service::url)
+            {
+                Some(socket) => address.with_socket(socket),
+                None => address,
+            },
+        )
+    }
+}
+
 impl SiteAddress for UcanAddress {
     type Site = UcanSite;
 }
@@ -147,6 +180,42 @@ mod tests {
         assert_eq!(
             serde_ipld_dagcbor::to_vec(&plain).unwrap(),
             serde_ipld_dagcbor::to_vec(&theirs).unwrap(),
+        );
+    }
+
+    fn service(kind: &str, endpoint: serde_json::Value) -> Service {
+        Service {
+            id: None,
+            kinds: vec![kind.to_string()],
+            endpoint,
+        }
+    }
+
+    /// A DID document's services name an access service by its endpoint,
+    /// with its socket when it has one.
+    #[dialog_common::test]
+    fn it_reads_the_address_the_services_name() {
+        let endpoint = service(ACCESS_SERVICE, "https://access.example/ucan/".into());
+        let socket = service(ACCESS_SOCKET, "wss://access.example/ucan/".into());
+        let other = service("Other", "https://elsewhere.example/".into());
+
+        assert_eq!(
+            UcanAddress::from_services(&[other.clone(), endpoint.clone(), socket]),
+            Some(
+                UcanAddress::new("https://access.example/ucan/")
+                    .with_socket("wss://access.example/ucan/")
+            )
+        );
+        assert_eq!(
+            UcanAddress::from_services(&[endpoint]),
+            Some(UcanAddress::new("https://access.example/ucan/")),
+            "no socket entry, no socket"
+        );
+        assert_eq!(UcanAddress::from_services(&[other]), None);
+        assert_eq!(
+            UcanAddress::from_services(&[service(ACCESS_SERVICE, serde_json::json!({}))]),
+            None,
+            "an endpoint that is not a URL names no address"
         );
     }
 

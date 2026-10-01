@@ -91,6 +91,7 @@ use dialog_capability::identity::Entity;
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
 use dialog_credentials::SignerCredential;
+use dialog_did_web::{CachingResolver, Discover, ResolveError, Service, WebResolver};
 use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
 use dialog_effects::peer::PeerConnection;
 use dialog_effects::storage::{Directory, Location};
@@ -109,6 +110,29 @@ use dialog_varsig::{Did, Principal};
 use parking_lot::Mutex;
 
 use access::ChainCache;
+
+/// What a peer learns where a DID's subject is reached with: the services
+/// its document names (see [`Discover`]).
+///
+/// By default a peer resolves `did:key` locally and `did:web` and `did:plc`
+/// over the network, and caches nothing of it (see
+/// [`PeerBuilder::discovery`] to change that).
+pub trait Discovery: Provider<Discover> + ConditionalSend + ConditionalSync {}
+
+impl<T> Discovery for T where T: Provider<Discover> + ConditionalSend + ConditionalSync {}
+
+/// The discovery a peer has when it is given none.
+pub(crate) fn default_discovery() -> Arc<dyn Discovery> {
+    Arc::new(CachingResolver::new(WebResolver::new()))
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S: Clone + ConditionalSend + ConditionalSync, M: Mode> Provider<Discover> for Peer<S, M> {
+    async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
+        self.inner.discovery.execute(input).await
+    }
+}
 
 /// The space provider bound a peer's storage must satisfy for the peer
 /// to provide every effect, including the remote forks, and to mount its
@@ -250,6 +274,8 @@ pub(crate) struct Inner {
     network: Network,
     /// The shared runtime: hydration scheduler and speculation queue.
     runtime: Runtime,
+    /// What the peer learns where a DID's subject is reached with.
+    discovery: Arc<dyn Discovery>,
     /// The branch that holds this peer's state, opened. Proofs resolve
     /// from its `dialog.ucan/*` facts and retained delegations commit
     /// into it.
@@ -397,6 +423,11 @@ impl<S: Clone, M: Mode> Peer<S, M> {
     /// The shared runtime this peer performs through.
     pub fn runtime(&self) -> &Runtime {
         &self.inner.runtime
+    }
+
+    /// What the peer learns where a DID's subject is reached with.
+    pub(crate) fn discovery(&self) -> &Arc<dyn Discovery> {
+        &self.inner.discovery
     }
 
     /// The scheduler every remote block read of this peer goes through:
