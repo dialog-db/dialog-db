@@ -459,8 +459,15 @@ async fn it_labels_the_request_with_the_command_and_the_subject() {
 mod layer {
     use super::*;
     use crate::{FRESHNESS, Issuance};
+    use dialog_ucan_core::promise::Promised;
+    use dialog_ucan_core::subject::Subject as DelegatedSubject;
     use dialog_ucan_core::time::timestamp::{Duration, Timestamp, UNIX_EPOCH};
-    use dialog_ucan_core::{InvocationBuilder, InvocationChain};
+    use dialog_ucan_core::{
+        DelegationBuilder, InvocationBuilder, InvocationChain, RevocationChecker, RevocationMatch,
+        RevocationSelector,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     async fn credential_for<Fx>(signer: &Ed25519Signer, capability: &Capability<Fx>) -> String
     where
@@ -847,5 +854,210 @@ mod layer {
             "{:?}",
             refused.err()
         );
+    }
+
+    /// Answers a revocation of `delegation` (its content identifier), by
+    /// `principal`, once `revoked` is set.
+    #[derive(Clone)]
+    struct Revocable {
+        delegation: String,
+        principal: dialog_capability::Did,
+        revoked: Arc<AtomicBool>,
+    }
+
+    impl RevocationChecker for Revocable {
+        type Error = std::convert::Infallible;
+
+        async fn query(
+            &self,
+            selector: RevocationSelector<'_>,
+        ) -> Result<Option<RevocationMatch>, Self::Error> {
+            let revoked = self.revoked.load(Ordering::SeqCst)
+                && selector.delegation.to_string() == self.delegation
+                && selector.by.contains(&self.principal);
+            Ok(revoked.then(|| RevocationMatch {
+                revocation: selector.delegation,
+                principal: self.principal.clone(),
+            }))
+        }
+    }
+
+    /// A watch of the cell `head` in `local`, made by an operator the
+    /// subject delegated reading its cells to: the delegation's content
+    /// identifier, the subject, and the watch.
+    async fn delegated_watch() -> (String, Ed25519Signer, Container) {
+        let subject = Ed25519Signer::generate().await.expect("a subject");
+        let operator = Ed25519Signer::generate().await.expect("an operator");
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(["use", "get", "memory", "cell"].map(String::from).to_vec())
+            .try_build()
+            .await
+            .expect("the delegation mints");
+        let cid = delegation.to_cid();
+        let mut arguments = std::collections::BTreeMap::new();
+        arguments.insert("space".to_string(), Promised::String("local".into()));
+        arguments.insert("cell".to_string(), Promised::String("head".into()));
+        let invocation = InvocationBuilder::new()
+            .issuer(operator)
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(
+                ["use", "get", "memory", "cell", "watch"]
+                    .map(String::from)
+                    .to_vec(),
+            )
+            .arguments(arguments)
+            .proofs(vec![cid])
+            .issued_at(Timestamp::now())
+            .try_build()
+            .await
+            .expect("the watch mints");
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, Arc::new(delegation));
+        let chain = InvocationChain::new(invocation, delegations);
+        (cid.to_string(), subject, Container::from(&chain))
+    }
+
+    /// A watch is accepted with what the cell holds when it begins, and is
+    /// named by its invocation.
+    #[dialog_common::test]
+    async fn it_subscribes_a_watch_with_what_the_cell_holds() {
+        let (signer, subject) = owner().await;
+        let content = b"held".to_vec();
+        let publish =
+            CellScope::new(subject.clone(), "local", "head").publish(content.clone(), None);
+        let access = Access::new(MemoryStore::default());
+        let value = credential_for(&signer, &publish).await;
+        let (status, _) = performed(
+            access
+                .handle(Request::new(Some(&value)).payload(content.clone()))
+                .await,
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let watch = CellScope::new(subject.clone(), "local", "head").watch();
+        let minted = issued(&signer, &watch).await;
+        let chain = minted.invocation().chain();
+        let (subscription, state) = access
+            .subscribe(Container::from(chain))
+            .await
+            .expect("the watch is accepted");
+
+        assert_eq!(state.map(|edition| edition.content), Some(content));
+        assert_eq!(
+            subscription.invocation(),
+            chain.invocation.to_cid().to_string()
+        );
+        assert!(subscription.follows(subject.did(), "local", "head"));
+        assert!(!subscription.follows(subject.did(), "local", "tail"));
+    }
+
+    /// A watch is authority that lasts, so one that does not say when it
+    /// was issued is refused as stale, where a request would be served.
+    #[dialog_common::test]
+    async fn it_refuses_a_watch_that_does_not_say_when_it_was_issued() {
+        let (signer, subject) = owner().await;
+        let watch = CellScope::new(subject, "local", "head").watch();
+        let access = Access::new(MemoryStore::default());
+        let value = issued_at(&signer, &watch, None).await;
+        let container = crate::direct::credential_container(&value).expect("reads");
+
+        match access.subscribe(container).await {
+            Err(Answer::Refused(refusal)) => assert!(
+                matches!(
+                    refusal.reason(),
+                    AuthorizeError::Stale {
+                        issued_at: None,
+                        ..
+                    }
+                ),
+                "{:?}",
+                refusal.reason()
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// An invocation that is not a watch is not taken for one.
+    #[dialog_common::test]
+    async fn it_subscribes_nothing_but_a_watch() {
+        let (signer, subject) = owner().await;
+        let resolve = CellScope::new(subject, "local", "head").resolve();
+        let access = Access::new(MemoryStore::default());
+        let minted = issued(&signer, &resolve).await;
+        let answer = access
+            .subscribe(Container::from(minted.invocation().chain()))
+            .await;
+        assert!(matches!(answer, Err(Answer::Unsupported)), "{answer:?}");
+    }
+
+    /// A watch whose delegation is revoked after it began keeps being
+    /// delivered to until its authority is checked again, which happens
+    /// once the recheck interval has passed since it last held, and is
+    /// then refused as revoked.
+    #[dialog_common::test]
+    async fn it_refuses_a_running_watch_once_its_delegation_is_revoked() {
+        let (delegation, subject, watch) = delegated_watch().await;
+        let revoked = Arc::new(AtomicBool::new(false));
+        let access = Access::new(MemoryStore::default()).with_revocations(Revocable {
+            delegation,
+            principal: subject.did(),
+            revoked: revoked.clone(),
+        });
+        let (mut subscription, state) = access.subscribe(watch).await.expect("accepted");
+        assert_eq!(state, None, "nothing is published yet");
+        let began = subscription.checked();
+        let interval = std::time::Duration::from_secs(60);
+
+        revoked.store(true, Ordering::SeqCst);
+        access
+            .recheck(&mut subscription, interval, began + 30)
+            .await
+            .expect("within the interval the authority is not checked again");
+
+        let refused = access
+            .recheck(&mut subscription, interval, began + 60)
+            .await
+            .expect_err("past the interval the revocation is found");
+        assert!(
+            matches!(refused.reason(), AuthorizeError::Revoked { .. }),
+            "{:?}",
+            refused.reason()
+        );
+        assert_eq!(
+            subscription.checked(),
+            began,
+            "a refused check holds nothing"
+        );
+    }
+
+    /// A watch whose authority still holds is found to, and when.
+    #[dialog_common::test]
+    async fn it_keeps_a_running_watch_whose_authority_holds() {
+        let (_, _, watch) = delegated_watch().await;
+        let access = Access::new(MemoryStore::default());
+        let (mut subscription, _) = access.subscribe(watch).await.expect("accepted");
+        let at = subscription.checked() + 120;
+        access
+            .recheck(&mut subscription, std::time::Duration::from_secs(60), at)
+            .await
+            .expect("the authority holds");
+        assert_eq!(subscription.checked(), at);
+    }
+
+    /// A subscription is data a service can store between messages and
+    /// read back whole.
+    #[dialog_common::test]
+    async fn it_stores_a_subscription_and_reads_it_back() {
+        let (_, _, watch) = delegated_watch().await;
+        let access = Access::new(MemoryStore::default());
+        let (subscription, _) = access.subscribe(watch).await.expect("accepted");
+        let bytes = serde_ipld_dagcbor::to_vec(&subscription).expect("encodes");
+        let read: crate::Subscription = serde_ipld_dagcbor::from_slice(&bytes).expect("decodes");
+        assert_eq!(read, subscription);
     }
 }

@@ -34,11 +34,11 @@ use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{self, BlobError, BlobReader};
 use dialog_effects::memory::prelude::MemoryExt as _;
 use dialog_effects::memory::{self, Cell, PublishAttenuation, Space};
-use dialog_remote_ucan_s3::{Args, FromUcanArgs, verify_invocation};
+use dialog_remote_ucan_s3::{Args, FromUcanArgs, verify_invocation, verify_invocation_at};
 use dialog_ucan_core::revocation::RevocationChecker;
 use dialog_ucan_core::{Container, InvocationChain, UnverifiedRevocations};
 use dialog_varsig::AnySignature;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::direct::{OBJECT_MEDIA_TYPE, credential_container, is_credential};
 
@@ -440,6 +440,39 @@ impl Verified {
     }
 }
 
+/// A watch the service accepted: the cell it follows, and the invocation
+/// that authorized it, kept so that its authority can be checked again
+/// for as long as the watch runs.
+///
+/// Plain data, so a service that keeps its watches between messages (a
+/// Durable Object that hibernates, say) stores it and reads it back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subscription {
+    invocation: String,
+    subject: Did,
+    space: String,
+    cell: String,
+    container: Vec<u8>,
+    checked: u64,
+}
+
+impl Subscription {
+    /// The watch invocation's content identifier, which names the watch.
+    pub fn invocation(&self) -> &str {
+        &self.invocation
+    }
+
+    /// Whether the watch follows the cell `cell` in `space` of `subject`.
+    pub fn follows(&self, subject: &Did, space: &str, cell: &str) -> bool {
+        &self.subject == subject && self.space == space && self.cell == cell
+    }
+
+    /// When the watch's authority was last found to hold, in Unix seconds.
+    pub fn checked(&self) -> u64 {
+        self.checked
+    }
+}
+
 /// How the layer answered a request.
 #[derive(Debug)]
 pub enum Answer {
@@ -522,6 +555,111 @@ where
             return Err(AuthorizeError::Replayed { invocation }.into());
         }
         Ok(Verified { chain })
+    }
+
+    /// Accept a watch: admit the invocation, which must say when it was
+    /// issued (see [`Issuance`]), and answer the subscription with what
+    /// the cell holds now.
+    ///
+    /// A watch is authority that lasts, so an invocation that could not
+    /// be aged is not accepted for one. Anything that is not a watch, or
+    /// does not verify, is answered as a request would be.
+    pub async fn subscribe(
+        &self,
+        container: Container,
+    ) -> Result<(Subscription, memory::CellState), Answer>
+    where
+        P: Store,
+    {
+        let bytes = container.to_bytes().map_err(|error| {
+            Answer::Refused(Refusal(AuthorizeError::Malformed {
+                detail: error.to_string(),
+            }))
+        })?;
+        let verified = self
+            .admit(container, Issuance::Required)
+            .await
+            .map_err(Answer::Refused)?;
+        if verified.command() != ["use", "get", "memory", "cell", "watch"] {
+            return Err(Answer::Unsupported);
+        }
+        let subject = verified.subject().clone();
+        let watch = memory::Watch::capability_from_args(&subject, verified.chain().arguments())
+            .map_err(|error| {
+                Answer::Refused(Refusal(AuthorizeError::Malformed {
+                    detail: error.to_string(),
+                }))
+            })?;
+        let space = Space::<dialog_effects::method::Get>::of(&watch)
+            .space
+            .clone();
+        let cell = Cell::<dialog_effects::method::Get>::of(&watch).cell.clone();
+        // What the cell holds now is what a resolve of it would read: the
+        // same cell, named by the same arguments.
+        let resolve = memory::Resolve::capability_from_args(&subject, verified.chain().arguments())
+            .map_err(|error| {
+                Answer::Refused(Refusal(AuthorizeError::Malformed {
+                    detail: error.to_string(),
+                }))
+            })?;
+        let state = match Provider::<memory::Resolve>::execute(&self.provider, resolve).await {
+            Ok(state) => state,
+            Err(error) => {
+                return Err(match Failure::from(error) {
+                    Failure::Refused(refusal) => Answer::Refused(refusal),
+                    Failure::Answered(response) => Answer::Performed(response),
+                });
+            }
+        };
+        let subscription = Subscription {
+            invocation: verified.chain().invocation.to_cid().to_string(),
+            subject,
+            space,
+            cell,
+            container: bytes,
+            checked: now_s(),
+        };
+        Ok((subscription, state))
+    }
+
+    /// Check, before delivering to `subscription` at `at` (Unix seconds),
+    /// that the authority behind the watch still holds, when it was last
+    /// found to hold more than `interval` before.
+    ///
+    /// The invocation's chain is verified again as of `at`: a delegation
+    /// that lapsed or was revoked since the watch began is refused, as
+    /// [`AuthorizeError::Expired`] or [`AuthorizeError::Revoked`], and so
+    /// is the watch's own invocation once its `exp` passes. Its issue time
+    /// is not judged again: it was fresh when the watch began. Checking
+    /// only when there is something to deliver means a watch nothing
+    /// happens to costs nothing, and that what reaches a watcher after its
+    /// authority ends is bounded by `interval`.
+    pub async fn recheck(
+        &self,
+        subscription: &mut Subscription,
+        interval: Duration,
+        at: u64,
+    ) -> Result<(), Refusal> {
+        if subscription.checked.saturating_add(interval.as_secs()) > at {
+            return Ok(());
+        }
+        let container = Container::from_bytes(&subscription.container).map_err(|error| {
+            Refusal(AuthorizeError::Malformed {
+                detail: error.to_string(),
+            })
+        })?;
+        let time = dialog_ucan_core::time::Timestamp::new(
+            dialog_ucan_core::time::timestamp::UNIX_EPOCH
+                + dialog_ucan_core::time::timestamp::Duration::from_secs(at),
+        )
+        .map_err(|error| {
+            Refusal(AuthorizeError::Unavailable {
+                detail: error.to_string(),
+            })
+        })?;
+        verify_invocation_at(container, self.resolver.as_ref(), &*self.revocations, time).await?;
+        subscription.checked = at;
+        Ok(())
     }
 
     /// Answer a request: read the invocation out of its `Authorization`
