@@ -458,6 +458,9 @@ async fn it_labels_the_request_with_the_command_and_the_subject() {
 /// does not perform, and a body that is not what the invocation bound.
 mod layer {
     use super::*;
+    use crate::{FRESHNESS, Issuance};
+    use dialog_ucan_core::time::timestamp::{Duration, Timestamp, UNIX_EPOCH};
+    use dialog_ucan_core::{InvocationBuilder, InvocationChain};
 
     async fn credential_for<Fx>(signer: &Ed25519Signer, capability: &Capability<Fx>) -> String
     where
@@ -519,15 +522,18 @@ mod layer {
             .put(Buffer::from(content.clone()));
         let authorization = issued(&signer, &put).await;
         let container = Container::from(authorization.invocation().chain());
-        let access = Access::new(MemoryStore::default());
+        // One invocation, read in each form by a service of its own: a
+        // service that saw it once would refuse it as presented again.
+        let store = MemoryStore::default();
         for tag in [Tag::Base64Url, Tag::Base64UrlGzip] {
+            let access = Access::new(store.clone());
             let text = String::from_utf8(container.clone().encode(tag).unwrap()).unwrap();
             let value = format!("UCAN {text}");
             let request = Request::new(Some(&value)).payload(content.clone());
             let (status, _) = performed(access.handle(request).await).await;
             assert_eq!(status, 200, "{tag:?}");
         }
-        assert_eq!(access.provider().blocks(), 1);
+        assert_eq!(store.blocks(), 1);
     }
 
     #[dialog_common::test]
@@ -682,5 +688,164 @@ mod layer {
         async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
             Ok(self.pieces.pop_front())
         }
+    }
+
+    /// The credential for `capability`, minted by `signer` on its own
+    /// authority, saying it was issued at `issued_at` (Unix seconds), or not
+    /// saying when.
+    async fn issued_at<Fx>(
+        signer: &Ed25519Signer,
+        capability: &Capability<Fx>,
+        issued_at: Option<u64>,
+    ) -> String
+    where
+        Fx: Effect + Clone,
+        Capability<Fx>: Ability,
+    {
+        let minted = issued(signer, capability).await;
+        let arguments = minted.invocation().chain().arguments().clone();
+        let command = capability
+            .ability()
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(String::from)
+            .collect();
+        let builder = InvocationBuilder::new()
+            .issuer(Signer::from(signer.clone()))
+            .audience(signer)
+            .subject(signer)
+            .command(command)
+            .arguments(arguments)
+            .proofs(Vec::new());
+        let builder = match issued_at {
+            Some(at) => builder
+                .issued_at(Timestamp::new(UNIX_EPOCH + Duration::from_secs(at)).expect("in range")),
+            None => builder,
+        };
+        let invocation = builder.try_build().await.expect("the invocation mints");
+        let chain = InvocationChain::new(invocation, Default::default());
+        credential(Container::from(&chain)).expect("encodes")
+    }
+
+    fn refused(answer: Answer) -> AuthorizeError {
+        match answer {
+            Answer::Refused(refusal) => {
+                assert_eq!(refusal.status(), 401, "a fresh invocation would do");
+                refusal.reason().clone()
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Every invocation the client mints says when it was issued.
+    #[dialog_common::test]
+    async fn it_mints_invocations_that_say_when_they_were_issued() {
+        let (signer, subject) = owner().await;
+        let resolve = CellScope::new(subject, "local", "head").resolve();
+        let minted = issued(&signer, &resolve).await;
+        let issued = minted
+            .invocation()
+            .chain()
+            .invocation
+            .issued_at()
+            .map(|at| at.to_unix());
+        let at = now_s();
+        assert!(
+            issued.is_some_and(|issued| issued + 5 >= at && issued <= at),
+            "issued at {issued:?}, checked at {at}"
+        );
+    }
+
+    /// An invocation presented a second time is refused, whatever it
+    /// would do, and does not do it again.
+    #[dialog_common::test]
+    async fn it_refuses_an_invocation_presented_twice() {
+        let (signer, subject) = owner().await;
+        let content = b"first".to_vec();
+        let publish =
+            CellScope::new(subject.clone(), "local", "head").publish(content.clone(), None);
+        let access = Access::new(MemoryStore::default());
+        let value = credential_for(&signer, &publish).await;
+
+        let request = Request::new(Some(&value)).payload(content.clone());
+        let (status, _) = performed(access.handle(request).await).await;
+        assert_eq!(status, 200);
+        let version = access
+            .provider()
+            .cell(&subject, "local", "head")
+            .map(|edition| edition.version);
+
+        let request = Request::new(Some(&value)).payload(content);
+        let reason = refused(access.handle(request).await);
+        assert!(
+            matches!(reason, AuthorizeError::Replayed { .. }),
+            "{reason:?}"
+        );
+        assert_eq!(
+            access
+                .provider()
+                .cell(&subject, "local", "head")
+                .map(|edition| edition.version),
+            version,
+            "the replay wrote nothing"
+        );
+    }
+
+    /// An invocation issued longer ago than the freshness window is
+    /// refused as stale, and what it would write is not written.
+    #[dialog_common::test]
+    async fn it_refuses_an_invocation_issued_too_long_ago() {
+        let (signer, subject) = owner().await;
+        let content = b"late".to_vec();
+        let publish =
+            CellScope::new(subject.clone(), "local", "head").publish(content.clone(), None);
+        let access = Access::new(MemoryStore::default());
+        let long_ago = now_s() - FRESHNESS.as_secs() - 60;
+        let value = issued_at(&signer, &publish, Some(long_ago)).await;
+
+        let request = Request::new(Some(&value)).payload(content);
+        let reason = refused(access.handle(request).await);
+        assert!(
+            matches!(
+                reason,
+                AuthorizeError::Stale {
+                    issued_at: Some(_),
+                    ..
+                }
+            ),
+            "{reason:?}"
+        );
+        assert!(
+            access.provider().cell(&subject, "local", "head").is_none(),
+            "the stale invocation wrote nothing"
+        );
+    }
+
+    /// An invocation that does not say when it was issued is served where
+    /// saying is optional, as over HTTP, and refused where it is required.
+    #[dialog_common::test]
+    async fn it_requires_an_issue_time_only_where_asked() {
+        let (signer, subject) = owner().await;
+        let resolve = CellScope::new(subject, "local", "head").resolve();
+        let access = Access::new(MemoryStore::default());
+
+        let value = issued_at(&signer, &resolve, None).await;
+        let (status, _) = performed(access.handle(Request::new(Some(&value))).await).await;
+        assert_eq!(status, 404, "served: the cell is empty");
+
+        let value = issued_at(&signer, &resolve, None).await;
+        let container = crate::direct::credential_container(&value).expect("reads");
+        let refused = access.admit(container, Issuance::Required).await;
+        assert!(
+            matches!(
+                refused.as_ref().map_err(|refusal| refusal.reason()),
+                Err(AuthorizeError::Stale {
+                    issued_at: None,
+                    ..
+                })
+            ),
+            "{:?}",
+            refused.err()
+        );
     }
 }

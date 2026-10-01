@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use base58::ToBase58;
-use dialog_capability::{Capability, Policy, Provider};
+use dialog_capability::{Capability, Policy, Provider, Subject};
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::prelude::{GetExt, PutExt};
 use dialog_effects::archive::{self, ArchiveError, Catalog};
@@ -56,6 +56,20 @@ impl MemoryStore {
     /// How many blobs the store holds.
     pub fn blobs(&self) -> usize {
         self.inner.lock().expect("store lock").blobs.len()
+    }
+
+    /// What the cell `cell` in `space` of `subject` holds, if anything.
+    pub fn cell(&self, subject: &Subject, space: &str, cell: &str) -> Option<Edition<Vec<u8>>> {
+        let key = (subject.to_string(), space.to_string(), cell.to_string());
+        self.inner
+            .lock()
+            .expect("store lock")
+            .cells
+            .get(&key)
+            .map(|(content, version)| Edition {
+                content: content.clone(),
+                version: version.clone(),
+            })
     }
 }
 
