@@ -57,6 +57,7 @@ dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-ucan-core = { workspace = true, features = ["helpers"] }
 dialog-remote-fs = { workspace = true }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
+dialog-remote-ucan = { workspace = true, features = ["helpers"] }
 dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }

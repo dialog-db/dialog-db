@@ -19,6 +19,9 @@ pub use publish::*;
 mod reference;
 pub use reference::*;
 
+mod watch;
+pub use watch::*;
+
 /// A branch of a [`ConnectedReplica`], loaded.
 ///
 /// Produced by opening or loading a [`LoadedRemoteBranchReference`].
@@ -119,5 +122,11 @@ impl ConnectedBranch {
     /// if it is ahead of the head already known.
     pub fn observe(&self, edition: RemoteEdition) -> ObserveRemoteBranch<'_> {
         ObserveRemoteBranch::new(self, edition)
+    }
+
+    /// Follow the remote branch's head as it moves, recording each head
+    /// that is ahead of the one known.
+    pub fn watch(&self) -> WatchRemoteBranch<'_> {
+        WatchRemoteBranch::new(self)
     }
 }

@@ -48,6 +48,45 @@ pub enum ObserveRemoteBranchError {
     Publish(#[from] PublishError),
 }
 
+/// Errors a watch of a remote branch answers.
+#[derive(Error, Debug)]
+pub enum WatchRemoteBranchError {
+    /// The remote did not follow the branch, or stopped: it cannot
+    /// (`Rejection::Unsupported`), could not be reached, or refused.
+    #[error("Failed to watch the remote branch: {0}")]
+    Watch(#[from] MemoryError),
+
+    /// A head the remote delivered could not be read.
+    #[error("Failed to read a watched head: {0}")]
+    Decode(#[from] ResolveError),
+
+    /// A head the remote delivered could not be recorded.
+    #[error("Failed to record a watched head: {0}")]
+    Observe(#[from] ObserveRemoteBranchError),
+}
+
+/// What went wrong while replicating a branch. None of these end the
+/// replication: it goes on, and tries again on what comes next.
+#[derive(Error, Debug)]
+pub enum ReplicateError {
+    /// An upstream could not be opened to watch.
+    #[error("Failed to open an upstream to watch: {0}")]
+    Open(#[from] OpenRemoteBranchError),
+
+    /// An upstream's head could not be watched, or a watched head not
+    /// recorded.
+    #[error(transparent)]
+    Watch(#[from] WatchRemoteBranchError),
+
+    /// Pulling from the upstreams failed.
+    #[error(transparent)]
+    Pull(#[from] PullError),
+
+    /// Pushing to the upstreams failed.
+    #[error(transparent)]
+    Push(#[from] PushError),
+}
+
 /// Errors returned by the publish remote branch command.
 #[derive(Error, Debug)]
 pub enum PublishRemoteBranchError {
