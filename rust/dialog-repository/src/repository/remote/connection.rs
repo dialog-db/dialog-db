@@ -123,6 +123,15 @@ impl Resend<MemoryError> for memory::Resolve {
     }
 }
 
+/// A watch is a read: one an address could not carry out, or does not
+/// carry out at all, may be tried at the peer's next address, which may
+/// follow the cell where the first could not.
+impl Resend<MemoryError> for memory::Watch {
+    fn resend(error: &MemoryError) -> bool {
+        error.unreachable() || matches!(error, MemoryError::Rejected(Rejection::Unsupported { .. }))
+    }
+}
+
 impl Resend<MemoryError> for memory::Publish {
     fn resend(error: &MemoryError) -> bool {
         matches!(error, MemoryError::Rejected(Rejection::Unavailable { .. }))

@@ -78,6 +78,9 @@ pub use push::*;
 mod reference;
 pub use reference::*;
 
+mod replicate;
+pub use replicate::*;
+
 mod reset;
 pub use reset::*;
 
