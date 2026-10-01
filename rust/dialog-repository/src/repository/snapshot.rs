@@ -769,8 +769,9 @@ impl SnapshotExport {
             }
             drop(spill_reads);
 
-            // Blob bytes, discovered above. The size comes from the tree's
-            // own blob index rather than the traversal: `import` is opened
+            // Blob bytes, discovered above. The size comes from what the
+            // tree records for the content (its asset fact, or a legacy
+            // blob-index entry) rather than the traversal: `import` is opened
             // with it, and reading it costs no byte fetch. Each blob's
             // whole fetch (and, under a downloading reach, its local
             // import) is one future; they run concurrently (bounded) and
@@ -786,8 +787,8 @@ impl SnapshotExport {
                 async move {
                     // The walk takes every assert it passes for a
                     // reference, including one a newer removal higher in
-                    // the tree supersedes. The tree's own blob index says
-                    // whether the blob is still referenced; one it no longer
+                    // the tree supersedes. What the tree records for the
+                    // content says whether the blob is still referenced; one it no longer
                     // names is not this export's to carry.
                     let Some(size) = tree.content_size(index, digest.as_bytes()).await? else {
                         return Ok((digest, Found::Unreferenced));

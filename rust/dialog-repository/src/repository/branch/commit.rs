@@ -60,7 +60,7 @@ impl<'a, Changes> Commit<'a, Changes> {
         self
     }
 
-    /// Append pre-built machinery entries (blob-index edits) to the same
+    /// Append pre-built machinery entries (blob-index tombstones) to the same
     /// batch, so they seal, persist, and publish with the commit's data in
     /// one revision. Entries make the commit non-empty even when the change
     /// stream is all no-ops.
@@ -621,7 +621,7 @@ where
             .await?
         };
         // Machinery entries count as changes: a commit carrying only a
-        // blob-index edit still advances the head.
+        // blob-index tombstone still advances the head.
         let changed = batch.changed() || !self.entries.is_empty();
 
         // A batch that left the indexes untouched (e.g. a transaction
@@ -747,7 +747,7 @@ where
         // they ride the same buffered write as the data, so the record costs
         // a buffer append instead of a second canonical spine-to-leaf edit.
         let entries = record.entries(batch.manifest())?;
-        // The caller's machinery entries (blob-index edits) ride the same
+        // The caller's machinery entries (blob-index tombstones) ride the same
         // batch as the revision record, so one seal covers data, record,
         // and entries together.
         let batch = batch.record(&store, self.entries).await?;
