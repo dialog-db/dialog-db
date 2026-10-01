@@ -7,6 +7,9 @@ pub use fetch::*;
 mod load;
 pub use load::*;
 
+mod observe;
+pub use observe::*;
+
 mod open;
 pub use open::*;
 
@@ -110,5 +113,11 @@ impl ConnectedBranch {
     /// Publish a revision to the remote.
     pub fn publish(&self, revision: Revision) -> PublishRemoteBranch<'_> {
         PublishRemoteBranch::new(self, revision)
+    }
+
+    /// Record a head of the remote branch observed rather than fetched,
+    /// if it is ahead of the head already known.
+    pub fn observe(&self, edition: RemoteEdition) -> ObserveRemoteBranch<'_> {
+        ObserveRemoteBranch::new(self, edition)
     }
 }
