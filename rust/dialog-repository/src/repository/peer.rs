@@ -5,9 +5,11 @@
 //! address, and every replica that names the same service converges on
 //! the same peer:
 //!
-//! - a service reached over HTTP (S3, UCAN) is `did:web` of the
-//!   endpoint's origin and the path it is served under, so two services
-//!   on one host are two peers;
+//! - a UCAN service is `did:web` of its endpoint's origin, the DID its
+//!   host publishes a document for, whatever path the service is served
+//!   under;
+//! - an S3 bucket is `did:web` of its endpoint's origin, with the bucket
+//!   joining as a path segment when the endpoint is path-style;
 //! - a directory on the local filesystem is the `did:key` of the
 //!   Ed25519 key seeded by the Blake3 hash of its file URI, one for one
 //!   directory however its path is spelled.
@@ -345,7 +347,12 @@ async fn find<Env: PeersEnv>(
 /// The DID of the peer reached at `address`, derived from it: the one
 /// place a peer's identity is not given but worked out, for remotes that
 /// never had one.
-pub fn peer_did(address: &SiteAddress) -> Result<Did, PeerError> {
+///
+/// Private to the crate: an application names a peer by the DID it was
+/// given and records the addresses that DID resolves to. Only the upgrade,
+/// carrying remotes that were recorded by address alone, has nothing but
+/// an address to name a peer by.
+pub(crate) fn peer_did(address: &SiteAddress) -> Result<Did, PeerError> {
     match address {
         // A virtual-hosted endpoint names the bucket in its host, so its
         // origin is the store. A path-style one shares its host with every
@@ -355,19 +362,16 @@ pub fn peer_did(address: &SiteAddress) -> Result<Did, PeerError> {
             web(address.endpoint(), [address.bucket()])
         }
         SiteAddress::S3(address) => web(address.endpoint(), []),
-        // A UCAN service is served under a path, and one host may serve
-        // several: the path joins the DID, so each is its own peer.
+        // A UCAN service is the peer its origin names: `did:web` resolves
+        // a bare origin to `/.well-known/did.json`, the document the host
+        // publishes, while a path would name a document under that path
+        // nobody serves. The path is where the service is reached, and
+        // stays in the address.
         SiteAddress::Ucan(address) => {
             let endpoint = Url::parse(&address.endpoint).map_err(|_| PeerError::NoOrigin {
                 endpoint: address.endpoint.clone(),
             })?;
-            let path: Vec<&str> = endpoint
-                .path_segments()
-                .into_iter()
-                .flatten()
-                .filter(|segment| !segment.is_empty())
-                .collect();
-            web(&endpoint, path)
+            web(&endpoint, [])
         }
         SiteAddress::Fs(address) => Ok(key(address.location())),
     }
@@ -526,16 +530,17 @@ mod tests {
     use dialog_storage::provider::storage::VolatileSpace;
     use dialog_varsig::did;
 
-    /// A UCAN service is the `did:web` of its origin and the path it is
-    /// served under, so two services on one host are two peers. The
-    /// DIDs are pinned: a peer's identity is derived from its address,
-    /// so changing the derivation changes every peer on record.
+    /// A UCAN service is the `did:web` of its origin, the DID whose
+    /// document the host publishes at `/.well-known/did.json`, whatever
+    /// path the service is served under. The DIDs are pinned: a peer's
+    /// identity is derived from its address, so changing the derivation
+    /// changes every peer on record.
     #[dialog_common::test]
-    fn it_names_a_ucan_service_by_its_origin_and_path() -> anyhow::Result<()> {
+    fn it_names_a_ucan_service_by_its_origin() -> anyhow::Result<()> {
         let ucan = |endpoint: &str| SiteAddress::from(UcanAddress::new(endpoint));
         assert_eq!(
             peer_did(&ucan("https://tonk.network/ucan/"))?,
-            did!("web:tonk.network:ucan")
+            did!("web:tonk.network")
         );
         assert_eq!(
             peer_did(&ucan("https://tonk.network/"))?,
@@ -543,11 +548,12 @@ mod tests {
         );
         assert_eq!(
             peer_did(&ucan("https://tonk.network/sync/v2/"))?,
-            did!("web:tonk.network:sync:v2")
+            did!("web:tonk.network")
         );
-        assert_ne!(
+        assert_eq!(
             peer_did(&ucan("https://tonk.network/a/"))?,
-            peer_did(&ucan("https://tonk.network/b/"))?
+            peer_did(&ucan("https://tonk.network/b/"))?,
+            "two paths on one origin are one peer"
         );
         Ok(())
     }
@@ -561,7 +567,7 @@ mod tests {
         let ucan = |endpoint: &str| SiteAddress::from(UcanAddress::new(endpoint));
         assert_eq!(
             peer_did(&ucan("http://localhost:8787/ucan"))?,
-            did!("web:localhost%3A8787:ucan")
+            did!("web:localhost%3A8787")
         );
         assert_eq!(
             peer_did(&ucan("https://tonk.network:8443/"))?,

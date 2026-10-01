@@ -450,6 +450,60 @@ mod tests {
         out
     }
 
+    /// A complete export of a branch whose retained delegation was later
+    /// retracted asks only for the blobs the tree still references. The
+    /// retraction removes the envelope's blob record, and when the record
+    /// was asserted further down the tree than the removal landed, the
+    /// assert is still there, superseded. An export that took every assert
+    /// it walked past for a reference demanded a blob the tree no longer
+    /// has, so a replica downloading the head failed on it.
+    #[dialog_common::test]
+    async fn it_exports_a_branch_whose_retained_delegation_was_retracted() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction, Value};
+
+        let (branch, operator) = open_branch("delegation-retract-export").await?;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let chain = delegate(&space, &holder, UcanSubject::Specific(space.did())).await;
+        branch
+            .delegations()
+            .retain(chain.clone())
+            .perform(&operator)
+            .await?;
+
+        // Enough commits after the retain that its blob record is carried
+        // below the root before the retraction lands there.
+        for round in 0..64 {
+            let facts = (0..32).map(|fact| {
+                Instruction::Assert(Artifact {
+                    the: "test/fact".parse().expect("a valid attribute"),
+                    of: format!("test:{round}-{fact}")
+                        .parse()
+                        .expect("a valid entity"),
+                    is: Value::UnsignedInt(fact),
+                    cause: None,
+                })
+            });
+            branch
+                .commit(stream::iter(facts.collect::<Vec<_>>()))
+                .perform(&operator)
+                .await?;
+        }
+        branch
+            .delegations()
+            .retract(chain)
+            .perform(&operator)
+            .await?;
+
+        let snapshot = branch.snapshot().expect("the branch has a head");
+        let export = snapshot.export().perform(&operator);
+        futures_util::pin_mut!(export);
+        while let Some(item) = export.next().await {
+            item?;
+        }
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_retains_a_delegation_as_facts_and_envelope() -> Result<()> {
         let (branch, operator) = open_branch("delegation-retain").await?;

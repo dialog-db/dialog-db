@@ -300,6 +300,9 @@ pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     /// The live peer a session is built from, asked for its site secrets
     /// (see [`Inner::sites`]).
     sites: Option<Arc<dyn SiteSecrets>>,
+    /// The peer a session is built from, whose records of spaces it reads
+    /// (see [`Inner::holder`]).
+    holder: Option<Did>,
     mode: PhantomData<M>,
 }
 
@@ -318,6 +321,7 @@ impl<M> PeerBuilder<Unset, Unset, M> {
             held: Vec::new(),
             steps: Vec::new(),
             sites: None,
+            holder: None,
             mode: PhantomData,
         }
     }
@@ -350,6 +354,7 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>, Session> {
                 .collect(),
             steps: Vec::new(),
             sites: Some(Arc::new(peer.clone())),
+            holder: Some(peer.did()),
             mode: PhantomData,
         }
     }
@@ -444,6 +449,7 @@ impl<St> PeerBuilder<PeerKey, St, Local> {
             held: self.held,
             steps: self.steps,
             sites: self.sites,
+            holder: self.holder,
             mode: PhantomData,
         }
     }
@@ -486,6 +492,7 @@ impl<St, M> PeerBuilder<Unset, St, M> {
             held: self.held,
             steps: self.steps,
             sites: self.sites,
+            holder: self.holder,
             mode: PhantomData,
         }
     }
@@ -517,6 +524,7 @@ impl<K, M, S: Clone> With<Storage<S>> for PeerBuilder<K, Unset, M> {
             held: self.held,
             steps: self.steps,
             sites: self.sites,
+            holder: self.holder,
             mode: PhantomData,
         }
     }
@@ -727,6 +735,13 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
             .await
             .map_err(|error| PeerError::State(error.to_string()))?;
 
+        let holder = self.holder.unwrap_or_else(|| {
+            if M::HOLDS_KEYS {
+                credential.did()
+            } else {
+                home.clone()
+            }
+        });
         let peer = Peer::assemble(
             self.storage,
             Inner {
@@ -743,6 +758,7 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 holdings: Holdings::default(),
                 connections: Mutex::default(),
                 sites: self.sites,
+                holder,
             },
         );
 

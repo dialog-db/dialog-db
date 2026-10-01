@@ -228,6 +228,31 @@ where
     }
 }
 
+/// A key retracted from the store is gone: the store held its only copy.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<credential::Retract<Credential>> for CredentialStore<S>
+where
+    S: Clone + ConditionalSync,
+    Router<S>: Provider<credential::Retract<Credential>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<credential::Retract<Credential>>,
+    ) -> Result<(), credential::CredentialError> {
+        let subject = input.subject().clone();
+        let own = credential::Key::of(&input).address == credential::SELF;
+        input.perform(&self.router).await?;
+        // A space whose own key is gone names nothing: its location is
+        // free for the next key created under the same name.
+        if own {
+            self.loader.unmount(&subject);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]

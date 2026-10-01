@@ -2,6 +2,7 @@
 
 use core::fmt::Display;
 
+use super::secret::seal_key;
 use super::{Mode, Peer, PeerSpace};
 use dialog_capability::access::{Access, FromCapability as _, Prove, Retain};
 use dialog_capability::{Ability, Capability, Constraint, Effect, Policy, Provider, Subject};
@@ -133,7 +134,7 @@ where
             .refresh(self)
             .await
             .map_err(|error| failed(error.to_string()))?;
-        let mut found = spaces::find(state, name, self)
+        let mut found = spaces::find(state, &self.holder(), name, self)
             .await
             .map_err(|error| failed(error.to_string()))?;
         match found.len() {
@@ -151,7 +152,7 @@ where
         &self,
         repository: &Did,
     ) -> Result<Option<storage_fx::Location>, storage_fx::StorageError> {
-        let found = spaces::locate(self.state(), repository, self)
+        let found = spaces::locate(self.state(), &self.holder(), repository, self)
             .await
             .map_err(|error| storage_fx::StorageError::Storage(error.to_string()))?;
         Ok(found.into_iter().next().map(|(_, location)| location))
@@ -169,7 +170,29 @@ where
         name: &str,
         location: &storage_fx::Location,
     ) -> Result<(), storage_fx::StorageError> {
-        spaces::record(self.state(), repository, name, location, self)
+        spaces::record(
+            self.state(),
+            &self.holder(),
+            repository,
+            name,
+            location,
+            self,
+        )
+        .await
+        .map_err(failed)
+    }
+
+    /// Keep a copy of the key of the repository `repository` for the peer
+    /// this handle acts for, so it signs as a space it created or adopted
+    /// without the account's key.
+    async fn keep_copy(
+        &self,
+        repository: &Did,
+        seed: &[u8],
+    ) -> Result<(), storage_fx::StorageError> {
+        let holder = self.holder();
+        let sealed = seal_key(seed, &holder).await.map_err(failed)?;
+        secrets::grant(self.state(), repository, &holder, sealed, self)
             .await
             .map_err(failed)
     }
@@ -250,11 +273,19 @@ where
         let sealed = self.seal_to_account(&account, &seed).await?;
         self.delegate_to_account(&account, &signer).await?;
         self.seal_space(&signer.did(), &account, sealed.to_bytes())
-            .await
+            .await?;
+        self.keep_copy(&signer.did(), &seed).await
     }
 }
 
 impl<S: Clone, M: Mode> Peer<S, M> {
+    /// The peer this handle acts for, whose records of spaces it reads:
+    /// itself when it holds its key, and the peer it was built from when
+    /// it is a session (see [`Inner::holder`](super::Inner)).
+    pub(crate) fn holder(&self) -> Did {
+        self.inner.holder.clone()
+    }
+
     /// `seed`, sealed to `account`.
     async fn seal_to_account(
         &self,
@@ -379,7 +410,7 @@ where
         let account = self.authority().await.map_err(failed)?;
         let sealed = self.seal_to_account(&account, &seed).await?;
         let signer = Signer::from(
-            Ed25519Signer::import(KeyExport::Extractable(seed))
+            Ed25519Signer::import(KeyExport::Extractable(seed.clone()))
                 .await
                 .map_err(failed)?,
         );
@@ -410,6 +441,7 @@ where
                 return Err(error);
             }
         };
+        self.keep_copy(&created.did(), &seed).await?;
         self.record_space(&created.did(), name, &location).await?;
         Ok(Credential::Signer(SignerCredential::from(signer)))
     }
@@ -429,14 +461,16 @@ mod tests {
     use dialog_capability::{Subject, did};
     use dialog_credentials::key::{ExtractableKey, KeyExport};
     use dialog_credentials::secret::{Context, SealedSecret};
-    use dialog_credentials::{Credential, Ed25519Signer, Extractable, SignerCredential};
+    use dialog_credentials::{Credential, Ed25519Signer, Extractable, Signer, SignerCredential};
+    use dialog_effects::credential::CredentialError;
     use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
     use dialog_identity::OpenCredential;
-    use dialog_repository::{Repository, RepositoryExt as _, secrets, spaces};
+    use dialog_repository::{BranchReference, Repository, RepositoryExt as _, secrets, spaces};
     use dialog_storage::provider::storage::{CredentialStore, Storage, VolatileSpace};
-    use dialog_ucan::{Parameters, Scope, Ucan};
+    use dialog_ucan::{Parameters, Scope, Ucan, UcanDelegation};
     use dialog_ucan_core::command::Command as UcanCommand;
     use dialog_ucan_core::subject::Subject as UcanSubject;
+    use dialog_ucan_core::{DelegationBuilder, DelegationChain};
     use dialog_varsig::Principal as _;
 
     /// Where a test peer acting as `credential` keeps its home space.
@@ -685,6 +719,353 @@ mod tests {
         Ok(())
     }
 
+    /// An invite principal held for the account follows a handover with
+    /// the chain it holds its authority by: the account's authority over
+    /// the space it was invited to runs space → invite → account, and after
+    /// the handover space → invite → owner, never a lone invite → owner
+    /// link that proves nothing.
+    #[dialog_common::test]
+    async fn it_hands_an_invite_over_with_the_chain_it_holds() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/invite-handover").await?;
+
+        // Someone else's space invited a principal whose key this peer holds.
+        let space = Ed25519Signer::generate().await?;
+        let invite = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await?;
+        let invited = DelegationBuilder::new()
+            .issuer(Signer::from(space.clone()))
+            .audience(&invite.did())
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        peer.access()
+            .save(UcanDelegation::new(DelegationChain::new(invited)))
+            .perform(&peer)
+            .await?;
+        peer.adopt_principal("invite", invite.clone()).await?;
+        let account = peer.authority().await?;
+        let before = proven_through(&peer, &account, &space.did()).await?;
+        assert_eq!(before, vec![space.did(), invite.did()]);
+
+        let custodian = test_custodian(&peer).await?;
+        let vault = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await?;
+        let owner = Ed25519Signer::generate().await?;
+        let powerline = DelegationBuilder::new()
+            .issuer(Signer::from(owner.clone()))
+            .audience(&peer.did())
+            .subject(UcanSubject::Any)
+            .command(Vec::new())
+            .try_build()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        peer.access()
+            .save(UcanDelegation::new(DelegationChain::new(powerline)))
+            .perform(&peer)
+            .await?;
+        vault.hand_over(owner.did()).perform(&peer).await?;
+
+        let after = proven_through(&peer, &owner.did(), &space.did()).await?;
+        assert_eq!(after, vec![space.did(), invite.did()]);
+        for delegation in peer.issued_by(&invite.did()).await? {
+            assert_ne!(
+                delegation.chain().audience(),
+                &account,
+                "the invite's delegation to the old account is retracted"
+            );
+        }
+        Ok(())
+    }
+
+    /// The issuers of the chain proving `principal` may archive `space`,
+    /// root first, checked to end at `principal`.
+    async fn proven_through(
+        peer: &Peer<VolatileSpace>,
+        principal: &dialog_varsig::Did,
+        space: &dialog_varsig::Did,
+    ) -> anyhow::Result<Vec<dialog_varsig::Did>> {
+        let scope = Scope {
+            subject: UcanSubject::Specific(space.clone()),
+            command: UcanCommand(vec!["archive".to_string()]),
+            parameters: Parameters::default(),
+        };
+        let proof = Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(principal.clone(), scope))
+            .perform(peer)
+            .await?;
+        let last = proof.proofs.last().expect("a chain proves it");
+        assert_eq!(
+            last.0.audience(),
+            principal,
+            "the chain ends at the principal"
+        );
+        Ok(proof
+            .proofs
+            .iter()
+            .map(|certificate| certificate.0.issuer().clone())
+            .collect())
+    }
+
+    /// An account handed over to a key its owner holds keeps its spaces,
+    /// and needs only the owner's DID: the peer acts for the owner, the
+    /// owner's key opens the account and the old custodian no longer
+    /// does, and the peer proves authority over the space through the
+    /// owner.
+    #[dialog_common::test]
+    async fn it_hands_an_account_over_to_a_key_its_owner_holds() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/handover").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+        let custodian = test_custodian(&peer).await?;
+        let account = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await?;
+
+        // What sign-in brings: the owner's delegation to the peer, and
+        // the owner's DID, never its key.
+        let owner = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await?;
+        let powerline = DelegationBuilder::new()
+            .issuer(Signer::from(
+                Ed25519Signer::import(&seed_of(&owner).await?).await?,
+            ))
+            .audience(&peer.did())
+            .subject(UcanSubject::Any)
+            .command(Vec::new())
+            .try_build()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        peer.access()
+            .save(UcanDelegation::new(DelegationChain::new(powerline)))
+            .perform(&peer)
+            .await?;
+        account.hand_over(owner.did()).perform(&peer).await?;
+        assert_eq!(peer.authority().await?, owner.did());
+
+        let refused = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await;
+        assert!(
+            matches!(refused, Err(CredentialError::Withheld(_))),
+            "{refused:?}"
+        );
+        let owner = SignerCredential::from(Ed25519Signer::import(&seed_of(&owner).await?).await?);
+        let opened = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&owner)
+            .perform(&peer)
+            .await?;
+        assert_eq!(*opened.did(), owner.did());
+        let sealed = opened.add(peer.did()).perform(&peer).await;
+        assert!(
+            matches!(sealed, Err(CredentialError::Withheld(_))),
+            "the owner's key is sealed to no one else: {sealed:?}"
+        );
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space's key is held");
+        assert_eq!(held.kind, spaces::SPACE);
+        assert_eq!(held.to, owner.did());
+
+        let scope = Scope {
+            subject: UcanSubject::Specific(created.did()),
+            command: UcanCommand(vec!["archive".to_string()]),
+            parameters: Parameters::default(),
+        };
+        Subject::from(peer.did())
+            .attenuate(Access)
+            .invoke(Prove::<Ucan>::new(peer.did(), scope))
+            .perform(&peer)
+            .await?;
+        Ok(())
+    }
+
+    /// The seed of an extractable key.
+    async fn seed_of(key: &Ed25519Signer<Extractable>) -> anyhow::Result<[u8; 32]> {
+        #[allow(irrefutable_let_patterns)]
+        let KeyExport::Extractable(seed) = key.export().await? else {
+            anyhow::bail!("not extractable");
+        };
+        Ok(seed.as_slice().try_into()?)
+    }
+
+    /// A session finds a space by the name its peer recorded it under,
+    /// whichever repository the peer's key names: the record is the
+    /// peer's, not the home's, and a session of the peer reads the
+    /// peer's.
+    #[dialog_common::test]
+    async fn it_resolves_a_sessions_names_through_its_peer() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let alice = peer_at(&storage, &credential, "/shared").await?;
+        let bob = OpenCredential::open(unique_name("bob"))
+            .perform(&test_credential_store())
+            .await?;
+        let bob = Peer::new(bob)
+            .space(BranchReference::from(alice.state()))
+            .with(storage.clone())
+            .grant(test_grant().await)
+            .await?;
+        assert_ne!(bob.did(), *bob.home(), "bob's key names alice's home");
+        let name = unique_name("notes");
+        let created = bob.space(name.clone()).create().perform(&bob).await?;
+
+        let session = bob
+            .session(b"worker")
+            .space(bob.state())
+            .allow(Subject::any())
+            .await?;
+        let loaded = session.space(name.clone()).load().perform(&session).await?;
+        assert_eq!(loaded.did(), created.did());
+        assert!(
+            alice.space(name).load().perform(&alice).await.is_err(),
+            "alice knows no space by bob's name"
+        );
+        Ok(())
+    }
+
+    /// The peer that creates a space keeps its own copy of the space's
+    /// key, the key is held sealed to the account, and the space delegates
+    /// to the account. Another peer of the same account keeps no copy.
+    #[dialog_common::test]
+    async fn it_keeps_a_copy_of_a_created_spaces_key_for_its_peer() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/copy").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+        assert!(
+            !secrets::keys_of(peer.state(), &created.did(), &peer.did(), &peer)
+                .await?
+                .is_empty(),
+            "the creator keeps a copy"
+        );
+        let account = peer.authority().await?;
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space's key is held");
+        assert_eq!(held.kind, spaces::SPACE);
+        assert_eq!(held.to, account);
+        let audiences: Vec<_> = peer
+            .issued_by(&created.did())
+            .await?
+            .into_iter()
+            .map(|delegation| delegation.chain().audience().clone())
+            .collect();
+        assert!(audiences.contains(&account), "{audiences:?}");
+
+        let other = OpenCredential::open(unique_name("bob"))
+            .perform(&test_credential_store())
+            .await?;
+        let other = Peer::new(other)
+            .space(BranchReference::from(peer.state()))
+            .with(storage.clone())
+            .grant(test_grant().await)
+            .await?;
+        assert!(
+            secrets::keys_of(other.state(), &created.did(), &other.did(), &other)
+                .await?
+                .is_empty(),
+            "another peer of the account keeps no copy"
+        );
+        Ok(())
+    }
+
+    /// A peer says whether it keeps a copy of a space's key: it does for
+    /// a space it created, as does a session of it, and not for one it
+    /// never made or one another peer created over the same records.
+    /// Rotating the account without the peer forgets the copy, and the
+    /// key held for the rotated account does not count.
+    #[dialog_common::test]
+    async fn it_says_whether_it_holds_a_spaces_key() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/holds").await?;
+        let created = peer
+            .space(unique_name("notes"))
+            .create()
+            .perform(&peer)
+            .await?;
+        assert!(peer.holds_key(&created.did()).await?);
+        assert!(
+            !peer
+                .holds_key(&did!(
+                    "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+                ))
+                .await?
+        );
+
+        let session = peer
+            .session(b"holds")
+            .space(peer.state())
+            .allow(Subject::any())
+            .await?;
+        assert!(session.holds_key(&created.did()).await?);
+
+        let other = OpenCredential::open(unique_name("bob"))
+            .perform(&test_credential_store())
+            .await?;
+        let other = Peer::new(other)
+            .space(BranchReference::from(peer.state()))
+            .with(storage.clone())
+            .grant(test_grant().await)
+            .await?;
+        assert!(!other.holds_key(&created.did()).await?);
+
+        let custodian = test_custodian(&peer).await?;
+        let account = peer
+            .state()
+            .vault("account")
+            .load()
+            .via(&custodian)
+            .perform(&peer)
+            .await?;
+        account.rotate().without(peer.did()).perform(&peer).await?;
+        assert!(!peer.holds_key(&created.did()).await?);
+        let held = secrets::held_principal(peer.state(), &created.did(), &peer)
+            .await?
+            .expect("the space's key is held");
+        assert_eq!(held.kind, spaces::SPACE);
+        assert_eq!(held.to, peer.authority().await?);
+        Ok(())
+    }
+
     /// A space's key is kept only sealed to its account, and the account
     /// opens it: the key it reveals is the one the space is named by.
     #[dialog_common::test]
@@ -876,12 +1257,16 @@ mod tests {
             .await?;
 
         let state = peer.state();
-        assert!(spaces::find(state, &name, &peer).await?.is_empty());
+        assert!(
+            spaces::find(state, &peer.holder(), &name, &peer)
+                .await?
+                .is_empty()
+        );
         let loaded = peer.space(name.clone()).load().perform(&peer).await?;
         assert_eq!(loaded.did(), repository.did());
         state.refresh(&peer).await?;
         assert_eq!(
-            spaces::find(state, &name, &peer).await?,
+            spaces::find(state, &peer.holder(), &name, &peer).await?,
             vec![(repository.did(), location)]
         );
         Ok(())

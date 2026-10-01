@@ -66,6 +66,7 @@ pub trait SpaceProvider:
     + Provider<memory::List>
     + Provider<credential::Load<Credential>>
     + Provider<credential::Save<Credential>>
+    + Provider<credential::Retract<Credential>>
     + Provider<credential::Load<Secret>>
     + Provider<credential::Save<Secret>>
     + Provider<credential::Retract<Secret>>
@@ -86,6 +87,7 @@ impl<T> SpaceProvider for T where
         + Provider<memory::List>
         + Provider<credential::Load<Credential>>
         + Provider<credential::Save<Credential>>
+        + Provider<credential::Retract<Credential>>
         + Provider<credential::Load<Secret>>
         + Provider<credential::Save<Secret>>
         + Provider<credential::Retract<Secret>>
@@ -111,6 +113,7 @@ pub struct Space<A, M, C, D, B> {
     #[provide(
         credential::Load<Credential>,
         credential::Save<Credential>,
+        credential::Retract<Credential>,
         credential::Load<Secret>,
         credential::Save<Secret>,
         credential::Retract<Secret>
