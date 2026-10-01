@@ -17,7 +17,7 @@ use dialog_common::Blake3Hash;
 use crate::archive::Archive;
 use crate::{Method, method};
 
-use super::{Blob, ByteRange, Import, Read, Write};
+use super::{Blob, ByteRange, Import, Read, Size, Write};
 
 /// Scope the archive to its blob store.
 pub trait ArchiveBlobExt {
@@ -41,11 +41,29 @@ where
 pub trait ReadBlobExt {
     /// Read a blob by hash.
     fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read>;
+    /// The size of a blob by hash, without reading its bytes.
+    fn size(self, digest: impl Into<Blake3Hash>) -> Capability<Size>;
 }
 
 impl ReadBlobExt for Capability<Blob<method::Get>> {
     fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read> {
         self.invoke(Read::new(digest))
+    }
+
+    fn size(self, digest: impl Into<Blake3Hash>) -> Capability<Size> {
+        self.invoke(Size::new(digest))
+    }
+}
+
+/// Field accessors on `Capability<Size>`.
+pub trait BlobSizeExt {
+    /// The blob digest from the capability chain.
+    fn digest(&self) -> &Blake3Hash;
+}
+
+impl BlobSizeExt for Capability<Size> {
+    fn digest(&self) -> &Blake3Hash {
+        &Size::of(self).digest
     }
 }
 

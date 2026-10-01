@@ -1,30 +1,32 @@
-use dialog_effects::MethodExt as _;
-use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
-use std::collections::HashSet;
-
-use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
-    Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
+    Datum, Key as ArtifactKey, LoadBlob, ShipmentRef, State, shipment_ref, shipment_refs,
 };
-use dialog_capability::{Fork, Provider};
+use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync};
+use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::ArchiveExt as _;
+use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
 use dialog_effects::archive::{Get, Put};
-use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
+use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{
-    ArchivedNodeBody, ContentAddressedStorage as TreeStorage, MissingBlocks, MissingPolicy,
-    NoveltyOp, PersistentNode, TreeDifference, into_owned,
+    MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, TreeDifference, into_owned,
 };
-use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+use std::collections::HashSet;
 
+use super::resolve::resolve;
+use crate::ResolveEnv;
+use crate::repository::archive::local::read_all;
+use crate::repository::archive::networked::fill_import;
+use crate::repository::remote::Step;
 use crate::{
-    Branch, Index, LocalIndex, PublishError, PushError, RemoteArchiveIndex, RemoteRepository,
-    RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
+    Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteSite,
+    RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
+use futures_util::future::join_all;
 
 /// Command struct for pushing local changes to an upstream branch.
 ///
@@ -76,14 +78,15 @@ impl<'a> Push<'a> {
         self
     }
 
-    /// Push to the given branch instead of the default upstream.
+    /// Push to the given branch alone, instead of every upstream.
     ///
-    /// Accepts either a `&Branch` or a `&RemoteBranch` — the same inputs as
-    /// [`Branch::set_upstream`]. If the target is already tracked, its
-    /// recorded sync base drives the fast-forward check and the novelty
-    /// upload; otherwise the empty base does (only a target with no
-    /// revision of its own accepts such a push), and a successful push
-    /// starts tracking the target — without changing the default upstream.
+    /// Accepts either a `&Branch` or a `&ConnectedBranch` — the same inputs as
+    /// [`Branch::set_upstream`]. The tree last synced with that branch
+    /// drives the fast-forward check and the novelty upload, or the empty
+    /// base if it never was (only a target with no revision of its own
+    /// accepts such a push). A successful push records how far it got,
+    /// but does not make the target an upstream: that is
+    /// [`Branch::push_to`]'s to record.
     pub fn to(mut self, source: impl Into<UpstreamBranch>) -> Self {
         self.to = Some(Upstream::from(source.into()));
         self
@@ -91,10 +94,10 @@ impl<'a> Push<'a> {
 }
 
 impl Branch {
-    /// Create a command to push local changes to the upstream branch.
+    /// Create a command to push local changes to every branch this one
+    /// pushes to.
     ///
-    /// Targets the default upstream; chain [`Push::to`] to push to another
-    /// tracked (or brand-new) upstream instead.
+    /// Chain [`Push::to`] to push to one branch alone instead.
     pub fn push(&self) -> Push<'_> {
         Push::new(self)
     }
@@ -134,51 +137,98 @@ impl Push<'_> {
     /// for content reachable from no store at all.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PushError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Publish>
+        Env: ResolveEnv
             + Provider<BlobRead>
             + Provider<Fork<RemoteSite, Get>>
-            + Provider<crate::Hydrate>
             + Provider<Fork<RemoteSite, Put>>
-            + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, Publish>>
             + Provider<Fork<RemoteSite, BlobImport>>
-            + Provider<Fork<RemoteSite, BlobRead>>
-            + ConditionalSync
-            + 'static,
+            + Provider<Fork<RemoteSite, BlobRead>>,
     {
         let branch = self.branch;
+        let confirm = self.confirm_upstream;
+        resolve(branch, env).await?;
 
-        // Select the upstream entry to push to: the default when no
-        // explicit target was given, otherwise the tracked entry for that
-        // target — or, for a target not tracked yet, a fresh entry whose
-        // empty sync base only fast-forwards onto an empty target.
-        let upstreams = branch.upstreams();
-        let upstream_state = match self.to {
-            None => upstreams.default_upstream().cloned().ok_or_else(|| {
-                PushError::BranchHasNoUpstream {
+        // Push to the given target -- the tracked entry for it, or, for
+        // one not tracked yet, a fresh entry whose empty sync base only
+        // fast-forwards onto an empty target -- or else to every branch
+        // this one pushes to, at once: the pushes are independent.
+        let Some(target) = self.to else {
+            let upstreams: Vec<Upstream> = branch.pushes().iter().cloned().collect();
+            if upstreams.is_empty() {
+                return Err(PushError::BranchHasNoUpstream {
                     branch: branch.name().to_string(),
-                }
-            })?,
-            Some(target) => {
-                if let Upstream::Local { branch: name, .. } = &target
-                    && name == branch.name()
-                {
-                    return Err(PushError::UpstreamIsItself {
-                        branch: branch.name().to_string(),
-                    });
-                }
-                upstreams.find(&target).cloned().unwrap_or(target)
+                });
             }
+            // One upstream that cannot be pushed to does not keep the push
+            // from the others: it lands where it can and reports the rest.
+            let total = upstreams.len();
+            let results = join_all(upstreams.into_iter().map(|upstream| async move {
+                let target = upstream.target();
+                (
+                    target,
+                    Box::pin(push_upstream(branch, upstream, confirm, env)).await,
+                )
+            }))
+            .await;
+            let mut pushed = None;
+            let mut unreached = Vec::new();
+            for (target, result) in results {
+                match result {
+                    Ok(revision) => pushed = pushed.or(revision),
+                    Err(error) => unreached.push((target, error)),
+                }
+            }
+            return match unreached.len() {
+                0 => Ok(pushed),
+                failed if failed == total => Err(unreached.remove(0).1),
+                _ => Err(PushError::Partial {
+                    pushed: pushed.map(Box::new),
+                    unreached,
+                }),
+            };
         };
+        if let Upstream::Local { branch: name, .. } = &target
+            && name == branch.name()
+        {
+            return Err(PushError::UpstreamIsItself {
+                branch: branch.name().to_string(),
+            });
+        }
+        let upstream = branch
+            .upstreams()
+            .find(&target)
+            .cloned()
+            .unwrap_or_else(|| {
+                let tree = branch.tracked().tree(&target.target());
+                target.with_tree(tree)
+            });
+        Box::pin(push_upstream(branch, upstream, confirm, env)).await
+    }
+}
 
+/// Push `branch` to one upstream, fast-forward only.
+async fn push_upstream<Env>(
+    branch: &Branch,
+    upstream_state: Upstream,
+    confirm_upstream: bool,
+    env: &Env,
+) -> Result<Option<Revision>, PushError>
+where
+    Env: ResolveEnv
+        + Provider<BlobRead>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Put>>
+        + Provider<Fork<RemoteSite, Publish>>
+        + Provider<Fork<RemoteSite, BlobImport>>
+        + Provider<Fork<RemoteSite, BlobRead>>,
+{
+    {
         let revision = match branch.revision() {
             Some(revision) => revision,
             None => return Ok(None),
         };
-        let base = upstream_state.tree().clone();
+        let base = upstream_state.tree().cloned();
 
         // Nothing new to push: the local head already equals the recorded
         // upstream sync point. Without this guard every sync tick re-publishes
@@ -186,7 +236,7 @@ impl Push<'_> {
         // PUT) and re-fetches + diffs the upstream for an empty novelty set,
         // even when no commit has landed since the last push. Short-circuit so
         // an idle branch does no push I/O.
-        if revision.tree == base {
+        if Some(&revision.tree) == base.as_ref() {
             return Ok(Some(revision));
         }
 
@@ -202,7 +252,7 @@ impl Push<'_> {
                     .perform(env)
                     .await?;
 
-                let current = target.revision().map(|r| r.tree).unwrap_or_default();
+                let current = target.revision().map(|r| r.tree);
                 if current != base {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
@@ -213,18 +263,17 @@ impl Push<'_> {
 
                 target.reset(revision.clone()).perform(env).await?;
             }
+            Upstream::Unreachable { target, reason, .. } => {
+                return Err(PushError::Unreachable {
+                    upstream: target.to_string(),
+                    reason: reason.clone(),
+                });
+            }
             Upstream::Remote {
-                remote: remote_name,
+                remote,
                 branch: upstream_branch_name,
                 ..
             } => {
-                let remote = branch
-                    .subject()
-                    .remote(remote_name.clone())
-                    .load()
-                    .perform(env)
-                    .await?;
-
                 let upstream = remote
                     .branch(upstream_branch_name.clone())
                     .open()
@@ -236,7 +285,7 @@ impl Push<'_> {
                 // in our last snapshot. The caller may already hold a
                 // fresh answer and say so; see [`Push::assuming_upstream`]
                 // for what that gives up.
-                if self.confirm_upstream {
+                if confirm_upstream {
                     upstream.fetch().perform(env).await?;
                 }
 
@@ -250,7 +299,7 @@ impl Push<'_> {
                         .map_err(dialog_artifacts::DialogArtifactsError::from)?;
                 }
 
-                let current = upstream.revision().map(|r| r.tree).unwrap_or_default();
+                let current = upstream.revision().map(|r| r.tree);
                 if current != base {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
@@ -261,7 +310,8 @@ impl Push<'_> {
 
                 // Upload tree nodes present in our current tree but not
                 // in the base, so the remote can hydrate the new tree
-                // before we publish the revision pointing at it.
+                // before we publish the revision pointing at it. A first
+                // push has no base: everything is novel.
                 //
                 // The walk reads the local archive only, and a replica
                 // legitimately holds whole subtrees by reference (a
@@ -290,9 +340,12 @@ impl Push<'_> {
 
                 let index = branch.archive().index();
                 let store = LocalIndex::new(env, index.clone());
-                let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
+                let base_tree = match &base {
+                    Some(base) => Index::from_hash(NodeHash::from(*base.hash())),
+                    None => Index::empty(),
+                };
                 let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
-                let tree_store = TreeStorage::new(TreeStorageBridge(store));
+                let tree_store = store;
                 let difference = TreeDifference::compute_with(
                     &base_tree,
                     &current_tree,
@@ -332,12 +385,12 @@ impl Push<'_> {
                 // remotes only IT tracks — attribution that stopped at the
                 // local entry would credit that content to this branch's own
                 // remote and silently skip forwarding it.
-                let tracked = tracked_remote_names(branch, env).await?;
-                let sole_remote = tracked.iter().all(|name| name == remote_name);
+                let tracked = tracked_remotes(branch, env).await?;
+                let sole_remote = tracked.iter().all(|other| other.same(remote));
                 let sources = if sole_remote {
                     Vec::new()
                 } else {
-                    source_remotes(&tracked, branch, remote_name, env).await
+                    source_remotes(&tracked, remote)
                 };
 
                 // Ship the blocks the tree nodes reference but the node
@@ -362,8 +415,7 @@ impl Push<'_> {
                         ship(
                             shipment,
                             branch,
-                            &remote,
-                            &remote_index,
+                            remote,
                             &blob_store,
                             &sources,
                             sole_remote,
@@ -392,7 +444,7 @@ impl Push<'_> {
                         forward_subtree(
                             link.node.clone(),
                             branch,
-                            &remote,
+                            remote,
                             &sources,
                             target_may_have,
                             &mut visited,
@@ -475,32 +527,34 @@ impl Push<'_> {
         // publish once more; if our own entry moved, a concurrent sync of
         // this same upstream already recorded a consistent pair, so yield
         // rather than regress it.
-        let advanced = upstream_state.with_tree(revision.tree.clone());
-        let marker = branch.upstream.checkpoint();
-        let mut upstreams = branch.upstreams();
-        upstreams.upsert(advanced.clone());
-        let publish = marker.publish(upstreams, env).await;
-        if let Err(PublishError::VersionMismatch { .. }) = publish {
-            branch.upstream.resolve().perform(env).await?;
-            let marker = branch.upstream.checkpoint();
-            let mut upstreams = branch.upstreams();
-            let ours_untouched = match upstreams.find(&advanced) {
-                None => true,
-                Some(entry) => *entry.tree() == base,
-            };
-            if ours_untouched {
-                upstreams.upsert(advanced);
-                match marker.publish(upstreams, env).await {
-                    // The cell is contended; give up on the marker
-                    // advance — the push itself landed, the next sync
-                    // is just heavier.
-                    Err(PublishError::VersionMismatch { .. }) => {}
-                    other => other?,
-                }
+        let target = upstream_state.target();
+        let marker = branch.tracking().checkpoint();
+        let mut tracking = branch.tracked();
+        let advanced = upstream_state.clone().with_tree(revision.tree.clone());
+        tracking.record(&advanced);
+        // The record is written until it lands. A mismatch means another
+        // write to the cell came first: each is some sync recording its
+        // own upstream, so there are only ever as many as syncs in flight,
+        // and folding ours into the current state again eventually lands.
+        // Giving up would leave this upstream's base behind its head, and
+        // every later push there would be refused as not a fast-forward.
+        // Only a concurrent sync of this same upstream ends the loop early:
+        // it already recorded a consistent pair, which ours must not undo.
+        let mut publish = marker.publish(tracking, env).await;
+        while let Err(PublishError::VersionMismatch { .. }) = publish {
+            branch.tracking().resolve().perform(env).await?;
+            let marker = branch.tracking().checkpoint();
+            let mut tracking = branch.tracked();
+            let ours_untouched = tracking
+                .get(&target)
+                .is_none_or(|tree| Some(tree) == base.as_ref());
+            if !ours_untouched {
+                return Ok(Some(revision));
             }
-        } else {
-            publish?;
+            tracking.record(&advanced);
+            publish = marker.publish(tracking, env).await;
         }
+        publish?;
 
         Ok(Some(revision))
     }
@@ -511,52 +565,42 @@ fn node_children(
     node: &PersistentNode<ArtifactKey, State<Datum>>,
 ) -> Result<Vec<NodeHash>, PushError> {
     match node.body() {
-        ArchivedNodeBody::Index(index) => {
+        NodeBody::Index(index) => {
             let links = index.links()?;
             Ok(links.into_iter().map(|link| link.node).collect())
         }
-        ArchivedNodeBody::Segment(_) => Ok(Vec::new()),
+        NodeBody::Segment(_) => Ok(Vec::new()),
     }
 }
 
-/// Every remote name reachable from the branch's tracked upstream set,
-/// resolved transitively through local upstream entries.
+/// Every remote reachable from the branch's upstreams, resolved
+/// transitively through its local upstreams.
 ///
 /// A local upstream lives in the same archive, so its blocks are "held"
-/// exactly as this branch's are — but its head can carry content by
+/// exactly as this branch's are -- but its head can carry content by
 /// reference whose provenance is a remote only IT tracks. Provenance is
-/// what push attribution reasons over, so the walk follows every
-/// `Upstream::Local` entry into that branch's own tracked set (cycle-safe
-/// via a visited set) and returns the union of remote names. Attribution
-/// is sound only against this transitive set; the branch's own entries
-/// alone under-count where by-reference content can have come from.
-async fn tracked_remote_names<Env>(branch: &Branch, env: &Env) -> Result<Vec<String>, PushError>
+/// what push attribution reasons over, so the walk follows every local
+/// upstream into that branch's own upstreams (cycle-safe via a visited
+/// set) and returns the union. Attribution is sound only against this
+/// transitive set; the branch's own entries alone under-count where
+/// by-reference content can have come from.
+async fn tracked_remotes<Env>(
+    branch: &Branch,
+    env: &Env,
+) -> Result<Vec<ConnectedReplica>, PushError>
 where
     Env: Provider<Resolve> + ConditionalSync + 'static,
 {
-    let mut remotes: Vec<String> = Vec::new();
-    let mut visited: HashSet<String> = HashSet::from([branch.name().to_string()]);
-    let mut locals: Vec<String> = Vec::new();
-    for entry in branch.upstreams().iter() {
-        match entry {
-            Upstream::Remote { remote, .. } => {
-                if !remotes.contains(remote) {
-                    remotes.push(remote.clone());
-                }
-            }
-            Upstream::Local { branch: name, .. } => {
-                if visited.insert(name.clone()) {
-                    locals.push(name.clone());
-                }
-            }
-        }
-    }
-    while let Some(name) = locals.pop() {
-        let local = branch.subject().branch(name).load().perform(env).await?;
-        for entry in local.upstreams().iter() {
+    fn gather(
+        upstreams: &crate::Upstreams,
+        remotes: &mut Vec<ConnectedReplica>,
+        visited: &mut HashSet<String>,
+        locals: &mut Vec<String>,
+    ) {
+        for entry in upstreams.iter() {
             match entry {
                 Upstream::Remote { remote, .. } => {
-                    if !remotes.contains(remote) {
+                    if !remotes.iter().any(|known| known.same(remote)) {
                         remotes.push(remote.clone());
                     }
                 }
@@ -565,41 +609,50 @@ where
                         locals.push(name.clone());
                     }
                 }
+                Upstream::Unreachable { .. } => {}
             }
         }
+    }
+
+    let mut remotes: Vec<ConnectedReplica> = Vec::new();
+    let mut visited: HashSet<String> = HashSet::from([branch.name().to_string()]);
+    let mut locals: Vec<String> = Vec::new();
+    // Where content came from is every branch a branch synced with, not
+    // only those it tracks: a one-off pull adopts content as surely as a
+    // tracked one.
+    let host = branch.subject();
+    gather(&branch.upstreams(), &mut remotes, &mut visited, &mut locals);
+    gather(
+        &branch.sharing(branch.tracked().synced_with(&host)),
+        &mut remotes,
+        &mut visited,
+        &mut locals,
+    );
+    while let Some(name) = locals.pop() {
+        let local = branch.subject().branch(name).load().perform(env).await?;
+        gather(&local.upstreams(), &mut remotes, &mut visited, &mut locals);
+        gather(
+            &branch.sharing(local.tracked().synced_with(&host)),
+            &mut remotes,
+            &mut visited,
+            &mut locals,
+        );
     }
     Ok(remotes)
 }
 
-/// Load every reachable tracked remote other than the push target,
-/// best-effort: a remote that fails to load is simply not a source. The
-/// forwarder tries sources in order and fails loudly only when content
-/// is available nowhere.
-async fn source_remotes<Env>(
-    tracked: &[String],
-    branch: &Branch,
-    target: &str,
-    env: &Env,
-) -> Vec<RemoteRepository>
-where
-    Env: Provider<Resolve> + ConditionalSync + 'static,
-{
-    let mut sources = Vec::with_capacity(tracked.len());
-    for name in tracked {
-        if name == target {
-            continue;
-        }
-        if let Ok(remote) = branch
-            .subject()
-            .remote(name.clone())
-            .load()
-            .perform(env)
-            .await
-        {
-            sources.push(remote);
-        }
-    }
-    sources
+/// Every reachable remote other than the push target: where content the
+/// target lacks can be fetched from. The forwarder tries them in order
+/// and fails loudly only when content is available nowhere.
+fn source_remotes(
+    tracked: &[ConnectedReplica],
+    target: &ConnectedReplica,
+) -> Vec<ConnectedReplica> {
+    tracked
+        .iter()
+        .filter(|remote| !remote.same(target))
+        .cloned()
+        .collect()
 }
 
 /// How many shipments (blob bytes, spilled value blocks) a push has in
@@ -617,10 +670,9 @@ const SHIPMENT_CONCURRENCY: usize = 16;
 async fn ship<Env>(
     shipment: Result<ShipmentRef, dialog_artifacts::DialogArtifactsError>,
     branch: &Branch,
-    remote: &RemoteRepository,
-    remote_index: &RemoteArchiveIndex<'_>,
+    remote: &ConnectedReplica,
     blob_store: &LocalIndex<'_, Env>,
-    sources: &[RemoteRepository],
+    sources: &[ConnectedReplica],
     sole_remote: bool,
     env: &Env,
 ) -> Result<(), PushError>
@@ -637,7 +689,6 @@ where
         + ConditionalSync
         + 'static,
 {
-    let address = remote.address();
     match shipment? {
         // Removals ship nothing; the remote keeps its bytes.
         ShipmentRef::BlobRemoved(_) => Ok(()),
@@ -657,7 +708,7 @@ where
                 .read(digest.clone())
                 .perform(env)
                 .await;
-            let mut source = match source {
+            let source = match source {
                 Ok(source) => source,
                 // Bytes this replica never held: the record rode into the
                 // head by reference. Sole remote -> the target stores them
@@ -671,36 +722,63 @@ where
                 }
                 Err(error) => return Err(error.into()),
             };
-            let mut sink = address
-                .subject
-                .clone()
-                .writer()
-                .archive()
-                .blob()
-                .import(digest.clone(), size)
-                .fork(address.site())
-                .perform(env)
+            // An attempt is the whole transfer, since an import can fail
+            // at any point up to its finish. The source opened above
+            // serves the first; one that follows a failed attempt reads
+            // the bytes again.
+            let mut opened = Some(source);
+            remote
+                .reach(|address| {
+                    let digest = digest.clone();
+                    let opened = opened.take();
+                    async move {
+                        let mut source = match opened {
+                            Some(source) => source,
+                            None => {
+                                branch
+                                    .archive()
+                                    .blob()
+                                    .read(digest.clone())
+                                    .perform(env)
+                                    .await?
+                            }
+                        };
+                        let mut sink = address
+                            .subject
+                            .clone()
+                            .writer()
+                            .archive()
+                            .blob()
+                            .import(digest, size)
+                            .fork(address.site())
+                            .perform(env)
+                            .await?;
+                        while let Some(chunk) = source.next().await? {
+                            sink.write_all(&chunk).await?;
+                        }
+                        sink.finish().await?;
+                        Ok::<_, BlobError>(())
+                    }
+                })
                 .await?;
-            while let Some(chunk) = source.next().await? {
-                sink.write_all(&chunk).await?;
-            }
-            sink.finish().await?;
             Ok(())
         }
-        // A value larger than the inline threshold lives as a
-        // content-addressed block (addressed by its 32-byte value
-        // reference) in the same store as the tree nodes. Local bytes ->
-        // remote block put, mirroring the novel node upload.
+        // A value larger than the inline threshold lives in the blob store
+        // under its 32-byte value reference (or, spilled before values
+        // moved to blobs, as a block beside the tree's nodes). Local bytes
+        // -> remote blob import, verified against that reference.
         ShipmentRef::SpilledValue(reference) => {
-            let bytes = match blob_store.get(&reference).await? {
+            let digest = NodeHash::from(reference);
+            let bytes = match LoadBlob::new(digest.clone()).perform(blob_store).await? {
                 Some(bytes) => bytes,
                 // Held by reference: not this replica's to ship. Sole
                 // remote -> the target has it by attribution; otherwise
                 // adjudicate.
                 None => {
                     if !sole_remote {
-                        ensure_block_on_target(
-                            NodeHash::from(reference),
+                        ensure_spill_on_target(
+                            digest,
+                            LocalCopy::Missing,
                             branch,
                             remote,
                             sources,
@@ -711,10 +789,162 @@ where
                     return Ok(());
                 }
             };
-            remote_index.put(Buffer::from(bytes)).perform(env).await?;
-            Ok(())
+            upload_spill(&digest, bytes.as_ref(), remote, env).await
         }
     }
+}
+
+/// Write a spilled value's bytes into `target`'s blob store, verified
+/// against `digest`.
+async fn upload_spill<Env>(
+    digest: &NodeHash,
+    bytes: &[u8],
+    target: &ConnectedReplica,
+    env: &Env,
+) -> Result<(), PushError>
+where
+    Env: Provider<Fork<RemoteSite, BlobImport>> + ConditionalSync + 'static,
+{
+    // An attempt is the whole transfer, since an import can fail at any
+    // point up to its finish.
+    target
+        .reach(|address| {
+            let digest = digest.clone();
+            async move {
+                let sink = address
+                    .subject
+                    .clone()
+                    .writer()
+                    .archive()
+                    .blob()
+                    .import(digest.clone(), bytes.len() as u64)
+                    .fork(address.site())
+                    .perform(env)
+                    .await?;
+                fill_import(sink, &digest, bytes).await
+            }
+        })
+        .await?;
+    Ok(())
+}
+
+/// Whether `target` holds a spilled value: in its blob store, or as a block
+/// beside its tree nodes when it was pushed before values moved to blobs.
+async fn target_has_spill<Env>(
+    digest: &NodeHash,
+    target: &ConnectedReplica,
+    env: &Env,
+) -> Result<bool, PushError>
+where
+    Env: Provider<Fork<RemoteSite, BlobRead>>
+        + Provider<Fork<RemoteSite, Get>>
+        + ConditionalSync
+        + 'static,
+{
+    let probe = Subject::from(target.did())
+        .reader()
+        .archive()
+        .blob()
+        .read(digest.clone())
+        .perform(&target.connection(env))
+        .await;
+    match probe {
+        // Present; the unconsumed reader is dropped.
+        Ok(_) => Ok(true),
+        Err(BlobError::NotFound(_)) => remote_has_block(digest, target, env).await,
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A spilled value's bytes from wherever this replica can reach them: the
+/// local archive first (its blob store, then its block catalog), then each
+/// source remote the same way.
+async fn spill_from_anywhere<Env>(
+    digest: &NodeHash,
+    local: LocalCopy,
+    branch: &Branch,
+    sources: &[ConnectedReplica],
+    env: &Env,
+) -> Result<Option<Vec<u8>>, PushError>
+where
+    Env: Provider<Get>
+        + Provider<BlobRead>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
+{
+    if let LocalCopy::Unprobed = local
+        && let Some(bytes) = LocalIndex::new(env, branch.archive().index())
+            .load_blob(digest)
+            .await
+            .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
+    {
+        return Ok(Some(bytes.into_vec()));
+    }
+    for source in sources {
+        let read = Subject::from(source.did())
+            .reader()
+            .archive()
+            .blob()
+            .read(digest.clone())
+            .perform(&source.connection(env))
+            .await;
+        match read {
+            Ok(reader) => return Ok(Some(read_all(reader).await?)),
+            Err(BlobError::NotFound(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if let Some(bytes) = remote_block(digest, source, env).await? {
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the local archive has yet to be asked for a spilled value, or
+/// was asked and does not hold it, so a lookup asks it at most once.
+#[derive(Clone, Copy)]
+enum LocalCopy {
+    /// Not looked for yet.
+    Unprobed,
+    /// Looked for and not held.
+    Missing,
+}
+
+/// Make sure the target holds a spilled value: probe once, and forward the
+/// bytes from wherever they are reachable only on a miss, into the
+/// target's blob store. `local` says whether the caller already missed in
+/// the local archive, which is then not asked again. Never persists the
+/// bytes locally: the pusher is a bridge here, not a replica.
+async fn ensure_spill_on_target<Env>(
+    digest: NodeHash,
+    local: LocalCopy,
+    branch: &Branch,
+    target: &ConnectedReplica,
+    sources: &[ConnectedReplica],
+    env: &Env,
+) -> Result<(), PushError>
+where
+    Env: Provider<Get>
+        + Provider<BlobRead>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + Provider<Fork<RemoteSite, BlobImport>>
+        + ConditionalSync
+        + 'static,
+{
+    if target_has_spill(&digest, target, env).await? {
+        return Ok(());
+    }
+    let Some(bytes) = spill_from_anywhere(&digest, local, branch, sources, env).await? else {
+        return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
+            "spilled value {digest} is referenced by the head but reachable from no \
+             store: not local, not on the push target, not on any tracked remote"
+        ))
+        .into());
+    };
+    upload_spill(&digest, &bytes, target, env).await
 }
 
 /// One request answering "does `remote` hold this block": a forked
@@ -722,22 +952,18 @@ where
 /// point — and a dumb store offers nothing cheaper than a get.
 async fn remote_has_block<Env>(
     hash: &NodeHash,
-    remote: &RemoteRepository,
+    remote: &ConnectedReplica,
     env: &Env,
 ) -> Result<bool, PushError>
 where
     Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    let address = remote.address();
-    let found: Option<Vec<u8>> = address
-        .subject
-        .clone()
+    let found: Option<Vec<u8>> = Subject::from(remote.did())
         .reader()
         .archive()
         .catalog("index")
         .get(hash.clone())
-        .fork(&address.address)
-        .perform(env)
+        .perform(&remote.connection(env))
         .await
         .map_err(dialog_storage::DialogStorageError::from)
         .map_err(dialog_search_tree::DialogSearchTreeError::from)?;
@@ -747,22 +973,18 @@ where
 /// A block's bytes from `remote`, if it holds them.
 async fn remote_block<Env>(
     hash: &NodeHash,
-    remote: &RemoteRepository,
+    remote: &ConnectedReplica,
     env: &Env,
 ) -> Result<Option<Vec<u8>>, PushError>
 where
     Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    let address = remote.address();
-    address
-        .subject
-        .clone()
+    Subject::from(remote.did())
         .reader()
         .archive()
         .catalog("index")
         .get(hash.clone())
-        .fork(&address.address)
-        .perform(env)
+        .perform(&remote.connection(env))
         .await
         .map_err(dialog_storage::DialogStorageError::from)
         .map_err(dialog_search_tree::DialogSearchTreeError::from)
@@ -774,7 +996,7 @@ where
 async fn block_from_anywhere<Env>(
     hash: &NodeHash,
     branch: &Branch,
-    sources: &[RemoteRepository],
+    sources: &[ConnectedReplica],
     env: &Env,
 ) -> Result<Option<Vec<u8>>, PushError>
 where
@@ -783,11 +1005,11 @@ where
 {
     let local = LocalIndex::new(env, branch.archive().index());
     if let Some(bytes) = local
-        .get(hash.as_bytes())
+        .load(hash)
         .await
-        .map_err(dialog_search_tree::DialogSearchTreeError::from)?
+        .map_err(|error| dialog_search_tree::DialogSearchTreeError::Storage(error.into()))?
     {
-        return Ok(Some(bytes));
+        return Ok(Some(bytes.into_vec()));
     }
     for source in sources {
         if let Some(bytes) = remote_block(hash, source, env).await? {
@@ -797,45 +1019,6 @@ where
     Ok(None)
 }
 
-/// Make sure the target holds a content-addressed block (a tree node's
-/// sibling store also holds spilled values): probe once, and forward the
-/// bytes from wherever they are reachable only on a miss. Never persists
-/// the bytes locally — the pusher is a bridge here, not a replica.
-async fn ensure_block_on_target<Env>(
-    hash: NodeHash,
-    branch: &Branch,
-    target: &RemoteRepository,
-    sources: &[RemoteRepository],
-    env: &Env,
-) -> Result<(), PushError>
-where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Fork<RemoteSite, Get>>
-        + Provider<crate::Hydrate>
-        + Provider<Fork<RemoteSite, Put>>
-        + ConditionalSync
-        + 'static,
-{
-    if remote_has_block(&hash, target, env).await? {
-        return Ok(());
-    }
-    let Some(bytes) = block_from_anywhere(&hash, branch, sources, env).await? else {
-        return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
-            "block {hash} is referenced by the head but reachable from no store: \
-             not local, not on the push target, not on any tracked remote"
-        ))
-        .into());
-    };
-    target
-        .archive()
-        .index()
-        .put(Buffer::from(bytes))
-        .perform(env)
-        .await?;
-    Ok(())
-}
-
 /// Make sure the target holds a blob's bytes: probe once (a forked read,
 /// dropped unconsumed on a hit), and stream them from wherever they are
 /// reachable only on a miss.
@@ -843,8 +1026,8 @@ async fn ensure_blob_on_target<Env>(
     digest: dialog_common::Blake3Hash,
     size: u64,
     branch: &Branch,
-    target: &RemoteRepository,
-    sources: &[RemoteRepository],
+    target: &ConnectedReplica,
+    sources: &[ConnectedReplica],
     env: &Env,
 ) -> Result<(), PushError>
 where
@@ -855,16 +1038,12 @@ where
         + ConditionalSync
         + 'static,
 {
-    let address = target.address();
-    let probe = address
-        .subject
-        .clone()
+    let probe = Subject::from(target.did())
         .reader()
         .archive()
         .blob()
         .read(digest.clone())
-        .fork(address.site())
-        .perform(env)
+        .perform(&target.connection(env))
         .await;
     match probe {
         // Present; the unconsumed reader is dropped. (A ranged 1-byte
@@ -875,64 +1054,84 @@ where
         Err(error) => return Err(error.into()),
     }
 
-    // Local bytes first (free), then each source remote.
-    let mut source = match branch
+    // An attempt is the whole transfer, since an import can fail at any
+    // point up to its finish. The source found here serves the first;
+    // one that follows a failed attempt is found again.
+    let mut opened = Some(blob_source(&digest, branch, sources, env).await?);
+    target
+        .reach(|address| {
+            let digest = digest.clone();
+            let opened = opened.take();
+            // Only the target's side fails over: reading the source here
+            // would fail the same for every address.
+            async move {
+                let mut source = match opened {
+                    Some(source) => source,
+                    None => blob_source(&digest, branch, sources, env)
+                        .await
+                        .map_err(Step::Local)?,
+                };
+                let mut sink = address
+                    .subject
+                    .clone()
+                    .writer()
+                    .archive()
+                    .blob()
+                    .import(digest, size)
+                    .fork(address.site())
+                    .perform(env)
+                    .await
+                    .map_err(Step::Remote)?;
+                while let Some(chunk) = source.next().await.map_err(Step::Local)? {
+                    sink.write_all(&chunk).await.map_err(Step::Remote)?;
+                }
+                sink.finish().await.map_err(Step::Remote)?;
+                Ok::<_, Step<BlobError>>(())
+            }
+        })
+        .await
+        .map_err(Step::into_inner)?;
+    Ok(())
+}
+
+/// A reader of blob `digest` from wherever this replica can reach it:
+/// the local archive first (free), then each source remote.
+async fn blob_source<Env>(
+    digest: &dialog_common::Blake3Hash,
+    branch: &Branch,
+    sources: &[ConnectedReplica],
+    env: &Env,
+) -> Result<BlobReader, BlobError>
+where
+    Env: Provider<BlobRead> + Provider<Fork<RemoteSite, BlobRead>> + ConditionalSync,
+{
+    match branch
         .archive()
         .blob()
         .read(digest.clone())
         .perform(env)
         .await
     {
-        Ok(reader) => Some(reader),
-        Err(BlobError::NotFound(_)) => None,
-        Err(error) => return Err(error.into()),
-    };
-    if source.is_none() {
-        for origin in sources {
-            let origin_address = origin.address();
-            match origin_address
-                .subject
-                .clone()
-                .reader()
-                .archive()
-                .blob()
-                .read(digest.clone())
-                .fork(origin_address.site())
-                .perform(env)
-                .await
-            {
-                Ok(reader) => {
-                    source = Some(reader);
-                    break;
-                }
-                Err(BlobError::NotFound(_)) => continue,
-                Err(error) => return Err(error.into()),
-            }
+        Err(BlobError::NotFound(_)) => {}
+        found => return found,
+    }
+    for origin in sources {
+        let found = Subject::from(origin.did())
+            .reader()
+            .archive()
+            .blob()
+            .read(digest.clone())
+            .perform(&origin.connection(env))
+            .await;
+        match found {
+            Err(BlobError::NotFound(_)) => continue,
+            found => return found,
         }
     }
-    let Some(mut source) = source else {
-        return Err(BlobError::NotFound(format!(
-            "blob {digest:?} is referenced by the head but reachable from no store: \
-             not local, not on the push target, not on any tracked remote"
-        ))
-        .into());
-    };
-
-    let mut sink = address
-        .subject
-        .clone()
-        .writer()
-        .archive()
-        .blob()
-        .import(digest, size)
-        .fork(address.site())
-        .perform(env)
-        .await?;
-    while let Some(chunk) = source.next().await? {
-        sink.write_all(&chunk).await?;
-    }
-    sink.finish().await?;
-    Ok(())
+    Err(BlobError::NotFound(format!(
+        "blob {digest:?} is referenced by the head but reachable from no store: \
+         not local, not on the push target, not on any tracked remote"
+    )))
 }
 
 /// Transfer a by-reference subtree to the target, minimally: probe each
@@ -945,8 +1144,8 @@ where
 async fn forward_subtree<Env>(
     root: NodeHash,
     branch: &Branch,
-    target: &RemoteRepository,
-    sources: &[RemoteRepository],
+    target: &ConnectedReplica,
+    sources: &[ConnectedReplica],
     target_may_have: bool,
     visited: &mut HashSet<NodeHash>,
     env: &Env,
@@ -995,13 +1194,13 @@ where
                 // the node lands, mirroring the top-level shipment loop.
                 let mut entries: Vec<(ArtifactKey, State<Datum>)> = Vec::new();
                 match node.body() {
-                    ArchivedNodeBody::Segment(segment) => {
+                    NodeBody::Segment(segment) => {
                         segment.for_each_entry::<ArtifactKey, _>(|key, value| {
                             entries.push((ArtifactKey::from(key.to_vec()), into_owned(value)?));
                             Ok(())
                         })?;
                     }
-                    ArchivedNodeBody::Index(index) => {
+                    NodeBody::Index(index) => {
                         for entry in index.all_novelty::<ArtifactKey>()? {
                             if let NoveltyOp::Assert(value) = entry.op {
                                 entries.push((ArtifactKey::from(entry.key), value));
@@ -1024,8 +1223,9 @@ where
                                     .await
                             }
                             ShipmentRef::SpilledValue(reference) => {
-                                ensure_block_on_target(
+                                ensure_spill_on_target(
                                     NodeHash::from(reference),
+                                    LocalCopy::Unprobed,
                                     branch,
                                     target,
                                     sources,
@@ -1071,14 +1271,14 @@ mod tests {
     use crate::PushError;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::{StreamExt as _, stream};
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1116,7 +1316,7 @@ mod tests {
     /// nothing new is a no-op (no re-upload).
     #[dialog_common::test]
     async fn it_pushes_spilled_value_blocks_once() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1188,7 +1388,7 @@ mod tests {
     /// regression where an idle sync tick re-pushed on every drain.
     #[dialog_common::test]
     async fn it_is_a_noop_when_nothing_new_to_push() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1239,9 +1439,9 @@ mod tests {
     async fn it_folds_tracking_updates_when_pushing_from_a_stale_handle() -> Result<()> {
         use crate::Upstream;
         use crate::helpers::test_repo;
-        use dialog_operator::helpers::test_operator_with_profile;
+        use dialog_peer::helpers::test_session_with_peer;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1278,7 +1478,7 @@ mod tests {
         assert!(
             upstreams.iter().any(|entry| matches!(
                 entry,
-                Upstream::Local { branch, tree } if branch == "main" && *tree == revision.tree
+                Upstream::Local { branch, tree } if branch == "main" && tree.as_ref() == Some(&revision.tree)
             )),
             "A's tracking advance for main lands despite the stale snapshot"
         );
@@ -1307,7 +1507,7 @@ mod tests {
     async fn it_pushes_to_a_non_default_upstream_and_tracks_it() -> Result<()> {
         use crate::Upstream;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1342,16 +1542,19 @@ mod tests {
             Some(revision.tree.clone())
         );
 
-        // Backup is now tracked with its own sync base; main stays default.
-        let upstreams = feature.upstreams();
-        assert_eq!(upstreams.iter().count(), 2);
+        // A one-off push records how far it synced with backup without
+        // making backup an upstream: main is still the only branch a bare
+        // push goes to.
+        let upstreams = feature.pushes();
+        assert_eq!(upstreams.iter().count(), 1);
         assert!(matches!(
-            upstreams.default_upstream(),
+            upstreams.iter().next(),
             Some(Upstream::Local { branch, .. }) if branch == "main"
         ));
-        assert!(upstreams.iter().any(|entry| matches!(
+        assert!(feature.tracked().synced.iter().any(|entry| matches!(
             entry,
-            Upstream::Local { branch, tree } if branch == "backup" && *tree == revision.tree
+            crate::Synced { target: crate::Target::Local(branch), tree, .. }
+                if branch == "backup" && *tree == revision.tree
         )));
 
         // Pushing to the branch itself is refused.
@@ -1366,7 +1569,7 @@ mod tests {
     /// empty target can be fast-forwarded onto. Pull it first.
     #[dialog_common::test]
     async fn it_refuses_pushing_to_an_untracked_nonempty_target() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let occupied = repo.branch("occupied").open().perform(&operator).await?;
@@ -1402,7 +1605,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_non_fast_forward_on_local_upstream_diverged() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1440,18 +1643,18 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_has_no_upstream_by_default() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("feature").open().perform(&operator).await?;
 
-        assert!(branch.upstream().is_none());
+        assert!(branch.upstreams().is_empty());
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_errors_pushing_branch_without_upstream() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("feature").open().perform(&operator).await?;
 
@@ -1466,7 +1669,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_when_pushing_empty_branch() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
@@ -1476,6 +1679,87 @@ mod tests {
         let result = feature.push().perform(&operator).await?;
         assert!(result.is_none(), "Push with no revision should return None");
 
+        Ok(())
+    }
+
+    /// A bare push goes to every branch the branch pushes to, and each
+    /// records how far it got.
+    #[dialog_common::test]
+    async fn it_pushes_to_every_upstream() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        let mut targets = Vec::new();
+        for name in ["main", "backup"] {
+            let target = repo.branch(name).open().perform(&operator).await?;
+            feature.push_to(&target).perform(&operator).await?;
+            targets.push(name);
+        }
+        feature
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        let head = feature.revision().expect("committed");
+
+        feature.push().perform(&operator).await?;
+
+        for name in targets {
+            let target = repo.branch(name).load().perform(&operator).await?;
+            assert_eq!(
+                target.revision(),
+                Some(head.clone()),
+                "{name} received the push"
+            );
+            assert_eq!(
+                feature.tracked().get(&crate::Target::Local(name.into())),
+                Some(&head.tree),
+                "the push to {name} recorded how far it got"
+            );
+        }
+        Ok(())
+    }
+
+    /// Pushing to many upstreams at once, every push records how far it
+    /// got, however contended the record is: a push whose record was
+    /// dropped would find its target moved past the recorded base next
+    /// time, and be refused as not a fast-forward for good.
+    #[dialog_common::test]
+    async fn it_records_every_push_of_a_concurrent_push() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        let names = ["one", "two", "three", "four", "five"];
+        for name in names {
+            let target = repo.branch(name).open().perform(&operator).await?;
+            feature.push_to(&target).perform(&operator).await?;
+        }
+        for value in ["Alice", "Bob"] {
+            feature
+                .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                    the: "user/name".parse()?,
+                    of: format!("user:{value}").parse()?,
+                    is: Value::String(value.into()),
+                    cause: None,
+                })]))
+                .perform(&operator)
+                .await?;
+            feature.push().perform(&operator).await?;
+            let head = feature.revision().expect("committed");
+            for name in names {
+                assert_eq!(
+                    feature.tracked().get(&crate::Target::Local(name.into())),
+                    Some(&head.tree),
+                    "the push of {value} to {name} recorded how far it got"
+                );
+            }
+        }
         Ok(())
     }
 }

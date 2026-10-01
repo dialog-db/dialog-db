@@ -4,7 +4,8 @@ use dialog_capability::{Capability, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
 use dialog_effects::credential::prelude::{
-    LoadCredentialExt, LoadSecretExt, RetractSecretExt, SaveCredentialExt, SaveSecretExt,
+    LoadCredentialExt, LoadSecretExt, RetractCredentialExt, RetractSecretExt, SaveCredentialExt,
+    SaveSecretExt,
 };
 use dialog_effects::credential::{CredentialError, Load, Retract, Save, Secret};
 use dialog_varsig::Principal;
@@ -59,6 +60,25 @@ where
         let mut sessions = self.sessions.write();
         let session = sessions.entry(did).or_default();
         session.credentials.insert(key, export);
+        Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<Retract<Credential>> for Volatile
+where
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Retract<Credential>>) -> Result<(), CredentialError> {
+        let key = self.scoped_key(&format!("key/{}", input.address()));
+
+        // Load finds a key in whichever session holds it, so retracting
+        // clears it from every one.
+        let mut sessions = self.sessions.write();
+        for session in sessions.values_mut() {
+            session.credentials.remove(&key);
+        }
         Ok(())
     }
 }

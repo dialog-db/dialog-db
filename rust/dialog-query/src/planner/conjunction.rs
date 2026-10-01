@@ -94,7 +94,7 @@ impl Conjunction {
     {
         self.steps.into_iter().fold(
             Box::pin(selection) as Pin<Box<dyn Selection + 'a>>,
-            |selection, plan| Box::pin(plan.evaluate(selection, env)),
+            |selection, plan| plan.evaluate_boxed(selection, env),
         )
     }
 
@@ -161,15 +161,38 @@ impl Conjunction {
     where
         Env: Provider<Estimate> + ConditionalSync,
     {
+        let selectors: Vec<_> = self
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Plan::Scan(_, query) => Some((query, query.resolved_selector(base))),
+                _ => None,
+            })
+            .collect();
+
+        // A cardinality-one scan with its entity and attribute both bound
+        // reads at most one live value. Scans that are all like that are
+        // the same size by construction, so they are balanced, and walking
+        // the tree to estimate each range would only confirm it -- a second
+        // walk per scan, per row, on the lookups rules are made of.
+        let point = selectors.iter().all(|(query, selector)| {
+            matches!(query.as_ref(), DynamicAttributeQuery::Only(_))
+                && selector.as_ref().is_ok_and(|selector| {
+                    selector.entity().is_some() && selector.attribute().is_some()
+                })
+        });
+        if !selectors.is_empty() && point {
+            return true;
+        }
+
         let mut min_size = u64::MAX;
         let mut max_size = 0u64;
-        for step in &self.steps {
-            let Plan::Scan(_, query) = step else { continue };
+        for (_, selector) in selectors {
             // A selector build failure or an unavailable estimate means
             // "range size unknown"; treat as maximally broad so an all-broad
             // join stays eligible and a genuinely selective one is never
             // wrongly merged on a missing estimate.
-            let size = match query.resolved_selector(base) {
+            let size = match selector {
                 Ok(selector) => Provider::<Estimate>::execute(env, selector)
                     .await
                     .ok()
@@ -211,6 +234,22 @@ impl Conjunction {
         Box::pin(crate::try_stream! {
             let mut selection = Box::pin(selection.peekable());
 
+            // Rows share one binding pattern, so the first says whether the
+            // caller already bound the join variable. If it did, every scan
+            // is a lookup on that one entity: the merge would read exactly
+            // what the fold reads, after resolving and estimating every scan
+            // per row and running each as a stream of its own. Fold instead.
+            let bound = matches!(
+                selection.as_mut().peek().await,
+                Some(Ok(first)) if first.value_of(&variable).is_some()
+            );
+            if bound {
+                for await row in self.into_fold(selection, env) {
+                    yield row?;
+                }
+                return;
+            }
+
             let scans: Vec<DynamicAttributeQuery> = self
                 .steps
                 .iter()
@@ -235,10 +274,7 @@ impl Conjunction {
 
             let mut listening = true;
             let mut hinted: HashSet<ArtifactSelector<Constrained>> = HashSet::new();
-            loop {
-                let Some(first) = selection.next().await else {
-                    break;
-                };
+            while let Some(first) = selection.next().await {
                 let first = first?;
                 let shape = fingerprint(&first);
                 let balanced = match &decided {
@@ -369,7 +405,7 @@ mod tests {
         Environment, Formula, Negation, Parameters, Premise, Proposition, Term, Type, Value,
     };
     use dialog_artifacts::Entity;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::{TryStreamExt, stream};
 
     /// A two-attribute conjunction over a shared entity is structurally merge
@@ -380,7 +416,7 @@ mod tests {
     /// back to the nested-loop fold instead of scanning every range in full.
     #[dialog_common::test]
     async fn it_prefers_the_fold_when_one_scan_is_selective() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -462,7 +498,7 @@ mod tests {
     /// out exactly as the fold alone produces them.
     #[dialog_common::test]
     async fn it_decides_merge_or_fold_per_run_of_bindings() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -552,13 +588,103 @@ mod tests {
         Ok(())
     }
 
+    /// Rows that bind the join variable read one entity per scan, so the
+    /// conjunction evaluates them as the fold does, row by row, and yields
+    /// each bound entity's own values and nothing else.
+    #[dialog_common::test]
+    async fn it_folds_rows_that_bind_the_join_variable() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut tx = branch.transaction();
+        for i in 0..50 {
+            let entity: Entity = format!("id:thing-{i}").parse()?;
+            tx = tx
+                .assert(
+                    the!("thing/name")
+                        .of(entity.clone())
+                        .is(format!("name-{i}")),
+                )
+                .assert(the!("thing/role").of(entity).is(format!("role-{i}")));
+        }
+        tx.commit().publish().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let env = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+                Term::from(the!("thing/name")),
+                Term::<Entity>::var("this"),
+                Term::<Any>::var("name"),
+                Term::var("c1"),
+                Some(Cardinality::One),
+            )))),
+            Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+                Term::from(the!("thing/role")),
+                Term::<Entity>::var("this"),
+                Term::<Any>::var("role"),
+                Term::var("c2"),
+                Some(Cardinality::One),
+            )))),
+        ])
+        .plan(&Environment::new())?;
+        assert_eq!(plan.merge_variable().as_deref(), Some("this"));
+
+        let bound = |i: usize| -> anyhow::Result<Match> {
+            let mut row = Match::new();
+            row.bind(
+                &Term::<Any>::var("this"),
+                Value::Entity(format!("id:thing-{i}").parse()?),
+            )?;
+            Ok(row)
+        };
+        let rows = vec![bound(3)?, bound(17)?, bound(3)?, bound(42)?];
+        let chosen = plan
+            .clone()
+            .evaluate(stream::iter(rows.clone().into_iter().map(Ok)), &env)
+            .try_collect::<Vec<_>>()
+            .await?;
+        let oracle = plan
+            .into_fold(stream::iter(rows.into_iter().map(Ok)), &env)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let values = |rows: &[Match]| -> Vec<(String, String)> {
+            rows.iter()
+                .map(|row| {
+                    (
+                        format!("{:?}", row.value_of("name")),
+                        format!("{:?}", row.value_of("role")),
+                    )
+                })
+                .collect()
+        };
+        let expected: Vec<(String, String)> = [3, 17, 3, 42]
+            .iter()
+            .map(|i| {
+                (
+                    format!("{:?}", Some(&Value::String(format!("name-{i}")))),
+                    format!("{:?}", Some(&Value::String(format!("role-{i}")))),
+                )
+            })
+            .collect();
+        assert_eq!(
+            values(&chosen),
+            expected,
+            "one row per bound entity, in order"
+        );
+        assert_eq!(chosen, oracle);
+        Ok(())
+    }
+
     /// Coalesce must take the *source* when the lookup finds a value
     /// and the fallback only when it does not. The coalesce's source
     /// slot is a hard requirement, so the planner orders it after
     /// the left-join that binds `?nickname`.
     #[dialog_common::test]
     async fn it_takes_present_source_over_coalesce_fallback() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -647,7 +773,7 @@ mod tests {
     /// it had every banned one.
     #[dialog_common::test]
     async fn it_negates_absent_as_matching_nothing() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -729,7 +855,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_filters_concept_rows_with_absent_field_from_required_formula() -> anyhow::Result<()>
     {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -820,7 +946,7 @@ mod tests {
     /// share a single type is a non-match — no promotion, no error.
     #[dialog_common::test]
     async fn it_sums_signed_integers_and_filters_mixed_rows() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -890,7 +1016,7 @@ mod tests {
     /// other way around.
     #[dialog_common::test]
     async fn it_adapts_integer_literals_to_the_rows_type() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -946,7 +1072,7 @@ mod tests {
     /// the predicate.
     #[dialog_common::test]
     async fn it_filters_rows_through_type_predicates() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -995,7 +1121,7 @@ mod tests {
     /// default instead of exclusion.
     #[dialog_common::test]
     async fn it_narrows_optional_formula_input_to_a_filter() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

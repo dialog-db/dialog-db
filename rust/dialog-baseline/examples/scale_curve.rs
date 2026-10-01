@@ -36,7 +36,7 @@ fn main() -> anyhow::Result<()> {
         .build()?;
     runtime.block_on(async {
         let mut sqlite = SqliteFacts::open(SqliteMode::Memory)?;
-        let mut dialog = DialogFacts::open(DialogMode::Memory).await?;
+        let dialog = DialogFacts::open(DialogMode::Memory).await?;
 
         println!(
             "{:>10}  {:>14}  {:>14}  {:>6}",

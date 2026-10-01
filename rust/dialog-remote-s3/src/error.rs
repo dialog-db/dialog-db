@@ -42,6 +42,18 @@ pub enum S3Error {
 
 impl From<reqwest::Error> for S3Error {
     fn from(error: reqwest::Error) -> Self {
+        // A connection that could not be made carried no request, so the
+        // service did nothing and another address may be tried, even for
+        // a conditional write. Any other transport failure may have come
+        // after the request was sent, and its outcome is unknown. The
+        // browser's fetch does not tell the two apart, so there every
+        // failure is taken as possibly sent.
+        #[cfg(not(target_arch = "wasm32"))]
+        if error.is_connect() {
+            return S3Error::Rejected(Rejection::Unavailable {
+                reason: error.to_string(),
+            });
+        }
         S3Error::Transport(error.to_string())
     }
 }

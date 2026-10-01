@@ -41,24 +41,25 @@
 //! receiver's own snapshot and context — nothing about the sender's
 //! state beyond the differential itself.
 
+use crate::{ArchiveReader, LoadBlob};
 use core::ops::RangeInclusive;
+use dialog_capability::Provider;
 use std::collections::BTreeSet;
+use std::fmt::Display;
 use std::iter::repeat_n;
 use std::str::FromStr;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
 
-use dialog_common::Blake3Hash;
-use dialog_search_tree::{
-    Change, ContentAddressedStorage, DialogSearchTreeError, Differential, Entry,
-};
-use dialog_storage::{DialogStorageError, StorageBackend};
+use dialog_common::ConditionalSync;
+use dialog_search_tree::{Change, DialogSearchTreeError, Differential, Entry};
 
 use crate::Value;
 use crate::artifacts::decode_value;
 use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord, Version};
 use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
 use crate::tree::ArtifactTree;
+use crate::tree::fetch_spilled;
 use crate::{
     Attribute, AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
     ENTITY_KEY_TAG, Entity, EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key,
@@ -157,9 +158,7 @@ pub fn data_scope() -> [RangeInclusive<Key>; 2] {
 /// embed the value hash, so the covered claims live at different keys
 /// than the record's. The whole slot must be scanned.
 pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTreeError> {
-    let decode = |e: crate::DialogArtifactsError| {
-        DialogSearchTreeError::Node(format!("history record: {e}"))
-    };
+    let decode = |e: &dyn Display| DialogSearchTreeError::Node(format!("history record: {e}"));
     // The record's entity and attribute live in its key, not its payload.
     let parts = parse_key(key.as_ref())
         .ok_or_else(|| DialogSearchTreeError::Node("history key did not parse".to_string()))?;
@@ -167,12 +166,12 @@ pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTree
         from_utf8(&parts.entity)
             .map_err(|e| DialogSearchTreeError::Node(format!("entity is not UTF-8: {e}")))?,
     )
-    .map_err(decode)?;
+    .map_err(|e| decode(&e))?;
     let the = Attribute::from_str(
         from_utf8(&parts.attribute)
             .map_err(|e| DialogSearchTreeError::Node(format!("attribute is not UTF-8: {e}")))?,
     )
-    .map_err(decode)?;
+    .map_err(|e| decode(&e))?;
     let start = <EntityKey<Key> as KeyViewConstruct>::min()
         .set_entity(EntityKeyPart::from(&of))
         .set_attribute(AttributeKeyPart::from(&the))
@@ -205,13 +204,10 @@ const SCREEN_LOOKAHEAD: usize = 16;
 pub fn screen_history<'a, Backend, C>(
     changes: C,
     local: ArtifactTree,
-    storage: ContentAddressedStorage<Backend>,
+    storage: Backend,
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + dialog_common::ConditionalSync
-        + 'a,
+    Backend: ArchiveReader + Clone + dialog_common::ConditionalSync + 'a,
     C: Differential<Key, State<Datum>> + 'a,
 {
     use futures_util::{StreamExt as _, TryStreamExt as _, stream};
@@ -234,12 +230,10 @@ where
 async fn screen_record<Backend>(
     change: Change<Key, State<Datum>>,
     local: &ArtifactTree,
-    storage: &ContentAddressedStorage<Backend>,
+    storage: &Backend,
 ) -> Result<Vec<Change<Key, State<Datum>>>, DialogSearchTreeError>
 where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + dialog_common::ConditionalSync,
+    Backend: ArchiveReader + Clone + dialog_common::ConditionalSync,
 {
     let entry = match change {
         Change::Add(entry) => entry,
@@ -413,12 +407,18 @@ where
 /// trusted from the datum's version tag. A record that fails to decode
 /// fails the merge — the same strictness the durable history reader
 /// applies.
-pub fn observe_revisions<'a, C>(
+///
+/// A record whose value spilled out of its key (a tree whose `inline_n`
+/// is below the record's size) is read back from `store`, the raw block
+/// backend the differential's tree is read through.
+pub fn observe_revisions<'a, C, S>(
     changes: C,
     observed: Arc<Mutex<BTreeSet<Version>>>,
+    store: S,
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
+    S: Provider<LoadBlob> + ConditionalSync + 'a,
 {
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
@@ -433,16 +433,14 @@ where
                 && parts.attribute.as_ref() == REVISION_ATTRIBUTE.as_bytes()
             {
                 // The inline payload is the ORDER-PRESERVING encoding, not the
-                // raw record bytes: decode it back to a value first. Every
-                // arm that cannot produce the record's version FAILS the
-                // merge rather than skipping: the context derived here is
-                // published under the merged head's signature, and a
-                // silently omitted version understates the watermark — a
+                // raw record bytes: decode it back to a value first; a
+                // spilled payload is the raw value bytes in an archive
+                // block. Every arm that cannot produce the record's version
+                // FAILS the merge rather than skipping: the context derived
+                // here is published under the merged head's signature, and
+                // a silently omitted version understates the watermark — a
                 // later pull would then treat facts this head has seen as
-                // news and resurrect deletions. A revision record is a few
-                // hundred bytes, far under the default inline threshold, so
-                // a spilled one means a non-default manifest this pass does
-                // not support yet (reading it back needs the archive).
+                // news and resurrect deletions.
                 let bytes = match &parts.value {
                     ValueRef::Inline(inline) => {
                         match decode_value(parts.value_type, inline) {
@@ -453,11 +451,22 @@ where
                             ))?,
                         }
                     }
-                    ValueRef::Spilled { .. } => Err(DialogSearchTreeError::Node(
-                        "revision record spilled out of its key; the merged context cannot \
-                         be derived without reading it back"
-                            .to_string(),
-                    ))?,
+                    ValueRef::Spilled { .. } => {
+                        let spilled = fetch_spilled(&store, &entry.key)
+                            .await
+                            .map_err(|error| {
+                                DialogSearchTreeError::Node(format!(
+                                    "spilled revision record: {error}"
+                                ))
+                            })?;
+                        match spilled.map(|bytes| Value::try_from((parts.value_type, bytes))) {
+                            Some(Ok(Value::Record(bytes))) => bytes,
+                            _ => Err(DialogSearchTreeError::Node(
+                                "spilled revision record does not decode to a record value"
+                                    .to_string(),
+                            ))?,
+                        }
+                    }
                 };
                 let record = RevisionRecord::try_from_bytes(&bytes).map_err(|error| {
                     DialogSearchTreeError::Node(format!("revision record: {error}"))
@@ -791,17 +800,28 @@ mod span_tests {
 #[cfg(test)]
 mod screen_tests {
     use super::*;
+    use crate::ArchiveDelta;
     use crate::history::{Edition, Origin, Version};
     use crate::tree::ArtifactTreeExt as _;
     use crate::{Artifact, Attribute, Entity, Instruction, Value};
     use anyhow::Result;
-    use dialog_search_tree::Delta;
-    use dialog_search_tree::helpers::ObservingBackend;
-    use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage};
+    use dialog_search_tree::MemoryBlocks;
+    use dialog_search_tree::helpers::ObservingBlocks;
     use futures_util::{StreamExt as _, stream};
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// Writes everything `delta` staged into `store`, and mirrors it into
+    /// `observing` so reads through it can be counted.
+    fn mirror(delta: &mut ArchiveDelta, store: &MemoryBlocks, observing: &ObservingBlocks) {
+        let blocks: Vec<_> = delta.flush_blocks().collect();
+        let blobs: Vec<_> = delta.flush_blobs().collect();
+        for block in blocks.into_iter().chain(blobs) {
+            store.store(block.clone());
+            observing.store(block);
+        }
+    }
 
     /// Screening covering records must scan their slots concurrently, and
     /// must emit exactly what screening them one at a time emits, in the
@@ -817,11 +837,8 @@ mod screen_tests {
     async fn it_screens_covering_records_concurrently_and_in_order() -> Result<()> {
         // Built through the tree's own store, mirrored block for block into
         // the observing backend the screen reads through.
-        let mut observing = ObservingBackend::new();
-        let mut store = Storage {
-            encoder: CborEncoder,
-            backend: MemoryStorageBackend::default(),
-        };
+        let observing = ObservingBlocks::new();
+        let store = MemoryBlocks::new();
         let the: Attribute = "task/label".parse()?;
         let writer = Version::new(Origin::from([1u8; 32]), Edition::new(0));
         let retractor = Version::new(Origin::from([2u8; 32]), Edition::new(1));
@@ -838,42 +855,32 @@ mod screen_tests {
             })
             .collect::<Result<_>>()?;
         let mut local = ArtifactTree::empty();
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         local
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(writer),
                 stream::iter(facts.iter().cloned().map(Instruction::Assert)),
             )
             .await?;
-        for (digest, buffer) in delta.flush() {
-            store
-                .set(*digest.as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-            observing.set(digest, buffer.into_vec()).await?;
-        }
+        mirror(&mut delta, &store, &observing);
 
         // ... and the upstream retracted every one of them, so its history
         // delta is a run of covering records.
         let mut upstream = local.clone();
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         upstream
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(retractor),
                 stream::iter(facts.iter().cloned().map(Instruction::Retract)),
             )
             .await?;
-        for (digest, buffer) in delta.flush() {
-            store
-                .set(*digest.as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-            observing.set(digest, buffer.into_vec()).await?;
-        }
+        mirror(&mut delta, &store, &observing);
 
-        let storage = ContentAddressedStorage::new(observing.clone());
+        let storage = observing.clone();
         let scope = history_scope();
         let incoming = local
             .differentiate_within(&upstream, &scope, &storage, &storage)

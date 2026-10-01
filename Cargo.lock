@@ -354,6 +354,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
+name = "bijoux"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0df3f02c7ce18790c3c2f547305fa61c8c9a73425d681bae7f978ccbf5abbc4"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1076,8 +1085,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
  "wasm-bindgen-test",
 ]
 
@@ -1094,7 +1101,7 @@ dependencies = [
  "dialog-common",
  "dialog-effects",
  "dialog-network",
- "dialog-operator",
+ "dialog-peer",
  "dialog-repository",
  "dialog-search-tree",
  "dialog-storage",
@@ -1119,6 +1126,7 @@ dependencies = [
  "dialog-macros",
  "dialog-varsig",
  "ed25519-dalek",
+ "rand 0.8.5",
  "rkyv",
  "serde",
  "serde-big-array",
@@ -1129,6 +1137,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
 ]
 
@@ -1213,10 +1223,16 @@ name = "dialog-diagnose"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base58",
  "clap",
  "dialog-artifacts",
+ "dialog-capability",
  "dialog-common",
+ "dialog-csv",
+ "dialog-effects",
+ "dialog-peer",
+ "dialog-repository",
  "dialog-search-tree",
  "dialog-storage",
  "futures-util",
@@ -1300,6 +1316,7 @@ dependencies = [
  "dialog-varsig",
  "ipld-core",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "wasm-bindgen-test",
@@ -1340,7 +1357,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialog-operator"
+name = "dialog-peer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1403,7 +1420,7 @@ dependencies = [
  "dialog-effects",
  "dialog-macros",
  "dialog-network",
- "dialog-operator",
+ "dialog-peer",
  "dialog-repository",
  "dialog-search-tree",
  "dialog-storage",
@@ -1436,7 +1453,7 @@ dependencies = [
  "dialog-credentials",
  "dialog-effects",
  "dialog-network",
- "dialog-operator",
+ "dialog-peer",
  "dialog-repository",
  "dialog-storage",
  "dialog-ucan",
@@ -1580,8 +1597,9 @@ dependencies = [
  "dialog-effects",
  "dialog-identity",
  "dialog-network",
- "dialog-operator",
+ "dialog-peer",
  "dialog-query",
+ "dialog-remote-fs",
  "dialog-remote-s3",
  "dialog-remote-ucan",
  "dialog-remote-ucan-s3",
@@ -1590,6 +1608,8 @@ dependencies = [
  "dialog-ucan",
  "dialog-ucan-core",
  "dialog-varsig",
+ "dirs",
+ "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.16",
  "ipld-core",
@@ -1618,10 +1638,12 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base58",
+ "bijoux",
  "blake3",
  "bytes",
  "criterion",
  "dashmap",
+ "dialog-capability",
  "dialog-common",
  "dialog-macros",
  "dialog-storage",
@@ -1654,12 +1676,13 @@ dependencies = [
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
- "dialog-operator",
+ "dialog-peer",
  "dialog-query",
  "dialog-remote-fs",
  "dialog-repository",
  "dialog-search-tree",
  "dialog-storage",
+ "dialog-varsig",
  "futures-util",
  "serde",
  "serde_json",
@@ -1675,7 +1698,6 @@ dependencies = [
  "async-trait",
  "base58",
  "blake3",
- "brotli",
  "bytes",
  "clap",
  "dialog-capability",
@@ -1699,7 +1721,6 @@ dependencies = [
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",
- "sieve-cache",
  "signature",
  "tempfile",
  "thiserror 2.0.18",

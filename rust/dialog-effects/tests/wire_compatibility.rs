@@ -207,6 +207,7 @@ fn it_preserves_the_whole_command_vocabulary() {
             .read(digest.clone())
             .ability(),
         subject().writer().archive().blob().write().ability(),
+        subject().reader().memory().space("s").list().ability(),
     ];
     commands.sort();
     commands.dedup();
@@ -218,6 +219,7 @@ fn it_preserves_the_whole_command_vocabulary() {
             "/use/get/archive/blob",
             "/use/get/archive/block",
             "/use/get/memory/cell",
+            "/use/get/memory/space",
             "/use/put/archive/blob",
             "/use/put/archive/block",
             "/use/put/memory/cell",

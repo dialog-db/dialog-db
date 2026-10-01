@@ -5,7 +5,7 @@
 //! designed for benchmarks that need three signals:
 //!
 //! 1. **Read count** — the number of block fetches a query triggers,
-//!    recorded via [`JournaledStorage`]. This is the planner's true
+//!    recorded via [`CountingStore`]. This is the planner's true
 //!    objective (minimize round-trips) and is deterministic and
 //!    machine-independent.
 //! 2. **In-memory wall-clock** — engine CPU isolation, via a volatile
@@ -23,29 +23,35 @@
 // `#[path]`-included into a separate target where Cargo links the package's
 // own lib under the `dialog_query` name (its extern prelude), so bare
 // `dialog_query::…` resolves to the real crate in both.
-
 use anyhow::Result;
 use async_trait::async_trait;
-use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Instruction,
-    Select, Value,
+    LoadBlob, Select, Value,
 };
 use dialog_capability::{Fork, Provider, Subject};
-use dialog_common::ConditionalSync;
+use dialog_common::Buffer;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
-use dialog_effects::memory::{Publish, Resolve};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
+use dialog_effects::blob::Size as BlobSize;
+use dialog_effects::memory::{List, Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
-use dialog_network::Network;
-use dialog_operator::DeriveOperator as _;
-use dialog_operator::helpers::{generate_data, unique_name};
-use dialog_operator::{Operator, Profile};
-use dialog_repository::{Branch, NetworkedIndex, RemoteSite, Repository, RepositoryExt as _};
+use dialog_effects::storage::Location;
+#[cfg(not(target_arch = "wasm32"))]
+use dialog_peer::helpers::test_owned;
+use dialog_peer::helpers::{generate_data, open_peer, test_storage, unique_name};
+use dialog_peer::{Peer, Session};
+use dialog_repository::{
+    Branch, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
+};
 use dialog_search_tree::audit as tree_audit;
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+use dialog_storage::Blake3Hash;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
-use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBackend};
 use dialog_storage::{DUPLICATE_SETS, TOTAL_SETS, dup_audit};
 use std::sync::atomic::Ordering;
 // The platform temp filesystem (and the on-disk `BenchEnv::temp` variant
@@ -302,7 +308,7 @@ pub struct JoinRun {
 /// once per outer binding) through a *separate* `Provider<Select>::execute`
 /// call, and each call builds its own [`NetworkedIndex`] over the borrowed
 /// operator. To attribute every one of those block reads to a single
-/// query we cannot reuse one [`JournaledStorage`] instance (its backend
+/// query we cannot reuse one journaling store instance (its backend
 /// would have to outlive each per-call index borrow). Instead the journal
 /// is this small shared accumulator: each call wraps its fresh index in a
 /// [`CountingStore`] that holds a clone of the same `Arc`, so all reads
@@ -347,7 +353,8 @@ impl ReadJournal {
     }
 }
 
-/// A [`StorageBackend`] that records every successful read into a shared
+/// A block source that records every successful load, through either lane,
+/// into a shared
 /// [`ReadJournal`] before delegating to the wrapped backend.
 ///
 /// Built fresh per `Provider<Select>` call but parameterized over a cloned
@@ -366,25 +373,33 @@ impl<Backend> CountingStore<Backend> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> StorageBackend for CountingStore<Backend>
+impl<Backend> Provider<LoadBlock> for CountingStore<Backend>
 where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Backend: Provider<LoadBlock> + ConditionalSync,
 {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.backend.set(key, value).await
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let value = self.backend.get(key).await?;
-        if value.is_some() {
-            self.journal.record(key);
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        let hash = load.hash.clone();
+        let block = load.perform(&self.backend).await?;
+        if block.is_some() {
+            self.journal.record(hash.as_bytes());
         }
-        Ok(value)
+        Ok(block)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> Provider<LoadBlob> for CountingStore<Backend>
+where
+    Backend: Provider<LoadBlob> + ConditionalSync,
+{
+    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
+        let hash = load.hash.clone();
+        let blob = load.perform(&self.backend).await?;
+        if blob.is_some() {
+            self.journal.record(hash.as_bytes());
+        }
+        Ok(blob)
     }
 }
 
@@ -412,7 +427,8 @@ impl<'a, Env> JoinEnv<'a, Env> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<'a, Env> Provider<Select<'a>> for JoinEnv<'a, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<dialog_repository::Hydrate>
@@ -446,7 +462,8 @@ impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<dialog_artifacts::Estimate> for JoinEnv<'_, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<dialog_repository::Hydrate>
@@ -484,7 +501,7 @@ impl<Env: ConditionalSync> Provider<dialog_artifacts::Preload> for JoinEnv<'_, E
 // block reads land in the shared read journal too.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Provider<Load> for JoinEnv<'_, Env>
+impl<Env> Provider<LoadBlock> for JoinEnv<'_, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -496,10 +513,33 @@ where
         + ConditionalSync
         + 'static,
 {
-    async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
         let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
         let counting = CountingStore::new(store, self.journal.clone());
-        Ok(counting.get(&input).await?)
+        load.perform(&counting).await
+    }
+}
+
+// Spilled-value loads for `tree/value`, through the same counting store.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<LoadBlob> for JoinEnv<'_, Env>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(&self, load: LoadBlob) -> Result<Option<Buffer>, DialogArtifactsError> {
+        let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
+        let counting = CountingStore::new(store, self.journal.clone());
+        load.perform(&counting).await
     }
 }
 
@@ -562,30 +602,30 @@ pub struct BenchEnv<Env> {
     branch: String,
 }
 
-impl BenchEnv<Operator<VolatileSpace>> {
+impl BenchEnv<Peer<VolatileSpace, Session>> {
     /// Build a volatile (in-memory) benchmark environment.
     ///
     /// Use for CPU/memory-read isolated signals — no disk I/O.
     pub async fn volatile() -> Result<Self> {
-        let storage = Storage::volatile();
+        let storage = test_storage().await;
         Self::with_storage(storage).await
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl BenchEnv<Operator<NativeTempSpace>> {
+impl BenchEnv<Peer<NativeTempSpace, Session>> {
     /// Build an on-disk benchmark environment rooted in the platform
     /// temp directory.
     ///
     /// Use for real-world latency signals where I/O dominates.
     pub async fn temp() -> Result<Self> {
-        let storage = Storage::temp();
+        let storage = test_owned(Storage::temp()).await;
         Self::with_storage(storage).await
     }
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
-impl BenchEnv<Operator<::dialog_storage::provider::storage::WebSpace>> {
+impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
     /// Build an IndexedDB-backed benchmark environment (the real browser
     /// backend). Reads are async IndexedDB round-trips, so this is the wasm
     /// analogue of the on-disk backend — the read-count reduction shows up as
@@ -598,7 +638,10 @@ impl BenchEnv<Operator<::dialog_storage::provider::storage::WebSpace>> {
 
 impl<Env> BenchEnv<Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobSize>
+        + Provider<BlobImport>
+        + Provider<Get>
+        + Provider<BlobRead>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>
@@ -607,10 +650,13 @@ where
         + Provider<Attest>
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
+        + Provider<List>
+        + PeersEnv
         + Provider<dialog_repository::Hydrate>
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {
@@ -644,7 +690,7 @@ where
     }
 
     /// Run a select-by-attribute query against the seeded branch,
-    /// recording block reads via a [`JournaledStorage`] wrapper.
+    /// recording block reads via a [`CountingStore`] wrapper.
     ///
     /// The query scans the branch's index for every fact carrying the
     /// given attribute. The journal is cleared immediately before the
@@ -664,14 +710,14 @@ where
             .select(ArtifactSelector::new().the(the))
             .to_owned();
         let store = NetworkedIndex::new(&self.operator, select.catalog(), None);
-        let journaled = JournaledStorage::new(store);
-        journaled.clear_journal();
+        let journal = ReadJournal::default();
+        let counting = CountingStore::new(store, journal.clone());
 
-        let stream = select.execute(journaled.clone()).await?;
+        let stream = select.execute(counting).await?;
         let results: Vec<Artifact> = stream.try_collect().await?;
 
-        let reads = journaled.read_count();
-        let unique_reads = journaled.unique_keys_read_count();
+        let reads = journal.reads();
+        let unique_reads = journal.unique_reads();
 
         Ok(QueryRun {
             results,
@@ -1570,9 +1616,9 @@ where
     }
 
     /// Open the repository under `profile` and assemble the environment.
-    async fn assemble(operator: Env, profile: &Profile) -> Result<Self> {
+    async fn assemble<S: Clone>(operator: Env, profile: &Peer<S>) -> Result<Self> {
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&operator)
             .await?;
@@ -1584,50 +1630,41 @@ where
     }
 }
 
-impl BenchEnv<Operator<VolatileSpace>> {
+impl BenchEnv<Peer<VolatileSpace, Session>> {
     async fn with_storage(storage: Storage<VolatileSpace>) -> Result<Self> {
-        let profile = Profile::open(unique_name("bench"))
-            .perform(&storage)
-            .await?;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
         let operator = profile
-            .derive(b"bench")
+            .session(b"bench")
+            .space(profile.state())
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
             .await?;
         Self::assemble(operator, &profile).await
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl BenchEnv<Operator<NativeTempSpace>> {
+impl BenchEnv<Peer<NativeTempSpace, Session>> {
     async fn with_storage(storage: Storage<NativeTempSpace>) -> Result<Self> {
-        let profile = Profile::open(unique_name("bench"))
-            .perform(&storage)
-            .await?;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
         let operator = profile
-            .derive(b"bench")
+            .session(b"bench")
+            .space(profile.state())
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
             .await?;
         Self::assemble(operator, &profile).await
     }
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
-impl BenchEnv<Operator<::dialog_storage::provider::storage::WebSpace>> {
+impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
     async fn with_storage(
         storage: Storage<::dialog_storage::provider::storage::WebSpace>,
     ) -> Result<Self> {
-        let profile = Profile::open(unique_name("bench"))
-            .perform(&storage)
-            .await?;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("bench"))).await?;
         let operator = profile
-            .derive(b"bench")
+            .session(b"bench")
+            .space(profile.state())
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
             .await?;
         Self::assemble(operator, &profile).await
     }
@@ -1711,7 +1748,10 @@ mod test {
     #[cfg(not(target_arch = "wasm32"))]
     async fn replay_log_reporting<Env>(env: BenchEnv<Env>, path: &str, limit: usize) -> Result<()>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
+            + Provider<BlobSize>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -1720,10 +1760,13 @@ mod test {
             + Provider<Attest>
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
+            + Provider<List>
+            + PeersEnv
             + Provider<dialog_repository::Hydrate>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -1831,7 +1874,10 @@ mod test {
         seed_start: Instant,
     ) -> Result<()>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -1840,10 +1886,13 @@ mod test {
             + Provider<Attest>
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
+            + Provider<List>
+            + PeersEnv
             + Provider<dialog_repository::Hydrate>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -1960,7 +2009,10 @@ mod test {
         limit: usize,
     ) -> Result<()>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
+            + Provider<BlobSize>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -1969,10 +2021,13 @@ mod test {
             + Provider<Attest>
             + Provider<SpaceLoad>
             + Provider<SpaceCreate>
+            + Provider<List>
+            + PeersEnv
             + Provider<dialog_repository::Hydrate>
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {

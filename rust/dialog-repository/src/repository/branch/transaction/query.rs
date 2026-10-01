@@ -5,24 +5,24 @@
 //! pending writes against the underlying branch — "as-if committed"
 //! semantics so a caller can run normal queries mid-transaction.
 //!
-//! # Pending asserts and retracts
+//! # Pending asserts, retracts and replaces
 //!
-//! The transaction's pending [`Changes`] flow directly into the query
-//! engine through `Provider<Select> for Changes` — no in-memory tree
-//! materialization. Asserts/Replaces surface as positive facts unioned
-//! with the branch's stream; Retracts lift into tombstones (via
-//! [`tombstones_from`](crate::layer::tombstones_from)) that filter matching branch facts via
-//! [`filter_tombstones`] before the merge, so a `tx.retract(x)` shadows
-//! `x` in the underlying branch view without modifying the branch's
-//! persistent tree.
+//! The transaction's writes are held in a [`Staged`] store, under the
+//! tree's own index keys, and join the query as layers above the line:
+//! each selector is a range read that comes out in tree order, with no
+//! copy of the writes and no scan of them, however many there are.
+//! Asserts surface as facts unioned with the line's stream; retracts
+//! hide matching facts in the line's stream before the merge; a
+//! cardinality-one replace hides every value the line holds at its
+//! `(entity, attribute)` cell, so a read sees only what the commit will
+//! leave there. Nothing touches the line's persistent tree.
 //!
-//! # Tombstone scope: source-only
+//! # Hiding scope: the line only
 //!
-//! Tombstones suppress facts only in the branch source, not the
-//! pending Changes overlay. So `tx.retract(X).assert(X)` correctly
-//! shows `X`: the pending Changes surface `X` via Provider<Select>;
-//! the branch's `X`, if any, is tombstoned but the overlay's `X`
-//! passes through unmodified.
+//! Retracts and replaces hide facts in the line, not in the staged
+//! layers. So `tx.retract(X).assert(X)` correctly shows `X`: the staged
+//! layer holds `X`; the line's `X`, if any, is hidden, but the staged
+//! `X` passes through unmodified.
 //!
 //! # Auto-injected schema metadata
 //!
@@ -49,38 +49,40 @@
 //! queried mid-transaction or after commit — it's part of evaluating a
 //! query, not an optional composition.
 
-use dialog_artifacts::{Changes, DialogArtifactsError};
+use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
 
-use crate::RemoteSite;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
 use crate::repository::source::SourceRef;
+use crate::{RemoteSite, Staged};
 
 /// A non-composable query handle returned by
 /// [`Transaction::query`](crate::repository::branch::Transaction::query)
 /// and [`SnapshotTransaction::query`](crate::SnapshotTransaction::query).
 ///
-/// Holds an immutable snapshot of the transaction's pending changes
-/// plus a reference to the line (branch or snapshot) it runs on. The
-/// transaction itself remains open and committable.
+/// Holds the transaction's staged layers as they stand (shared, so
+/// taking them copies nothing, and later writes to the transaction do
+/// not reach them) plus a reference to the line (branch or snapshot)
+/// it runs on. The transaction itself remains open and committable.
 ///
 /// See module docs for tombstone semantics.
 pub struct TransactionQuery<'a> {
     source: SourceRef<'a>,
-    changes: Changes,
+    layers: Vec<Staged>,
 }
 
 impl<'a> TransactionQuery<'a> {
-    pub(crate) fn new(source: impl Into<SourceRef<'a>>, changes: &Changes) -> Self {
+    pub(crate) fn new(source: impl Into<SourceRef<'a>>, layers: Vec<Staged>) -> Self {
         Self {
             source: source.into(),
-            changes: changes.clone(),
+            layers,
         }
     }
 
@@ -89,7 +91,7 @@ impl<'a> TransactionQuery<'a> {
     pub fn select<Q: Application>(self, query: Q) -> TransactionSelectQuery<'a, Q> {
         TransactionSelectQuery {
             source: self.source,
-            changes: self.changes,
+            layers: self.layers,
             query,
         }
     }
@@ -98,7 +100,7 @@ impl<'a> TransactionQuery<'a> {
 /// A staged query on a [`TransactionQuery`].
 pub struct TransactionSelectQuery<'a, Q> {
     source: SourceRef<'a>,
-    changes: Changes,
+    layers: Vec<Staged>,
     query: Q,
 }
 
@@ -106,17 +108,17 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
     /// Execute the query, returning a stream of results.
     ///
     /// Mirrors [`SelectQuery::perform`](crate::SelectQuery::perform):
-    /// resolves the operator's identity via [`Identify`], builds the
-    /// per-query overlay (pending transaction changes + auto-injected
-    /// schema metadata) through
-    /// [`QueryLayer::overlay`](crate::QueryLayer::overlay), lifts any
-    /// retracts in it into tombstones, and unions the branch stream
-    /// (tombstone-filtered) with the overlay. The schema-metadata
-    /// pass is what keeps `Session` / `SessionBranch` /
-    /// `BranchMetadata` visible mid-transaction.
+    /// resolves the operator's identity via [`Identify`], takes the
+    /// auto-injected schema metadata through
+    /// [`QueryLayer::overlay`](crate::QueryLayer::overlay), and unions
+    /// the line's stream (filtered by what the staged layers hide) with
+    /// the metadata and the layers. The metadata is what keeps
+    /// `Session` / `SessionBranch` / `BranchMetadata` visible
+    /// mid-transaction.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
@@ -129,7 +131,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
     {
         let TransactionSelectQuery {
             source,
-            changes,
+            layers,
             query,
         } = self;
         async_stream::try_stream! {
@@ -138,16 +140,11 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
                 .await
                 .map_err(|e| DialogArtifactsError::InvalidSignature(format!("identify: {e}")))?;
 
-            // Route through the same QueryLayer overlay path
-            // Branch::query() uses, so schema-injected metadata
-            // (Session, SessionBranch, per-branch BranchMetadata)
-            // surfaces alongside the transaction's pending changes.
-            // `with(changes)` preserves Assert/Replace/Retract
-            // polarity via `Statement for Changes`, so the user's
-            // retracts stay retracts and lift into tombstones below.
-            let overlay = QueryLayer::from(source)
-                .with(changes)
-                .overlay(&operator);
+            // The same schema-injected metadata Branch::query() folds
+            // in (Session, SessionBranch, per-branch BranchMetadata),
+            // shared rather than rebuilt, beside the transaction's
+            // staged layers.
+            let overlay = QueryLayer::from(source).overlay(&operator);
 
             // A transaction query is just a single-line `QueryEnv`.
             // Constructing the *same* env type the branch-session path
@@ -155,7 +152,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
             let sources = vec![source.to_source()];
-            let query_env = QueryEnv::new(sources.clone(), overlay, env);
+            let query_env = QueryEnv::new(sources.clone(), overlay, env).with_layers(layers);
             let results = Box::pin(query.perform(&query_env));
             // Mid-transaction queries drive the ambient preload queue
             // like any other evaluation (see `crate::repository::fetch`).
@@ -177,7 +174,7 @@ mod tests {
     use crate::schema;
     use crate::schema::DidExt as _;
     use dialog_artifacts::Entity;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
     use dialog_query::{Concept, Query, Term, the};
 
@@ -212,7 +209,7 @@ mod tests {
     async fn it_integrates_external_changes_into_branch_transaction() -> anyhow::Result<()> {
         use dialog_artifacts::Changes;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -289,7 +286,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_surfaces_pending_asserts_through_transaction_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -317,7 +314,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_tombstones_pending_retracts_through_transaction_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -360,7 +357,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_keeps_value_when_retract_is_followed_by_assert() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -395,6 +392,63 @@ mod tests {
         Ok(())
     }
 
+    /// A cardinality-one replace reads as the commit will leave the
+    /// cell: the new value alone, not the value the branch holds.
+    #[dialog_common::test]
+    async fn it_reads_a_replaced_value_alone() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(Person {
+                this: alice.clone(),
+                name: people::Name("Alice".into()),
+            })
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let tx = branch.transaction().assert(Person {
+            this: alice.clone(),
+            name: people::Name("Alicia".into()),
+        });
+
+        let names: Vec<String> = tx
+            .query()
+            .select(Query::<Person> {
+                this: Term::var("this"),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|p| p.name.0)
+            .collect();
+        assert_eq!(names, vec!["Alicia".to_string()]);
+
+        // And the commit leaves exactly what the read showed.
+        tx.commit().publish().perform(&operator).await?;
+        let committed: Vec<String> = branch
+            .query()
+            .select(Query::<Person> {
+                this: Term::var("this"),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|p| p.name.0)
+            .collect();
+        assert_eq!(committed, names);
+        Ok(())
+    }
+
     /// `Transaction::query()` must surface the same auto-injected
     /// session metadata that `Branch::query()` does. The txn view is
     /// "branch + pending changes" — schema-shaped facts the branch
@@ -404,7 +458,7 @@ mod tests {
     /// Counterpart to `repository::tests::it_auto_includes_session_facts`.
     #[dialog_common::test]
     async fn it_auto_includes_session_facts_in_transaction_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -446,7 +500,7 @@ mod tests {
     /// land zero metadata facts on the branch tree.
     #[dialog_common::test]
     async fn it_does_not_leak_session_metadata_into_commits() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -505,7 +559,7 @@ mod tests {
     /// `repository::tests::it_auto_includes_session_branch_attribute_per_branch_in_scope`.
     #[dialog_common::test]
     async fn it_auto_includes_session_branch_in_transaction_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
 
@@ -537,7 +591,7 @@ mod tests {
     /// [`QueryEnv`](crate::repository::branch::session::QueryEnv).
     #[dialog_common::test]
     async fn it_resolves_derived_revision_concepts_in_a_transaction() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -605,7 +659,7 @@ mod tests {
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptQuery, Parameters};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -660,7 +714,7 @@ mod tests {
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptQuery, Parameters};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

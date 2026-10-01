@@ -13,6 +13,7 @@ web-integration-tests = []
 
 [dependencies]
 tracing = { workspace = true }
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-macros = { workspace = true }
 dialog-storage = { workspace = true }
@@ -31,6 +32,7 @@ nonempty = { workspace = true, features = ["serialize"] }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rkyv = { workspace = true }
+bijoux = { workspace = true }
 serde = { workspace = true }
 sieve-cache = { workspace = true }
 stable_deref_trait = { workspace = true }
@@ -76,6 +78,14 @@ required-features = ["helpers"]
 
 [[example]]
 name = "node_sizes"
+required-features = ["helpers"]
+
+[[example]]
+name = "tradeoffs"
+required-features = ["helpers"]
+
+[[example]]
+name = "columnar_tradeoffs"
 required-features = ["helpers"]
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]

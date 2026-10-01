@@ -63,6 +63,18 @@ impl<Address: Eq + Hash, R> Pool<Address, R> {
     pub fn insert(&self, address: Address, resource: R) -> Option<R> {
         self.resources.write().insert(address, resource)
     }
+
+    /// Remove the resource for the given address, returning it if present.
+    pub fn remove(&self, address: &Address) -> Option<R> {
+        self.resources.write().remove(address)
+    }
+
+    /// Keep only the resources `keep` accepts.
+    pub fn retain(&self, mut keep: impl FnMut(&Address, &R) -> bool) {
+        self.resources
+            .write()
+            .retain(|address, resource| keep(address, resource));
+    }
 }
 
 #[cfg(test)]

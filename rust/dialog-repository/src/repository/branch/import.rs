@@ -3,6 +3,8 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Import as ArchiveImport, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
 use futures_util::StreamExt;
 
@@ -24,7 +26,9 @@ impl<I: Importer + Unpin + ConditionalSend> Import<'_, I> {
     /// Execute the import, reading artifacts and committing them as assertions.
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<ArchiveImport>
             + Provider<Resolve>

@@ -1,12 +1,16 @@
-//! Archive capabilities and CAS adapters.
+//! Loading a branch's tree through archive capabilities.
 //!
-//! - [`local`] -- local CAS adapter for search tree storage
-//! - [`networked`] -- networked CAS adapter falling back to a remote site
+//! - [`local`] -- loads nodes and spilled values from the local archive
+//! - [`networked`] -- falls back to a remote site on a local miss
 
-/// Local CAS adapter bridging capabilities with search tree's ContentAddressedStorage.
+/// Loads nodes and spilled values from the local archive.
 pub mod local;
 pub use local::*;
 
-/// CAS adapter that falls back to a remote site and caches locally on read miss.
+/// Loads nodes and spilled values locally, falling back to a remote site
+/// and caching locally on a read miss.
 pub mod networked;
 pub use networked::*;
+
+mod persist;
+pub(crate) use persist::persist;
