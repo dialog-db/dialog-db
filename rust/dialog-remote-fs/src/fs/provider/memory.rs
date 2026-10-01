@@ -10,7 +10,10 @@
 //! resolve or publish is one round trip a real remote would serve.
 
 use dialog_capability::{ForkInvocation, Provider};
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::Rejection;
+use dialog_effects::memory::{
+    Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
+};
 
 use crate::fs::Fs;
 use crate::fs::simulation::{self, Traffic};
@@ -56,5 +59,18 @@ impl Provider<ForkInvocation<Fs, Retract>> for Fs {
             Provider::<Retract>::execute(input.authorization.filesystem(), input.capability).await;
         flight.complete(0).await;
         result
+    }
+}
+
+/// A directory cannot follow a cell as it changes: a watch is refused, and the
+/// cell is read by resolving it again instead.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<ForkInvocation<Fs, Watch>> for Fs {
+    async fn execute(&self, _: ForkInvocation<Fs, Watch>) -> Result<Editions, MemoryError> {
+        Err(Rejection::Unsupported {
+            reason: "a filesystem remote does not watch its cells".into(),
+        }
+        .into())
     }
 }
