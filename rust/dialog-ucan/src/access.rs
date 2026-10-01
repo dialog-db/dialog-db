@@ -319,6 +319,9 @@ impl Authorization<Ucan> for UcanAuthorization {
             .command(command)
             .arguments(args)
             .proofs(proofs)
+            // When it was issued, so a service can refuse it presented
+            // again later: a captured invocation is not authority forever.
+            .issued_at(Timestamp::now())
             .try_build()
             .await
             .map_err(|e| AuthorizeError::Malformed {

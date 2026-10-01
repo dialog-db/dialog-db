@@ -17,10 +17,13 @@
 //! content type, a version and a body, which the embedder relays
 //! however it serves HTTP.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Did, Policy, Provider, Subject};
+use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_common::{Blake3Hash, Buffer, Checksum, ConditionalSync};
 use dialog_did_web::{CachingResolver, Resolve, WebResolver};
 use dialog_effects::MethodExt as _;
@@ -43,11 +46,75 @@ use crate::direct::{OBJECT_MEDIA_TYPE, credential_container, is_credential};
 /// shape the client reads back.
 pub const REFUSAL_MEDIA_TYPE: &str = "application/json";
 
+/// How long after it was issued an invocation is accepted, and how far
+/// ahead of the service's clock its issue time may be: an invocation is
+/// good when it is made, and the window allows for its trip and for
+/// clocks that disagree.
+pub const FRESHNESS: Duration = Duration::from_secs(30);
+
+/// Whether an invocation must say when it was issued.
+///
+/// One that says is refused once it is older than the freshness window,
+/// whichever way it arrives. One that does not say cannot be aged, so
+/// where a captured invocation would grant lasting access (a watch,
+/// which follows a cell for as long as its chain holds) saying is
+/// required, and elsewhere it is not, so clients that predate it are
+/// still served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Issuance {
+    /// An invocation that does not say when it was issued is refused.
+    Required,
+    /// An invocation that does not say when it was issued is accepted.
+    Optional,
+}
+
+/// The invocations a service accepted lately, remembered so that one
+/// presented again is refused.
+///
+/// An invocation carries a nonce, so one made again is never the same as
+/// one made before: an invocation presented twice was copied. It need
+/// only be remembered while it is fresh, since after that it is refused
+/// as stale anyway.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait Presented: ConditionalSync {
+    /// Remember `invocation`, its content identifier, until `until` (Unix
+    /// seconds), answering `false` when it is remembered already.
+    async fn record(&self, invocation: &str, until: u64) -> bool;
+}
+
+/// Presented invocations remembered in the memory of one process: what
+/// a service that runs in one process, or keeps one instance per space,
+/// needs. A service spread over many processes shares a record they all
+/// reach instead.
+#[derive(Debug, Default)]
+pub struct RecentInvocations(Mutex<HashMap<String, u64>>);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Presented for RecentInvocations {
+    async fn record(&self, invocation: &str, until: u64) -> bool {
+        let now = now_s();
+        let mut presented = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        presented.retain(|_, remembered| *remembered >= now);
+        if presented.contains_key(invocation) {
+            return false;
+        }
+        presented.insert(invocation.to_string(), until);
+        true
+    }
+}
+
 /// An access service over a provider of the effects it performs.
 pub struct Access<P, Resolver = CachingResolver<WebResolver>, Revocations = UnverifiedRevocations> {
     provider: P,
     resolver: Arc<Resolver>,
     revocations: Arc<Revocations>,
+    freshness: Duration,
+    presented: Arc<dyn Presented>,
 }
 
 impl<P: std::fmt::Debug, Resolver, Revocations> std::fmt::Debug
@@ -83,6 +150,8 @@ impl<P, Resolver> Access<P, Resolver> {
             provider,
             resolver,
             revocations: Arc::new(UnverifiedRevocations),
+            freshness: FRESHNESS,
+            presented: Arc::new(RecentInvocations::default()),
         }
     }
 }
@@ -95,7 +164,24 @@ impl<P, Resolver, Revocations> Access<P, Resolver, Revocations> {
             provider: self.provider,
             resolver: self.resolver,
             revocations: Arc::new(revocations),
+            freshness: self.freshness,
+            presented: self.presented,
         }
+    }
+
+    /// The same service, accepting an invocation for `freshness` after it
+    /// was issued (see [`FRESHNESS`]).
+    pub fn with_freshness(mut self, freshness: Duration) -> Self {
+        self.freshness = freshness;
+        self
+    }
+
+    /// The same service, remembering the invocations it accepts in
+    /// `presented`: an embedder that builds a service per request keeps
+    /// one record across them.
+    pub fn with_presented(mut self, presented: Arc<dyn Presented>) -> Self {
+        self.presented = presented;
+        self
     }
 
     /// The provider the service performs operations with.
@@ -306,7 +392,9 @@ impl Refusal {
             AuthorizeError::InvalidSignature { .. }
             | AuthorizeError::InvalidAudience { .. }
             | AuthorizeError::Expired { .. }
-            | AuthorizeError::NotValidBefore { .. } => 401,
+            | AuthorizeError::NotValidBefore { .. }
+            | AuthorizeError::Stale { .. }
+            | AuthorizeError::Replayed { .. } => 401,
             AuthorizeError::UnprovenSubject { .. }
             | AuthorizeError::CommandEscalation { .. }
             | AuthorizeError::PolicyViolation { .. }
@@ -397,10 +485,42 @@ where
     Resolver: Provider<Resolve> + ConditionalSync,
     Revocations: RevocationChecker + ConditionalSync,
 {
-    /// Verify the invocation `container` carries.
+    /// Verify the invocation `container` carries, accepting one that does
+    /// not say when it was issued.
     pub async fn verify(&self, container: Container) -> Result<Verified, Refusal> {
+        self.admit(container, Issuance::Optional).await
+    }
+
+    /// Verify the invocation `container` carries, and accept it only when
+    /// it is fresh and was not presented before.
+    ///
+    /// The issue time and the record are consulted after the chain
+    /// verifies, so an invocation is only ever refused as stale or as
+    /// replayed when it is authentic.
+    pub async fn admit(
+        &self,
+        container: Container,
+        issuance: Issuance,
+    ) -> Result<Verified, Refusal> {
         let chain =
             verify_invocation(container, self.resolver.as_ref(), &*self.revocations).await?;
+        let at = now_s();
+        let window = self.freshness.as_secs();
+        let issued_at = chain.invocation.issued_at().map(|issued| issued.to_unix());
+        let fresh = match issued_at {
+            Some(issued) => {
+                issued.saturating_add(window) >= at && issued <= at.saturating_add(window)
+            }
+            None => issuance == Issuance::Optional,
+        };
+        if !fresh {
+            return Err(AuthorizeError::Stale { issued_at, at }.into());
+        }
+        let invocation = chain.invocation.to_cid().to_string();
+        let until = issued_at.unwrap_or(at).saturating_add(window);
+        if !self.presented.record(&invocation, until).await {
+            return Err(AuthorizeError::Replayed { invocation }.into());
+        }
         Ok(Verified { chain })
     }
 
@@ -749,4 +869,12 @@ impl From<memory::MemoryError> for Failure {
             memory::MemoryError::Storage(detail) => Self::storage(detail),
         }
     }
+}
+
+/// The service's clock, in Unix seconds.
+fn now_s() -> u64 {
+    time::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
 }
