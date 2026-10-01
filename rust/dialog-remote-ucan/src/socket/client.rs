@@ -155,6 +155,26 @@ impl Connection {
         })
     }
 
+    /// Send the invocation `container` carries, named `invocation`, with
+    /// the bytes a write stores, and wait for the service's answer.
+    pub(crate) async fn invoke(
+        &self,
+        invocation: String,
+        container: Vec<u8>,
+        payload: Option<Vec<u8>>,
+    ) -> Result<Reply, MemoryError> {
+        let mut replies = self.routes.wait(invocation.clone());
+        let frame = Request::Invoke { container, payload }.encode();
+        if let Err(error) = self.link.send(frame) {
+            self.routes.forget(&invocation);
+            return Err(error);
+        }
+        replies
+            .next()
+            .await
+            .ok_or_else(|| unavailable("the socket closed before the service answered"))
+    }
+
     fn cancel(&self, invocation: &str) {
         self.routes.forget(invocation);
         let frame = Request::Cancel {

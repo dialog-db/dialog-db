@@ -20,7 +20,7 @@ use dialog_effects::archive::prelude::*;
 use dialog_effects::blob::BlobError;
 use dialog_effects::blob::prelude::*;
 use dialog_effects::memory::prelude::CellScope;
-use dialog_effects::memory::{Edition, MemoryError, Version, Watch};
+use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Version, Watch};
 use dialog_ucan::Scope;
 use dialog_ucan_core::{Container, Tag};
 use dialog_varsig::Principal as _;
@@ -491,6 +491,61 @@ async fn it_watches_a_cell_over_the_socket(service: UcanServiceAddress) -> anyho
         Some(b"second".to_vec()),
         "and so does the next"
     );
+    Ok(())
+}
+
+/// Where the address names a socket, a cell's invocations go over it: the
+/// endpoint here answers nothing, so a publish and a resolve that succeed
+/// went over the socket.
+#[dialog_common::test]
+async fn it_reads_and_writes_a_cell_over_the_socket(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let address = UcanAddress::new("http://127.0.0.1:1/").with_socket(&service.socket);
+
+    let publish = cell.publish(b"framed".to_vec(), None);
+    let authorization = issued(&signer, &publish).await;
+    let version = Provider::<ForkInvocation<UcanSite, Publish>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(publish, address.clone(), authorization),
+    )
+    .await?;
+
+    let resolve = cell.resolve();
+    let authorization = issued(&signer, &resolve).await;
+    let resolved = Provider::<ForkInvocation<UcanSite, Resolve>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(resolve, address, authorization),
+    )
+    .await?;
+    assert_eq!(
+        resolved,
+        Some(Edition {
+            content: b"framed".to_vec(),
+            version,
+        })
+    );
+    Ok(())
+}
+
+/// A socket that cannot be reached is passed over: the cell's invocation
+/// goes to the endpoint as a request.
+#[dialog_common::test]
+async fn it_passes_over_a_socket_it_cannot_reach(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let address = UcanAddress::new(&service.endpoint).with_socket("ws://127.0.0.1:1/");
+    let publish = cell.publish(b"requested".to_vec(), None);
+    let authorization = issued(&signer, &publish).await;
+    Provider::<ForkInvocation<UcanSite, Publish>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(publish, address, authorization),
+    )
+    .await?;
     Ok(())
 }
 

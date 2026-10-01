@@ -107,7 +107,14 @@ impl Link {
 }
 
 impl Drop for Link {
+    /// Detach the handlers before closing: the socket outlives this link
+    /// in the browser, and its events (the close this causes among them)
+    /// must not reach closures that are gone.
     fn drop(&mut self) {
+        self.socket.set_onopen(None);
+        self.socket.set_onerror(None);
+        self.socket.set_onclose(None);
+        self.socket.set_onmessage(None);
         let _ = self.socket.close();
     }
 }
