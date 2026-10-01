@@ -32,6 +32,7 @@ pub mod helpers;
 mod provider;
 pub mod server;
 mod site;
+pub mod socket;
 #[cfg(test)]
 mod test;
 

@@ -683,7 +683,19 @@ where
                 }));
             }
         };
-        match self.verify(container).await {
+        self.answer(container, payload, Issuance::Optional).await
+    }
+
+    /// Answer the invocation `container` carries: admit it under
+    /// `issuance` and perform it with `payload`, the bytes a write stores.
+    ///
+    /// What a request is answered with, whatever carried it: the
+    /// `Authorization` header and body of a request, or a frame.
+    pub async fn answer(&self, container: Container, payload: Payload, issuance: Issuance) -> Answer
+    where
+        P: Store,
+    {
+        match self.admit(container, issuance).await {
             Ok(verified) => self.perform(verified, payload).await,
             Err(refusal) => Answer::Refused(refusal),
         }

@@ -229,7 +229,7 @@ async fn bounded(response: reqwest::Response) -> Result<Vec<u8>, S3Error> {
 /// Read the reason a request was refused, as the permit flow does: the
 /// reason travels as itself, so nothing here knows a vocabulary of wire
 /// names, and an older responder degrades to "something went wrong".
-fn read_refusal(status: u16, body: &[u8]) -> S3Error {
+pub(crate) fn read_refusal(status: u16, body: &[u8]) -> S3Error {
     let bounded = &body[..body.len().min(MAX_ERROR_BODY_BYTES)];
 
     if let Ok(reason) = serde_json::from_slice::<AuthorizeError>(bounded) {

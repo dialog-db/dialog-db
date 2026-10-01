@@ -40,6 +40,12 @@ pub struct UcanAddress {
     /// The exchange to speak at the endpoint.
     #[serde(default, skip_serializing_if = "Exchange::is_direct")]
     pub exchange: Exchange,
+    /// The service's socket, where one connection carries invocations
+    /// both ways, which is what lets it answer a watch as a cell changes.
+    /// Left out of the encoding when the service has none, so an address
+    /// written before there was a socket encodes as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<String>,
 }
 
 impl UcanAddress {
@@ -49,7 +55,19 @@ impl UcanAddress {
         Self {
             endpoint: endpoint.into(),
             exchange: Exchange::Direct,
+            socket: None,
         }
+    }
+
+    /// The same address, with the service's socket at `socket`.
+    pub fn with_socket(mut self, socket: impl Into<String>) -> Self {
+        self.socket = Some(socket.into());
+        self
+    }
+
+    /// The service's socket, if it has one.
+    pub fn socket(&self) -> Option<&str> {
+        self.socket.as_deref()
     }
 
     /// The same address, spoken to with `exchange`.
@@ -113,6 +131,23 @@ mod tests {
         assert_eq!(read_back.exchange(), Exchange::Direct);
         let read_theirs: PermitAddress = serde_ipld_dagcbor::from_slice(&ours_bytes).unwrap();
         assert_eq!(read_theirs.endpoint(), ours.endpoint());
+    }
+
+    /// A socket is carried when the address names one, and an address
+    /// that names none encodes exactly as before there was a socket.
+    #[dialog_common::test]
+    fn it_carries_the_socket_when_the_service_has_one() {
+        let plain = UcanAddress::new("https://access.example/ucan/");
+        let address = plain.clone().with_socket("wss://access.example/ucan/");
+        let bytes = serde_ipld_dagcbor::to_vec(&address).unwrap();
+        let read_back: UcanAddress = serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+        assert_eq!(read_back.socket(), Some("wss://access.example/ucan/"));
+        assert_eq!(read_back, address);
+        let theirs = PermitAddress::new("https://access.example/ucan/");
+        assert_eq!(
+            serde_ipld_dagcbor::to_vec(&plain).unwrap(),
+            serde_ipld_dagcbor::to_vec(&theirs).unwrap(),
+        );
     }
 
     #[dialog_common::test]

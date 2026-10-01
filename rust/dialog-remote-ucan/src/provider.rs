@@ -20,6 +20,7 @@ use dialog_effects::memory::{
     Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
 };
 use dialog_remote_ucan_s3::UcanSite as PermitSite;
+use dialog_ucan_core::Container;
 
 use crate::address::Exchange;
 use crate::direct;
@@ -270,16 +271,37 @@ impl BlobSink for Upload {
     }
 }
 
-/// Following a cell needs a connection the service can answer on as the
-/// cell changes, which a request per effect is not: until the site keeps
-/// one, a watch is refused, and the cell is read by resolving it again.
+/// A watch rides the service's socket, the one connection to it shared by
+/// every watch of a cell in the same space: a service that names no
+/// socket cannot follow a cell, and a watch there is refused, so the cell
+/// is read by resolving it again.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
-    async fn execute(&self, _: ForkInvocation<UcanSite, Watch>) -> Result<Editions, MemoryError> {
-        Err(Rejection::Unsupported {
-            reason: "the access service is reached by a request per effect".into(),
-        }
-        .into())
+    async fn execute(
+        &self,
+        invocation: ForkInvocation<UcanSite, Watch>,
+    ) -> Result<Editions, MemoryError> {
+        let Some(socket) = invocation.address.socket() else {
+            return Err(Rejection::Unsupported {
+                reason: "the access service names no socket".into(),
+            }
+            .into());
+        };
+        let url = per_space(socket, invocation.capability.subject().as_ref());
+        let chain = invocation.authorization.invocation().chain();
+        let container = Container::from(chain)
+            .to_bytes()
+            .map_err(|error| MemoryError::Storage(error.to_string()))?;
+        let name = chain.invocation.to_cid().to_string();
+        let connection = self.sockets().connect(&url).await?;
+        Ok(Box::new(connection.watch(name, container)?))
     }
+}
+
+/// The socket of the space `subject` names: a service answers each space
+/// on a connection of its own.
+fn per_space(socket: &str, subject: &str) -> String {
+    let separator = if socket.contains('?') { '&' } else { '?' };
+    format!("{socket}{separator}sub={subject}")
 }
