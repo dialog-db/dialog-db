@@ -797,8 +797,8 @@ mod tests {
 
             let env: Storage<WebSpace> = Storage::default();
             let name = unique_name("idb-load-missing");
-            // `Directory::Profile` names the database `"{name}.profile"`.
-            let db_name = format!("{name}.profile");
+            // `Directory::Profile` names the database by the name alone.
+            let db_name = name.clone();
 
             assert!(
                 !idb_database_exists(&db_name).await,
