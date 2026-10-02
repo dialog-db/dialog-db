@@ -8,7 +8,7 @@ use anyhow::Result;
 use dialog_artifacts::history::{History as _, Version};
 use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Value};
 use dialog_capability::{Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::blob::Read as BlobRead;
@@ -100,6 +100,7 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {

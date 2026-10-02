@@ -268,7 +268,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 ///     is: Term::var("full_name"),
 /// };
 /// ```
-#[proc_macro_derive(Formula, attributes(output))]
+#[proc_macro_derive(Formula, attributes(output, formula))]
 pub fn derive_formula(input: TokenStream) -> TokenStream {
     query::formula::derive(input)
 }

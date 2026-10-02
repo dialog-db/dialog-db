@@ -25,7 +25,7 @@ use dialog_artifacts::tree::rekey::rekey_tree;
 use dialog_artifacts::{ArchiveDelta, DialogArtifactsError, NUMBER_BAND};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
@@ -216,6 +216,7 @@ impl Migrate<'_> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
