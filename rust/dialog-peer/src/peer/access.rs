@@ -44,7 +44,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead, Write as BlobWrite};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_repository::RemoteSite;
+use dialog_repository::{Branch, RemoteSite};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
 use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -591,6 +591,19 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
             .map_err(|error| AuthorizeError::Unavailable {
                 detail: format!("failed to refresh the access branch: {error}"),
             })?;
+        Box::pin(branch.delegations().issued_by(issuer.clone()).perform(&env)).await
+    }
+
+    /// The delegations `branch` retains that `issuer` issued: another
+    /// branch of this peer's space, as it stands, read as the peer.
+    pub(crate) async fn issued_by_on(
+        &self,
+        branch: &Branch,
+        issuer: &Did,
+    ) -> Result<Vec<UcanDelegation>, AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
         Box::pin(branch.delegations().issued_by(issuer.clone()).perform(&env)).await
     }
 
