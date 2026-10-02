@@ -767,17 +767,23 @@ impl SnapshotExport {
             // with it, and reading it costs no byte fetch. Each blob's
             // whole fetch (and, under a downloading reach, its local
             // import) is one future; they run concurrently (bounded) and
-            // yield as they complete. `None` from a future means the blob
-            // is unavailable — no index record, or no bytes anywhere the
-            // reach extends — which sparse tolerates and complete refuses.
+            // yield as they complete. A blob the tree no longer references
+            // is skipped; one it references with no bytes anywhere the
+            // reach extends is unavailable, which sparse tolerates and
+            // complete refuses.
             let mut blob_reads = stream::iter(blobs.into_iter().map(|digest| {
                 let tree = &tree;
                 let index = &index;
                 let hydrate = &hydrate;
                 let subject = subject.clone();
                 async move {
+                    // The walk takes every assert it passes for a
+                    // reference, including one a newer removal higher in
+                    // the tree supersedes. The tree's own blob index says
+                    // whether the blob is still referenced; one it no longer
+                    // names is not this export's to carry.
                     let Some(record) = tree.get_blob(index, digest.as_bytes()).await? else {
-                        return Ok((digest, None));
+                        return Ok((digest, Found::Unreferenced));
                     };
                     let reader = subject
                         .clone()
@@ -832,25 +838,37 @@ impl SnapshotExport {
                         (reader, _) => reader,
                     };
                     match reader {
-                        Ok(chunks) => Ok((digest, Some((record.size, chunks)))),
-                        Err(BlobError::NotFound(_)) => Ok((digest, None)),
+                        Ok(chunks) => Ok((digest, Found::Bytes(record.size, chunks))),
+                        Err(BlobError::NotFound(_)) => Ok((digest, Found::Absent)),
                         Err(error) => Err(SnapshotError::from(error)),
                     }
                 }
             }))
             .buffer_unordered(FETCH_CONCURRENCY);
             while let Some(fetched) = blob_reads.next().await {
-                let (digest, available) = fetched?;
-                match available {
-                    Some((size, chunks)) => {
+                let (digest, found) = fetched?;
+                match found {
+                    Found::Bytes(size, chunks) => {
                         yield Item::Blob { digest, size, chunks };
                     }
-                    None if sparse => {}
-                    None => Err(SnapshotError::MissingBlob { digest })?,
+                    Found::Unreferenced => {}
+                    Found::Absent if sparse => {}
+                    Found::Absent => Err(SnapshotError::MissingBlob { digest })?,
                 }
             }
         }
     }
+}
+
+/// What an export found for a blob its walk came across.
+enum Found<Chunks> {
+    /// The tree references it, and its bytes are within reach.
+    Bytes(u64, Chunks),
+    /// The tree references it, and no bytes are within reach.
+    Absent,
+    /// The tree no longer references it: the walk passed an assert that a
+    /// newer removal higher in the tree supersedes.
+    Unreferenced,
 }
 
 /// Writes snapshot content into a repository's storage.
