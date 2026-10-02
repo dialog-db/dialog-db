@@ -103,10 +103,31 @@ Two consequences:
 
 Ordered choice, which the old `variants` desugaring expressed by
 negating earlier alternatives, is expressed by election instead: give
-the cardinality-one attribute an ordered value domain and elect the
-highest. Every alternative is then a positive rule, and the attribute
-picks. See [`ordered-domains.md`](./ordered-domains.md) when that lands;
-this note only requires that election be a property of the attribute.
+the cardinality-one attribute a listed value domain and select the
+first listed value present. Every alternative is then a positive rule,
+and the attribute picks. The notation this points at puts the policy
+beside the carrier type, with today's cardinalities as two of its
+values and recency as the default:
+
+```yaml
+attribute!: &status
+  the: io.gozala.job/status
+  select: top              # last (default) | all | top | max | min
+  as:
+    - case:suspended
+    - case:active
+    - case:registered
+    - case:onboarding
+```
+
+`last` is the newest write, today's cardinality one; `all` is the set,
+today's cardinality many; `top` is the first listed value present;
+`max` and `min` are the extremes of a naturally ordered carrier. Only
+`last` depends on history rather than on the values present, which is
+why it is the one policy under which a derived row needs a standing
+of its own. The engine part of this is a per-attribute election
+policy beside cardinality; the notation is tonk's, and this note only
+requires that election be a property of the attribute.
 
 ## Mechanism
 
@@ -151,11 +172,39 @@ premise and is outside the component, which is where election runs.
 
 `{ a }` for a cardinality-one `a` elects after its disjunction: rows
 are grouped by entity and folded through the attribute's election
-with the row's standing. A stored row's standing is its artifact's; a
-derived row's is the maximum standing among the claims its `Match`
-carries, which is every claim a premise bound on the way to the head.
-The fold is commutative, so the order rows arrive in does not matter.
-Inside a component the fold is skipped and the rows stay a set.
+with the row's standing. A stored row's standing is its artifact's,
+the revision version then the cause, exactly what the stored election
+compares. A derived row's is the maximum standing among the facts its
+`Match` cites, which is every fact a premise bound on the way to the
+head, carried across every concept boundary the row crossed. The fold
+is commutative, so the order rows arrive in does not matter. A tie
+falls to the value's bytes. Inside a recursive component the fold is
+skipped and the rows stay a set.
+
+### Set-widened reads
+
+An optional field over a derived attribute reads `{ a }` with its
+value term admitting `Nothing`. The concept query honours that as the
+left join an optional scan is: every input row leaves at least once,
+with the value `Absent` where no row, stored or derived, matched.
+
+### Built-in concepts
+
+The version-control concepts are resolved exactly as written: nothing
+stores or derives their attributes besides the engine, so a query over
+`Revision` evaluates the projection rule once rather than once per
+attribute. A query over one of their attributes goes through `{ a }`
+and sees the built-in's head for it like any rule's.
+
+### Reducing rules
+
+A reducing rule's heads are its reduced fields, each folded over the
+body grouped by the entity, and its other fields derived from the
+unfolded body. A fold grouped by anything finer than the entity is
+not expressible as an attribute of that entity, which is the EAV
+answer again: the group is an entity of its own. An identity-less
+fold whose group has no present input derives nothing for that
+entity, where the concept head bound the field `Absent`.
 
 ### Storage: `dialog.rule/derives`
 
@@ -213,10 +262,16 @@ the gap so the decision is made on numbers.
 
 ## Not in this change
 
-- the ordered-domain election that replaces ordered choice;
+- the `select` policy that replaces ordered choice; cardinality one
+  still elects by recency alone;
 - the per-query body memo;
 - `reduce` on inductive rules, the materialised home for aggregates;
-- the standing of a derived row beyond its cause: until `Match` claims
-  carry the artifact's version, derived rows elect by cause and tie-break
-  by value, and a versioned stored row beats a derived one. Recorded
-  as a known gap, not a design.
+- election at the exit of a recursive component: a recursive
+  cardinality-one attribute concept yields its candidates as a set;
+- a rule body naming a derived attribute through a raw attribute
+  premise, rather than a concept, reads stored facts only; the
+  notation always emits concept premises, so this reaches only the
+  Rust API;
+- the stratification policy note, which this design withdraws once
+  open rules are monotone; until `unless` is refused in deductive
+  rules the analysis and its errors stand.

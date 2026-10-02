@@ -1,11 +1,18 @@
 /// Serializable rule descriptor matching the formal notation.
 pub mod descriptor;
+/// A rule's heads, one per attribute.
+pub mod head;
+/// Renaming a body's variables.
+mod rename;
+
+pub use head::Head;
 
 use crate::Formula;
 use crate::artifact::Entity;
 use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::descriptor::ConceptFieldDescriptor;
 use crate::error::TypeError;
 use crate::formula::attribute::AttributeParts;
 use crate::memo::Memo;
@@ -17,6 +24,7 @@ pub use crate::premise::Premise;
 use crate::reduce::{Reduce, ReduceEntry, ReduceSpec};
 use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::{Compile, RuleKind, compile_rule, fmt_rule_schema};
+use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
@@ -228,6 +236,21 @@ impl DeductiveRule {
             .clone()
     }
 
+    /// Whether `other` is this rule: the same content address when both
+    /// have one, else structural equality. Two hydrations of one stored
+    /// body are not always equal, because analysis records its
+    /// narrowings in a hash-map-dependent order, so a rule set
+    /// deduplicates by this rather than by `==`.
+    pub fn same(&self, other: &DeductiveRule) -> bool {
+        if Arc::ptr_eq(&self.analysis, &other.analysis) {
+            return true;
+        }
+        match (self.try_this(), other.try_this()) {
+            (Some(a), Some(b)) => a == b,
+            _ => self == other,
+        }
+    }
+
     /// Canonical dag-cbor encoding, panicking if the rule has no
     /// encodable body. Use on the storage path where the rule is known
     /// to be storable (concept/formula bodies). Prefer
@@ -321,6 +344,24 @@ impl DeductiveRule {
 /// premise per concept-typed field. Shared by
 /// `From<&ConceptDescriptor>` and [`DeductiveRule::variants`].
 fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
+    selecting_premises(concept, &|_| false)
+}
+
+/// Lower a concept's fields into the body premises of its selecting
+/// rule. A required field whose attribute `derived` says some rule
+/// derives is read through the [attribute
+/// concept](ConceptDescriptor::of_attribute) over it, so the field
+/// sees stored and derived values alike; every other field is a scan
+/// (or left-join) over stored facts, as in the implicit rule.
+///
+/// An optional field over a derived attribute reads the attribute
+/// concept set-widened: the premise's value term admits `Nothing`, and
+/// [`ConceptQuery`](crate::concept::query::ConceptQuery) yields one
+/// `Absent` row for an entity no row matched.
+fn selecting_premises(
+    concept: &ConceptDescriptor,
+    derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
+) -> Vec<Premise> {
     use crate::concept::query::ConceptQuery;
     use crate::type_system::ConceptRef;
 
@@ -329,6 +370,46 @@ fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
     let this = Term::<Entity>::var("this");
 
     for (name, field) in concept.with().iter() {
+        if derived(field) {
+            // An optional field reads the attribute concept set-widened:
+            // its value term admits `Nothing`, which the concept query
+            // honours by yielding one `Absent` row where no row matched.
+            let kind = match (field.content_type().map(Kind::from), field.conforms()) {
+                (Some(kind), Some(target)) => Some(
+                    kind.with_conformance(ConceptRef(target.this().to_string()))
+                        .expect("a conforming field is entity-valued by construction"),
+                ),
+                (kind, _) => kind,
+            };
+            let value = match (kind, field.is_optional()) {
+                (Some(kind), true) => Term::<Any>::typed_var(name, kind.optional()),
+                (Some(kind), false) => Term::<Any>::typed_var(name, kind),
+                (None, true) => Term::<Any>::typed_var(name, Kind::from(Primitive::ANY)),
+                (None, false) => Term::var(name),
+            };
+            let mut terms = Parameters::new();
+            terms.insert("this".to_string(), Term::<Any>::var("this"));
+            terms.insert(ConceptDescriptor::VALUE.to_string(), value.clone());
+            if let Relation::Collection { .. } = field.the() {
+                terms.insert(
+                    Relation::key_operand(ConceptDescriptor::VALUE),
+                    Term::var(Relation::key_operand(name)),
+                );
+            }
+            premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: ConceptDescriptor::of_attribute(field),
+            })));
+            if let Some(target) = field.conforms() {
+                let mut terms = Parameters::new();
+                terms.insert("this".to_string(), value);
+                premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms,
+                    predicate: target.clone(),
+                })));
+            }
+            continue;
+        }
         // The value term stays scalar in both cases; the
         // associative layer never carries optionality. A
         // required field lowers to a plain scan (a missing fact
@@ -417,6 +498,20 @@ impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
         DeductiveRule::new(concept.clone(), concept_premises(concept))
             .expect("Concept should compile")
+    }
+}
+
+impl DeductiveRule {
+    /// The rule by which `concept` selects its rows: every required
+    /// field whose attribute `derived` says some rule derives is read
+    /// through the attribute concept over it, and every other field
+    /// from stored facts. With nothing derived this is the concept's
+    /// implicit rule.
+    pub fn selecting(
+        concept: &ConceptDescriptor,
+        derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
+    ) -> Result<Self, TypeError> {
+        DeductiveRule::new(concept.clone(), selecting_premises(concept, derived))
     }
 }
 

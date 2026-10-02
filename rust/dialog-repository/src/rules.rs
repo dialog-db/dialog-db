@@ -59,7 +59,9 @@ use crate::{Revision, schema};
 // install/uninstall a rule by plain assertion/retraction live with the
 // rule types themselves; this module re-uses them for its selectors,
 // caches, and dispatch probing.
-pub(crate) use dialog_query::rule::statement::{conclusion_attr, on_attr, reads_attr, source_attr};
+pub(crate) use dialog_query::rule::statement::{
+    conclusion_attr, derives_attr, head_entities, on_attr, reads_attr, source_attr,
+};
 
 /// The `dialog.concept/transient` marker attribute. A concept carrying it
 /// is a *command*: facts of it dispatched into a transaction (and heads
@@ -100,6 +102,23 @@ pub(crate) fn conclusion_selector(concept: &Entity) -> ArtifactSelector<Constrai
     ArtifactSelector::new()
         .the(conclusion_attr())
         .is(Value::Entity(concept.clone()))
+}
+
+/// Selector for `dialog.rule/derives is = <on:attribute>` — finds the rule
+/// entities deriving an attribute, whatever concept they were written
+/// against.
+pub(crate) fn derives_selector(on: &Entity) -> ArtifactSelector<Constrained> {
+    ArtifactSelector::new()
+        .the(derives_attr())
+        .is(Value::Entity(on.clone()))
+}
+
+/// The head-index entity of an attribute concept: the `on:` entity
+/// its one attribute reaches. `None` for a concept that is not an
+/// attribute concept.
+pub(crate) fn derives_key(attribute: &ConceptDescriptor) -> Option<Entity> {
+    attribute.attribute_field()?;
+    head_entities(attribute).into_iter().next()
 }
 
 /// Selector for `dialog.rule/source of = <rule>` — fetches a rule's body.
@@ -229,6 +248,46 @@ pub(crate) fn builtin(concept: &Entity) -> Vec<DeductiveRule> {
     }
 
     Vec::new()
+}
+
+/// Every built-in rule, for indexing by head attribute.
+pub(crate) fn builtin_rules() -> &'static [DeductiveRule] {
+    static ALL: OnceLock<Vec<DeductiveRule>> = OnceLock::new();
+    ALL.get_or_init(|| {
+        [
+            <schema::Revision as Descriptor<ConceptDescriptor>>::descriptor().this(),
+            <schema::RevisionParent as Descriptor<ConceptDescriptor>>::descriptor().this(),
+            <schema::RevisionAncestor as Descriptor<ConceptDescriptor>>::descriptor().this(),
+            <schema::PullUpstream as Descriptor<ConceptDescriptor>>::descriptor().this(),
+            <schema::PushUpstream as Descriptor<ConceptDescriptor>>::descriptor().this(),
+        ]
+        .iter()
+        .flat_map(builtin)
+        .collect()
+    })
+}
+
+/// The built-in rules deriving the attribute concept `attribute`, each
+/// re-headed onto it: how a query over one attribute of a built-in
+/// concept sees the built-in derivation.
+pub(crate) fn builtin_deriving(attribute: &Entity) -> Vec<DeductiveRule> {
+    static HEADS: OnceLock<HashMap<Entity, Vec<DeductiveRule>>> = OnceLock::new();
+    HEADS
+        .get_or_init(|| {
+            let mut heads: HashMap<Entity, Vec<DeductiveRule>> = HashMap::new();
+            for rule in builtin_rules() {
+                for head in rule.heads().expect("built-in rules split per attribute") {
+                    heads
+                        .entry(ConceptDescriptor::of_attribute(&head.field).this())
+                        .or_default()
+                        .push(head.rule);
+                }
+            }
+            heads
+        })
+        .get(attribute)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The rule resolving a branch's pull or push relation to where the
@@ -376,6 +435,14 @@ struct RuleCacheInner {
     /// Keyed by concept; tagged with the head it was scanned at so a
     /// head advance (commit/pull) triggers a re-scan of that concept.
     discovery: HashMap<Entity, (Revision, Vec<Entity>)>,
+    /// Which rule entities derive an attribute, as of a branch head.
+    /// Keyed by the attribute's `on:` entity and head-tagged like
+    /// `discovery`.
+    derived: HashMap<Entity, (Revision, Vec<Entity>)>,
+    /// A rule's head re-spelled onto an attribute concept, keyed by
+    /// (rule entity, attribute concept entity). Both halves are
+    /// content-addressed, so an entry is never stale.
+    heads: HashMap<(Entity, Entity), DeductiveRule>,
     /// Hydrated rule bodies, keyed by content-addressed rule entity.
     /// Never stale (the key is a content hash), so this survives head
     /// changes and is shared across concepts.
@@ -437,6 +504,35 @@ impl RuleCache {
             .write()
             .discovery
             .insert(concept, (head, entities));
+    }
+
+    /// Cached committed rule entities deriving the attribute `on` if
+    /// scanned at `head`; `None` if absent or stale.
+    pub(crate) fn derived(&self, on: &Entity, head: &Revision) -> Option<Vec<Entity>> {
+        let inner = self.inner.read();
+        match inner.derived.get(on) {
+            Some((scanned_at, entities)) if scanned_at == head => Some(entities.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the committed rule entities deriving `on` at `head`.
+    pub(crate) fn record_derived(&self, on: Entity, head: Revision, entities: Vec<Entity>) {
+        self.inner.write().derived.insert(on, (head, entities));
+    }
+
+    /// The head of `rule` re-spelled onto `attribute`, if recorded.
+    pub(crate) fn head(&self, rule: &Entity, attribute: &Entity) -> Option<DeductiveRule> {
+        self.inner
+            .read()
+            .heads
+            .get(&(rule.clone(), attribute.clone()))
+            .cloned()
+    }
+
+    /// Record the head of `rule` re-spelled onto `attribute`.
+    pub(crate) fn record_head(&self, rule: Entity, attribute: Entity, head: DeductiveRule) {
+        self.inner.write().heads.insert((rule, attribute), head);
     }
 
     /// The rule set assembled for `descriptor` over layers at `roots`,
@@ -635,6 +731,59 @@ pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<Deductiv
         }
     }
     out
+}
+
+/// Read rules from an overlay [`Changes`] batch deriving the attribute
+/// `on`: the `dialog.rule/derives` facts pointing at it, then their
+/// `dialog.rule/source` bodies. Fresh every query, like
+/// [`overlay_rules`].
+pub(crate) fn overlay_rules_deriving(changes: &Changes, on: &Entity) -> Vec<DeductiveRule> {
+    use dialog_artifacts::Change;
+
+    let derives = derives_attr();
+    let source = source_attr();
+
+    let mut rule_entities: Vec<Entity> = Vec::new();
+    for (entity, attribute, change) in changes.iter() {
+        if *attribute == derives
+            && let Change::Assert(Value::Entity(c)) | Change::Replace(Value::Entity(c)) = change
+            && c == on
+            && !rule_entities.contains(entity)
+        {
+            rule_entities.push(entity.clone());
+        }
+    }
+
+    let mut out = Vec::new();
+    for rule_entity in rule_entities {
+        for (entity, attribute, change) in changes.iter() {
+            if *entity == rule_entity
+                && *attribute == source
+                && let Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) =
+                    change
+                && let Ok(rule) = hydrate(bytes)
+            {
+                out.push(rule);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// The head of `rule` re-spelled onto the attribute concept
+/// `attribute`, if the rule derives it.
+pub(crate) fn head_onto(
+    rule: &DeductiveRule,
+    attribute: &Entity,
+) -> Result<Option<DeductiveRule>, EvaluationError> {
+    let heads = rule
+        .heads()
+        .map_err(|error| EvaluationError::Store(format!("rule head: {error}")))?;
+    Ok(heads
+        .into_iter()
+        .find(|head| ConceptDescriptor::of_attribute(&head.field).this() == *attribute)
+        .map(|head| head.rule))
 }
 
 // Re-export a shared cache handle type alias for the branch to hold.
