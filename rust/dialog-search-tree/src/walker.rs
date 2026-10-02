@@ -399,10 +399,7 @@ where
         // embeds a walk (clippy's `large_futures` catches it downstream).
         futures_util::TryStreamExt::map_ok(
             self.stream_scan::<R, Env, TypedKey<Key>>(range, accessor),
-            |entry| Entry {
-                key: entry.key.0,
-                value: entry.value,
-            },
+            |entry| Entry::new(entry.key.0, entry.value),
         )
     }
 
@@ -584,7 +581,7 @@ where
                             if let NoveltyOp::Assert(value) = op {
                                 entered_range = true;
                                 let entry_key = Out::from_entry_bytes(&buffered_key)?;
-                                yield Entry { key: entry_key, value };
+                                yield Entry::new(entry_key, value);
                             }
                         }
 
@@ -594,7 +591,7 @@ where
                             if let NoveltyOp::Assert(value) = op {
                                 entered_range = true;
                                 let entry_key = Out::from_entry_bytes(&buffered_key)?;
-                                yield Entry { key: entry_key, value };
+                                yield Entry::new(entry_key, value);
                             }
                             continue;
                         }
@@ -618,7 +615,7 @@ where
                             // `KeyHandle` consumer borrows it copy-free; the
                             // typed consumer copies out, as before.
                             let entry_key = Out::from_arena(&keys, at)?;
-                            yield Entry { key: entry_key, value };
+                            yield Entry::new(entry_key, value);
                         // Entries only ascend, so a key past the range's end
                         // ends the walk. The `past_end_bytes` half must NOT be
                         // gated on `entered_range`: a scan whose range hits no
@@ -644,7 +641,7 @@ where
                             if let NoveltyOp::Assert(value) = op {
                                 entered_range = true;
                                 let entry_key = Out::from_entry_bytes(&buffered_key)?;
-                                yield Entry { key: entry_key, value };
+                                yield Entry::new(entry_key, value);
                             }
                         }
 
@@ -654,7 +651,7 @@ where
                             if let NoveltyOp::Assert(value) = op {
                                 entered_range = true;
                                 let entry_key = Out::from_entry_bytes(&buffered_key)?;
-                                yield Entry { key: entry_key, value };
+                                yield Entry::new(entry_key, value);
                             }
                             continue;
                         }
@@ -664,7 +661,7 @@ where
                             entered_range = true;
                             let value = into_owned(segment.value_at(at)?)?;
                             let entry_key = Out::from_entry_bytes(key)?;
-                            yield Entry { key: entry_key, value };
+                            yield Entry::new(entry_key, value);
                         // See the memoized arm above: the `past_end_bytes`
                         // half must not be gated on `entered_range`, or a
                         // range matching no stored entry walks the rest of
@@ -682,7 +679,7 @@ where
                     if let NoveltyOp::Assert(value) = op {
                         entered_range = true;
                         let entry_key = Out::from_entry_bytes(&buffered_key)?;
-                        yield Entry { key: entry_key, value };
+                        yield Entry::new(entry_key, value);
                     }
                 }
             }
