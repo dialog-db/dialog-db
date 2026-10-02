@@ -519,6 +519,34 @@ mod tests {
         Ok(())
     }
 
+    /// A name that only looks like a DID (a valid one with a stray ", "
+    /// after it, as two joined copies of a header read) names no
+    /// repository: loading it is an error, not an abort.
+    #[dialog_common::test]
+    async fn it_refuses_a_name_that_only_looks_like_a_did() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let peer = peer_at(&storage, &credential, "/lookalike").await?;
+        let name = format!("{}, ", credential.did());
+        let loaded = peer.space(name.clone()).load().perform(&peer).await;
+        assert!(
+            matches!(
+                loaded,
+                Err(dialog_repository::LoadRepositoryError::Storage(
+                    storage_fx::StorageError::NotFound(_)
+                ))
+            ),
+            "a name that is not a DID is looked for as a name, and not found"
+        );
+        assert!(
+            peer.recorded_space(&name).await?.is_none(),
+            "a name that was not found is not recorded"
+        );
+        Ok(())
+    }
+
     /// Only the system a storage belongs to grants mounting spaces in
     /// it: a peer built over a storage it was granted nothing over is
     /// refused rather than granted it.
