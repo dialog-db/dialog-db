@@ -281,7 +281,7 @@ impl ArtifactView {
     /// deepest claim version, as the pair the election compares (the
     /// edition, then the hash of the whole version). `None` for a row no
     /// revision tagged.
-    fn standing(&self) -> Option<(Edition, [u8; 32])> {
+    pub fn standing(&self) -> Option<(Edition, [u8; 32])> {
         self.versions()
             .map(|version| (version.edition, make_reference(version.key_bytes())))
             .max()

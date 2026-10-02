@@ -123,6 +123,27 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
         .collect()
 }
 
+/// The dependency edges a concept contributes with no rules of its own:
+/// one positive edge to the attribute concept of every field whose
+/// attribute `derived` holds, since the concept's selecting rule reads
+/// it there, plus its structural edges.
+fn selecting_edges(
+    descriptor: &ConceptDescriptor,
+    derived: &HashSet<Entity>,
+) -> Vec<(ConceptDescriptor, Polarity)> {
+    let mut edges = structural_edges(descriptor);
+    if descriptor.attribute_field().is_some() {
+        return edges;
+    }
+    for (_, field) in descriptor.with().iter() {
+        let attribute = ConceptDescriptor::of_attribute(field);
+        if derived.contains(&attribute.this()) {
+            edges.push((attribute, Polarity::Positive));
+        }
+    }
+    edges
+}
+
 /// The dependency edges a concept contributes with no rules
 /// installed: its implicit rule applies the target concept of every
 /// concept-typed field, so each `conforms` target is a positive
@@ -153,6 +174,9 @@ pub struct ProgramAnalysis {
     /// Every negative or aggregating edge that lands inside its own
     /// component.
     violations: Vec<Violation>,
+    /// The attribute concepts some rule derives, by entity: what an
+    /// unregistered concept's selecting rule reads through.
+    derived: HashSet<Entity>,
 }
 
 /// The shape of a queried concept's dependency closure, as
@@ -174,6 +198,18 @@ impl ProgramAnalysis {
     /// and concepts referenced by premises without a registry entry
     /// of their own contribute their structural (`conforms`) edges.
     pub fn analyze<'a>(entries: impl IntoIterator<Item = (&'a Entity, &'a ConceptRules)>) -> Self {
+        Self::analyze_with(entries, HashSet::new())
+    }
+
+    /// [`analyze`](Self::analyze), told which attribute concepts
+    /// (by entity) some rule derives: a concept referenced by a premise
+    /// but never resolved reads each such attribute through its
+    /// attribute concept, and contributes that edge beside its
+    /// structural ones.
+    pub fn analyze_with<'a>(
+        entries: impl IntoIterator<Item = (&'a Entity, &'a ConceptRules)>,
+        derived: HashSet<Entity>,
+    ) -> Self {
         let mut edges: HashMap<Entity, Vec<(Entity, Polarity)>> = HashMap::new();
         let mut pending: VecDeque<ConceptDescriptor> = VecDeque::new();
 
@@ -196,7 +232,7 @@ impl ProgramAnalysis {
                 continue;
             }
             let mut out = Vec::new();
-            for (target, polarity) in structural_edges(&descriptor) {
+            for (target, polarity) in selecting_edges(&descriptor, &derived) {
                 out.push((target.this(), polarity));
                 pending.push_back(target);
             }
@@ -278,6 +314,7 @@ impl ProgramAnalysis {
             recursive,
             component,
             violations,
+            derived,
         }
     }
 
@@ -330,7 +367,7 @@ impl ProgramAnalysis {
             }
             order.push(entity.clone());
             if !self.edges.contains_key(&entity) {
-                for (target, _) in structural_edges(&descriptor) {
+                for (target, _) in selecting_edges(&descriptor, &self.derived) {
                     structural.push_back(target);
                 }
             }

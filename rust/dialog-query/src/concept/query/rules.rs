@@ -30,6 +30,10 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone)]
 pub struct ConceptRules {
     implicit: DeductiveRule,
+    /// Whether `implicit` is a selecting rule reading some attribute
+    /// through its attribute concept, rather than the descriptor's own
+    /// implicit scan whose plans the descriptor memoizes.
+    selecting: bool,
     installed: Vec<DeductiveRule>,
     plans: Arc<RwLock<HashMap<Adornment, Arc<Disjunction>>>>,
     /// Cross-query cache of planned per-rule [`Conjunction`]s, keyed by
@@ -71,8 +75,21 @@ impl ConceptRules {
     /// layers; passing the branch's cache here lets each assembly reuse
     /// plans the previous one computed (see [`PlanCache`]).
     pub fn with_plan_cache(descriptor: &ConceptDescriptor, plan_cache: PlanCache) -> Self {
+        Self::with_implicit(descriptor.implicit_rule(), false, plan_cache)
+    }
+
+    /// Create a `ConceptRules` whose stored-facts branch is `implicit`
+    /// rather than the descriptor's own implicit rule.
+    ///
+    /// A concept selecting a derived attribute reads it through the
+    /// attribute concept over it, so its selecting rule differs from the
+    /// implicit scan and must not share the descriptor's memoized
+    /// implicit plan: `selecting` says so, and such a rule is planned
+    /// through this instance's own per-adornment cache instead.
+    pub fn with_implicit(implicit: DeductiveRule, selecting: bool, plan_cache: PlanCache) -> Self {
         Self {
-            implicit: descriptor.implicit_rule(),
+            implicit,
+            selecting,
             installed: Vec::new(),
             plans: Arc::new(RwLock::new(HashMap::new())),
             plan_cache,
@@ -107,10 +124,11 @@ impl ConceptRules {
         self.continuation.as_ref()
     }
 
-    /// Install a deductive rule, deduplicating by equality.
-    /// Clears the plan cache when a genuinely new rule is added.
+    /// Install a deductive rule, deduplicating by identity
+    /// ([`DeductiveRule::same`]). Clears the plan cache when a genuinely
+    /// new rule is added.
     pub fn install(&mut self, rule: DeductiveRule) {
-        if !self.installed.contains(&rule) {
+        if !self.installed.iter().any(|known| known.same(&rule)) {
             self.installed.push(rule);
             self.plans.write().unwrap().clear();
         }
@@ -181,10 +199,13 @@ impl ConceptRules {
         // a small branch costs, so neither is planned twice. Reducing
         // rules never join the disjunction: their folded rows are
         // computed separately (see [`Self::reducing`]).
-        let implicit = self
-            .implicit
-            .conclusion()
-            .implicit_plan(adornment, || self.implicit.plan(&scope));
+        let implicit = if self.selecting {
+            self.implicit.plan(&scope)
+        } else {
+            self.implicit
+                .conclusion()
+                .implicit_plan(adornment, || self.implicit.plan(&scope))
+        };
         let plan: Disjunction = iter::once(implicit)
             .chain(
                 self.installed

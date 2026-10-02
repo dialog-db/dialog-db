@@ -7,13 +7,14 @@ use crate::environment::Environment;
 use crate::formula::number::Numeric;
 use crate::query::Application;
 use crate::query::Output;
-use crate::selection::{Match, Selection};
+use crate::selection::{Match, Selection, Standing};
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Record};
 use crate::{
     Binding, Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value,
     try_stream,
 };
+use dialog_artifacts::history::Edition;
 use dialog_artifacts::{Artifact, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
 use serde::{Deserialize, Serialize};
@@ -165,8 +166,13 @@ impl AttributeQueryAll {
         &self,
         candidate: &mut Match,
         artifact: Artifact,
+        version: Option<(Edition, [u8; 32])>,
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(artifact);
+        let standing = Standing {
+            version,
+            cause: claim.cause().clone(),
+        };
         candidate.reserve(4);
         if let Some(name) = self.the.shared_name() {
             candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;
@@ -189,6 +195,7 @@ impl AttributeQueryAll {
             )?;
         }
         candidate.cite_owned(&self.source, claim);
+        candidate.cite_standing(&self.source, standing);
         Ok(())
     }
 
@@ -398,7 +405,9 @@ impl AttributeQueryAll {
                     // stored bytes fail validation (`CorruptEntry`) is a
                     // corrupt or foreign-written tree entry: ignore it
                     // rather than failing the query.
-                    let artifact = match artifact?.to_owned() {
+                    let artifact = artifact?;
+                    let standing = artifact.standing();
+                    let artifact = match artifact.to_owned() {
                         Ok(artifact) => artifact,
                         Err(DialogArtifactsError::CorruptEntry(reason)) => {
                             tracing::warn!(%reason, "ignoring corrupt stored row");
@@ -412,7 +421,7 @@ impl AttributeQueryAll {
                         continue;
                     }
                     let mut extension = base.clone();
-                    selector.merge(&mut extension, artifact)?;
+                    selector.merge(&mut extension, artifact, standing)?;
                     yield extension;
                 }
             }

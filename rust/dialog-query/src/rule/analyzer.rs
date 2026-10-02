@@ -371,7 +371,23 @@ pub fn analyze_with(
                 declared: Box::new(declared),
             })));
         }
-        types.insert(&field, output);
+        // An attribute concept's relation holds values, never
+        // absences: a fold that may yield `Nothing` there derives no
+        // row for that group, so the value enters as its present
+        // shapes. Any other head keeps the raw output, so the
+        // required-head check below still sees an identity-less
+        // fold's Nothing.
+        let derives_value = conclusion
+            .attribute_field()
+            .is_some_and(|(name, _)| name == field);
+        types.insert(
+            &field,
+            if derives_value {
+                output.required()
+            } else {
+                output
+            },
+        );
         entries.push(entry);
     }
     let types = Arc::new(types);

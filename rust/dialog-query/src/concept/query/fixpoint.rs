@@ -349,8 +349,12 @@ where
             for premise in rule.analysis().premises() {
                 match in_component(premise, analysis, &root_entity) {
                     Some(query) => {
+                        // An occurrence names the concept under the
+                        // premise's spelling; the table holds the
+                        // concept's rows under its canonical one.
+                        let query = query.clone().canonical();
                         queue.push(query.predicate.clone());
-                        occurrences.push(query.clone());
+                        occurrences.push(query);
                     }
                     None => base.push(premise.clone()),
                 }
@@ -391,9 +395,19 @@ where
         plan.evaluate(matched.seed(), env).try_collect().await?
     };
     Ok(results
-        .into_iter()
-        .map(|result| project(&member.descriptor, &result))
+        .iter()
+        .filter_map(|result| project_complete(&member.descriptor, result))
         .collect())
+}
+
+/// [`project`], yielding nothing when a required operand is missing:
+/// a fold that bound a required head field `Absent` derived no row.
+pub(crate) fn project_complete(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Row> {
+    let row = project(descriptor, matched);
+    descriptor
+        .required_operands()
+        .all(|operand| row.contains_key(&operand))
+        .then_some(row)
 }
 
 /// [`collect_rule_rows`], staging every row into the table.
@@ -1969,28 +1983,15 @@ mod tests {
             ],
         )?;
 
-        // Connection { this, to, name }: every reachable node with
-        // its name. Not itself recursive.
-        let connection = ConceptDescriptor::try_from(vec![
-            (
-                "to",
-                AttributeDescriptor::new(
-                    the!("conn/to"),
-                    "",
-                    Cardinality::Many,
-                    Some(Type::Entity),
-                ),
-            ),
-            (
-                "name",
-                AttributeDescriptor::new(
-                    the!("conn/name"),
-                    "",
-                    Cardinality::Many,
-                    Some(Type::String),
-                ),
-            ),
-        ])?;
+        // Connection { this, name }: the name of every reachable node.
+        // Not itself recursive. A single attribute, since a rule
+        // derives one relation per head attribute and a concept
+        // joining `to` with `name` would pair every reachable node
+        // with every reachable name.
+        let connection = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(the!("conn/name"), "", Cardinality::Many, Some(Type::String)),
+        )])?;
         let mut link_terms = Parameters::new();
         link_terms.insert("this".to_string(), Term::<Any>::var("this"));
         link_terms.insert("next".to_string(), Term::<Any>::var("to"));
@@ -2024,7 +2025,6 @@ mod tests {
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("from"));
-        terms.insert("to".to_string(), Term::<Any>::var("to"));
         terms.insert("name".to_string(), Term::<Any>::var("name"));
         let source = TestEnv::new(&branch, &operator, registry);
         let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
@@ -2042,42 +2042,17 @@ mod tests {
         for matched in results {
             connections.push((
                 matched.lookup(&Term::<Any>::var("from"))?.content()?,
-                matched.lookup(&Term::<Any>::var("to"))?.content()?,
                 matched.lookup(&Term::<Any>::var("name"))?.content()?,
             ));
         }
         connections.sort_by_key(|row| format!("{row:?}"));
         let mut expected = vec![
-            (
-                Value::Entity(n0.clone()),
-                Value::Entity(n1.clone()),
-                Value::String("a".into()),
-            ),
-            (
-                Value::Entity(n1.clone()),
-                Value::Entity(n2.clone()),
-                Value::String("b".into()),
-            ),
-            (
-                Value::Entity(n0.clone()),
-                Value::Entity(n2.clone()),
-                Value::String("b".into()),
-            ),
-            (
-                Value::Entity(n2.clone()),
-                Value::Entity(n3.clone()),
-                Value::String("c".into()),
-            ),
-            (
-                Value::Entity(n1.clone()),
-                Value::Entity(n3.clone()),
-                Value::String("c".into()),
-            ),
-            (
-                Value::Entity(n0.clone()),
-                Value::Entity(n3.clone()),
-                Value::String("c".into()),
-            ),
+            (Value::Entity(n0.clone()), Value::String("a".into())),
+            (Value::Entity(n0.clone()), Value::String("b".into())),
+            (Value::Entity(n0.clone()), Value::String("c".into())),
+            (Value::Entity(n1.clone()), Value::String("b".into())),
+            (Value::Entity(n1.clone()), Value::String("c".into())),
+            (Value::Entity(n2.clone()), Value::String("c".into())),
         ];
         expected.sort_by_key(|row| format!("{row:?}"));
         assert_eq!(connections, expected, "every reachable node, named");

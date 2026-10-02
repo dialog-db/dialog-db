@@ -9,6 +9,8 @@ use crate::term::{Term, VariableName};
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Record;
+use dialog_artifacts::Cause;
+use dialog_artifacts::history::Edition;
 
 use super::Selection;
 
@@ -133,6 +135,8 @@ pub struct Match {
     // https://github.com/dialog-db/dialog-db/pull/221 claims can be stored
     // directly as Value::Record in bindings, eliminating this separate list.
     claims: Vec<(Arc<str>, Arc<Claim>)>,
+    /// The standing of each cited claim's fact, by the same name.
+    standings: Vec<(Arc<str>, Standing)>,
     /// The bindings and claims this row extends, shared with every other
     /// row extending the same ones.
     frame: Option<Arc<Frame>>,
@@ -151,7 +155,41 @@ pub struct Match {
 struct Frame {
     bindings: Vec<(Arc<str>, Binding)>,
     claims: Vec<(Arc<str>, Arc<Claim>)>,
+    standings: Vec<(Arc<str>, Standing)>,
     parent: Option<Arc<Frame>>,
+}
+
+/// What a row brings to a cardinality-one election: the standing of
+/// the fact it cites, as [`ArtifactView::elect`] compares it. A row
+/// derived by a rule stands as the newest of the facts its body
+/// consumed. Ordered as the election orders: a versioned row beats an
+/// unversioned one, a deeper version beats a shallower, then the
+/// cause decides.
+///
+/// [`ArtifactView::elect`]: dialog_artifacts::ArtifactView::elect
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Standing {
+    /// The deepest revision version the fact carries, as its edition
+    /// and the hash of the version.
+    pub version: Option<(Edition, [u8; 32])>,
+    /// The fact's cause.
+    pub cause: Cause,
+}
+
+impl Ord for Standing {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.version.cmp(&other.version).then_with(|| {
+            self.cause
+                .partial_cmp(&other.cause)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+}
+
+impl PartialOrd for Standing {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Binding order is premise-evaluation order, an artifact of the plan;
@@ -200,12 +238,13 @@ impl Match {
     /// so clones of it (every row a premise extends it into) share them
     /// instead of each copying them.
     pub fn share(&mut self) {
-        if self.bindings.is_empty() && self.claims.is_empty() {
+        if self.bindings.is_empty() && self.claims.is_empty() && self.standings.is_empty() {
             return;
         }
         let frame = Frame {
             bindings: mem::take(&mut self.bindings),
             claims: mem::take(&mut self.claims),
+            standings: mem::take(&mut self.standings),
             parent: self.frame.take(),
         };
         self.frame = Some(Arc::new(frame));
@@ -239,6 +278,63 @@ impl Match {
             }
         }
         claims
+    }
+
+    /// Every standing this row recorded, innermost first, one per
+    /// cited name.
+    fn all_standings(&self) -> Vec<&(Arc<str>, Standing)> {
+        let mut standings: Vec<&(Arc<str>, Standing)> = Vec::new();
+        for entry in self
+            .standings
+            .iter()
+            .chain(self.frames().flat_map(|frame| frame.standings.iter()))
+        {
+            if !standings.iter().any(|(name, _)| *name == entry.0) {
+                standings.push(entry);
+            }
+        }
+        standings
+    }
+
+    /// The row's standing: the newest among the facts it cites. A row
+    /// derived by a rule stands as recent as the latest fact its body
+    /// consumed, which is how it competes in an attribute's election
+    /// against stored rows. `None` for a row citing nothing.
+    pub fn standing(&self) -> Option<Standing> {
+        self.all_standings()
+            .into_iter()
+            .map(|(_, standing)| standing)
+            .max()
+            .cloned()
+    }
+
+    /// Adopt every claim and standing `other` cites that this row does
+    /// not: a result leaving a nested scope keeps the facts it was
+    /// derived from, so the row it merges into stands as they do.
+    pub(crate) fn adopt_citations(&mut self, other: &Match) {
+        for (name, claim) in other.all_claims() {
+            if self.find_claim(name).is_none() {
+                self.claims.push((name.clone(), claim.clone()));
+            }
+        }
+        for (name, standing) in other.all_standings() {
+            if !self.all_standings().iter().any(|(held, _)| held == name) {
+                self.standings.push((name.clone(), standing.clone()));
+            }
+        }
+    }
+
+    /// Record the standing of the fact cited for `term`.
+    pub(crate) fn cite_standing(&mut self, term: &Term<Record>, standing: Standing) {
+        if let Term::Variable {
+            name: Some(name), ..
+        } = term
+        {
+            match self.standings.iter_mut().find(|(held, _)| **held == **name) {
+                Some((_, slot)) => *slot = standing,
+                None => self.standings.push((name.clone(), standing)),
+            }
+        }
     }
 
     /// The binding for `name` along this row's ancestry.
@@ -343,6 +439,11 @@ impl Match {
         for (name, claim) in other.all_claims() {
             if self.find_claim(name).is_none() {
                 self.claims.push((name.clone(), claim.clone()));
+            }
+        }
+        for (name, standing) in other.all_standings() {
+            if !self.all_standings().iter().any(|(held, _)| held == name) {
+                self.standings.push((name.clone(), standing.clone()));
             }
         }
         if self.caller.is_none() {
