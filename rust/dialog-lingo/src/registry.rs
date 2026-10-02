@@ -62,6 +62,12 @@ pub struct Registry {
     pub verbs: Vec<Verb>,
     /// Candidates per noun concept.
     pub candidates: BTreeMap<String, Vec<Candidate>>,
+    /// What fills an empty argument of a noun when the page's own entity
+    /// doesn't: in tonk, a value rules derived from where the palette was
+    /// opened (the notebook a page shows). Scored like that entity: as a
+    /// default, half an exact match.
+    #[serde(default)]
+    pub defaults: BTreeMap<String, Candidate>,
 }
 
 impl Registry {

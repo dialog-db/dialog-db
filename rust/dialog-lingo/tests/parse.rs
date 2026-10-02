@@ -32,6 +32,7 @@ fn concept(id: &str) -> Noun {
 /// share the word "rename" and differ in what they rename.
 fn registry() -> Registry {
     Registry {
+        defaults: Default::default(),
         verbs: vec![
             Verb {
                 id: "member/expel".into(),
@@ -226,6 +227,7 @@ fn it_ranks_what_was_chosen_before() {
 fn it_ranks_a_specific_noun_above_arbitrary_text() {
     // Ubiquity's testSortSpecificNounsBeforeArbTextParser2.
     let registry = Registry {
+        defaults: Default::default(),
         verbs: vec![
             Verb {
                 id: "mumble".into(),

@@ -92,13 +92,19 @@ pub(crate) fn detect(
 }
 
 /// The default for an empty argument: the entity the page shows, when
-/// it is a row of the noun's concept, otherwise nothing.
+/// it is a row of the noun's concept; otherwise the noun's default, when
+/// the host gave one; otherwise nothing.
 pub(crate) fn default(registry: &Registry, noun: &Noun, this: Option<&str>) -> Suggestion {
     if let (Noun::Concept(concept), Some(this)) = (noun, this)
         && let Some(candidate) = registry
             .candidates(concept)
             .iter()
             .find(|row| row.entity == this)
+    {
+        return exact(candidate);
+    }
+    if let Noun::Concept(concept) = noun
+        && let Some(candidate) = registry.defaults.get(concept)
     {
         return exact(candidate);
     }
@@ -120,6 +126,34 @@ fn exact(candidate: &Candidate) -> Suggestion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate(entity: &str, label: &str) -> Candidate {
+        Candidate {
+            entity: entity.to_owned(),
+            label: label.to_owned(),
+        }
+    }
+
+    #[test]
+    fn it_defaults_to_the_page_entity_before_the_nouns_default() {
+        let mut registry = Registry::default();
+        let notebook = Noun::Concept("notebook".to_owned());
+        registry.candidates.insert(
+            "notebook".to_owned(),
+            vec![candidate("nb:a", "Alpha"), candidate("nb:b", "Beta")],
+        );
+        assert_eq!(default(&registry, &notebook, None).value, None);
+
+        registry
+            .defaults
+            .insert("notebook".to_owned(), candidate("nb:b", "Beta"));
+        let filled = default(&registry, &notebook, None);
+        assert_eq!(filled.text, "Beta");
+        assert_eq!(filled.value, Some(Value::Entity("nb:b".to_owned())));
+
+        let shown = default(&registry, &notebook, Some("nb:a"));
+        assert_eq!(shown.value, Some(Value::Entity("nb:a".to_owned())));
+    }
 
     #[test]
     fn it_scores_a_whole_label_as_one() {
