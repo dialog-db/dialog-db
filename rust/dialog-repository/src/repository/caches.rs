@@ -22,6 +22,9 @@
 //!   Every branch of a repository shares them.
 //! - **What is tagged by a head, per branch:** the rule cache and the live
 //!   spine.
+//! - **The outputs of cached formulas, for the whole environment:** a
+//!   formula is a pure function of its inputs, so what it computed for one
+//!   repository holds for any (see [`FormulaCache`]).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -32,6 +35,7 @@ use dialog_artifacts::history::{CausalityCache, ContextCache, RevisionRecord, Ve
 use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
 use dialog_common::{Holds, held_key};
 use dialog_query::concept::query::PlanCache;
+use dialog_query::formula::FormulaCache;
 use dialog_search_tree::{Cache, NODE_CACHE_BUDGET, NodeCache, Scope};
 use dialog_varsig::Did;
 
@@ -92,6 +96,8 @@ impl Repository {
 pub struct HeldCaches {
     /// Tree nodes of every repository, each reading through its own scope.
     nodes: ArtifactNodeCache,
+    /// The outputs of formulas marked `#[formula(cached)]`.
+    formulas: FormulaCache,
     /// By repository DID.
     repositories: Arc<Mutex<HashMap<String, Arc<Repository>>>>,
 }
@@ -102,6 +108,7 @@ impl fmt::Debug for HeldCaches {
             .field("budget", &self.budget())
             .field("bytes", &self.bytes())
             .field("repositories", &self.repositories().len())
+            .field("formulas", &self.formulas.len())
             .finish()
     }
 }
@@ -122,8 +129,13 @@ impl HeldCaches {
     /// repository together. With no room for a node, nothing is kept and
     /// every read goes to the archive.
     pub fn with_budget(bytes: usize) -> Self {
+        Self::with_formulas(bytes, FormulaCache::new())
+    }
+
+    fn with_formulas(bytes: usize, formulas: FormulaCache) -> Self {
         Self {
             nodes: NodeCache::with_budget(bytes),
+            formulas,
             repositories: Arc::default(),
         }
     }
@@ -131,12 +143,17 @@ impl HeldCaches {
     /// The caches `env` holds, made with the default budget if it holds
     /// none yet.
     pub fn of<Env: Holds>(env: &Env) -> Self {
-        env.held_or(&held_key::<Self>(HELD), &|| Arc::new(Self::new()))
-            .downcast_ref::<Self>()
-            .cloned()
-            // Only if something else is held under the key: caches of the
-            // caller's own, which reuse nothing and break nothing.
-            .unwrap_or_default()
+        // Queries may have run through `env` before anything was opened,
+        // with a formula cache of their own: these caches take that one.
+        let formulas = FormulaCache::of(env);
+        env.held_or(&held_key::<Self>(HELD), &|| {
+            Arc::new(Self::with_formulas(NODE_CACHE_BUDGET, formulas.clone()))
+        })
+        .downcast_ref::<Self>()
+        .cloned()
+        // Only if something else is held under the key: caches of the
+        // caller's own, which reuse nothing and break nothing.
+        .unwrap_or_default()
     }
 
     /// Have `env` hold these caches, in place of any it held.
@@ -145,6 +162,12 @@ impl HeldCaches {
     /// opened from here on uses these.
     pub fn hold<Env: Holds>(&self, env: &Env) {
         env.hold(held_key::<Self>(HELD), Arc::new(self.clone()));
+        self.formulas.hold(env);
+    }
+
+    /// The outputs of cached formulas these caches remember.
+    pub fn formulas(&self) -> &FormulaCache {
+        &self.formulas
     }
 
     /// The bytes of tree nodes these caches may hold.
@@ -177,6 +200,7 @@ impl HeldCaches {
     pub fn clear(&self) {
         self.lock().clear();
         self.nodes.clear();
+        self.formulas.clear();
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Arc<Repository>>> {

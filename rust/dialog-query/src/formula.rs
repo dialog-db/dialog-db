@@ -7,6 +7,7 @@
 
 /// Bindings for reading/writing values during formula evaluation.
 pub mod bindings;
+pub mod cache;
 /// Formula cell types for parameter slot definitions.
 pub mod cell;
 
@@ -18,6 +19,7 @@ pub mod number;
 pub mod query;
 
 pub use bindings::*;
+pub use cache::{FORMULA_CACHE_CAPACITY, FormulaCache};
 pub use cell::*;
 pub use input::*;
 pub use number::*;
@@ -118,20 +120,22 @@ pub trait Formula: Predicate + Sized + Clone {
     ///
     /// This default implementation should work for most formulas.
     fn resolve(bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
-        let mut results = Vec::new();
         let input: Self::Input = bindings.try_into()?;
-        for output in Self::compute(input) {
-            let mut bindings = bindings.clone();
-            match output.write(&mut bindings) {
-                Ok(()) => results.push(bindings.source),
-                Err(EvaluationError::Conflict { .. })
-                | Err(EvaluationError::Absent { .. })
-                | Err(EvaluationError::TypeMismatch { .. }) => continue,
-                Err(error) => return Err(error),
-            }
-        }
+        emit(bindings, &Self::compute(input))
+    }
 
-        Ok(results)
+    /// [`resolve`](Self::resolve), with a cache the formula may keep its
+    /// outputs in.
+    ///
+    /// A formula derived with `#[formula(cached)]` computes through
+    /// `cache`, so the same inputs are computed once for as long as the
+    /// cache remembers them. Any other formula ignores it.
+    fn resolve_with(
+        bindings: &mut Bindings,
+        cache: &FormulaCache,
+    ) -> Result<Vec<Match>, EvaluationError> {
+        let _ = cache;
+        Self::resolve(bindings)
     }
 
     /// Create a formula application from raw parameters.
@@ -148,6 +152,30 @@ pub trait Formula: Predicate + Sized + Clone {
     /// This method is called for each output instance produced by `compute`
     /// to write the computed values back to the bindings.
     fn write(&self, bindings: &mut Bindings) -> Result<(), EvaluationError>;
+}
+
+/// Writes each of a formula's `outputs` to its own copy of `bindings`,
+/// answering with the matches that agree with what the row already holds:
+/// the write half of [`Formula::resolve`], shared by formulas that compute
+/// their outputs some other way.
+///
+/// A write that disagrees with what the row already holds (a `Conflict`
+/// on a pre-bound output slot, an `Absent` binding, a `TypeMismatch`) is
+/// local to that output: the row filters it and keeps the outputs that do
+/// agree. Any other write error is a genuine failure and propagates.
+pub fn emit<F: Formula>(bindings: &Bindings, outputs: &[F]) -> Result<Vec<Match>, EvaluationError> {
+    let mut results = Vec::new();
+    for output in outputs {
+        let mut bindings = bindings.clone();
+        match output.write(&mut bindings) {
+            Ok(()) => results.push(bindings.source),
+            Err(EvaluationError::Conflict { .. })
+            | Err(EvaluationError::Absent { .. })
+            | Err(EvaluationError::TypeMismatch { .. }) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(results)
 }
 
 /// Trait alias for types that can be constructed from a [`Bindings`] as formula input.

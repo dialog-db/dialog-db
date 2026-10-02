@@ -76,7 +76,7 @@ use dialog_artifacts::{
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -589,6 +589,7 @@ where
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -853,6 +854,7 @@ where
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -988,6 +990,7 @@ where
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -1043,6 +1046,7 @@ where
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -1090,7 +1094,7 @@ mod tests {
     use dialog_artifacts::{Attribute as ArtifactsAttribute, NameShape, Symbol};
     use dialog_artifacts::{Entity, Value};
     use dialog_capability::{Fork, Provider};
-    use dialog_common::{ConditionalSend, ConditionalSync};
+    use dialog_common::{ConditionalSend, ConditionalSync, Holds};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::Identify;
     use dialog_effects::blob::Read as BlobRead;
@@ -1172,6 +1176,7 @@ mod tests {
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSend
+            + Holds
             + ConditionalSync
             + 'static,
     {

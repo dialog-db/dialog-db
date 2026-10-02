@@ -415,6 +415,21 @@ pub struct JoinEnv<'a, Env> {
     journal: ReadJournal,
 }
 
+/// What evaluation keeps between queries is the operator's to hold.
+impl<Env: Holds> Holds for JoinEnv<'_, Env> {
+    fn held(&self, key: &str) -> Option<dialog_common::Held> {
+        self.operator.held(key)
+    }
+
+    fn hold(&self, key: String, handle: dialog_common::Held) {
+        self.operator.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> dialog_common::Held) -> dialog_common::Held {
+        self.operator.held_or(key, make)
+    }
+}
+
 impl<'a, Env> JoinEnv<'a, Env> {
     /// The shared read journal accumulating block reads across premises.
     pub fn journal(&self) -> &ReadJournal {
