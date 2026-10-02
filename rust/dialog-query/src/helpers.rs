@@ -711,7 +711,7 @@ where
     /// repository is released first, so the reads a query reports are the
     /// blocks a reader with nothing warm would fetch.
     async fn cold(&self) -> Result<Branch> {
-        HeldCaches::release(&self.operator, &self.repo.did());
+        HeldCaches::of(&self.operator).release(&self.repo.did());
         Ok(self
             .repo
             .branch(&self.branch)
@@ -1186,7 +1186,7 @@ where
         if held.is_none() || !reuse {
             // Reopening is only cold once what the environment holds for
             // the repository is let go.
-            HeldCaches::release(&self.operator, &self.repo.did());
+            HeldCaches::of(&self.operator).release(&self.repo.did());
             *held = Some(
                 self.repo
                     .branch(&self.branch)
@@ -1596,7 +1596,7 @@ where
             if held.is_none() || !reuse {
                 // Reopening is only cold once what the environment holds
                 // for the repository is let go.
-                HeldCaches::release(&self.operator, &self.repo.did());
+                HeldCaches::of(&self.operator).release(&self.repo.did());
                 held = Some(
                     self.repo
                         .branch(&self.branch)

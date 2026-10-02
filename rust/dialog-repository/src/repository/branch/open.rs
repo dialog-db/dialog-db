@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::repository::caches;
-use crate::{Branch, BranchReference, Ephemeral, ResolveError};
+use crate::{Branch, BranchReference, Ephemeral, HeldCaches, ResolveError};
 use dialog_capability::Provider;
 use dialog_common::Holds;
 use dialog_effects::branch::invalid_name;
@@ -52,7 +51,7 @@ impl OpenBranch {
         let induction = self.branch.induction();
         induction.resolve().perform(env).await?;
 
-        let caches = caches::of(env, &self.branch);
+        let caches = HeldCaches::of(env).branch(&self.branch);
 
         Ok(Branch {
             writer: Branch::writer_of(&self.branch),

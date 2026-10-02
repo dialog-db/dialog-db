@@ -99,7 +99,8 @@ use dialog_identity::access::Access;
 use dialog_identity::{Authority, CredentialHandle, SpaceHandle};
 use dialog_network::{HydrationScheduler, Network};
 use dialog_repository::{
-    Branch, By, ContactConnection, ContactReference, RemoteSite, ReplicaReference, contact,
+    Branch, By, ContactConnection, ContactReference, HeldCaches, RemoteSite, ReplicaReference,
+    contact,
 };
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
@@ -394,6 +395,13 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         &self.inner.network
     }
 
+    /// The caches this peer holds for the repositories opened through it:
+    /// the ones it was built with, or its own. Bound them when building the
+    /// peer; let a repository's go with [`HeldCaches::release`].
+    pub fn caches(&self) -> HeldCaches {
+        HeldCaches::of(self)
+    }
+
     /// The shared runtime this peer performs through.
     pub fn runtime(&self) -> &Runtime {
         &self.inner.runtime
@@ -564,10 +572,6 @@ impl<S: Clone, M: Mode> Holds for Peer<S, M> {
 
     fn hold(&self, key: String, handle: Held) {
         self.inner.holdings.hold(key, handle)
-    }
-
-    fn release(&self, key: &str) -> Option<Held> {
-        self.inner.holdings.release(key)
     }
 }
 
