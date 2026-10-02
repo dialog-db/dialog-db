@@ -17,6 +17,7 @@ use dialog_did_web::Resolve;
 use dialog_effects::memory::CellState;
 use dialog_ucan_core::revocation::RevocationChecker;
 use dialog_ucan_core::{Container, InvocationChain};
+use futures_util::future::join_all;
 
 use super::{Reply, Request};
 use crate::server::{Access, Answer, Issuance, Payload, Store, Subscription};
@@ -108,8 +109,9 @@ impl Session {
     /// `state`, at `at` (Unix seconds), to the watches that follow it.
     ///
     /// A watch whose authority was last found to hold more than `interval`
-    /// before is checked again first (see [`Access::recheck`]); one whose
-    /// authority ends is answered with why, and the session drops it.
+    /// before is checked again first (see [`Access::recheck`]), all of them
+    /// at once; one whose authority ends is answered with why, and the
+    /// session drops it.
     pub async fn deliver<P, Resolver, Revocations>(
         &mut self,
         access: &Access<P, Resolver, Revocations>,
@@ -121,15 +123,26 @@ impl Session {
         Resolver: Provider<Resolve> + ConditionalSync,
         Revocations: RevocationChecker + ConditionalSync,
     {
+        // Every watch the change reaches is checked at once: a cell many
+        // follow is not held up by checking each in turn.
+        let checked = join_all(
+            self.watches
+                .iter_mut()
+                .filter(|(_, watch)| watch.follows(change.subject, change.space, change.cell))
+                .map(|(invocation, watch)| async move {
+                    (
+                        invocation.clone(),
+                        access.recheck(watch, interval, at).await,
+                    )
+                }),
+        )
+        .await;
         let mut replies = Vec::new();
         let mut ended = Vec::new();
-        for (invocation, watch) in self.watches.iter_mut() {
-            if !watch.follows(change.subject, change.space, change.cell) {
-                continue;
-            }
-            match access.recheck(watch, interval, at).await {
+        for (invocation, outcome) in checked {
+            match outcome {
                 Ok(()) => replies.push(Reply::State {
-                    invocation: invocation.clone(),
+                    invocation,
                     state: change.state.clone(),
                 }),
                 Err(refusal) => {
@@ -140,7 +153,7 @@ impl Session {
                         status: response.status,
                         body,
                     });
-                    ended.push(invocation.clone());
+                    ended.push(invocation);
                 }
             }
         }
