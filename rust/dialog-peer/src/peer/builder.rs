@@ -8,9 +8,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use dialog_capability::access::{Access, Prove};
-use dialog_capability::{Ability, Capability, Constraint, Subject, did};
-use dialog_common::{Held, Holdings};
+use dialog_capability::{Ability, Capability, Command, Constraint, Provider, Subject, did};
+use dialog_common::{ConditionalSync, Held, Holdings, Holds};
 use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential, Verifier};
+use dialog_effects::memory::Resolve;
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
 use dialog_identity::access::{Access as Accessor, Claim};
 use dialog_network::Network;
@@ -540,6 +541,38 @@ impl<K, St, M> With<Network> for PeerBuilder<K, St, M> {
     }
 }
 
+/// A peer's storage beside the holdings the peer will have: what its state
+/// branch is opened through, before there is a peer to open it through.
+struct Opening<'a, S: Clone> {
+    storage: &'a Storage<S>,
+    holdings: &'a Holdings,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S: Clone> Provider<Resolve> for Opening<'_, S>
+where
+    Storage<S>: Provider<Resolve> + ConditionalSync,
+{
+    async fn execute(&self, input: <Resolve as Command>::Input) -> <Resolve as Command>::Output {
+        Provider::<Resolve>::execute(self.storage, input).await
+    }
+}
+
+impl<S: Clone> Holds for Opening<'_, S> {
+    fn held(&self, key: &str) -> Option<Held> {
+        self.holdings.held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        self.holdings.hold(key, handle)
+    }
+
+    fn release(&self, key: &str) -> Option<Held> {
+        self.holdings.release(key)
+    }
+}
+
 impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
     /// Register `step`, run when the peer opens if its version is above
     /// the one the peer's records are at. See
@@ -729,9 +762,16 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
             grants.push(grant);
         }
 
+        // The peer's state branch is opened before the peer exists, so it
+        // is opened through the storage with the holdings the peer will
+        // have: what the branch keeps is then the peer's to hold.
+        let holdings = Holdings::default();
         let state = reference
             .open()
-            .perform(&self.storage)
+            .perform(&Opening {
+                storage: &self.storage,
+                holdings: &holdings,
+            })
             .await
             .map_err(|error| PeerError::State(error.to_string()))?;
 
@@ -755,7 +795,7 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 state,
                 chains: Mutex::default(),
                 grants,
-                holdings: Holdings::default(),
+                holdings,
                 connections: Mutex::default(),
                 sites: self.sites,
                 holder,

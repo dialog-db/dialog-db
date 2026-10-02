@@ -255,7 +255,7 @@ where
         store,
     };
     let storage = store;
-    let tree = Index::from_hash(NodeHash::from(root));
+    let tree = Index::from_hash_with_cache(NodeHash::from(root), source.as_ref().node_cache());
 
     let manifest = tree.manifest(&storage).await?;
     let range = selector_range(selector, &manifest);

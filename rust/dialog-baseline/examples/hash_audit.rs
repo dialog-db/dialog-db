@@ -9,6 +9,7 @@
 use dialog_baseline::metered::Tally;
 use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::{SeLog, se_instructions};
+use dialog_repository::BranchReference;
 use futures_util::stream;
 
 fn main() -> anyhow::Result<()> {
@@ -24,11 +25,25 @@ fn main() -> anyhow::Result<()> {
         let tally = Tally::default();
         let repo = DialogRepo::metered(tally.clone()).await?;
         let started = std::time::Instant::now();
+        // `HASH_AUDIT_REOPEN` opens the branch afresh for every commit, the
+        // way a service that keeps no handle between requests does.
+        let reopen = std::env::var("HASH_AUDIT_REOPEN").is_ok();
         for commit in &log.transactions {
-            repo.branch()
-                .commit(stream::iter(se_instructions(commit)?))
-                .perform(repo.operator())
-                .await?;
+            let instructions = stream::iter(se_instructions(commit)?);
+            if reopen {
+                BranchReference::from(repo.branch())
+                    .open()
+                    .perform(repo.operator())
+                    .await?
+                    .commit(instructions)
+                    .perform(repo.operator())
+                    .await?;
+            } else {
+                repo.branch()
+                    .commit(instructions)
+                    .perform(repo.operator())
+                    .await?;
+            }
         }
         let elapsed = started.elapsed();
         println!(

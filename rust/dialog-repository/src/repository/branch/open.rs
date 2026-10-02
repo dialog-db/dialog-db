@@ -1,13 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-use crate::rules::RuleCache;
+use crate::repository::caches;
 use crate::{Branch, BranchReference, Ephemeral, ResolveError};
-use dialog_artifacts::history::{CausalityCache, ContextCache};
-use dialog_artifacts::tree::spill_cache;
 use dialog_capability::Provider;
+use dialog_common::Holds;
 use dialog_effects::branch::invalid_name;
 use dialog_effects::memory::Resolve;
-use dialog_query::concept::query::PlanCache;
 
 /// Command to open a branch. Resolves the branch's revision and upstream
 /// cells without ever erroring on a missing revision — a freshly-opened
@@ -30,9 +28,13 @@ impl OpenBranch {
     /// before any cell is touched: a store lays a branch's cells out under
     /// its name, and a name such as `meta?x` or `x/../meta` would open
     /// another branch's cells, however it got here.
+    ///
+    /// The branch reads and commits through the caches `env` holds for it
+    /// (see [`HeldCaches`](crate::HeldCaches)), so opening it again through
+    /// the same environment finds them warm.
     pub async fn perform<Env>(self, env: &Env) -> Result<Branch, ResolveError>
     where
-        Env: Provider<Resolve>,
+        Env: Provider<Resolve> + Holds,
     {
         if let Some(reason) = invalid_name(self.branch.name()) {
             return Err(ResolveError::Storage(format!(
@@ -50,20 +52,22 @@ impl OpenBranch {
         let induction = self.branch.induction();
         induction.resolve().perform(env).await?;
 
+        let caches = caches::of(env, &self.branch);
+
         Ok(Branch {
             writer: Branch::writer_of(&self.branch),
             reference: self.branch,
             revision,
             tracking,
             induction,
-            node_cache: dialog_search_tree::NodeCache::new(),
-            spill_cache: spill_cache(),
-            rule_cache: Arc::new(RuleCache::new()),
-            plan_cache: PlanCache::default(),
-            causality_cache: CausalityCache::new(),
-            context_cache: ContextCache::new(),
-            record_cache: dialog_search_tree::Cache::new(),
-            spine: dialog_artifacts::SpineSlot::new(),
+            node_cache: caches.nodes,
+            spill_cache: caches.spills,
+            rule_cache: caches.rules,
+            plan_cache: caches.plans,
+            causality_cache: caches.causality,
+            context_cache: caches.contexts,
+            record_cache: caches.records,
+            spine: caches.spine,
             identity_cache: Arc::new(Mutex::new(None)),
             metadata_cache: Arc::new(Mutex::new(None)),
             layer_metadata_cache: Arc::new(Mutex::new(None)),

@@ -3,7 +3,7 @@ use dialog_artifacts::{
 };
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::{Buffer, ConditionalSync};
+use dialog_common::{Buffer, ConditionalSync, Holds};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
@@ -589,7 +589,7 @@ async fn tracked_remotes<Env>(
     env: &Env,
 ) -> Result<Vec<ConnectedReplica>, PushError>
 where
-    Env: Provider<Resolve> + ConditionalSync + 'static,
+    Env: Provider<Resolve> + Holds + ConditionalSync + 'static,
 {
     fn gather(
         upstreams: &crate::Upstreams,
