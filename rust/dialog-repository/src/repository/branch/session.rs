@@ -11,7 +11,7 @@ use dialog_artifacts::{
 };
 use dialog_artifacts::{LoadBlob, Relation as ArtifactsRelation, Standing, Value};
 use dialog_capability::{Capability, Fork, Provider};
-use dialog_common::{Buffer, ConditionalSync};
+use dialog_common::{Buffer, ConditionalSync, Held, Holds};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
@@ -322,6 +322,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + Provider<Preload>
             + Provider<Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -371,6 +372,7 @@ pub(crate) trait Capabilities:
     + Provider<Hydrate>
     + Provider<Preload>
     + Provider<Fork<RemoteSite, Resolve>>
+    + Holds
     + ConditionalSync
 {
 }
@@ -383,6 +385,7 @@ impl<T> Capabilities for T where
         + Provider<Hydrate>
         + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
 {
 }
@@ -433,6 +436,22 @@ pub(crate) struct QueryEnv<'a> {
     /// through.
     memo: Memo,
     env: &'a Erased,
+}
+
+/// What evaluation keeps between queries, the outputs of cached formulas
+/// above all, is held by the environment the query runs in.
+impl Holds for QueryEnv<'_> {
+    fn held(&self, key: &str) -> Option<Held> {
+        self.env.held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        self.env.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.env.held_or(key, make)
+    }
 }
 
 /// The format [`Manifest`]s of the trees a [`QueryEnv`] reads, and the
@@ -2028,6 +2047,7 @@ mod rule_tests {
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -2071,6 +2091,7 @@ mod rule_tests {
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -2150,6 +2171,7 @@ mod rule_tests {
             + dialog_capability::Provider<dialog_artifacts::Preload>
             + dialog_capability::Provider<dialog_artifacts::Speculation>
             + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {

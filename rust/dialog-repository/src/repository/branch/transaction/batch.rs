@@ -37,7 +37,7 @@ use dialog_artifacts::{
 };
 use dialog_capability::history::Origin;
 use dialog_capability::{Did, Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::blob::Import as BlobImport;
@@ -377,6 +377,7 @@ impl TransactionPublish<&Branch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -404,6 +405,7 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -444,6 +446,7 @@ impl TransactionCommit<&Branch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -552,6 +555,7 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -648,6 +652,7 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {
