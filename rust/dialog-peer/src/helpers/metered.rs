@@ -94,6 +94,10 @@ impl<Env: Holds, M> Holds for Metered<Env, M> {
     fn hold(&self, key: String, handle: Held) {
         self.inner.hold(key, handle)
     }
+
+    fn release(&self, key: &str) -> Option<Held> {
+        self.inner.release(key)
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

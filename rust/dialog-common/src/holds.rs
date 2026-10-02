@@ -27,6 +27,17 @@ pub trait Holds {
 
     /// Hold `handle` under `key`, replacing whatever was held there.
     fn hold(&self, key: String, handle: Held);
+
+    /// Stop holding what is held under `key`, handing it back: how the
+    /// code that put a handle in lets it go before the environment does.
+    ///
+    /// An environment that cannot forget a key holds nothing useful under
+    /// it instead, which is what this does unless it is overridden.
+    fn release(&self, key: &str) -> Option<Held> {
+        let held = self.held(key)?;
+        self.hold(key.to_string(), Arc::new(()));
+        Some(held)
+    }
 }
 
 /// A map of held handles, for an environment to embed and delegate
@@ -56,6 +67,13 @@ impl Holds for Holdings {
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(key, handle);
     }
+
+    fn release(&self, key: &str) -> Option<Held> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(key)
+    }
 }
 
 #[cfg(test)]
@@ -77,5 +95,19 @@ mod tests {
         let held = shared.held("answer").expect("held");
         assert_eq!(held.downcast_ref::<u32>(), Some(&42));
         assert!(shared.held("missing").is_none());
+    }
+
+    /// What is released comes back to whoever released it and is held no
+    /// longer, through any clone.
+    #[dialog_common::test]
+    fn it_lets_go_of_what_it_releases() {
+        let holdings = Holdings::default();
+        let shared = holdings.clone();
+        holdings.hold("answer".into(), Arc::new(42u32));
+
+        let released = shared.release("answer").expect("held");
+        assert_eq!(released.downcast_ref::<u32>(), Some(&42));
+        assert!(holdings.held("answer").is_none());
+        assert!(holdings.release("answer").is_none());
     }
 }

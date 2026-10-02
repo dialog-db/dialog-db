@@ -2329,6 +2329,10 @@ impl<P: dialog_common::Holds> dialog_common::Holds for AbortOnRemoteBlobImport<P
     fn hold(&self, key: String, handle: dialog_common::Held) {
         self.inner.hold(key, handle)
     }
+
+    fn release(&self, key: &str) -> Option<dialog_common::Held> {
+        self.inner.release(key)
+    }
 }
 
 #[cfg(not(feature = "web-integration-tests"))]

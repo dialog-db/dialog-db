@@ -40,6 +40,7 @@ mod credential;
 mod memory;
 
 use dialog_capability::Did;
+use dialog_common::{Held, Holdings, Holds};
 use dialog_credentials::credential::CredentialExport;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -87,6 +88,23 @@ pub struct Volatile {
     /// Prefix for scoping this provider to a location.
     mount: String,
     sessions: Arc<RwLock<HashMap<Did, Session>>>,
+    /// Handles kept for the code running against this provider, in memory
+    /// like everything else it keeps. Clones share them.
+    holdings: Holdings,
+}
+
+impl Holds for Volatile {
+    fn held(&self, key: &str) -> Option<Held> {
+        self.holdings.held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        self.holdings.hold(key, handle)
+    }
+
+    fn release(&self, key: &str) -> Option<Held> {
+        self.holdings.release(key)
+    }
 }
 
 impl Default for Volatile {
@@ -94,6 +112,7 @@ impl Default for Volatile {
         Self {
             mount: String::new(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            holdings: Holdings::default(),
         }
     }
 }
@@ -140,6 +159,7 @@ impl Resource<Location> for Volatile {
         Ok(Self {
             mount: prefix,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            holdings: Holdings::default(),
         })
     }
 }

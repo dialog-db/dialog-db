@@ -565,6 +565,10 @@ impl<S: Clone, M: Mode> Holds for Peer<S, M> {
     fn hold(&self, key: String, handle: Held) {
         self.inner.holdings.hold(key, handle)
     }
+
+    fn release(&self, key: &str) -> Option<Held> {
+        self.inner.holdings.release(key)
+    }
 }
 
 impl<S: Clone, M: Mode> Principal for Peer<S, M> {

@@ -209,9 +209,11 @@ where
         return Ok(None);
     };
     let store = index_store(source, env).await;
-    Ok(Index::from_hash(NodeHash::from(*revision.tree.hash()))
-        .asset_size(&store, hash)
-        .await?)
+    Ok(
+        Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), source.node_cache())
+            .asset_size(&store, hash)
+            .await?,
+    )
 }
 
 /// Import `content` into `source`'s blob store under `asset`'s hash and
