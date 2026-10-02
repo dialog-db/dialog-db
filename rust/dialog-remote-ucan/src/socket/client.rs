@@ -8,6 +8,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use dialog_common::time::{self, SystemTime};
 
 use dialog_effects::Rejection;
 use dialog_effects::memory::{CellState, EditionSource, MemoryError};
@@ -26,16 +29,24 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 use web::Link;
 
+/// How long a socket that could not be opened is not tried again: what
+/// would have gone over it goes as requests meanwhile, without paying for
+/// a connection attempt each time.
+const RETRY: Duration = Duration::from_secs(30);
+
 /// The connections a site keeps, one per socket address: every watch of
 /// a cell in one space at one service shares one.
 #[derive(Debug, Clone, Default)]
 pub struct Sockets {
     connections: Arc<Mutex<HashMap<String, Connection>>>,
+    /// Socket addresses that could not be opened, and when.
+    failed: Arc<Mutex<HashMap<String, SystemTime>>>,
 }
 
 impl Sockets {
     /// The connection to `url`, opened when there is none or the one
-    /// there closed.
+    /// there closed. A socket that could not be opened is answered as
+    /// unavailable, without trying it again, until [`RETRY`] has passed.
     pub(crate) async fn connect(&self, url: &str) -> Result<Connection, MemoryError> {
         if let Some(connection) = self
             .connections
@@ -46,8 +57,34 @@ impl Sockets {
         {
             return Ok(connection.clone());
         }
+        let recently = self
+            .failed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(url)
+            .is_some_and(|failed| {
+                time::now()
+                    .duration_since(*failed)
+                    .is_ok_and(|since| since < RETRY)
+            });
+        if recently {
+            return Err(unavailable("it could not be opened a moment ago"));
+        }
         let routes = Routes::default();
-        let link = Link::open(url, routes.clone()).await?;
+        let link = match Link::open(url, routes.clone()).await {
+            Ok(link) => link,
+            Err(error) => {
+                self.failed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(url.to_string(), time::now());
+                return Err(error);
+            }
+        };
+        self.failed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(url);
         let connection = Connection {
             link: Arc::new(link),
             routes,
@@ -230,4 +267,49 @@ pub(crate) fn unavailable(reason: impl std::fmt::Display) -> MemoryError {
         reason: format!("the socket could not be used: {reason}"),
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Sockets;
+    use dialog_effects::Rejection;
+    use dialog_effects::memory::MemoryError;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A socket that could not be opened is not tried again at once: the
+    /// second connect is answered as unavailable without reaching it.
+    ///
+    /// Native only, for the listener that counts attempts; the browser
+    /// connects through the same `Sockets`, whose memory of failures this
+    /// pins.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_does_not_try_a_failed_socket_again_at_once() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("ws://{}/", listener.local_addr()?);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        let sockets = Sockets::default();
+        assert!(sockets.connect(&url).await.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let again = sockets.connect(&url).await;
+        assert!(
+            matches!(
+                again,
+                Err(MemoryError::Rejected(Rejection::Unavailable { .. }))
+            ),
+            "{:?}",
+            again.err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "it was not tried again");
+        Ok(())
+    }
 }
