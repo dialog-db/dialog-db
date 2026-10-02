@@ -94,18 +94,18 @@ pub(super) fn kept(credential: &Credential) -> Credential {
     }
 }
 
-/// Whether `location` names where a credential store keeps a key rather
-/// than a space: a storage refuses it, so a key and the space of its name
-/// never meet through one handle.
+/// Whether `location` names where a credential store keeps its keys
+/// rather than a space: a storage refuses it, so keys are never reached
+/// through a handle that mounts spaces.
 pub(super) fn is_credential_store(location: &storage::Location) -> bool {
-    location.name.ends_with(credential_store::SUFFIX)
+    location.name == credential_store::VAULT
 }
 
-/// A location a storage refuses because a credential store keeps a key
+/// A location a storage refuses because a credential store keeps its keys
 /// there.
 fn refused(location: &storage::Location) -> storage::StorageError {
     storage::StorageError::Storage(format!(
-        "{} is where a credential store keeps a key, not a space",
+        "{} is where a credential store keeps its keys, not a space",
         location.name
     ))
 }
@@ -390,13 +390,14 @@ mod tests {
         );
     }
 
-    /// A storage refuses the name a credential store keeps a key under,
-    /// so a key and the space of its name never meet through one handle.
+    /// A storage refuses the name a credential store keeps its keys
+    /// under, so keys are never reached through a handle that mounts
+    /// spaces.
     #[dialog_common::test]
     async fn it_refuses_where_a_credential_store_keeps_a_key() {
         let env = Storage::volatile();
         let credential = test_credential().await;
-        let refused = StorageFx::profile("alice.credentials")
+        let refused = StorageFx::profile("dialog.credential")
             .create(credential)
             .perform(&env)
             .await;
@@ -404,7 +405,7 @@ mod tests {
             matches!(refused, Err(storage::StorageError::Storage(_))),
             "{refused:?}"
         );
-        let refused = StorageFx::profile("alice.credentials")
+        let refused = StorageFx::profile("dialog.credential")
             .load()
             .perform(&env)
             .await;

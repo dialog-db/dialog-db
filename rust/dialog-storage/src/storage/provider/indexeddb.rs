@@ -323,7 +323,7 @@ fn database_name(location: &Location) -> String {
 /// *without opening* (so it never creates one). The factory is read off
 /// the global scope (`self`) rather than `window`, so it works in a
 /// worker where `window` is absent.
-async fn database_exists(name: &str) -> Result<bool, IndexedDbError> {
+pub(crate) async fn database_exists(name: &str) -> Result<bool, IndexedDbError> {
     let err = |m: String| IndexedDbError::Database(m);
 
     let scope = global();

@@ -6,9 +6,10 @@
 //! sign with. Keys are opened from a [`CredentialStore`] instead, by
 //! whoever builds a peer, and the peer is handed the key it acts with.
 //!
-//! The store is laid out like a storage, one space per key, but under
-//! names of its own (`{name}.credentials`), so a key and the space of the
-//! same name never share a directory or a database.
+//! The store keeps every key of a directory in one space of that
+//! directory, named [`VAULT`], each under its own name. A key and the
+//! space of the same name never share a directory or a database, and a
+//! directory holds one store however many keys it keeps.
 
 use std::fmt::Display;
 use std::sync::Arc;
@@ -24,10 +25,16 @@ use dialog_varsig::Principal as _;
 
 use super::Storage;
 
-use super::loader::Loader;
-use super::router::Router;
 use crate::provider::SpaceProvider;
 use crate::resource::{Pool, Resource};
+
+/// The name of the space a directory's keys are kept in, so a storage
+/// tells it apart from a space of its own and refuses to mount it.
+pub(super) const VAULT: &str = "dialog.credential";
+
+/// Where a key the store handed out is kept: the directory, and the name
+/// it is kept under there.
+type Kept = (storage::Directory, String);
 
 /// A store of signing keys, opened by name.
 ///
@@ -37,8 +44,10 @@ use crate::resource::{Pool, Resource};
 /// hands a peer the key it acts with; no peer holds the store. Cloning
 /// yields a second handle onto the same keys.
 pub struct CredentialStore<S: Clone> {
-    loader: Loader<S>,
-    router: Router<S>,
+    /// The space each directory keeps its keys in, once opened.
+    vaults: Arc<Pool<String, S>>,
+    /// Where each key this store handed out is kept, by the key's DID.
+    kept: Arc<Pool<Did, Kept>>,
     /// The system this store belongs to. Only its DID is kept.
     system: Option<Did>,
 }
@@ -46,8 +55,8 @@ pub struct CredentialStore<S: Clone> {
 impl<S: Clone> Clone for CredentialStore<S> {
     fn clone(&self) -> Self {
         Self {
-            loader: self.loader.clone(),
-            router: self.router.clone(),
+            vaults: Arc::clone(&self.vaults),
+            kept: Arc::clone(&self.kept),
             system: self.system.clone(),
         }
     }
@@ -56,10 +65,9 @@ impl<S: Clone> Clone for CredentialStore<S> {
 impl<S: Clone> CredentialStore<S> {
     /// A store with nothing opened yet.
     pub fn new() -> Self {
-        let spaces = Arc::new(Pool::new());
         Self {
-            loader: Loader::new(Arc::clone(&spaces)),
-            router: Router::new(spaces),
+            vaults: Arc::new(Pool::new()),
+            kept: Arc::new(Pool::new()),
             system: None,
         }
     }
@@ -82,26 +90,102 @@ impl<S: Clone> Default for CredentialStore<S> {
     }
 }
 
-/// What a key's name ends with where the store keeps it, so a storage
-/// tells a key apart from a space and refuses to mount one as the other.
-pub(super) const SUFFIX: &str = ".credentials";
+/// The space the keys of `directory` are kept in.
+fn vault(directory: &storage::Directory) -> storage::Location {
+    storage::Location::new(directory.clone(), VAULT)
+}
 
-/// Where the key named by `location` is kept: beside the space of the
-/// same name, never in it.
-fn keyed(location: &storage::Location) -> storage::Location {
-    storage::Location::new(
-        location.directory.clone(),
-        format!("{}{SUFFIX}", location.name),
-    )
+/// The key named `name` as a space keeps it: under its own name, where a
+/// space's own identity is kept under [`credential::SELF`].
+fn key(name: &str) -> Capability<credential::Key> {
+    Subject::from(did!("local:storage")).credential().key(name)
+}
+
+fn failed(error: impl Display) -> storage::StorageError {
+    storage::StorageError::Storage(error.to_string())
 }
 
 impl<S> CredentialStore<S>
 where
-    S: Clone + SpaceProvider + Resource<storage::Location> + ConditionalSend + ConditionalSync,
+    S: Clone + SpaceProvider + Resource<storage::Location> + ConditionalSend,
     S::Error: Display,
-    Router<S>: Provider<credential::Save<Credential>>,
-    Self: ConditionalSend + ConditionalSync,
 {
+    /// The space `directory` keeps its keys in. With `create` it is
+    /// brought into being when absent; without, a directory that keeps no
+    /// keys yet answers `None` and nothing is created.
+    async fn vault(
+        &self,
+        directory: &storage::Directory,
+        create: bool,
+    ) -> Result<Option<S>, storage::StorageError> {
+        let location = vault(directory);
+        let pooled = format!("{directory:?}");
+        if let Some(space) = self.vaults.get(&pooled) {
+            return Ok(Some(space));
+        }
+        let space = if create {
+            S::open(&location).await.map_err(failed)?
+        } else {
+            match S::load(&location).await {
+                Ok(space) => space,
+                Err(error) if S::is_not_found(&error) => return Ok(None),
+                Err(error) => return Err(failed(error)),
+            }
+        };
+        self.vaults.insert(pooled, space.clone());
+        Ok(Some(space))
+    }
+
+    /// The key kept at `location`, or `None` when the directory keeps no
+    /// key under that name.
+    async fn load(
+        &self,
+        location: &storage::Location,
+    ) -> Result<Option<Credential>, storage::StorageError> {
+        let Some(space) = self.vault(&location.directory, false).await? else {
+            return Ok(None);
+        };
+        match key(&location.name).load().perform(&space).await {
+            Ok(credential) => {
+                self.kept.insert(
+                    credential.did(),
+                    (location.directory.clone(), location.name.clone()),
+                );
+                Ok(Some(credential))
+            }
+            Err(credential::CredentialError::NotFound(_)) => Ok(None),
+            Err(error) => Err(failed(error)),
+        }
+    }
+
+    /// Keep `credential` at `location`, refusing a name that already
+    /// keeps a key.
+    async fn create(
+        &self,
+        location: &storage::Location,
+        credential: Credential,
+    ) -> Result<Credential, storage::StorageError> {
+        if self.load(location).await?.is_some() {
+            return Err(storage::StorageError::AlreadyExists(format!(
+                "{:?}/{}",
+                location.directory, location.name
+            )));
+        }
+        let Some(space) = self.vault(&location.directory, true).await? else {
+            return Err(failed("the credential store could not be opened"));
+        };
+        key(&location.name)
+            .save(credential.clone())
+            .perform(&space)
+            .await
+            .map_err(failed)?;
+        self.kept.insert(
+            credential.did(),
+            (location.directory.clone(), location.name.clone()),
+        );
+        Ok(credential)
+    }
+
     /// Move the signing key the space at `location` in `storage` kept
     /// from before the credential store into this store, leaving the
     /// space its verifier. Idempotent: a space that holds only a verifier
@@ -114,7 +198,11 @@ where
         &self,
         storage: &Storage<S>,
         location: &storage::Location,
-    ) -> Result<Credential, storage::StorageError> {
+    ) -> Result<Credential, storage::StorageError>
+    where
+        super::router::Router<S>: Provider<credential::Save<Credential>>,
+        Self: ConditionalSend + ConditionalSync,
+    {
         let at = Subject::from(did!("local:storage"))
             .attenuate(storage::Storage)
             .attenuate(location.clone());
@@ -122,28 +210,19 @@ where
         // over as its verifier, and this is where the key is taken out.
         let held = at.clone().load().perform(&storage.loader).await?;
         let Credential::Signer(signer) = &held else {
-            return Subject::from(did!("local:storage"))
-                .attenuate(storage::Storage)
-                .attenuate(keyed(location))
-                .load()
-                .perform(&self.loader)
-                .await;
+            return self.load(location).await?.ok_or_else(|| {
+                storage::StorageError::NotFound(format!("no key is kept under {}", location.name))
+            });
         };
-        let kept = Subject::from(did!("local:storage"))
-            .attenuate(storage::Storage)
-            .attenuate(keyed(location))
-            .create(held.clone())
-            .perform(&self.loader)
-            .await;
-        let kept = match kept {
+        let kept = match self.create(location, held.clone()).await {
             Ok(kept) => kept,
             Err(storage::StorageError::AlreadyExists(_)) => {
-                Subject::from(did!("local:storage"))
-                    .attenuate(storage::Storage)
-                    .attenuate(keyed(location))
-                    .load()
-                    .perform(&self.loader)
-                    .await?
+                self.load(location).await?.ok_or_else(|| {
+                    storage::StorageError::NotFound(format!(
+                        "no key is kept under {}",
+                        location.name
+                    ))
+                })?
             }
             Err(error) => return Err(error),
         };
@@ -162,7 +241,7 @@ where
             .save(Credential::from(signer.signer().verifier()))
             .perform(&storage.router)
             .await
-            .map_err(|error| storage::StorageError::Storage(error.to_string()))?;
+            .map_err(failed)?;
         Ok(kept)
     }
 }
@@ -179,13 +258,10 @@ where
         &self,
         input: Capability<storage::Load>,
     ) -> Result<Credential, storage::StorageError> {
-        let location = keyed(storage::Location::of(&input));
-        Subject::from(input.subject().clone())
-            .attenuate(storage::Storage)
-            .attenuate(location)
-            .load()
-            .perform(&self.loader)
-            .await
+        let location = storage::Location::of(&input);
+        self.load(location).await?.ok_or_else(|| {
+            storage::StorageError::NotFound(format!("no key is kept under {}", location.name))
+        })
     }
 }
 
@@ -201,54 +277,60 @@ where
         &self,
         input: Capability<storage::Create>,
     ) -> Result<Credential, storage::StorageError> {
-        let location = keyed(storage::Location::of(&input));
+        let location = storage::Location::of(&input);
         let credential = storage::Create::of(&input).credential.clone();
-        Subject::from(input.subject().clone())
-            .attenuate(storage::Storage)
-            .attenuate(location)
-            .create(credential)
-            .perform(&self.loader)
-            .await
+        self.create(location, credential).await
     }
 }
 
+/// The key a store handed out, read again by the key's own DID.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S> Provider<credential::Load<Credential>> for CredentialStore<S>
 where
-    S: Clone + ConditionalSync,
-    Router<S>: Provider<credential::Load<Credential>>,
+    S: Clone + SpaceProvider + Resource<storage::Location> + ConditionalSend,
+    S::Error: Display,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
         input: Capability<credential::Load<Credential>>,
     ) -> Result<Credential, credential::CredentialError> {
-        input.perform(&self.router).await
+        let missing = || credential::CredentialError::NotFound(input.subject().to_string());
+        let (directory, name) = self.kept.get(input.subject()).ok_or_else(missing)?;
+        self.load(&storage::Location::new(directory, name))
+            .await
+            .map_err(|error| credential::CredentialError::Storage(error.to_string()))?
+            .ok_or_else(missing)
     }
 }
 
 /// A key retracted from the store is gone: the store held its only copy.
+/// The name it was kept under is free for the next key created there.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S> Provider<credential::Retract<Credential>> for CredentialStore<S>
 where
-    S: Clone + ConditionalSync,
-    Router<S>: Provider<credential::Retract<Credential>>,
+    S: Clone + SpaceProvider + Resource<storage::Location> + ConditionalSend,
+    S::Error: Display,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
         input: Capability<credential::Retract<Credential>>,
     ) -> Result<(), credential::CredentialError> {
-        let subject = input.subject().clone();
-        let own = credential::Key::of(&input).address == credential::SELF;
-        input.perform(&self.router).await?;
-        // A space whose own key is gone names nothing: its location is
-        // free for the next key created under the same name.
-        if own {
-            self.loader.unmount(&subject);
+        // Retracting a key the store never handed out retracts nothing.
+        let Some((directory, name)) = self.kept.get(input.subject()) else {
+            return Ok(());
+        };
+        let space = self
+            .vault(&directory, false)
+            .await
+            .map_err(|error| credential::CredentialError::Storage(error.to_string()))?;
+        if let Some(space) = space {
+            key(&name).retract().perform(&space).await?;
         }
+        self.kept.remove(input.subject());
         Ok(())
     }
 }
@@ -343,6 +425,125 @@ mod tests {
             .perform(&credentials)
             .await;
         assert!(stored.is_err() || matches!(stored, Ok(Credential::Signer(_))));
+    }
+
+    /// Every key of a directory is kept in the directory's one credential
+    /// space: keeping a second key adds nothing beside it. The volatile
+    /// store keeps nothing on disk to count;
+    /// `it_keeps_every_key_of_a_directory_in_one_database` pins the same
+    /// in the browser.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_keeps_every_key_of_a_directory_in_one_space() {
+        use crate::provider::storage::NativeSpace;
+        use dialog_effects::storage::{Directory, Location};
+
+        let root = tempfile::tempdir().unwrap();
+        let base = Directory::At(root.path().to_string_lossy().into_owned());
+        let credentials = CredentialStore::<NativeSpace>::new();
+        let at = |name: &str| {
+            Subject::from(did!("local:storage"))
+                .attenuate(storage::Storage)
+                .attenuate(Location::new(base.clone(), name))
+        };
+
+        let alice = test_credential().await;
+        let bob = test_credential().await;
+        at("alice")
+            .create(alice.clone())
+            .perform(&credentials)
+            .await
+            .unwrap();
+        at("bob")
+            .create(bob.clone())
+            .perform(&credentials)
+            .await
+            .unwrap();
+
+        let entries: Vec<String> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec![VAULT.to_string()]);
+
+        // A fresh handle on the store reads each key back under its name.
+        let reopened = CredentialStore::<NativeSpace>::new();
+        let loaded = at("alice").load().perform(&reopened).await.unwrap();
+        assert_eq!(loaded.did(), alice.did());
+        let loaded = at("bob").load().perform(&reopened).await.unwrap();
+        assert_eq!(loaded.did(), bob.did());
+        assert!(matches!(
+            at("carol").load().perform(&reopened).await,
+            Err(storage::StorageError::NotFound(_))
+        ));
+    }
+
+    /// In the browser every key of a directory is a row of one database,
+    /// and no key gets a database of its own.
+    #[cfg(target_arch = "wasm32")]
+    #[dialog_common::test]
+    async fn it_keeps_every_key_of_a_directory_in_one_database() {
+        use crate::helpers::unique_name;
+        use crate::provider::indexeddb::database_exists;
+        use crate::provider::storage::WebSpace;
+        use dialog_effects::storage::{Directory, Location};
+
+        let path = unique_name("credentials");
+        let base = Directory::At(path.clone());
+        let credentials = CredentialStore::<WebSpace>::new();
+        let at = |name: &str| {
+            Subject::from(did!("local:storage"))
+                .attenuate(storage::Storage)
+                .attenuate(Location::new(base.clone(), name))
+        };
+
+        let alice = test_credential().await;
+        let bob = test_credential().await;
+        at("alice")
+            .create(alice.clone())
+            .perform(&credentials)
+            .await
+            .unwrap();
+        at("bob")
+            .create(bob.clone())
+            .perform(&credentials)
+            .await
+            .unwrap();
+
+        assert!(database_exists(&format!("{path}/{VAULT}")).await.unwrap());
+        for name in ["alice", "bob", "alice.credentials", "bob.credentials"] {
+            assert!(
+                !database_exists(&format!("{path}/{name}")).await.unwrap(),
+                "{name} got a database of its own"
+            );
+        }
+
+        let reopened = CredentialStore::<WebSpace>::new();
+        let loaded = at("alice").load().perform(&reopened).await.unwrap();
+        assert_eq!(loaded.did(), alice.did());
+        let loaded = at("bob").load().perform(&reopened).await.unwrap();
+        assert_eq!(loaded.did(), bob.did());
+    }
+
+    /// Loading a key from a directory that keeps none creates nothing
+    /// there: the store comes into being with its first key.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_creates_nothing_to_look_for_a_key() {
+        use crate::provider::storage::NativeSpace;
+        use dialog_effects::storage::{Directory, Location};
+
+        let root = tempfile::tempdir().unwrap();
+        let base = Directory::At(root.path().to_string_lossy().into_owned());
+        let credentials = CredentialStore::<NativeSpace>::new();
+        let missing = Subject::from(did!("local:storage"))
+            .attenuate(storage::Storage)
+            .attenuate(Location::new(base, "nobody"))
+            .load()
+            .perform(&credentials)
+            .await;
+        assert!(matches!(missing, Err(storage::StorageError::NotFound(_))));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     /// A key and the space of the same name are kept apart: the space
