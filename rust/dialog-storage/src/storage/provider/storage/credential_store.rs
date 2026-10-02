@@ -488,40 +488,42 @@ mod tests {
         use crate::provider::storage::WebSpace;
         use dialog_effects::storage::{Directory, Location};
 
-        let path = unique_name("credentials");
-        let base = Directory::At(path.clone());
         let credentials = CredentialStore::<WebSpace>::new();
         let at = |name: &str| {
             Subject::from(did!("local:storage"))
                 .attenuate(storage::Storage)
-                .attenuate(Location::new(base.clone(), name))
+                .attenuate(Location::new(Directory::Temp, name))
         };
+        let first = unique_name("alice");
+        let second = unique_name("bob");
 
         let alice = test_credential().await;
         let bob = test_credential().await;
-        at("alice")
+        at(&first)
             .create(alice.clone())
             .perform(&credentials)
             .await
             .unwrap();
-        at("bob")
+        at(&second)
             .create(bob.clone())
             .perform(&credentials)
             .await
             .unwrap();
 
-        assert!(database_exists(&format!("{path}/{VAULT}")).await.unwrap());
-        for name in ["alice", "bob", "alice.credentials", "bob.credentials"] {
-            assert!(
-                !database_exists(&format!("{path}/{name}")).await.unwrap(),
-                "{name} got a database of its own"
-            );
+        assert!(database_exists(&format!("temp.{VAULT}")).await.unwrap());
+        for name in [&first, &second] {
+            for kept in [name.to_string(), format!("{name}.credentials")] {
+                assert!(
+                    !database_exists(&format!("temp.{kept}")).await.unwrap(),
+                    "{kept} got a database of its own"
+                );
+            }
         }
 
         let reopened = CredentialStore::<WebSpace>::new();
-        let loaded = at("alice").load().perform(&reopened).await.unwrap();
+        let loaded = at(&first).load().perform(&reopened).await.unwrap();
         assert_eq!(loaded.did(), alice.did());
-        let loaded = at("bob").load().perform(&reopened).await.unwrap();
+        let loaded = at(&second).load().perform(&reopened).await.unwrap();
         assert_eq!(loaded.did(), bob.did());
     }
 
