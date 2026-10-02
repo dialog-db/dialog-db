@@ -12,13 +12,30 @@ use bijoux::{Decode as _, Encode as _};
 
 use crate::{
     Buffer, DialogSearchTreeError, Entry, Key, LegacyManifest, Link, Manifest, Scale, Schema,
-    Value,
+    Separator, Value,
+    distribution::summary::{Knobs, PieceSummary},
+    hashed::HashColumn,
     node::codec::{common_prefix, encode_keys},
     node::columnar::{ColumnData, StreamingLeaf, column_slices, encode_column_values},
 };
 use std::cmp::Ordering;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// What a node derives from its own bytes and keeps with them: each part is
+/// a pure function of the bytes (and, for the summary, of the manifest knobs
+/// recorded beside it), computed on first use and dropped with the node.
+/// Whoever holds the node, a node cache above all, decides how long that is.
+#[derive(Default)]
+struct Derived {
+    /// A leaf's keys, decoded for repeated lookups.
+    keys: OnceLock<Arc<DecodedKeys>>,
+    /// The hashes of a leaf's keys or an index's separators, as the
+    /// boundary rules ask for them.
+    hashes: OnceLock<HashColumn>,
+    /// A leaf's summary as a piece of a forced run.
+    summary: OnceLock<(Knobs, Arc<PieceSummary>)>,
+}
 
 /// A leaf segment's decoded keys in entry order, stored as one flat arena with
 /// per-entry end offsets rather than a `Vec<Vec<u8>>`.
@@ -238,9 +255,9 @@ where
     /// The separator is a seam property, not derivable from the node's own
     /// body (it depends on the left-adjacent subtree), so the caller threads
     /// it in from the context that knows the seam.
-    pub fn to_link(&self, separator: Vec<u8>) -> Link {
+    pub fn to_link(&self, separator: impl Into<Separator>) -> Link {
         Link {
-            separator,
+            separator: separator.into(),
             node: self.buffer.blake3_hash().clone(),
             scale: self.scale(),
         }
@@ -343,11 +360,85 @@ where
     /// once [`should_memoize_keys`](Self::should_memoize_keys) has returned
     /// `true`; a single-touch scan streams instead (see the walker).
     pub fn memoized_keys(&self) -> Result<Arc<DecodedKeys>, DialogSearchTreeError> {
+        let derived = self.derived();
+        if let Some(keys) = derived.keys.get() {
+            return Ok(keys.clone());
+        }
+        // Decode before taking the cell: the decode can fail, and a racing
+        // reader computes the same keys, so whichever lands first stands.
+        let keys = Arc::new(self.materialize_keys()?);
+        Ok(derived.keys.get_or_init(|| keys).clone())
+    }
+
+    /// What this node has derived from its bytes so far, kept on its
+    /// [`Buffer`] so every holder of the node shares it.
+    fn derived(&self) -> Arc<Derived> {
         self.buffer
-            .memoize_decode(|| self.materialize_keys())?
-            .ok_or_else(|| {
-                DialogSearchTreeError::Access("node buffer memoized a different decode".to_string())
+            .memoize_decode(|| Ok::<_, std::convert::Infallible>(Derived::default()))
+            .ok()
+            .flatten()
+            // Only if something else took the buffer's one slot: derive
+            // without keeping, which costs repeat work and nothing else.
+            .unwrap_or_default()
+    }
+
+    /// The cells this node keeps hashes in: one per entry of a leaf, for
+    /// its key, or per link of an index, for its separator, each filled the
+    /// first time a boundary rule asks for that hash. What is opened from
+    /// the node shares them ([`TransientNode::open`](crate::TransientNode::open)),
+    /// so stored bytes are hashed once for as long as the node is held,
+    /// however many times it is opened.
+    pub(crate) fn hashes(&self) -> HashColumn {
+        self.derived()
+            .hashes
+            .get_or_init(|| {
+                let count = match self.body() {
+                    NodeBody::Segment(segment) => segment.len(),
+                    NodeBody::Index(index) => index.len(),
+                };
+                (0..count).map(|_| OnceLock::new()).collect()
             })
+            .clone()
+    }
+
+    /// Hands this node the hashes already computed for what it was sealed
+    /// from, in entry (or link) order: `None` where none was asked for. A
+    /// node sealed from ranked entries then opens with their hashes in
+    /// place instead of computing every one again.
+    pub(crate) fn adopt_hashes(&self, hashes: Vec<Option<Blake3Hash>>) {
+        if hashes.iter().all(Option::is_none) {
+            return;
+        }
+        let column: HashColumn = hashes
+            .into_iter()
+            .map(|hash| hash.map(OnceLock::from).unwrap_or_default())
+            .collect();
+        let _ = self.derived().hashes.set(column);
+    }
+
+    /// This piece's summary for the forced-run quiet check, if one was kept
+    /// under `manifest`'s knobs ([`summarize`](Self::summarize)).
+    pub(crate) fn summary(&self, manifest: &Manifest) -> Option<Arc<PieceSummary>> {
+        let derived = self.buffer.memoized::<Derived>()?;
+        let (knobs, summary) = derived.summary.get()?;
+        (*knobs == Knobs::from(manifest)).then(|| summary.clone())
+    }
+
+    /// Keeps `summary` with this node as its summary under `manifest`'s
+    /// knobs, returning the shared handle. A summary is a pure function of
+    /// the node's bytes and those knobs, so it never goes stale; a node
+    /// already holding one under other knobs keeps that one.
+    pub(crate) fn summarize(
+        &self,
+        manifest: &Manifest,
+        summary: PieceSummary,
+    ) -> Arc<PieceSummary> {
+        let summary = Arc::new(summary);
+        let _ = self
+            .derived()
+            .summary
+            .set((Knobs::from(manifest), summary.clone()));
+        summary
     }
 
     /// Decodes this segment's keys into the flat-arena form. Used both to
@@ -1886,12 +1977,7 @@ mod tests {
     }
 
     fn segment_under(manifest: Manifest) -> Buffer {
-        let entries = (0u8..4)
-            .map(|i| Entry {
-                key: [i; 4],
-                value: vec![i; 8],
-            })
-            .collect();
+        let entries = (0u8..4).map(|i| Entry::new([i; 4], vec![i; 8])).collect();
         let body: PersistentNodeBody<Vec<u8>> =
             PersistentNodeBody::segment_from_entries::<[u8; 4]>(entries, manifest)
                 .expect("a segment encodes");

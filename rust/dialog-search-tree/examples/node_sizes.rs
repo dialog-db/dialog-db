@@ -11,9 +11,10 @@
 
 use std::collections::BTreeMap;
 
-use dialog_common::Blake3Hash;
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{Delta, Distribution, MemoryBlocks, PersistentNode, PersistentTree, Rank};
+use dialog_search_tree::{
+    Delta, Distribution, Hashed, MemoryBlocks, PersistentNode, PersistentTree, Rank,
+};
 
 const BENCH_SEED: u64 = 42;
 const SIZES: [usize; 2] = [10_000, 50_000];
@@ -21,8 +22,8 @@ const SIZES: [usize; 2] = [10_000, 50_000];
 struct Threshold<const M: u64>;
 
 impl<const M: u64> Distribution for Threshold<M> {
-    fn rank(key: &[u8], _manifest: &dialog_search_tree::Manifest) -> Rank {
-        let hash = Blake3Hash::hash(key);
+    fn rank(key: Hashed<'_>, _manifest: &dialog_search_tree::Manifest) -> Rank {
+        let hash = key.hash();
         let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *hash.as_bytes();
         let prefix = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
         let mut rank: Rank = 1;
