@@ -57,8 +57,8 @@ tokio-test = { workspace = true }
 dialog-artifacts = { workspace = true }
 dialog-peer = { workspace = true }
 dialog-repository = { workspace = true, features = ["helpers"] }
-dialog-storage = { workspace = true, features = ["helpers"] }
-dialog-search-tree = { workspace = true }
+dialog-storage = { workspace = true, features = ["helpers", "audit"] }
+dialog-search-tree = { workspace = true, features = ["audit"] }
 dialog-network = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }

@@ -1,63 +1,6 @@
 use crate::{BOTTOM_RANK, Hashed, Manifest};
 
-/// Measurement-only hash accounting (uncommitted experiment plumbing): every
-/// hash the shaping paths ask for bumps a counter, split by purpose, and every
-/// hash actually computed bumps `HASHED`, so a replay can attribute hash cost
-/// and see how much of what was asked was already kept. Snapshot and reset
-/// from the harness.
-#[allow(missing_docs, clippy::missing_docs_in_private_items)]
-pub mod audit {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    pub static KEY_HASHES: AtomicU64 = AtomicU64::new(0);
-    pub static KEY_HASH_BYTES: AtomicU64 = AtomicU64::new(0);
-    pub static SEAM_HASHES: AtomicU64 = AtomicU64::new(0);
-    pub static SEAM_HASH_BYTES: AtomicU64 = AtomicU64::new(0);
-    pub static ELECTION_HASHES: AtomicU64 = AtomicU64::new(0);
-    pub static ELECTION_HASH_BYTES: AtomicU64 = AtomicU64::new(0);
-    pub static NODE_HASHES: AtomicU64 = AtomicU64::new(0);
-    pub static NODE_HASH_BYTES: AtomicU64 = AtomicU64::new(0);
-
-    pub fn key(bytes: usize) {
-        KEY_HASHES.fetch_add(1, Ordering::Relaxed);
-        KEY_HASH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    }
-    pub fn seam(bytes: usize) {
-        SEAM_HASHES.fetch_add(1, Ordering::Relaxed);
-        SEAM_HASH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    }
-    pub fn election(bytes: usize) {
-        ELECTION_HASHES.fetch_add(1, Ordering::Relaxed);
-        ELECTION_HASH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    }
-    pub fn node(bytes: usize) {
-        NODE_HASHES.fetch_add(1, Ordering::Relaxed);
-        NODE_HASH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    }
-    pub static HASHED: AtomicU64 = AtomicU64::new(0);
-    pub static HASHED_BYTES: AtomicU64 = AtomicU64::new(0);
-    pub fn hashed(bytes: usize) {
-        HASHED.fetch_add(1, Ordering::Relaxed);
-        HASHED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    }
-    pub fn report() -> String {
-        format!(
-            "key_hashes={} key_bytes={} seam_hashes={} seam_bytes={} election_hashes={} election_bytes={} node_hashes={} node_bytes={}",
-            KEY_HASHES.swap(0, Ordering::Relaxed),
-            KEY_HASH_BYTES.swap(0, Ordering::Relaxed),
-            SEAM_HASHES.swap(0, Ordering::Relaxed),
-            SEAM_HASH_BYTES.swap(0, Ordering::Relaxed),
-            ELECTION_HASHES.swap(0, Ordering::Relaxed),
-            ELECTION_HASH_BYTES.swap(0, Ordering::Relaxed),
-            NODE_HASHES.swap(0, Ordering::Relaxed),
-            NODE_HASH_BYTES.swap(0, Ordering::Relaxed),
-        ) + &format!(
-            " hashed={} hashed_bytes={}",
-            HASHED.swap(0, Ordering::Relaxed),
-            HASHED_BYTES.swap(0, Ordering::Relaxed),
-        )
-    }
-}
+pub mod audit;
 
 /// The rank of a node in the prolly tree.
 pub type Rank = u64;
