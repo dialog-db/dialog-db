@@ -27,7 +27,9 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{Buffer, Delta, DialogSearchTreeError, Key, Link, Manifest, Value};
+use crate::{
+    Buffer, Delta, DialogSearchTreeError, Key, Link, Manifest, NodeCache, Separator, Value,
+};
 
 /// A tree node in either of its two representations.
 ///
@@ -74,9 +76,16 @@ impl<Key, Value> Node<Key, Value> {
     /// Used for routing and for the seam coin, so descending never copies a
     /// separator. Errors if a node on the leftmost path is empty.
     pub fn separator(&self) -> Result<&[u8], DialogSearchTreeError> {
+        Ok(self.edge()?.as_slice())
+    }
+
+    /// The separator at this node's left edge as it is held, with the hash
+    /// it keeps: what the seam coin ranks the node by, so regrouping a
+    /// parent again does not hash its children's separators again.
+    pub fn edge(&self) -> Result<&Separator, DialogSearchTreeError> {
         match self {
-            Node::Persistent(link) => Ok(link.separator.as_slice()),
-            Node::Transient(transient) => transient.separator(),
+            Node::Persistent(link) => Ok(&link.separator),
+            Node::Transient(transient) => transient.edge(),
         }
     }
 }
@@ -111,12 +120,15 @@ where
         self,
         delta: &mut Delta<Blake3Hash, Buffer>,
         manifest: &Manifest,
+        cache: &NodeCache<Key, Value>,
     ) -> Result<Link, DialogSearchTreeError> {
         match self {
             Node::Persistent(link) => Ok(link),
             Node::Transient(transient) => {
-                let separator = transient.separator()?.to_vec();
-                Ok(transient.persist(delta, manifest)?.to_link(separator))
+                let separator = transient.edge()?.clone();
+                Ok(transient
+                    .persist(delta, manifest, cache)?
+                    .to_link(separator))
             }
         }
     }

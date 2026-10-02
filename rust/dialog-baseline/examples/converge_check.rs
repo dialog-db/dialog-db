@@ -61,7 +61,8 @@ where
                     let value: State<Datum> =
                         dialog_search_tree::into_owned(segment.value_at(at)?)?;
                     let charge = key.len() + value.payload_weight() + manifest.entry_overhead();
-                    let cut = dialog_search_tree::Geometric::leaf_cut(key, charge, &manifest);
+                    let cut =
+                        dialog_search_tree::Geometric::leaf_cut(key.into(), charge, &manifest);
                     leaf.push((key.to_vec(), cut));
                 }
                 let len = leaf.len();
@@ -163,7 +164,7 @@ async fn arm(
                 // The production coin charge: key bytes + payload weight +
                 // per-entry encoding overhead.
                 let charge = key.len() + value.payload_weight() + manifest.entry_overhead();
-                let cut = dialog_search_tree::Geometric::leaf_cut(key, charge, &manifest);
+                let cut = dialog_search_tree::Geometric::leaf_cut(key.into(), charge, &manifest);
                 coins.push((key.to_vec(), cut));
             }
             entries += 1;

@@ -15,11 +15,11 @@
 
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, Delta, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, IndexPieceOrigin, Key, Link, LoadBlock, Manifest, Node,
+    Distribution, Entry, Geometric, Hashed, IndexPieceOrigin, Key, Link, LoadBlock, Manifest, Node,
     NodeCache, Novelty, NoveltyEntry, NoveltyOp, PersistentIndex, PersistentNode,
-    PersistentNodeBody, PersistentTree, PieceOrigin, Rank, TransientIndex, TransientNode,
-    TransientSegment, TreeWalker, Value, link_bounds, regroup_children, regroup_children_reusing,
-    regroup_entries, regroup_entries_reusing,
+    PersistentNodeBody, PersistentTree, PieceOrigin, Rank, Separator, TransientIndex,
+    TransientNode, TransientSegment, TreeWalker, Value, link_bounds, regroup_children,
+    regroup_children_reusing, regroup_entries, regroup_entries_reusing,
 };
 use async_stream::try_stream;
 use dialog_capability::Provider;
@@ -317,7 +317,7 @@ where
     where
         Env: Provider<LoadBlock> + ConditionalSync,
     {
-        let entry = Entry { key, value };
+        let entry = Entry::new(key, value);
         let accessor = Accessor::new(self.cache.clone(), storage);
         let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
         self.manifest = Some(manifest.clone());
@@ -418,10 +418,7 @@ where
         let mut entries: Vec<Entry<Key, Value>> = Vec::with_capacity(ops.len());
         let mut push = |op: NoveltyEntry<Value>| -> Result<(), DialogSearchTreeError> {
             if let NoveltyOp::Assert(value) = op.op {
-                entries.push(Entry {
-                    key: Key::try_from_bytes(&op.key)?,
-                    value,
-                });
+                entries.push(Entry::new(Key::try_from_bytes(&op.key)?, value));
             }
             Ok(())
         };
@@ -658,7 +655,7 @@ where
             // durable and is returned verbatim, touching no storage.
             TransientRoot::Unloaded(hash) => hash,
             TransientRoot::Loaded(transient) => transient
-                .persist(delta, &Self::format(&self.manifest)?)?
+                .persist(delta, &Self::format(&self.manifest)?, &self.cache)?
                 .hash()
                 .clone(),
         };
@@ -1416,7 +1413,7 @@ where
                     ));
                 };
                 apply_to_segment(leaf, self);
-                leaf.separator = separator;
+                leaf.separator = separator.into();
                 reroute_moved_seam::<Key, Value>(&mut root, &path)?;
                 return Ok(Some(root));
             }
@@ -1518,20 +1515,16 @@ where
                 match segment.entries().last() {
                     Some(last) if entry.key > last.key => {
                         if manifest.max_segment == 0 {
-                            D::rank(last.key.as_ref(), &manifest) > BOTTOM_RANK
-                                && D::rank(entry.key.as_ref(), &manifest) <= BOTTOM_RANK
+                            D::rank(last.hashed(), &manifest) > BOTTOM_RANK
+                                && D::rank(entry.hashed(), &manifest) <= BOTTOM_RANK
                         } else if D::vetoes(last.key.as_ref(), entry.key.as_ref(), &manifest) {
                             let bank = trailing_stretch_weight::<Key, Value, D>(
                                 segment.entries(),
                                 &manifest,
                             );
-                            !D::leaf_cut(
-                                entry.key.as_ref(),
-                                bank + entry.weight(&manifest),
-                                &manifest,
-                            )
+                            !D::leaf_cut(entry.hashed(), bank + entry.weight(&manifest), &manifest)
                         } else {
-                            !D::leaf_cut(entry.key.as_ref(), entry.weight(&manifest), &manifest)
+                            !D::leaf_cut(entry.hashed(), entry.weight(&manifest), &manifest)
                         }
                     }
                     _ => false,
@@ -1577,7 +1570,7 @@ where
                                     .last()
                                     .expect("segment with a found key is non-empty");
                                 !D::leaf_cut(
-                                    last.key.as_ref(),
+                                    last.hashed(),
                                     bank + last.weight(&manifest),
                                     &manifest,
                                 )
@@ -1620,11 +1613,7 @@ where
                                 at -= 1;
                                 bank += entries[at].weight(&manifest);
                             }
-                            !D::leaf_cut(
-                                entry.key.as_ref(),
-                                bank + entry.weight(&manifest),
-                                &manifest,
-                            )
+                            !D::leaf_cut(entry.hashed(), bank + entry.weight(&manifest), &manifest)
                         }
                         _ => false,
                     }
@@ -1647,7 +1636,7 @@ where
                 {
                     Err(0) => Some((
                         segment.separator.clone(),
-                        D::reseparate(entry.key.as_ref(), &segment.separator),
+                        Separator::from(D::reseparate(entry.key.as_ref(), &segment.separator)),
                     )),
                     _ => None,
                 }
@@ -1656,7 +1645,10 @@ where
                 match segment.entries().binary_search_by(|e| e.key.cmp(key)) {
                     Ok(0) if segment.entries().len() > 1 => Some((
                         segment.separator.clone(),
-                        D::reseparate(segment.entries()[1].key.as_ref(), &segment.separator),
+                        Separator::from(D::reseparate(
+                            segment.entries()[1].key.as_ref(),
+                            &segment.separator,
+                        )),
                     )),
                     _ => None,
                 }
@@ -1673,7 +1665,7 @@ where
         // fixed point of the floor rule, so it can never trigger this.
         let dissolves_left_cut = min_move
             .as_ref()
-            .map(|(old, new)| seam_cut_dissolves::<D>(old, new, &manifest))
+            .map(|(old, new)| seam_cut_dissolves::<D>(old.hashed(), new.hashed(), &manifest))
             .unwrap_or(false);
 
         // The mirror image: a seam-rank RISE that starts punching cuts the old
@@ -1682,7 +1674,7 @@ where
         // regroup at all, so it must be bypassed for the re-shape to see it.
         let raises_left_cut = min_move
             .as_ref()
-            .map(|(old, new)| seam_cut_punches::<D>(old, new, &manifest))
+            .map(|(old, new)| seam_cut_punches::<D>(old.hashed(), new.hashed(), &manifest))
             .unwrap_or(false);
 
         // Under a frame ceiling, index-level decisions read separator BYTES
@@ -1745,7 +1737,7 @@ where
                     && let Some(first) = segment.entries().first()
                 {
                     let separator = D::reseparate(first.key.as_ref(), &segment.separator);
-                    segment.separator = separator;
+                    segment.separator = separator.into();
                 }
                 // A moved separator moves a link boundary in the deepest
                 // ancestor where this leaf is not on the leftmost edge, and
@@ -1861,8 +1853,8 @@ where
                         Some(floor) => match follow(&mut root, neighbor_path)? {
                             TransientNode::Segment(neighbor) => match neighbor.entries().first() {
                                 Some(first) => seam_cut_dissolves::<D>(
-                                    &floor,
-                                    &D::reseparate(first.key.as_ref(), &floor),
+                                    floor.hashed(),
+                                    Hashed::from(&D::reseparate(first.key.as_ref(), &floor)),
                                     &manifest,
                                 ),
                                 None => false,
@@ -2002,7 +1994,11 @@ where
 /// the new rank is lower. (Punched levels form the range `1..=rank - 2`, so
 /// a drop from any rank of 3 or more removes cuts; a rise only adds them,
 /// which the local regroup realizes as a split without neighbor content.)
-fn seam_cut_dissolves<D>(old_separator: &[u8], new_separator: &[u8], manifest: &Manifest) -> bool
+fn seam_cut_dissolves<D>(
+    old_separator: Hashed<'_>,
+    new_separator: Hashed<'_>,
+    manifest: &Manifest,
+) -> bool
 where
     D: Distribution,
 {
@@ -2016,7 +2012,11 @@ where
 /// rose above the old rank. The cut is realized as a split by the local
 /// regroup (no neighbor content is needed), but only a re-shape runs that
 /// regroup — the fast path must not swallow such an edit.
-fn seam_cut_punches<D>(old_separator: &[u8], new_separator: &[u8], manifest: &Manifest) -> bool
+fn seam_cut_punches<D>(
+    old_separator: Hashed<'_>,
+    new_separator: Hashed<'_>,
+    manifest: &Manifest,
+) -> bool
 where
     D: Distribution,
 {
@@ -2168,9 +2168,9 @@ where
         let (lo, hi) = {
             let children = &follow(root, &parent_path)?.as_index()?.children;
             let forced = |i: usize| -> Result<bool, DialogSearchTreeError> {
-                let separator = children[i].separator()?;
+                let separator = children[i].edge()?;
                 Ok(separator.len() as u32 <= manifest.max_separator
-                    && D::seam_rank(separator, manifest) <= threshold)
+                    && D::seam_rank(separator.hashed(), manifest) <= threshold)
             };
             let mut lo = at;
             while lo > 0 && forced(lo)? {
@@ -2332,8 +2332,9 @@ enum RunVerdict {
 ///
 /// The point is cost: a passing check trades the merge's full
 /// rebuild-and-re-encode of every piece in the run — plus the new blocks
-/// that rebuild ships to every replica — for piece decodes and memoized
-/// key hashes, leaving the untouched pieces byte-identical in the store.
+/// that rebuild ships to every replica — for piece decodes and key hashes
+/// the pieces already keep, leaving the untouched pieces byte-identical in
+/// the store.
 async fn forced_run_quiet<Key, Value, Env, D>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
@@ -2498,10 +2499,10 @@ where
                     .entries()
                     .last()
                     .map(|entry| entry.key.as_ref().to_vec()),
-                Node::Persistent(link) => {
-                    crate::distribution::summary::memoized(&link.node, manifest)
-                        .map(|summary| summary.last_key.clone())
-                }
+                Node::Persistent(link) => accessor
+                    .cached(&link.node)
+                    .and_then(|piece| piece.summary(manifest))
+                    .map(|summary| summary.last_key.clone()),
                 Node::Transient(_) => None,
             };
             (previous_last, children[at].separator()?.len())
@@ -2577,75 +2578,75 @@ where
     let parent_path = &path[..path.len() - 1];
     let run_at = at - lo;
 
-    // Per-piece sources for the read-only stream: transient siblings give
-    // up their keys and weights immediately, persistent ones contribute
-    // their link.
-    enum PieceSource<Key> {
-        Fetch(Link),
-        Ready(Vec<Key>, Vec<usize>),
-    }
-    let sources: Vec<PieceSource<Key>> = {
+    // The stored pieces are fetched and opened first; a transient sibling
+    // is read where it lives. Every key is then borrowed from its own
+    // entry, so a hash the plan below asks for stays with that entry: a
+    // live one keeps it for the next check, and an opened one leaves it
+    // with its stored leaf.
+    let links: Vec<Option<Link>> = {
         let children = &follow(root, parent_path)?.as_index()?.children;
-        let mut sources = Vec::with_capacity(hi - lo + 1);
+        let mut links = Vec::with_capacity(hi - lo + 1);
         for child in children.iter().take(hi + 1).skip(lo) {
-            sources.push(match child {
-                Node::Persistent(link) => PieceSource::Fetch(link.clone()),
-                Node::Transient(TransientNode::Segment(segment)) => PieceSource::Ready(
-                    segment.entries().iter().map(|e| e.key.clone()).collect(),
-                    segment
-                        .entries()
-                        .iter()
-                        .map(|entry| entry.weight(manifest))
-                        .collect(),
-                ),
+            links.push(match child {
+                Node::Persistent(link) => Some(link.clone()),
+                Node::Transient(TransientNode::Segment(_)) => None,
                 Node::Transient(_) => return Ok(false),
             });
         }
-        sources
+        links
     };
-
-    // Stream the run's keys and weights in key order, remembering each
-    // piece's length so the current partition can be compared against the
-    // recomputed plan.
-    let mut keys: Vec<Key> = Vec::new();
-    let mut weights: Vec<usize> = Vec::new();
-    let mut piece_lens: Vec<usize> = Vec::with_capacity(sources.len());
-    for source in sources {
-        match source {
-            PieceSource::Ready(piece_keys, piece_weights) => {
-                piece_lens.push(piece_keys.len());
-                keys.extend(piece_keys);
-                weights.extend(piece_weights);
-            }
-            PieceSource::Fetch(link) => {
+    let mut opened: Vec<Option<TransientSegment<Key, Value>>> = Vec::with_capacity(links.len());
+    for link in links {
+        opened.push(match link {
+            None => None,
+            Some(link) => {
                 let persistent = accessor.get_node(&link.node).await?;
                 let TransientNode::Segment(segment) =
                     TransientNode::<Key, Value>::open(&persistent, link.separator.clone())?
                 else {
                     return Ok(false);
                 };
-                let entries = segment.entries();
-                piece_lens.push(entries.len());
-                keys.extend(entries.iter().map(|e| e.key.clone()));
-                weights.extend(entries.iter().map(|entry| entry.weight(manifest)));
+                Some(segment)
             }
-        }
+        });
+    }
+
+    // Stream the run's keys and weights in key order, remembering each
+    // piece's length so the current partition can be compared against the
+    // recomputed plan.
+    let children = &follow(root, parent_path)?.as_index()?.children;
+    let mut keys: Vec<Hashed<'_>> = Vec::new();
+    let mut weights: Vec<usize> = Vec::new();
+    let mut piece_lens: Vec<usize> = Vec::with_capacity(opened.len());
+    for (child, opened) in children.iter().take(hi + 1).skip(lo).zip(&opened) {
+        let entries = match (opened, child) {
+            (Some(segment), _) => segment.entries(),
+            (None, Node::Transient(TransientNode::Segment(segment))) => segment.entries(),
+            _ => return Ok(false),
+        };
+        piece_lens.push(entries.len());
+        keys.extend(entries.iter().map(Entry::hashed));
+        weights.extend(entries.iter().map(|entry| entry.weight(manifest)));
     }
 
     // Simulate the edit on the streamed sequence. The edit always lands in
     // the descent piece (`run_at`) — routing put it there — so that
-    // piece's length adjusts directly.
+    // piece's length adjusts directly. A key orders as its bytes do, so the
+    // search compares bytes.
     match edit {
-        Edit::Upsert(entry) => match keys.binary_search(&entry.key) {
-            Ok(i) => weights[i] = entry.weight(manifest),
-            Err(i) => {
-                piece_lens[run_at] += 1;
-                keys.insert(i, entry.key.clone());
-                weights.insert(i, entry.weight(manifest));
+        Edit::Upsert(entry) => {
+            match keys.binary_search_by(|key| key.bytes().cmp(entry.key.as_ref())) {
+                Ok(i) => weights[i] = entry.weight(manifest),
+                Err(i) => {
+                    piece_lens[run_at] += 1;
+                    keys.insert(i, entry.hashed());
+                    weights.insert(i, entry.weight(manifest));
+                }
             }
-        },
+        }
         Edit::Delete(key) => {
-            let Ok(i) = keys.binary_search(key) else {
+            let Ok(i) = keys.binary_search_by(|candidate| candidate.bytes().cmp(key.as_ref()))
+            else {
                 return Ok(false);
             };
             piece_lens[run_at] -= 1;
@@ -2659,9 +2660,8 @@ where
     // boundary predicted, and every boundary still carrying its forced
     // mark (a coin cut landing on a boundary would flip the stored
     // separator to its natural form — different bytes, so widen).
-    let key_refs: Vec<&Key> = keys.iter().collect();
     let (cut_after, forced_start) =
-        crate::node::transient::cut_plan::<Key, D>(&key_refs, &weights, manifest);
+        crate::node::transient::cut_plan::<D>(&keys, &weights, manifest);
     let count = keys.len();
     let mut boundary = vec![false; count];
     let mut acc = 0usize;
@@ -2730,8 +2730,8 @@ where
     Env: Provider<LoadBlock> + ConditionalSync,
     D: Distribution,
 {
-    use crate::distribution::summary::{self, PieceSummary};
-    use crate::distribution::{anchor_hash, cap};
+    use crate::distribution::cap;
+    use crate::distribution::summary::PieceSummary;
     use std::sync::Arc;
 
     let at = path[path.len() - 1];
@@ -2739,7 +2739,8 @@ where
 
     // Pass 1 (sync, under the tree borrow): per piece, either a ready
     // summary — transient segments and the edited piece, summarized in
-    // place — or the stored link to resolve against the memo. The edited
+    // place, and a stored piece whose node is held with its summary — or
+    // the stored link to fetch and summarize. The edited
     // piece gets its POST-EDIT summary, built from the open leaf with the
     // edit applied, mirroring the full check's simulation.
     enum Pending {
@@ -2755,10 +2756,10 @@ where
                     return Ok(None);
                 };
                 let entries = leaf.entries();
-                let mut keys: Vec<&[u8]> = Vec::with_capacity(entries.len() + 1);
+                let mut keys: Vec<Hashed<'_>> = Vec::with_capacity(entries.len() + 1);
                 let mut weights: Vec<usize> = Vec::with_capacity(entries.len() + 1);
                 for entry in entries {
-                    keys.push(entry.key.as_ref());
+                    keys.push(entry.hashed());
                     weights.push(entry.weight(manifest));
                 }
                 match edit {
@@ -2766,7 +2767,7 @@ where
                         match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
                             Ok(i) => weights[i] = entry.weight(manifest),
                             Err(i) => {
-                                keys.insert(i, entry.key.as_ref());
+                                keys.insert(i, entry.hashed());
                                 weights.insert(i, entry.weight(manifest));
                             }
                         }
@@ -2784,14 +2785,16 @@ where
                 ))));
             } else {
                 match child {
-                    Node::Persistent(link) => match summary::memoized(&link.node, manifest) {
+                    Node::Persistent(link) => match accessor
+                        .cached(&link.node)
+                        .and_then(|piece| piece.summary(manifest))
+                    {
                         Some(ready) => pieces.push(Pending::Ready(ready)),
                         None => pieces.push(Pending::Fetch(link.clone())),
                     },
                     Node::Transient(TransientNode::Segment(segment)) => {
                         let entries = segment.entries();
-                        let keys: Vec<&[u8]> =
-                            entries.iter().map(|entry| entry.key.as_ref()).collect();
+                        let keys: Vec<Hashed<'_>> = entries.iter().map(Entry::hashed).collect();
                         let weights: Vec<usize> =
                             entries.iter().map(|entry| entry.weight(manifest)).collect();
                         pieces.push(Pending::Ready(Arc::new(PieceSummary::build::<D>(
@@ -2804,8 +2807,9 @@ where
         }
     }
 
-    // Pass 2 (async): resolve stored pieces through the memo, streaming a
-    // piece only on its first touch per content change.
+    // Pass 2 (async): fetch the stored pieces that had no summary and keep
+    // each one's with its node, so a piece is streamed only on its first
+    // touch per content change for as long as the node is held.
     let mut summaries: Vec<Arc<PieceSummary>> = Vec::with_capacity(pieces.len());
     for pending in pieces {
         summaries.push(match pending {
@@ -2818,11 +2822,10 @@ where
                     return Ok(None);
                 };
                 let entries = segment.entries();
-                let keys: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_ref()).collect();
+                let keys: Vec<Hashed<'_>> = entries.iter().map(Entry::hashed).collect();
                 let weights: Vec<usize> =
                     entries.iter().map(|entry| entry.weight(manifest)).collect();
-                summary::memoize(
-                    &link.node,
+                persistent.summarize(
                     manifest,
                     PieceSummary::build::<D>(&keys, &weights, manifest),
                 )
@@ -2860,7 +2863,10 @@ where
             if !cap::is_forced_candidate(left, right, manifest) {
                 return Ok(None);
             }
-            boundaries.push((cap::shortest_separator_len(left, right), anchor_hash(right)));
+            boundaries.push((
+                cap::shortest_separator_len(left, right),
+                pair[1].first_hash.clone(),
+            ));
         }
         let compressed: Vec<cap::CompressedPiece> = summaries
             .iter()
@@ -2907,10 +2913,17 @@ where
             // The boundary seam's own coin verdict must be no-cut: a
             // natural cut here would store the short separator, not the
             // long forced form the stored partition carries.
-            if D::leaf_cut(left, pair[0].trailing_bank + pair[0].last_weight, manifest) {
+            if D::leaf_cut(
+                Hashed::known(left, &pair[0].last_hash),
+                pair[0].trailing_bank + pair[0].last_weight,
+                manifest,
+            ) {
                 return Ok(Some(false));
             }
-            boundaries.push((cap::shortest_separator_len(left, right), anchor_hash(right)));
+            boundaries.push((
+                cap::shortest_separator_len(left, right),
+                pair[1].first_hash.clone(),
+            ));
         }
         (manifest.frame_ceiling(), boundaries)
     } else {
@@ -3029,7 +3042,7 @@ where
         .splice(lo..=hi, std::iter::empty())
         .collect();
     let mut entries = Vec::new();
-    let mut separator = Vec::new();
+    let mut separator = Separator::default();
     let mut origins: Vec<PieceOrigin> = Vec::new();
     for (offset, member) in members.into_iter().enumerate() {
         let TransientNode::Segment(segment) = member.into_transient()? else {
@@ -3400,7 +3413,7 @@ where
             // run: its first group re-derives against it, and an emptied
             // segment propagates its removal through the boundary-delete
             // paths, which have the neighbor's keys in memory.
-            let floor = std::mem::take(&mut segment.separator);
+            let floor = std::mem::take(&mut segment.separator).into_bytes();
             Ok(regroup_entries_reusing::<Key, Value, D>(
                 segment.take_entries(),
                 floor,
@@ -3801,7 +3814,7 @@ where
             // segment's left seam (the neighbour's own seam dissolves and is
             // re-derived fresh if regrouping recreates it). Leaves buffer
             // nothing, so there is nothing to lift here.
-            let floor = std::mem::take(&mut main.separator);
+            let floor = std::mem::take(&mut main.separator).into_bytes();
             if let Some(key) = key
                 && main
                     .entries()
@@ -4365,7 +4378,7 @@ where
     loop {
         match node {
             TransientNode::Segment(segment) => {
-                segment.separator = Vec::new();
+                segment.separator = Separator::default();
                 return Ok(());
             }
             TransientNode::Index(index) => {
@@ -4491,8 +4504,8 @@ where
     match (left, right) {
         (TransientNode::Segment(left), TransientNode::Segment(right)) => {
             // Leaves buffer nothing.
-            let floor = left.separator.clone();
-            let mut entries = left.into_entries();
+            let (mut entries, floor) = left.into_parts();
+            let floor = floor.into_bytes();
             entries.extend(right.into_entries());
             Ok((
                 regroup_entries::<Key, Value, D>(entries, floor, manifest),
@@ -4597,7 +4610,7 @@ where
             // preceded by an accepted seam whenever this fast path can
             // apply (vetoed adjacency is rejected below), so its bank is
             // zero and the entry's own weight is the exact charge.
-            if D::leaf_cut(entry.key.as_ref(), entry.weight(manifest), manifest) {
+            if D::leaf_cut(entry.hashed(), entry.weight(manifest), manifest) {
                 return false; // inserting a cutting coin splits the segment
             }
             let at = found.unwrap_err();
@@ -4605,7 +4618,7 @@ where
             let appends_last = at == entries.len();
             let last_is_boundary = entries
                 .last()
-                .map(|e| D::rank(e.key.as_ref(), manifest) > BOTTOM_RANK)
+                .map(|e| D::rank(e.hashed(), manifest) > BOTTOM_RANK)
                 .unwrap_or(false);
             if appends_last && last_is_boundary {
                 return false;
@@ -4646,7 +4659,7 @@ where
                     let predecessor = entries[at - 1].key.as_ref();
                     if D::vetoes(predecessor, entries[at].key.as_ref(), manifest)
                         && !D::vetoes(predecessor, entries[at + 1].key.as_ref(), manifest)
-                        && D::rank(predecessor, manifest) > BOTTOM_RANK
+                        && D::rank(entries[at - 1].hashed(), manifest) > BOTTOM_RANK
                     {
                         return false;
                     }
@@ -4801,7 +4814,7 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::MemoryBlocks;
-    use crate::{Distribution, Geometric, Manifest};
+    use crate::{Distribution, Geometric, Hashed, Manifest};
     use anyhow::Result;
     use dialog_common::Blake3Hash;
 
@@ -5707,10 +5720,10 @@ mod tests {
             Manifest::default().entry_overhead()
         );
 
-        let entries = vec![crate::Entry {
-            key: 7u32.to_le_bytes(),
-            value: 7u32.to_le_bytes().to_vec(),
-        }];
+        let entries = vec![crate::Entry::new(
+            7u32.to_le_bytes(),
+            7u32.to_le_bytes().to_vec(),
+        )];
         let body = PersistentNodeBody::segment_from_entries(entries, unknown.clone())?;
         let buffer = Buffer::from(body.as_bytes()?);
         let root = buffer.blake3_hash().clone();
@@ -5831,10 +5844,10 @@ mod tests {
             fanout_n: 4,
             ..Manifest::default()
         };
-        let entries = vec![crate::Entry {
-            key: 7u32.to_le_bytes(),
-            value: 7u32.to_le_bytes().to_vec(),
-        }];
+        let entries = vec![crate::Entry::new(
+            7u32.to_le_bytes(),
+            7u32.to_le_bytes().to_vec(),
+        )];
         let body = PersistentNodeBody::segment_from_entries(entries, foreign.clone())?;
         let buffer = Buffer::from(body.as_bytes()?);
         let root = buffer.blake3_hash().clone();
@@ -6203,7 +6216,7 @@ mod tests {
                     let mut bounds: Option<([u8; 4], [u8; 4])> = None;
                     for (at, link) in index.links()?.into_iter().enumerate() {
                         let child: Blake3Hash = link.node;
-                        let separator: Vec<u8> = link.separator;
+                        let separator: Vec<u8> = link.separator.into_bytes();
                         let expected_child_leftmost = if at == 0 {
                             expected_leftmost.to_vec()
                         } else {
@@ -6315,7 +6328,7 @@ mod tests {
             let mut bytes = format!("{n:08}").into_bytes();
             bytes.resize(width, b'x');
             assert_eq!(
-                <Geometric as Distribution>::rank(&bytes, &manifest),
+                <Geometric as Distribution>::rank(Hashed::from(&bytes), &manifest),
                 var_rank(&bytes),
                 "an oversized key is ranked by the coin alone; the separator \
                  bound is enforced per seam by the veto, not by demotion"
@@ -6923,7 +6936,7 @@ mod tests {
         let mut n = 0u32;
         while keys.len() < want {
             let key = VarKey(format!("{prefix}{n:04}").into_bytes());
-            if <Geometric as Distribution>::rank(&key.0, manifest) <= 1 {
+            if <Geometric as Distribution>::rank(Hashed::from(&key.0), manifest) <= 1 {
                 keys.push(key);
             }
             n += 1;
@@ -7055,7 +7068,7 @@ mod tests {
             let mut n = 0u32;
             loop {
                 let key = VarKey(format!("m{n:04}").into_bytes());
-                if <Geometric as Distribution>::rank(&key.0, &manifest) > 1 {
+                if <Geometric as Distribution>::rank(Hashed::from(&key.0), &manifest) > 1 {
                     break key;
                 }
                 n += 1;
@@ -7151,7 +7164,8 @@ mod tests {
                     })
                     .sum();
                 let last = &keys[2];
-                if !<Geometric as Distribution>::leaf_cut(&last.0, charge, &manifest) {
+                if !<Geometric as Distribution>::leaf_cut(Hashed::from(&last.0), charge, &manifest)
+                {
                     break keys;
                 }
                 tag += 1;
@@ -8066,7 +8080,8 @@ mod tests {
         // The tree's own coin (the capped manifest's branch factor, not the
         // default's): find a high-coin key immediately followed by a
         // low-coin key, deterministically.
-        let coin = |key: &VarKey| <Geometric as Distribution>::rank(&key.0, &manifest);
+        let coin =
+            |key: &VarKey| <Geometric as Distribution>::rank(Hashed::from(&key.0), &manifest);
         let mut found = None;
         for n in 0..500u32 {
             if coin(&cluster_key(n)) > 1 && coin(&cluster_key(n + 1)) <= 1 {
@@ -8538,10 +8553,7 @@ mod tests {
             let band = random_band(&mut rng, k + 1..m, 60);
             let entries: Vec<Entry<[u8; 4], Vec<u8>>> = band
                 .iter()
-                .map(|&x| Entry {
-                    key: bkey(x),
-                    value: bkey(x).to_vec(),
-                })
+                .map(|&x| Entry::new(bkey(x), bkey(x).to_vec()))
                 .collect();
             let pieces = vec![
                 Piece::Range {
@@ -8762,7 +8774,7 @@ mod buffer_edit_interaction_tests {
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
     use crate::{
-        Buffer, Change, Delta, Entry, HitchhikerTree, NodeBody, NoveltyEntry, NoveltyOp,
+        Buffer, Change, Delta, Entry, Hashed, HitchhikerTree, NodeBody, NoveltyEntry, NoveltyOp,
         PersistentNode, PersistentTree, Piece, TransientTree, tree_spec,
     };
 
@@ -9393,12 +9405,11 @@ mod buffer_edit_interaction_tests {
 
                 // Integrate the same change stream into both.
                 let stream = || {
-                    futures_util::stream::iter(changes.iter().map(|key| {
-                        Ok(Change::Add(Entry {
-                            key: key.to_be_bytes(),
-                            value: vec![7],
-                        }))
-                    }))
+                    futures_util::stream::iter(
+                        changes
+                            .iter()
+                            .map(|key| Ok(Change::Add(Entry::new(key.to_be_bytes(), vec![7])))),
+                    )
                 };
 
                 let mut delta = Delta::zero();
@@ -9497,12 +9508,11 @@ mod buffer_edit_interaction_tests {
         );
 
         let changes: Vec<u32> = (1..2400u32).step_by(14).collect();
-        let stream = futures_util::stream::iter(changes.iter().map(|key| {
-            Ok(Change::Add(Entry {
-                key: key.to_be_bytes(),
-                value: vec![9],
-            }))
-        }));
+        let stream = futures_util::stream::iter(
+            changes
+                .iter()
+                .map(|key| Ok(Change::Add(Entry::new(key.to_be_bytes(), vec![9])))),
+        );
 
         observing.reset();
         let mut delta = Delta::zero();
@@ -9599,12 +9609,11 @@ mod buffer_edit_interaction_tests {
 
         // The seed: every odd key, in order, none held by the base.
         let changes: Vec<u32> = (1..24_000u32).step_by(2).collect();
-        let stream = futures_util::stream::iter(changes.iter().map(|key| {
-            Ok(Change::Add(Entry {
-                key: key.to_be_bytes(),
-                value: vec![9],
-            }))
-        }));
+        let stream = futures_util::stream::iter(
+            changes
+                .iter()
+                .map(|key| Ok(Change::Add(Entry::new(key.to_be_bytes(), vec![9])))),
+        );
 
         observing.reset();
         let mut delta = Delta::zero();
@@ -9662,12 +9671,11 @@ mod buffer_edit_interaction_tests {
         // a contested key would be resolved by value-hash last-write-wins,
         // which is not what this test is about.
         let changes: Vec<u32> = (1..1200u32).step_by(14).collect();
-        let stream = futures_util::stream::iter(changes.iter().map(|key| {
-            Ok(Change::Add(Entry {
-                key: key.to_be_bytes(),
-                value: vec![9],
-            }))
-        }));
+        let stream = futures_util::stream::iter(
+            changes
+                .iter()
+                .map(|key| Ok(Change::Add(Entry::new(key.to_be_bytes(), vec![9])))),
+        );
 
         // A cold node cache, so the descents must really read.
         observing.reset();
@@ -9904,7 +9912,7 @@ mod buffer_edit_interaction_tests {
             .find(|candidate| {
                 !avoid.contains(candidate)
                     && <crate::Geometric as crate::Distribution>::rank(
-                        &candidate.to_be_bytes(),
+                        Hashed::from(&candidate.to_be_bytes()),
                         manifest,
                     ) > crate::BOTTOM_RANK
             })
@@ -9928,8 +9936,10 @@ mod buffer_edit_interaction_tests {
         let manifest = paced_manifest();
         let base_keys: Vec<u32> = (0..400u32)
             .filter(|k| {
-                <crate::Geometric as crate::Distribution>::rank(&k.to_be_bytes(), &manifest)
-                    <= crate::BOTTOM_RANK
+                <crate::Geometric as crate::Distribution>::rank(
+                    Hashed::from(&k.to_be_bytes()),
+                    &manifest,
+                ) <= crate::BOTTOM_RANK
             })
             .collect();
         let mut base = Tree::empty();
@@ -10013,7 +10023,7 @@ mod buffer_edit_interaction_tests {
             .find(|k| {
                 *k < 399
                     && <crate::Geometric as crate::Distribution>::rank(
-                        &k.to_be_bytes(),
+                        Hashed::from(&k.to_be_bytes()),
                         &paced_manifest(),
                     ) > crate::BOTTOM_RANK
             })
@@ -10378,10 +10388,7 @@ mod buffer_edit_interaction_tests {
                     source: &source,
                     range: [0u8; 8]..=[0xffu8; 8],
                 },
-                Piece::Entries(vec![Entry {
-                    key: after,
-                    value: vec![7],
-                }]),
+                Piece::Entries(vec![Entry::new(after, vec![7])]),
             ],
             &storage,
         )

@@ -82,6 +82,13 @@ where
         hash
     }
 
+    /// The node at `hash` if the cache holds it, with no IO: a way to reach
+    /// what a held node keeps with it (its piece summary, say) without
+    /// loading a node that is not already here.
+    pub(crate) fn cached(&self, hash: &Blake3Hash) -> Option<PersistentNode<Key, Value>> {
+        self.cache.get_cached(hash)
+    }
+
     /// Retrieves a node by its content hash.
     ///
     /// Checks the cache first, then the environment. Returns an error if the

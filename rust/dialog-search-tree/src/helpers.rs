@@ -56,8 +56,8 @@ mod blocks;
 pub use blocks::*;
 
 use crate::{
-    Delta, DialogSearchTreeError, Distribution, Key, LoadBlock, Manifest, MemoryBlocks, NodeBody,
-    PersistentNode, PersistentTree, Rank, Value,
+    Delta, DialogSearchTreeError, Distribution, Hashed, Key, LoadBlock, Manifest, MemoryBlocks,
+    NodeBody, PersistentNode, PersistentTree, Rank, Value,
 };
 
 /// Traversal order for tree iteration.
@@ -567,12 +567,12 @@ impl Distribution for DistributionSimulator {
     // The simulator drives tree shape from bytes baked into the spec keys, so
     // it ignores the manifest's branching parameter and length guard: tests
     // that use it want an exact, byte-controlled shape, not a coin.
-    fn rank(key: &[u8], _manifest: &Manifest) -> Rank {
-        rank_byte(key, 1)
+    fn rank(key: Hashed<'_>, _manifest: &Manifest) -> Rank {
+        rank_byte(key.bytes(), 1)
     }
 
-    fn seam_rank(separator: &[u8], _manifest: &Manifest) -> Rank {
-        rank_byte(separator, 2)
+    fn seam_rank(separator: Hashed<'_>, _manifest: &Manifest) -> Rank {
+        rank_byte(separator.bytes(), 2)
     }
 
     fn separator(_left: &[u8], right: &[u8]) -> Vec<u8> {
@@ -1097,7 +1097,7 @@ impl TreeSpec {
                     match (segment.last_key::<SpecKey>(), node.manifest()) {
                         (Ok(upper_bound), Ok(manifest)) => (
                             String::from_utf8_lossy(&decode_key(&upper_bound)).to_string(),
-                            DistributionSimulator::rank(&upper_bound, &manifest),
+                            DistributionSimulator::rank(Hashed::from(&upper_bound), &manifest),
                         ),
                         _ => {
                             output.push_str(&format!("{prefix}(malformed node {hash})\n"));
