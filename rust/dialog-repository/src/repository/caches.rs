@@ -131,15 +131,12 @@ impl HeldCaches {
     /// The caches `env` holds, made with the default budget if it holds
     /// none yet.
     pub fn of<Env: Holds>(env: &Env) -> Self {
-        if let Some(held) = env
-            .held(HELD)
-            .and_then(|held| held.downcast_ref::<Self>().cloned())
-        {
-            return held;
-        }
-        let caches = Self::new();
-        caches.hold(env);
-        caches
+        env.held_or(HELD, &|| Arc::new(Self::new()))
+            .downcast_ref::<Self>()
+            .cloned()
+            // Only if something else is held under the key: caches of the
+            // caller's own, which reuse nothing and break nothing.
+            .unwrap_or_default()
     }
 
     /// Have `env` hold these caches, in place of any it held.

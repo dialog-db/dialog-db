@@ -79,5 +79,5 @@ where
 {
     let filesystem = FileSystem::open(fork.address().location()).await?;
     let invocation = fork.attest(FsAuthorization::new(filesystem));
-    Ok(invocation.perform(&Fs).await)
+    Ok(invocation.perform(&Fs::default()).await)
 }

@@ -54,7 +54,7 @@ impl OpenBranch {
         let caches = HeldCaches::of(env).branch(&self.branch);
 
         Ok(Branch {
-            writer: Branch::writer_of(&self.branch),
+            writer: Branch::writer_of(env, &self.branch),
             reference: self.branch,
             revision,
             tracking,
@@ -82,12 +82,49 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use std::sync::Arc;
+
     use anyhow::Result;
-    use dialog_capability::Subject;
+    use dialog_capability::{Command, Provider, Subject};
+    use dialog_common::{Held, Holdings, Holds};
+    use dialog_effects::memory::Resolve;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
     use crate::RepositoryMemoryExt;
+
+    /// A volatile store as an environment that holds what its branches
+    /// leave with it, the way a peer does. `Volatile` alone holds nothing.
+    #[derive(Default)]
+    struct Holding {
+        storage: Volatile,
+        holdings: Holdings,
+    }
+
+    impl Holds for Holding {
+        fn held(&self, key: &str) -> Option<Held> {
+            self.holdings.held(key)
+        }
+
+        fn hold(&self, key: String, handle: Held) {
+            self.holdings.hold(key, handle)
+        }
+
+        fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+            self.holdings.held_or(key, make)
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<Resolve> for Holding {
+        async fn execute(
+            &self,
+            input: <Resolve as Command>::Input,
+        ) -> <Resolve as Command>::Output {
+            Provider::<Resolve>::execute(&self.storage, input).await
+        }
+    }
 
     #[dialog_common::test]
     async fn it_opens_branch_with_no_revision() -> Result<()> {
@@ -112,6 +149,27 @@ mod tests {
         let branch = subject.branch("main").open().perform(&provider).await?;
 
         assert_eq!(branch.name(), "main");
+        Ok(())
+    }
+
+    /// The handles of a branch opened through one environment share its
+    /// writer, so their commits and pulls take turns. Another branch has
+    /// its own, and so does the same branch opened through another
+    /// environment.
+    #[dialog_common::test]
+    async fn it_shares_a_writer_between_handles_of_one_environment() -> Result<()> {
+        let provider = Holding::default();
+        let elsewhere = Holding::default();
+        let subject = Subject::from(did!("key:zBranchWriterTest"));
+
+        let first = subject.branch("main").open().perform(&provider).await?;
+        let second = subject.branch("main").open().perform(&provider).await?;
+        let other = subject.branch("feature").open().perform(&provider).await?;
+        let apart = subject.branch("main").open().perform(&elsewhere).await?;
+
+        assert!(Arc::ptr_eq(&first.writer(), &second.writer()));
+        assert!(!Arc::ptr_eq(&first.writer(), &other.writer()));
+        assert!(!Arc::ptr_eq(&first.writer(), &apart.writer()));
         Ok(())
     }
 
