@@ -209,6 +209,55 @@ fn it_fills_an_empty_argument_with_the_entity_the_page_shows() {
 }
 
 #[test]
+fn it_reads_a_trailing_delimiter_as_an_argument_still_to_come() {
+    // "rename to" is on its way to "rename to Q3": the goal is named and
+    // still empty, so it reads as "rename" does. Before, the only reading
+    // that survived took the whole line as the title. ("to" also starts
+    // the "to do list" notebook, a reading typed words rank above it.)
+    let rank = |parses: &[Parse], title: Option<Value>| {
+        parses.iter().position(|parse| {
+            parse.verb == "notebook/retitle"
+                && value(parse, "subject") == entity("id:roadmap")
+                && value(parse, "title") == title
+        })
+    };
+    let parses = english("rename to", &on_roadmap());
+    let open = rank(&parses, None).expect("the goal is left open");
+    assert_eq!(parses[open].display_text(), "rename [Roadmap] to (title)");
+    let whole = rank(&parses, text("rename to")).expect("the line as a title");
+    assert!(open < whole, "{parses:?}");
+
+    // Open, it takes the selection, as an unsaid goal would.
+    let selected = Context {
+        selection: Some(Selection {
+            text: "Q3 plans".into(),
+            entity: None,
+        }),
+        ..on_roadmap()
+    };
+    let parses = english("rename to", &selected);
+    let filled = rank(&parses, text("Q3 plans")).expect("the selection is the title");
+    assert!(filled < rank(&parses, None).unwrap(), "{parses:?}");
+}
+
+#[test]
+fn it_reads_this_as_the_page_when_the_selection_is_no_such_thing() {
+    // With text selected, "this" may be the selection or what the page
+    // shows. "Q3 plans" names no notebook, so the notebook is the page's.
+    let selected = Context {
+        selection: Some(Selection {
+            text: "Q3 plans".into(),
+            entity: None,
+        }),
+        ..on_roadmap()
+    };
+    let parses = english("rename this to", &selected);
+    assert_eq!(parses[0].verb, "notebook/retitle");
+    assert_eq!(value(&parses[0], "subject"), entity("id:roadmap"));
+    assert_eq!(value(&parses[0], "title"), text("Q3 plans"));
+}
+
+#[test]
 fn it_ranks_what_was_chosen_before() {
     let mut memory = Memory::default();
     memory.remember(Some("ren"), "tonk/rename-repository");

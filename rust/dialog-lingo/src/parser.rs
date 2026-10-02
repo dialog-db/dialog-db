@@ -354,17 +354,22 @@ impl<'a> Query<'a> {
             drafts.extend(interpolated);
         }
 
-        // Step 5.
-        if let Some(target) = self
-            .context
-            .selection
-            .as_ref()
-            .or(self.context.this.as_ref())
-            && self.find_anaphor(&input).is_some()
-        {
-            let substituted: Vec<Draft> = drafts
+        // Step 5. "this" can be what is selected or what the page shows;
+        // both are read, and the arguments decide which one fits.
+        if self.find_anaphor(&input).is_some() {
+            let targets: Vec<&Selection> =
+                [self.context.selection.as_ref(), self.context.this.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|target| !target.text.is_empty())
+                    .collect();
+            let substituted: Vec<Draft> = targets
                 .iter()
-                .flat_map(|draft| self.substitute_anaphora(draft, target))
+                .flat_map(|target| {
+                    drafts
+                        .iter()
+                        .flat_map(|draft| self.substitute_anaphora(draft, target))
+                })
                 .collect();
             drafts.extend(substituted);
         }
@@ -622,7 +627,10 @@ impl<'a> Query<'a> {
                 // The words this delimiter can reach: up to the next
                 // delimiter on its branching side. A delimiter with nothing
                 // on that side (trailing in English, leading in Japanese)
-                // yields no parse for this combination.
+                // names an argument still to be typed: "rename to" is on
+                // its way to "rename to Q3". It fills nothing, so the role
+                // stays open for a default or the selection, as one not
+                // said at all would. Ubiquity dropped the combination.
                 let span = match self.grammar.branching {
                     Branching::Left => at
                         .checked_sub(1)
@@ -635,8 +643,7 @@ impl<'a> Query<'a> {
                     }
                 };
                 let Some((min, max)) = span.filter(|(min, max)| min <= max) else {
-                    drafts_so_far = Vec::new();
-                    break;
+                    continue;
                 };
                 let modifier = &words[*at];
                 let mut next = Vec::new();
@@ -760,8 +767,8 @@ impl<'a> Query<'a> {
         best
     }
 
-    /// Step 5: a copy for every argument containing an anaphor, with the
-    /// selection in its place.
+    /// Step 5: a copy for every argument containing an anaphor, with
+    /// `target` (the selection, or the page's entity) in its place.
     fn substitute_anaphora(&self, draft: &Draft, target: &Selection) -> Vec<Draft> {
         let mut copies = Vec::new();
         for (role, args) in &draft.args {
