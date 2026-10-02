@@ -128,14 +128,15 @@ fn writes<P>(counting: &Counting<P>) -> u64 {
     .sum()
 }
 
-/// Selects through a fresh handle on `main` (its node and spill caches
-/// start empty), and reports the rows with the archive block reads and
-/// the writes the select cost.
+/// Selects through a handle on `main` whose caches start empty (what the
+/// environment held for the repository is released first), and reports
+/// the rows with the archive block reads and the writes the select cost.
 async fn cold_select(
     repo: &Repository<Credential>,
     selector: ArtifactSelector<Constrained>,
     operator: &Operator,
 ) -> Result<(Vec<Artifact>, u64, u64)> {
+    crate::HeldCaches::release(operator, &repo.did());
     let branch = repo.branch("main").load().perform(operator).await?;
     let counting = Counting::new(operator.clone());
     let rows = select(&branch, selector, &counting).await?;

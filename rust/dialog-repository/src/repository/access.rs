@@ -45,7 +45,7 @@ use dialog_capability::access::{
     Access as AccessAttenuation, AuthorizeError, Certificate as _, Export, Forget,
 };
 use dialog_capability::{Command, Fork, Provider, Subject};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Write as BlobWrite;
@@ -93,6 +93,22 @@ pub struct MigrateCertificates {
 struct MigrateEnv<S: Clone> {
     authority: Authority,
     storage: Storage<S>,
+    /// What the branch the migration opens keeps for its commits.
+    holdings: Holdings,
+}
+
+impl<S: Clone> Holds for MigrateEnv<S> {
+    fn held(&self, key: &str) -> Option<Held> {
+        self.holdings.held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        self.holdings.hold(key, handle)
+    }
+
+    fn release(&self, key: &str) -> Option<Held> {
+        self.holdings.release(key)
+    }
 }
 
 macro_rules! migrate_storage {
@@ -281,6 +297,7 @@ impl MigrateCertificates {
         let env = MigrateEnv {
             authority: Authority::new("profile", self.credential.did(), self.credential.clone()),
             storage: storage.clone(),
+            holdings: Holdings::default(),
         };
         let repository = crate::Repository::from(self.credential.clone());
         let branch = repository
@@ -442,6 +459,7 @@ mod tests {
         let env = MigrateEnv {
             authority: Authority::new("profile", profile_signer.did(), profile_signer.clone()),
             storage: storage.clone(),
+            holdings: Holdings::default(),
         };
         let branch = crate::Repository::from(profile_signer.clone())
             .branch(ACCESS_BRANCH)
@@ -629,6 +647,7 @@ mod tests {
         let env = MigrateEnv {
             authority: Authority::new("profile", profile_signer.did(), profile_signer.clone()),
             storage: storage.clone(),
+            holdings: Holdings::default(),
         };
         let branch = crate::Repository::from(profile_signer.clone())
             .branch(ACCESS_BRANCH)
