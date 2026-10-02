@@ -133,7 +133,7 @@ async fn cold_select(
     selector: ArtifactSelector<Constrained>,
     operator: &Operator,
 ) -> Result<(Vec<Artifact>, u64, u64)> {
-    crate::HeldCaches::release(operator, &repo.did());
+    crate::HeldCaches::of(operator).release(&repo.did());
     let branch = repo.branch("main").load().perform(operator).await?;
     let counting = Counting::new(operator.clone());
     let rows = select(&branch, selector, &counting).await?;
