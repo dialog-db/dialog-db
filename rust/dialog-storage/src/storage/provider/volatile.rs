@@ -101,10 +101,6 @@ impl Holds for Volatile {
     fn hold(&self, key: String, handle: Held) {
         self.holdings.hold(key, handle)
     }
-
-    fn release(&self, key: &str) -> Option<Held> {
-        self.holdings.release(key)
-    }
 }
 
 impl Default for Volatile {
