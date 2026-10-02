@@ -1871,7 +1871,7 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
 async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
     use crate::merge::observe_revisions;
     use base58::ToBase58 as _;
-    use dialog_search_tree::{Cache, Manifest, PersistentTree};
+    use dialog_search_tree::{Manifest, PersistentTree};
     use ed25519_dalek::Signer as _;
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
@@ -1904,7 +1904,8 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
         panic!("a record larger than inline_n spills");
     };
 
-    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(small.clone(), Cache::new());
+    let mut tree: ArtifactTree =
+        PersistentTree::empty_with_manifest(small.clone(), dialog_search_tree::NodeCache::new());
     let mut delta = ArchiveDelta::zero();
     tree.record(&store, &mut delta, entries).await?;
     delta.flush_into(&store);
@@ -1915,7 +1916,8 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
 
     let storage = store.clone();
     let observed = Arc::new(Mutex::new(BTreeSet::new()));
-    let empty: ArtifactTree = PersistentTree::empty_with_manifest(small, Cache::new());
+    let empty: ArtifactTree =
+        PersistentTree::empty_with_manifest(small, dialog_search_tree::NodeCache::new());
     let changes = observe_revisions(
         empty.differentiate(&tree, &storage, &storage),
         observed.clone(),

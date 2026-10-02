@@ -56,7 +56,7 @@ impl OpenBranch {
             revision,
             tracking,
             induction,
-            node_cache: dialog_search_tree::Cache::new(),
+            node_cache: dialog_search_tree::NodeCache::new(),
             spill_cache: spill_cache(),
             rule_cache: Arc::new(RuleCache::new()),
             plan_cache: PlanCache::default(),

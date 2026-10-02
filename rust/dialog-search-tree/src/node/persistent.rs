@@ -219,6 +219,14 @@ where
     Segment(&'a ArchivedSegment<Value>),
 }
 
+impl<Key, Value> PersistentNode<Key, Value> {
+    /// The length of this node's stored bytes: what a cache charges for
+    /// holding it.
+    pub(crate) fn size(&self) -> usize {
+        self.buffer.as_ref().len()
+    }
+}
+
 // Manual impl: a clone shares the buffer, whatever the marker types are.
 impl<Key, Value> Clone for PersistentNode<Key, Value> {
     fn clone(&self) -> Self {

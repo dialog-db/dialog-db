@@ -17,9 +17,9 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, Cache, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key,
-    LoadBlock, Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions, SearchResult,
-    TreeDifference, TreeWalker, Value, into_owned,
+    Accessor, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, LoadBlock,
+    Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions, SearchResult, TreeDifference,
+    TreeWalker, Value, into_owned,
 };
 
 /// A node on a range estimate's edge path, with the range's bound on each
@@ -184,7 +184,7 @@ where
     /// lands on — but no store holds that node until a persist runs
     /// ([`stored_root`](Self::stored_root) is `None` until then).
     pub fn empty() -> Self {
-        Self::empty_with_manifest(Manifest::default(), Cache::new())
+        Self::empty_with_manifest(Manifest::default(), NodeCache::new())
     }
 
     /// Creates a new empty [`PersistentTree`] sharing an existing node
@@ -232,7 +232,7 @@ where
     /// The all-zero hash is read as the empty tree under the default
     /// [`Manifest`] (see [`LEGACY_EMPTY_ROOT`]).
     pub fn from_hash(root: Blake3Hash) -> Self {
-        Self::from_hash_with_cache(root, Cache::new())
+        Self::from_hash_with_cache(root, NodeCache::new())
     }
 
     /// Creates a [`PersistentTree`] from a known root hash, reusing an existing
