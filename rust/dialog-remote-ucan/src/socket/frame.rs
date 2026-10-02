@@ -54,7 +54,8 @@ pub enum Reply {
     State {
         /// The watch invocation.
         invocation: String,
-        /// What the cell holds.
+        /// What the cell holds, its content a byte string.
+        #[serde(with = "held")]
         state: CellState,
     },
     /// The watch ended, for the reason `body` gives, as a refused
@@ -68,6 +69,39 @@ pub enum Reply {
         #[serde(with = "serde_bytes")]
         body: Vec<u8>,
     },
+}
+
+/// A cell's state as a frame carries it: its content as a byte string,
+/// where the edition's own encoding would spell each byte out.
+mod held {
+    use dialog_effects::memory::{CellState, Edition, Version};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct Held {
+        #[serde(with = "serde_bytes")]
+        content: Vec<u8>,
+        version: Version,
+    }
+
+    pub fn serialize<S: Serializer>(state: &CellState, serializer: S) -> Result<S::Ok, S::Error> {
+        state
+            .as_ref()
+            .map(|edition| Held {
+                content: edition.content.clone(),
+                version: edition.version.clone(),
+            })
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<CellState, D::Error> {
+        Ok(
+            Option::<Held>::deserialize(deserializer)?.map(|held| Edition {
+                content: held.content,
+                version: held.version,
+            }),
+        )
+    }
 }
 
 /// A frame that could not be read.
@@ -167,6 +201,26 @@ mod tests {
         for reply in replies {
             assert_eq!(Reply::decode(&reply.encode()).unwrap(), reply);
         }
+    }
+
+    /// A state's content travels as one byte string, not a byte at a time.
+    #[dialog_common::test]
+    fn it_carries_a_cells_content_as_bytes() {
+        let content = b"a head another device published".to_vec();
+        let frame = Reply::State {
+            invocation: "bafy".into(),
+            state: Some(Edition {
+                content: content.clone(),
+                version: Version::from(b"v1".as_slice()),
+            }),
+        }
+        .encode();
+        assert!(
+            frame
+                .windows(content.len())
+                .any(|window| window == content.as_slice()),
+            "the content is in the frame as it is"
+        );
     }
 
     /// Bytes that are not a frame are refused rather than misread.
