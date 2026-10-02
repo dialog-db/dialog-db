@@ -27,6 +27,25 @@ pub trait Holds {
 
     /// Hold `handle` under `key`, replacing whatever was held there.
     fn hold(&self, key: String, handle: Held);
+
+    /// The handle held under `key`, holding the one `make` builds if there
+    /// is none: how code that must share one handle per environment gets
+    /// it, however many callers ask at once.
+    ///
+    /// An environment that keeps its handles behind a lock answers this
+    /// under that lock, so two callers never each make one. This default
+    /// looks and then holds, which is only as good as the environment's
+    /// callers taking turns.
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        match self.held(key) {
+            Some(held) => held,
+            None => {
+                let handle = make();
+                self.hold(key.to_string(), handle.clone());
+                handle
+            }
+        }
+    }
 }
 
 /// A map of held handles, for an environment to embed and delegate
@@ -56,6 +75,15 @@ impl Holds for Holdings {
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(key, handle);
     }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(key.to_string())
+            .or_insert_with(make)
+            .clone()
+    }
 }
 
 #[cfg(test)]
@@ -77,5 +105,19 @@ mod tests {
         let held = shared.held("answer").expect("held");
         assert_eq!(held.downcast_ref::<u32>(), Some(&42));
         assert!(shared.held("missing").is_none());
+    }
+
+    /// Asking for a handle that is not held makes it once: whoever asks
+    /// next, through any clone, gets the one that was made.
+    #[dialog_common::test]
+    fn it_makes_a_handle_once_for_everyone_who_asks() {
+        let holdings = Holdings::default();
+        let shared = holdings.clone();
+
+        let first = holdings.held_or("answer", &|| Arc::new(42u32));
+        let second = shared.held_or("answer", &|| Arc::new(7u32));
+
+        assert_eq!(first.downcast_ref::<u32>(), Some(&42));
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }

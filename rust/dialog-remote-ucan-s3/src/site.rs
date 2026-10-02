@@ -14,7 +14,7 @@ use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Rejection;
 use dialog_effects::authority::{self, OperatorExt};
-use dialog_remote_s3::{Permit, S3Error, http_client};
+use dialog_remote_s3::{Permit, S3, S3Error, http_client};
 
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
@@ -230,6 +230,9 @@ fn now_s() -> u64 {
 pub struct UcanSite {
     permits: Arc<PermitCache>,
     redeems: Arc<Flight<PermitKey, Result<Permit, S3Error>>>,
+    /// The S3 site redeemed permits are invoked through: its in-flight
+    /// block GETs are this site's, for the same reason the redeems are.
+    s3: S3,
 }
 
 impl UcanSite {
@@ -247,6 +250,11 @@ impl UcanSite {
     /// The in-flight redeems shared by clones of this site.
     pub(crate) fn redeems(&self) -> &Flight<PermitKey, Result<Permit, S3Error>> {
         &self.redeems
+    }
+
+    /// The S3 site this one invokes redeemed permits through.
+    pub(crate) fn s3(&self) -> &S3 {
+        &self.s3
     }
 }
 
