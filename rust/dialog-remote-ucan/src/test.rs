@@ -592,7 +592,7 @@ mod layer {
         RevocationSelector,
     };
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     async fn credential_for<Fx>(signer: &Ed25519Signer, capability: &Capability<Fx>) -> String
     where
@@ -1343,5 +1343,127 @@ mod layer {
             "{reason:?}"
         );
         assert_eq!(session.watches().count(), 0, "the ended watch is dropped");
+    }
+
+    /// Answers no revocation, yielding once inside each query and counting
+    /// the queries in flight, so queries made together overlap and the
+    /// most ever in flight says whether they were.
+    #[derive(Clone, Default)]
+    struct Overlapping {
+        in_flight: Arc<AtomicUsize>,
+        most: Arc<AtomicUsize>,
+    }
+
+    impl RevocationChecker for Overlapping {
+        type Error = std::convert::Infallible;
+
+        async fn query(
+            &self,
+            _: RevocationSelector<'_>,
+        ) -> Result<Option<RevocationMatch>, Self::Error> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            YieldOnce(false).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    /// Pending once, then ready: lets whatever else is being polled run.
+    struct YieldOnce(bool);
+
+    impl std::future::Future for YieldOnce {
+        type Output = ();
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            if self.0 {
+                return std::task::Poll::Ready(());
+            }
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+
+    /// Watches of one cell, each made by an operator the subject delegated
+    /// reading its cells to.
+    async fn watches_of_one_cell(count: usize) -> (Ed25519Signer, Vec<Container>) {
+        let subject = Ed25519Signer::generate().await.expect("a subject");
+        let operator = Ed25519Signer::generate().await.expect("an operator");
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(["use", "get", "memory", "cell"].map(String::from).to_vec())
+            .try_build()
+            .await
+            .expect("the delegation mints");
+        let cid = delegation.to_cid();
+        let delegation = Arc::new(delegation);
+        let mut watches = Vec::new();
+        for _ in 0..count {
+            let mut arguments = std::collections::BTreeMap::new();
+            arguments.insert("space".to_string(), Promised::String("local".into()));
+            arguments.insert("cell".to_string(), Promised::String("head".into()));
+            let invocation = InvocationBuilder::new()
+                .issuer(operator.clone())
+                .audience(&subject.did())
+                .subject(&subject.did())
+                .command(
+                    ["use", "get", "memory", "cell", "watch"]
+                        .map(String::from)
+                        .to_vec(),
+                )
+                .arguments(arguments)
+                .proofs(vec![cid])
+                .issued_at(Timestamp::now())
+                .try_build()
+                .await
+                .expect("the watch mints");
+            let mut delegations = std::collections::HashMap::new();
+            delegations.insert(cid, delegation.clone());
+            watches.push(Container::from(&InvocationChain::new(
+                invocation,
+                delegations,
+            )));
+        }
+        (subject, watches)
+    }
+
+    /// The watches a change reaches have their authority checked together,
+    /// not one after another, so a change to a cell many follow is not
+    /// held up by checking each in turn.
+    #[dialog_common::test]
+    async fn it_checks_the_watches_a_change_reaches_together() {
+        let (subject, watches) = watches_of_one_cell(2).await;
+        let revocations = Overlapping::default();
+        let access = Access::new(MemoryStore::default()).with_revocations(revocations.clone());
+        let mut session = Session::new();
+        for watch in &watches {
+            let reply = session.receive(&access, &invoke(watch, None)).await;
+            assert!(matches!(reply, Some(Reply::State { .. })), "{reply:?}");
+        }
+        revocations.most.store(0, Ordering::SeqCst);
+
+        let state = None;
+        let did = subject.did();
+        let change = Change {
+            subject: &did,
+            space: "local",
+            cell: "head",
+            state: &state,
+        };
+        let delivered = session
+            .deliver(&access, change, Duration::ZERO, now_s())
+            .await;
+        assert_eq!(delivered.len(), 2, "both watches are delivered to");
+        assert_eq!(
+            revocations.most.load(Ordering::SeqCst),
+            2,
+            "the two checks were in flight together"
+        );
     }
 }
