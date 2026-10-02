@@ -76,18 +76,134 @@ impl FromStr for Did {
     type Err = DidParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if !s.starts_with("did:") {
-            return Err(DidParseError(format!("expected did: prefix, got: {s}")));
-        }
-        // Must have at least did:method:identifier
-        let rest = &s["did:".len()..];
-        if !rest.contains(':') {
+        if !is_did(s) {
             return Err(DidParseError(format!(
-                "expected did:method:identifier, got: {s}"
+                "expected did:method:identifier in DID syntax, got: {s}"
             )));
         }
         Ok(Did(Arc::from(s)))
     }
+}
+
+/// Whether `s` is a DID, or a DID URL, by the [DID syntax][syntax]:
+///
+/// ```text
+/// did-url            = did path-abempty [ "?" query ] [ "#" fragment ]
+/// did                = "did:" method-name ":" method-specific-id
+/// method-name        = 1*( %x61-7A / DIGIT )
+/// method-specific-id = *( *idchar ":" ) 1*idchar
+/// idchar             = ALPHA / DIGIT / "." / "-" / "_" / pct-encoded
+/// pct-encoded        = "%" HEXDIG HEXDIG
+/// ```
+///
+/// with `path-abempty`, `query` and `fragment` as in RFC 3986. A DID URL
+/// selects within what a DID resolves to (`did:web:example.com#key-1`, a
+/// key of its document), so it is a `Did` too.
+///
+/// A DID names a subject, and a subject is an entity, so every DID must
+/// also be an entity URI. This syntax guarantees it: no whitespace, no
+/// stray punctuation, nothing a URI parser would reject or rewrite.
+///
+/// One method outside the syntax is accepted: `_`, the method of
+/// `did:_:_`, which stands for any subject in a delegation's scope.
+///
+/// [syntax]: https://www.w3.org/TR/did-core/#did-syntax
+#[must_use]
+pub const fn is_did(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() < 4 || b[0] != b'd' || b[1] != b'i' || b[2] != b'd' || b[3] != b':' {
+        return false;
+    }
+    let mut i = 4;
+    let method = i;
+    if i < b.len() && b[i] == b'_' {
+        i += 1;
+    } else {
+        while i < b.len() && (b[i].is_ascii_lowercase() || b[i].is_ascii_digit()) {
+            i += 1;
+        }
+    }
+    if i == method || i == b.len() || b[i] != b':' {
+        return false;
+    }
+    i += 1;
+
+    // The identifier: segments of idchars between colons, the last one
+    // not empty.
+    let mut segment = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b':' {
+            segment = 0;
+            i += 1;
+        } else if c == b'%' {
+            if !pct_encoded(b, i) {
+                return false;
+            }
+            segment += 1;
+            i += 3;
+        } else if c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b'_' {
+            segment += 1;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if segment == 0 {
+        return false;
+    }
+    if i < b.len() && b[i] != b'/' && b[i] != b'?' && b[i] != b'#' {
+        return false;
+    }
+
+    // What a DID URL adds: a path, a query, a fragment, each optional and
+    // in that order.
+    let mut fragment = false;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'%' {
+            if !pct_encoded(b, i) {
+                return false;
+            }
+            i += 3;
+            continue;
+        }
+        let pchar = c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+            );
+        if c == b'#' {
+            if fragment {
+                return false;
+            }
+            fragment = true;
+        } else if !pchar && c != b'/' && c != b'?' {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Whether `b[i]` starts a `%XX` escape.
+const fn pct_encoded(b: &[u8], i: usize) -> bool {
+    i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit()
 }
 
 impl TryFrom<String> for Did {
@@ -133,26 +249,65 @@ impl<'de> Deserialize<'de> for Did {
 #[macro_export]
 macro_rules! did {
     ($s:literal) => {{
-        const _: () = {
-            let b = $s.as_bytes();
-            let mut i = 0;
-            let mut found_colon = false;
-            while i < b.len() {
-                if b[i] == b':' {
-                    assert!(i > 0, "DID method must not be empty");
-                    assert!(i + 1 < b.len(), "DID identifier must not be empty");
-                    found_colon = true;
-                    break;
-                }
-                i += 1;
-            }
-            assert!(found_colon, "expected \"method:identifier\"");
-        };
+        const _: () = assert!(
+            $crate::did::is_did(concat!("did:", $s)),
+            "expected \"method:identifier\" in DID syntax"
+        );
         #[allow(clippy::expect_used)]
         format!("did:{}", $s)
             .parse::<$crate::did::Did>()
-            // The cons block above validated the format ensuring this
-            // never happens
+            // The const assertion above validated it
             .expect("Invalid did 'did:{$s}'")
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_parses_dids_in_did_syntax() {
+        for did in [
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "did:web:example.com",
+            "did:web:example.com%3A8080:user:alice",
+            "did:example:a::b",
+            "did:_:_",
+            "did:web:pick.example#key-2",
+            "did:web:example.com/path",
+            "did:key:z6Mk/index/abc",
+            "did:key:abc?query#fragment",
+        ] {
+            assert!(did.parse::<Did>().is_ok(), "{did}");
+        }
+    }
+
+    #[test]
+    fn it_refuses_what_is_not_did_syntax() {
+        for not in [
+            "",
+            "did:",
+            "did:key",
+            "did:key:",
+            "did::abc",
+            "did:Key:abc",
+            "did:_key:abc",
+            "did:key:a:",
+            "did:key:has space",
+            "did:key:abc, ",
+            "did:key:abc,",
+            "did:key:abc#a#b",
+            "did:key:abc#frag ment",
+            "did:key:abc/pa th",
+            "did:key:line\nbreak",
+            "did:key:abc%2",
+            "did:key:abc%zz",
+            "key:abc",
+        ] {
+            assert!(
+                matches!(not.parse::<Did>(), Err(DidParseError(_))),
+                "{not:?} is refused"
+            );
+        }
+    }
 }
