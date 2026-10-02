@@ -588,6 +588,10 @@ impl<S: Clone> Holds for Opening<'_, S> {
     fn hold(&self, key: String, handle: Held) {
         self.holdings.hold(key, handle)
     }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.holdings.held_or(key, make)
+    }
 }
 
 impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {

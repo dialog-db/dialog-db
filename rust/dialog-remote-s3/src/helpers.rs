@@ -92,7 +92,7 @@ where
             Some(credential) => request.attest(credential),
             None => S3Authorization::public(request),
         };
-        fork.attest(authorization).perform(&S3).await
+        fork.attest(authorization).perform(&S3::default()).await
     }
 }
 

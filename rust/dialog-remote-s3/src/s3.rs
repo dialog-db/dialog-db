@@ -20,15 +20,44 @@ pub use credential::S3Credential;
 pub use invocation::S3Invocation;
 pub use permit::Permit;
 
+use std::sync::Arc;
+
 use dialog_capability::Effect;
 use dialog_capability::Fork;
 use dialog_capability::Site;
 
+use crate::S3Error;
+use crate::flight::Flight;
+
+/// In-flight block GETs, joined by presigned URL.
+///
+/// A block is immutable content, so every caller holding the same
+/// presigned URL gets the same bytes: the one read that is always safe to
+/// share. The URL's signature binds it to the permit (and through it the
+/// operator) that redeemed it, so a request signed for someone else carries
+/// a different URL and never joins.
+///
+/// Mutable reads (memory cells) deliberately do not come through here.
+pub(crate) type BlockGets = Flight<String, Result<(u16, Arc<Vec<u8>>), S3Error>>;
+
 /// S3 direct-access site.
 ///
 /// Authorization is handled via SigV4 presigned URLs on the [`Address`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct S3;
+///
+/// The site owns its in-flight block GETs, so readers join one another's
+/// requests only through the same site (one `Network`, hence one
+/// environment), and nothing outlives it. Clones share them.
+#[derive(Debug, Clone, Default)]
+pub struct S3 {
+    gets: Arc<BlockGets>,
+}
+
+impl S3 {
+    /// The in-flight block GETs shared by clones of this site.
+    pub(crate) fn gets(&self) -> &BlockGets {
+        &self.gets
+    }
+}
 
 /// Site-owned fork wrapper for S3.
 ///

@@ -105,6 +105,10 @@ impl<S: Clone> Holds for MigrateEnv<S> {
     fn hold(&self, key: String, handle: Held) {
         self.holdings.hold(key, handle)
     }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.holdings.held_or(key, make)
+    }
 }
 
 macro_rules! migrate_storage {

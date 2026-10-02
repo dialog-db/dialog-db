@@ -573,6 +573,10 @@ impl<S: Clone, M: Mode> Holds for Peer<S, M> {
     fn hold(&self, key: String, handle: Held) {
         self.inner.holdings.hold(key, handle)
     }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.inner.holdings.held_or(key, make)
+    }
 }
 
 impl<S: Clone, M: Mode> Principal for Peer<S, M> {

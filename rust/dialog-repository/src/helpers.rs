@@ -244,6 +244,10 @@ impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {
     fn hold(&self, key: String, handle: dialog_common::Held) {
         self.inner.hold(key, handle)
     }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> dialog_common::Held) -> dialog_common::Held {
+        self.inner.held_or(key, make)
+    }
 }
 
 /// How many reads are open now, and the most that were ever open at once.
