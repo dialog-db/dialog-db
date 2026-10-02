@@ -100,7 +100,7 @@ mod tests {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use dialog_search_tree::{Cache, Manifest, MemoryBlocks, PersistentTree};
+    use dialog_search_tree::{Manifest, MemoryBlocks, NodeCache, PersistentTree};
     use futures_util::{TryStreamExt as _, stream};
 
     use super::rekey_tree;
@@ -147,7 +147,7 @@ mod tests {
         instructions: Vec<Instruction>,
     ) -> anyhow::Result<ArtifactTree> {
         let mut tree: ArtifactTree =
-            PersistentTree::empty_with_manifest(Manifest::default(), Cache::new());
+            PersistentTree::empty_with_manifest(Manifest::default(), NodeCache::new());
         let mut delta = ArchiveDelta::zero();
         tree.apply(store, &mut delta, stream::iter(instructions))
             .await?;
@@ -189,7 +189,7 @@ mod tests {
             ..tree.manifest(store).await?
         };
         let mut delta = ArchiveDelta::zero();
-        let rewritten = rekey_tree(tree, store, &mut delta, manifest, Cache::new()).await?;
+        let rewritten = rekey_tree(tree, store, &mut delta, manifest, NodeCache::new()).await?;
         delta.flush_into(store);
         Ok(rewritten)
     }
