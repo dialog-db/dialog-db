@@ -37,7 +37,7 @@ members = [
     "rust/dialog-remote-ucan-s3",
     "rust/dialog-remote-ucan",
     "rust/dialog-remote-fs",
-    "rust/dialog-iroh-remote",
+    "rust/dialog-peer-iroh",
     "rust/dialog-network",
     "rust/dialog-identity",
     "rust/dialog-peer",
@@ -280,8 +280,8 @@ version = "0.4.0-rc.3"
 path = "./rust/dialog-remote-ucan"
 version = "0.4.0-rc.3"
 
-[workspace.dependencies.dialog-iroh-remote]
-path = "./rust/dialog-iroh-remote"
+[workspace.dependencies.dialog-peer-iroh]
+path = "./rust/dialog-peer-iroh"
 
 [workspace.dependencies.dialog-remote-fs]
 path = "./rust/dialog-remote-fs"

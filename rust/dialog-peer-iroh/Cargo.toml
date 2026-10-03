@@ -1,6 +1,6 @@
 [package]
-name = "dialog-iroh-remote"
-description = "Peer-to-peer remote for dialog-db: effects over iroh QUIC streams."
+name = "dialog-peer-iroh"
+description = "Dialog peers reached over iroh: effects over QUIC streams."
 version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -70,7 +70,7 @@ wasm-bindgen-test = { workspace = true }
 async-trait = { workspace = true }
 dialog-credentials = { workspace = true }
 ed25519-dalek = { workspace = true }
-dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true }
 
 
