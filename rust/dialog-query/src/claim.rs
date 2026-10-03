@@ -62,6 +62,17 @@ impl Conclusion for Claim {
     }
 }
 
+impl From<Artifact> for Claim {
+    fn from(artifact: Artifact) -> Self {
+        Claim {
+            the: The::from(artifact.the),
+            of: artifact.of,
+            is: artifact.is,
+            cause: artifact.cause.unwrap_or(Cause([0; 32])),
+        }
+    }
+}
+
 impl From<&Artifact> for Claim {
     fn from(artifact: &Artifact) -> Self {
         Claim {

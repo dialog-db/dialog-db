@@ -34,27 +34,34 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
+use futures_util::future::{FutureExt as _, Shared};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
 
 use async_trait::async_trait;
-use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
+use dialog_artifacts::tree::{ArtifactNodeCache, selector_range};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{
-    Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Traversable as _,
+    Buffer, DialogSearchTreeError, LoadBlock, PersistentNode, Traversable as _,
 };
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 
 use crate::repository::source::Source;
-use crate::{
-    EMPTY_TREE_HASH, Hydrate, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-};
+use crate::{Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + 'a>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type FallbackFuture<'a> = Pin<Box<dyn Future<Output = RemoteFallback> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type FallbackFuture<'a> = Pin<Box<dyn Future<Output = RemoteFallback> + 'a>>;
+
+/// A source's remote fallback, loaded at most once per driver and
+/// shared by every job that warms the source.
+type SharedFallback<'a> = Shared<FallbackFuture<'a>>;
 
 /// A stream that also drives the env's [`PreloadQueue`]: polling it
 /// executes queued preload hints, borrowing `env` for exactly the
@@ -65,10 +72,16 @@ type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + 'a>>;
 /// through the networked index, the local archive — so the later demand
 /// read is local. Job errors surface as nothing (a preload that fails
 /// must stay invisible; the demand read owns the error).
+///
+/// A source's remote fallback (a memory read of the remote's
+/// configuration) is loaded at most once per driver, on first need, and
+/// shared by every job: the remote a branch tracks does not change while
+/// one evaluation runs, and loading it per job put a store read in front
+/// of every warm-up.
 pub(crate) struct Driven<'a, S, Env> {
     inner: S,
     queue: Arc<PreloadQueue>,
-    sources: Vec<Source>,
+    sources: Vec<(Source, SharedFallback<'a>)>,
     env: &'a Env,
     budget: FetchBudget,
     likely_inflight: usize,
@@ -96,6 +109,15 @@ where
         env: &'a Env,
         queue: Arc<PreloadQueue>,
     ) -> Self {
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let loading = source.clone();
+                let fallback: FallbackFuture<'a> =
+                    Box::pin(async move { loading.as_ref().fallback() });
+                (source, fallback.shared())
+            })
+            .collect();
         Self {
             inner: stream,
             budget: queue.budget(),
@@ -127,11 +149,11 @@ where
             let sources = self.sources.clone();
             let env = self.env;
             let future = async move {
-                for source in sources {
+                for (source, fallback) in sources {
                     // Warming is advisory: an error ends this source's
                     // walk silently, and the demand read that actually
                     // needs the data owns the failure.
-                    let _ = warm_source(source, env, &selector, likelihood).await;
+                    let _ = warm_source(source, fallback, env, &selector, likelihood).await;
                 }
                 likelihood
             };
@@ -202,6 +224,7 @@ where
 /// superset at the edges is harmless.
 async fn warm_source<Env>(
     source: Source,
+    fallback: SharedFallback<'_>,
     env: &Env,
     selector: &ArtifactSelector<Constrained>,
     likelihood: Likelihood,
@@ -215,18 +238,23 @@ where
         + ConditionalSync
         + 'static,
 {
-    let root = source.as_ref().root();
-    if root == EMPTY_TREE_HASH {
+    let Some(root) = source.as_ref().root() else {
+        return Ok(());
+    };
+    let remote = fallback.await;
+    // Warming exists to fetch ahead of demand. With nowhere to fetch
+    // from, every block is local already and a demand read finds it; a
+    // walk here would only re-read, and re-hash, what is already there.
+    if matches!(remote, crate::RemoteFallback::None) {
         return Ok(());
     }
-    let remote = source.as_ref().fallback(env).await;
-    let catalog = source.as_ref().subject().archive().index();
+    let catalog = ArchiveScope::new(source.as_ref().subject()).index();
     let store = NetworkedIndex::new(env, catalog, remote).with_priority(likelihood.into());
     let store = CacheThrough {
         cache: source.as_ref().node_cache(),
         store,
     };
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let storage = store;
     let tree = Index::from_hash(NodeHash::from(root));
 
     let manifest = tree.manifest(&storage).await?;
@@ -246,12 +274,13 @@ where
     Ok(())
 }
 
-/// The node cache in front of a hydrating store, as a raw block backend:
+/// The node cache in front of a hydrating store, as a [`LoadBlock`] provider:
 /// the traversal's reads hit the line's shared cache first (a job whose
-/// spine a peer already warmed re-reads nothing), and every miss lands
-/// in it, so the demand read that follows a warm is served from memory.
+/// spine a peer already warmed re-reads nothing), and every miss that
+/// checks as a node lands in it, so the demand read that follows a warm is
+/// served from memory without checking the node again.
 struct CacheThrough<'a, Env> {
-    cache: Cache<NodeHash, Buffer>,
+    cache: ArtifactNodeCache,
     store: NetworkedIndex<'a, Env>,
 }
 
@@ -266,46 +295,137 @@ impl<Env> Clone for CacheThrough<'_, Env> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> StorageBackend for CacheThrough<'_, Env>
+impl<Env> Provider<LoadBlock> for CacheThrough<'_, Env>
 where
-    Env: Provider<Get> + Provider<Put> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        StorageBackend::set(&mut self.store, key, value).await
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let buffer = self
-            .cache
-            .get_or_fetch(&NodeHash::from(*key), async |hash| {
-                self.store
-                    .get(hash.as_bytes())
-                    .await
-                    .map(|bytes| bytes.map(Buffer::from))
-            })
-            .await?;
-        Ok(buffer.map(|buffer| buffer.as_ref().to_vec()))
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        if let Some(node) = self.cache.get_cached(&hash) {
+            return Ok(Some(node.buffer().clone()));
+        }
+        let block = LoadBlock::new(hash.clone()).perform(&self.store).await?;
+        // Bytes that do not check as a node stay out of the cache; the
+        // traversal reading them reports the failure.
+        if let Some(node) = block
+            .as_ref()
+            .and_then(|block| PersistentNode::try_from(block.clone()).ok())
+        {
+            self.cache.insert(hash, node);
+        }
+        Ok(block)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+    use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_query::{AttributeQuery, Term, the};
 
     use super::*;
     use crate::RepositoryExt as _;
-    use crate::helpers::Counting;
-    use dialog_artifacts::{Preload, PreloadRequest, Speculation};
+    use crate::helpers::{Counting, connect};
+    use crate::repository::source::SourceRef;
+    use dialog_artifacts::tree::ArtifactTreeExt as _;
+    use dialog_artifacts::{
+        ArchiveDelta, Artifact, Entity, Instruction, Preload, PreloadRequest, Speculation, Value,
+    };
+    use dialog_capability::{Capability, Command, Subject};
+    use dialog_effects::archive::ArchiveError;
+    use dialog_search_tree::MemoryBlocks;
+    use dialog_storage::DialogStorageError;
+    use dialog_varsig::did;
+    use futures_util::stream;
+
+    use crate::HydrationRequest;
     use dialog_query::query::Output as _;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// An archive that answers every read with the same block, whatever
+    /// was asked for, and holds nothing to hydrate.
+    struct Impostor(Vec<u8>);
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl Provider<Get> for Impostor {
+        async fn execute(&self, _: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl Provider<Hydrate> for Impostor {
+        async fn execute(&self, _: HydrationRequest) -> <Hydrate as Command>::Output {
+            Ok(None)
+        }
+    }
+
+    /// Persists a one-fact tree into `blocks` and returns its root.
+    async fn persist(blocks: &MemoryBlocks, name: &str) -> Result<NodeHash> {
+        let mut tree = Index::empty();
+        let mut delta = ArchiveDelta::zero();
+        tree.apply(
+            blocks,
+            &mut delta,
+            stream::iter(vec![Instruction::Assert(Artifact {
+                the: "profile/name".parse()?,
+                of: Entity::new()?,
+                is: Value::String(name.into()),
+                cause: None,
+            })]),
+        )
+        .await?;
+        delta.flush_into(blocks);
+        Ok(tree.root().clone())
+    }
+
+    /// A well-formed node the archive returns for some other hash is
+    /// refused and never enters the line's node cache, so a later read of
+    /// that hash cannot be served the wrong node from memory.
+    #[dialog_common::test]
+    async fn it_keeps_a_node_that_is_not_the_one_asked_for_out_of_the_cache() -> Result<()> {
+        let blocks = MemoryBlocks::new();
+        let asked = persist(&blocks, "Alice").await?;
+        let other = persist(&blocks, "Bob").await?;
+        let archive = Impostor(
+            blocks
+                .get(&other)
+                .expect("the other tree's root is stored")
+                .into_vec(),
+        );
+        let cache = ArtifactNodeCache::new();
+        let through = CacheThrough {
+            cache: cache.clone(),
+            store: NetworkedIndex::new(
+                &archive,
+                ArchiveScope::new(Subject::from(did!("key:zCacheThroughTest"))).catalog("index"),
+                None,
+            ),
+        };
+
+        let loaded = LoadBlock::new(asked.clone()).perform(&through).await;
+
+        assert!(
+            matches!(
+                loaded,
+                Err(DialogSearchTreeError::Storage(
+                    DialogStorageError::Verification(_)
+                ))
+            ),
+            "a node that does not hash to the one asked for must be refused, got {loaded:?}"
+        );
+        assert!(
+            cache.get_cached(&asked).is_none(),
+            "the impostor must not be cached under the hash asked for"
+        );
+        Ok(())
+    }
 
     fn selector(attribute: &str) -> ArtifactSelector<Constrained> {
         ArtifactSelector::new().the(attribute.parse().expect("a valid attribute"))
@@ -317,10 +437,10 @@ mod tests {
     /// query's rows flow as if the machinery did not exist.
     #[dialog_common::test]
     async fn it_refuses_hints_and_flows_demand_with_a_zero_budget() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("preload-off"))
+            .space(unique_name("preload-off"))
             .create()
             .perform(&env)
             .await?;
@@ -375,10 +495,10 @@ mod tests {
     /// cross-evaluation sharing the ambient design exists for.
     #[dialog_common::test]
     async fn it_replicates_hinted_ranges_while_any_query_runs() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("preload"))
+            .space(unique_name("preload"))
             .create()
             .perform(&env)
             .await?;
@@ -438,6 +558,100 @@ mod tests {
             env.count("archive::Get") - before,
             0,
             "a hinted range reads nothing from the backend"
+        );
+        Ok(())
+    }
+
+    /// Every warm-up job needs the source's remote fallback. It is read
+    /// from the routes the branch holds, with no store read, and a driver
+    /// shares it with every job: four hints in flight add no memory reads
+    /// to the query.
+    #[dialog_common::test]
+    async fn it_loads_a_sources_remote_fallback_once_per_driver() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .space(unique_name("fallback-once"))
+            .create()
+            .perform(&env)
+            .await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        let mut transaction = branch.transaction();
+        for index in 0..10 {
+            let entity: dialog_artifacts::Entity = format!("id:{index}").parse()?;
+            transaction = transaction
+                .assert(the!("a/name").of(entity.clone()).is(format!("a {index}")))
+                .assert(the!("b/name").of(entity.clone()).is(format!("b {index}")))
+                .assert(the!("c/name").of(entity.clone()).is(format!("c {index}")))
+                .assert(the!("d/name").of(entity.clone()).is(format!("d {index}")))
+                .assert(the!("e/name").of(entity).is(format!("e {index}")));
+        }
+        transaction.commit().publish().perform(&env).await?;
+
+        // Track a remote, so a warm-up has a fallback to load. Nothing
+        // here reaches the network: every block the query and the
+        // warm-ups read is local.
+        let site = dialog_remote_s3::Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()?;
+        let origin = connect("origin", site, repo.did(), &env).await?;
+        let remote_branch = origin.branch("main").open().perform(&env).await?;
+        branch.set_upstream(remote_branch).perform(&env).await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        let query = || {
+            AttributeQuery::new(
+                Term::from(the!("a/name")),
+                Term::blank(),
+                Term::blank(),
+                Term::blank(),
+                None,
+            )
+        };
+
+        // The fallback is the branch's own routes: reading it reads no
+        // memory. What the query costs with nothing to warm:
+        let before = env.count("memory::Resolve");
+        let _ = SourceRef::Branch(&branch).fallback();
+        assert_eq!(env.count("memory::Resolve"), before);
+        let before = env.count("memory::Resolve");
+        branch
+            .query()
+            .select(query())
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let bare = env.count("memory::Resolve") - before;
+
+        for attribute in ["b/name", "c/name", "d/name", "e/name"] {
+            let listening = Provider::<Preload>::execute(
+                &env,
+                PreloadRequest {
+                    selector: selector(attribute),
+                    likelihood: Likelihood::Likely,
+                },
+            )
+            .await;
+            assert!(listening, "the default budget accepts hints");
+        }
+        let before = env.count("memory::Resolve");
+        branch
+            .query()
+            .select(query())
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let warmed = env.count("memory::Resolve") - before;
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the driven query executed every hint");
+
+        assert_eq!(
+            warmed,
+            bare,
+            "four warm-ups add no fallback loads: {:?}",
+            env.snapshot()
         );
         Ok(())
     }

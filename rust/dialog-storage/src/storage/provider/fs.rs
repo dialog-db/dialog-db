@@ -178,6 +178,48 @@ use web as backend;
 
 pub(crate) use backend::{LockGuard, lock};
 
+/// The bytes of a path segment that URL resolution would otherwise read:
+/// `?` begins a query and `#` a fragment (both cut the path short), `\`
+/// is a separator in a `file:` URL, `%` begins an escape (`%2F` reaches
+/// the OS as `/` once `Url::to_file_path` decodes it), and a leading or
+/// trailing space or control is stripped from the input before parsing
+/// (`meta ` would be `meta`). Everything else, `:` and non-ASCII
+/// included, is left to the URL layer, which round-trips it; encoding
+/// only these keeps a plain name's layout exactly where it was.
+const SEGMENT_RESERVED: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'%')
+    .add(b'?')
+    .add(b'#')
+    .add(b'\\');
+
+/// Percent-encode one path segment so URL resolution treats it as a
+/// name. A leading `.` is encoded too, so no segment can begin to look
+/// like a dot segment to anything downstream.
+fn encode_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    let rest = match segment.strip_prefix('.') {
+        Some(rest) => {
+            encoded.push_str("%2E");
+            rest
+        }
+        None => segment,
+    };
+    encoded.extend(percent_encoding::utf8_percent_encode(
+        rest,
+        SEGMENT_RESERVED,
+    ));
+    encoded
+}
+
+/// Whether `segment` names the current or the parent location rather
+/// than a child: empty, `.` or `..`, or a percent-encoding of one, which
+/// URL resolution treats the same way.
+fn is_dot_segment(segment: &str) -> bool {
+    let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+    matches!(decoded.as_ref(), "" | "." | "..")
+}
+
 impl FileSystemHandle {
     /// Returns the underlying URL.
     pub fn url(&self) -> &Url {
@@ -199,11 +241,21 @@ impl FileSystemHandle {
         }
     }
 
-    /// Resolves a path segment relative to this location, validating containment.
+    /// Resolves a relative path (one or more `/`-separated segments)
+    /// under this location, validating containment.
     ///
-    /// Returns an error if the resulting path escapes this location (e.g., via `..`).
-    /// The segment is prefixed with `./` to ensure it's interpreted as a relative
-    /// path, preventing segments containing `:` from being parsed as URL schemes.
+    /// Each segment is a name, never an instruction to the resolver:
+    /// `?`, `#`, `%`, `\` and control characters are percent-encoded
+    /// before the join so URL resolution cannot read them (`meta?x` is
+    /// the name `meta?x`, not `meta` with a query), and a segment that is
+    /// empty, `.` or `..` (or percent-encodes to one) is refused, since
+    /// it names this location or its parent rather than a child.
+    /// Segments of plain bytes are left as they are, so the layout of
+    /// existing data does not move.
+    ///
+    /// The path is prefixed with `./` to ensure it's interpreted as
+    /// relative, preventing segments containing `:` from being parsed as
+    /// URL schemes.
     pub fn resolve(&self, segment: &str) -> Result<Self, FileSystemError> {
         // Normalize base to ensure it ends with '/' for correct directory semantics.
         // Without trailing slash, joining "baz" to "file:///foo/bar" gives "file:///foo/baz"
@@ -216,9 +268,17 @@ impl FileSystemHandle {
             url
         };
 
-        // Prefix with "./" to ensure the segment is treated as a relative path.
-        // Without this, "did:key:z6Mk" would be interpreted as a URL with scheme "did".
-        let relative_segment = format!("./{}", segment);
+        let mut relative_segment = String::from(".");
+        for piece in segment.split('/') {
+            if is_dot_segment(piece) {
+                return Err(FileSystemError::Containment(format!(
+                    "Path '{}' has a segment that is empty, '.' or '..'",
+                    segment
+                )));
+            }
+            relative_segment.push('/');
+            relative_segment.push_str(&encode_segment(piece));
+        }
 
         let joined = normalized_base
             .join(&relative_segment)
@@ -253,6 +313,13 @@ impl FileSystemHandle {
     /// the file does not exist.
     pub async fn read_optional(&self) -> Result<Option<Vec<u8>>, FileSystemError> {
         backend::read_optional(self).await
+    }
+
+    /// Every file under the directory at this location, by path relative
+    /// to it, including files in nested directories. Empty when the
+    /// directory does not exist.
+    pub async fn files(&self) -> Result<Vec<String>, FileSystemError> {
+        backend::files(self).await
     }
 
     /// Write contents to the file at this location, creating parent dirs.
@@ -313,6 +380,12 @@ impl FileSystemHandle {
     /// Check if this location exists.
     pub async fn exists(&self) -> bool {
         backend::exists(self).await
+    }
+
+    /// The length in bytes of the file at this location, without reading
+    /// it, or `None` when there is no file here.
+    pub async fn size(&self) -> Result<Option<u64>, FileSystemError> {
+        backend::size(self).await
     }
 }
 
@@ -582,7 +655,8 @@ mod tests {
         let content = b"hello archive layout".to_vec();
         let digest = Blake3Hash::hash(&content);
 
-        did.archive()
+        did.writer()
+            .archive()
             .catalog("index")
             .put(Buffer::from(content))
             .perform(&provider)
@@ -612,7 +686,8 @@ mod tests {
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = Principal::did(&signer);
 
-        did.memory()
+        did.writer()
+            .memory()
             .space("local")
             .cell("head")
             .publish(b"cell content", None)
@@ -711,6 +786,7 @@ mod tests {
 
         // Provider should find it
         let loaded = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -744,6 +820,7 @@ mod tests {
 
         // Provider should resolve it with correct edition
         let resolved = did
+            .reader()
             .memory()
             .space("local")
             .cell("head")
@@ -757,5 +834,176 @@ mod tests {
 
         let expected_version = dialog_effects::memory::Version::from(Blake3Hash::hash(&content));
         assert_eq!(publication.version, expected_version);
+    }
+
+    /// The segments a caller could hand a store to reach another name's
+    /// cells. Each one is either refused, or lands under the base at a
+    /// path of its own: never on `meta`, `main` or the base itself, in
+    /// the URL, on disk, or one cell deeper, where a branch's `revision`
+    /// cell is. Before this was pinned, `meta?x` was `meta` (the `?`
+    /// began a query), `x%2F..%2Fmeta` was `meta` on disk (`to_file_path`
+    /// decodes `%2F`), and `.` was the base.
+    #[dialog_common::test]
+    async fn it_keeps_an_adversarial_segment_under_its_own_name() {
+        let space = test_space(&unique_name("segment-aliasing")).await;
+        let base = space.memory().unwrap();
+        let base_path: PathBuf = (&base).try_into().unwrap();
+        let mut taken: Vec<PathBuf> = vec![base_path.clone()];
+        for name in ["meta", "main"] {
+            let handle = base.resolve(name).unwrap();
+            taken.push((&handle).try_into().unwrap());
+            taken.push((&handle.resolve("revision").unwrap()).try_into().unwrap());
+        }
+        let meta_revision = base_path.join("meta").join("revision");
+        std::fs::create_dir_all(meta_revision.parent().unwrap()).unwrap();
+        std::fs::write(&meta_revision, b"the registry's head").unwrap();
+
+        for segment in [
+            "meta?x",
+            "meta#x",
+            "x%2F..%2Fmeta",
+            "%2e%2e",
+            "..",
+            ".",
+            "",
+            "meta.",
+            "meta ",
+            "mét@",
+            "a/b",
+            "meta\\..\\main",
+            "meta\0",
+            "meta\n",
+        ] {
+            let Ok(handle) = base.resolve(segment) else {
+                continue;
+            };
+            assert!(
+                handle.path().starts_with(base.path()),
+                "{segment:?} escapes the base in the URL: {}",
+                handle.path()
+            );
+            let Ok(path) = PathBuf::try_from(&handle) else {
+                continue;
+            };
+            let cell = handle.resolve("revision").unwrap();
+            let cell_path = PathBuf::try_from(&cell).unwrap();
+            for candidate in [&path, &cell_path] {
+                assert!(
+                    candidate.starts_with(&base_path),
+                    "{segment:?} escapes the base on disk: {candidate:?}"
+                );
+                assert!(
+                    !taken.contains(candidate),
+                    "{segment:?} aliases another name: {candidate:?}"
+                );
+            }
+            if cell.write(b"clobbered").await.is_ok() {
+                assert_eq!(
+                    std::fs::read(&meta_revision).unwrap(),
+                    b"the registry's head",
+                    "writing {segment:?}'s revision cell reached meta's"
+                );
+            }
+        }
+    }
+
+    /// Distinct plain names never share a path.
+    #[dialog_common::test]
+    async fn it_gives_distinct_plain_names_distinct_paths() {
+        let space = test_space(&unique_name("segment-distinct")).await;
+        let base = space.memory().unwrap();
+        let names = [
+            "main",
+            "meta",
+            "Main",
+            "main.",
+            "main_",
+            "main-",
+            "m.e.t.a",
+            ".main",
+            "main..",
+            "did:key:z6Mk",
+        ];
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for name in names {
+            let path: PathBuf = (&base.resolve(name).unwrap()).try_into().unwrap();
+            assert!(!paths.contains(&path), "{name:?} shares a path: {path:?}");
+            paths.push(path);
+        }
+    }
+
+    /// A plain name lays out exactly where it always has, both in the
+    /// URL and on disk: the encoding that keeps adversarial segments
+    /// apart must not move existing data. Pins the strings.
+    #[dialog_common::test]
+    async fn it_keeps_the_layout_of_plain_names() {
+        let space = test_space(&unique_name("segment-layout")).await;
+        let root = space.handle().path().to_string();
+        let root_path: PathBuf = space.handle().clone().try_into().unwrap();
+        let relative = |handle: &FileSystemHandle| {
+            handle
+                .path()
+                .strip_prefix(root.as_str())
+                .map(str::to_string)
+        };
+
+        let main = space.memory().unwrap().resolve("main").unwrap();
+        assert_eq!(relative(&main).as_deref(), Some("memory/main"));
+        assert_eq!(
+            PathBuf::try_from(&main).unwrap(),
+            root_path.join("memory").join("main")
+        );
+
+        let meta = space.memory().unwrap().resolve("meta").unwrap();
+        assert_eq!(relative(&meta).as_deref(), Some("memory/meta"));
+        assert_eq!(
+            PathBuf::try_from(&meta).unwrap(),
+            root_path.join("memory").join("meta")
+        );
+
+        let revision = space
+            .memory()
+            .unwrap()
+            .resolve("branch/meta")
+            .unwrap()
+            .resolve("revision")
+            .unwrap();
+        assert_eq!(
+            relative(&revision).as_deref(),
+            Some("memory/branch/meta/revision")
+        );
+        assert_eq!(
+            PathBuf::try_from(&revision).unwrap(),
+            root_path
+                .join("memory")
+                .join("branch")
+                .join("meta")
+                .join("revision")
+        );
+
+        let credential = space.credential_key("self").unwrap();
+        assert_eq!(
+            relative(&credential).as_deref(),
+            Some("credential/key/self")
+        );
+
+        let certificate = space
+            .certificate()
+            .unwrap()
+            .resolve("did:key:z6MkExample")
+            .unwrap()
+            .resolve("_")
+            .unwrap();
+        assert_eq!(
+            relative(&certificate).as_deref(),
+            Some("certificate/did:key:z6MkExample/_")
+        );
+        assert_eq!(
+            PathBuf::try_from(&certificate).unwrap(),
+            root_path
+                .join("certificate")
+                .join("did:key:z6MkExample")
+                .join("_")
+        );
     }
 }

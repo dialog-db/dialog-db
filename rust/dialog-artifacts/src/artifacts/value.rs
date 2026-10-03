@@ -825,10 +825,6 @@ impl From<Value> for ValueDataType {
 
 /// [`ValueDataType`] embodies all types that are able to be represented
 /// as a [`Value`].
-#[cfg_attr(
-    all(target_arch = "wasm32", target_os = "unknown"),
-    wasm_bindgen::prelude::wasm_bindgen
-)]
 #[repr(u8)]
 #[derive(
     Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash,

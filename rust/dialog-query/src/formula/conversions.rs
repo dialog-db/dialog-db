@@ -117,12 +117,12 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::{Entity, Query, Term};
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
     async fn it_converts_number_to_string() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -140,7 +140,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_boolean_to_string() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -158,7 +158,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_passes_string_through() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -176,7 +176,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_entity_to_string() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -195,7 +195,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_float_to_string() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -213,7 +213,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_variable_input_to_string() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -238,7 +238,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_unsigned_integer() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -256,7 +256,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_unsigned_integer_with_whitespace() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -274,7 +274,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_rejects_negative_as_unsigned() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -291,7 +291,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_signed_integer() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -309,7 +309,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_positive_as_signed() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -327,7 +327,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_float() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -345,7 +345,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_negative_float() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -363,7 +363,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_integer_as_float() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -381,7 +381,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_rejects_invalid_text() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());

@@ -5,8 +5,9 @@
 //! are limited to 64 bytes in length.
 
 use std::{
-    fmt::{Display, Formatter, Result as FmtResult},
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
     str::FromStr,
+    sync::Arc,
 };
 
 use ::serde::{Deserialize, Serialize};
@@ -16,9 +17,31 @@ use crate::{ATTRIBUTE_LENGTH, DialogArtifactsError, Name, Symbol};
 /// An [`Attribute`] is the predicate part of a semantic triple. [`Attribute`]s
 /// in this crate may be a maximum of 64 bytes, and must be formated as
 /// "namespace/predicate". The namespace part of an attribute is required.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
+///
+/// An attribute is immutable, and is cloned into every claim, key and
+/// row that names it, so its name and key bytes are shared rather than
+/// copied by each clone.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 #[serde(into = "String", try_from = "String")]
-pub struct Attribute(String, [u8; ATTRIBUTE_LENGTH]);
+pub struct Attribute(Arc<AttributeParts>);
+
+/// What an [`Attribute`] shares between its clones: its name and the
+/// bytes it takes in an index key. Ordered and hashed name first, then
+/// key bytes.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct AttributeParts {
+    name: String,
+    key: [u8; ATTRIBUTE_LENGTH],
+}
+
+impl Debug for Attribute {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_tuple("Attribute")
+            .field(&self.0.name)
+            .field(&self.0.key)
+            .finish()
+    }
+}
 
 impl Attribute {
     /// Returns a byte representation of this attribute suitable for use within a key.
@@ -26,27 +49,32 @@ impl Attribute {
     /// The returned byte array is used for indexing and comparison operations
     /// within the prolly tree structure.
     pub fn key_bytes(&self) -> &[u8; ATTRIBUTE_LENGTH] {
-        &self.1
+        &self.0.key
     }
 
     /// The attribute's raw `namespace/predicate` string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.0.name
     }
 
     /// The domain half of this attribute: everything before the first
     /// `/`. Always present — construction requires the delimiter.
     pub fn domain(&self) -> &str {
         self.0
+            .name
             .split_once('/')
             .map(|(domain, _)| domain)
-            .unwrap_or(&self.0)
+            .unwrap_or(&self.0.name)
     }
 
     /// The name half of this attribute: everything after the first
     /// `/`. Always present — construction requires the delimiter.
     pub fn name(&self) -> &str {
-        self.0.split_once('/').map(|(_, name)| name).unwrap_or("")
+        self.0
+            .name
+            .split_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or("")
     }
 
     /// Split this attribute into its typed halves: the domain as a
@@ -105,7 +133,10 @@ impl TryFrom<String> for Attribute {
         let mut bytes = [0; ATTRIBUTE_LENGTH];
         bytes[0..value.len()].copy_from_slice(value.as_bytes());
 
-        Ok(Self(value, bytes))
+        Ok(Self(Arc::new(AttributeParts {
+            name: value,
+            key: bytes,
+        })))
     }
 }
 
@@ -120,19 +151,22 @@ impl FromStr for Attribute {
 
 impl From<Attribute> for String {
     fn from(value: Attribute) -> Self {
-        value.0
+        match Arc::try_unwrap(value.0) {
+            Ok(parts) => parts.name,
+            Err(shared) => shared.name.clone(),
+        }
     }
 }
 
 impl From<&Attribute> for String {
     fn from(value: &Attribute) -> Self {
-        value.0.clone()
+        value.0.name.clone()
     }
 }
 
 impl Display for Attribute {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", String::from(self))
+        f.write_str(self.as_str())
     }
 }
 

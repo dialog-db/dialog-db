@@ -11,9 +11,10 @@
 
 use std::sync::Arc;
 
-use dialog_capability::{Capability, Command, Did};
+use dialog_capability::{Command, Did};
 use dialog_common::{Blake3Hash, Priority, Scheduler};
-use dialog_effects::archive::{ArchiveError, Catalog};
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::archive::prelude::CatalogScope;
 
 use crate::NetworkAddress;
 
@@ -58,12 +59,27 @@ pub struct HydrationRequest {
     /// The subject (repository DID) at that site.
     pub subject: Did,
     /// The local catalog the fetched block writes back into.
-    pub catalog: Capability<Catalog>,
+    pub catalog: CatalogScope,
     /// The block to hydrate.
     pub digest: Blake3Hash,
+    /// Which store the bytes belong in: a tree node's block store, or the
+    /// blob store spilled values live in.
+    pub lane: HydrationLane,
     /// How the read ranks against the site's other reads: a demand read
     /// goes before speculative warming.
     pub priority: Priority,
+}
+
+/// Where hydrated bytes belong, locally and at the remote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HydrationLane {
+    /// A tree node: read from the remote's block catalog and written back
+    /// into the local one.
+    Block,
+    /// A spilled value: read from the remote's blob store, falling back to
+    /// its block catalog for values spilled before they moved to blobs,
+    /// and written back into the local blob store.
+    Blob,
 }
 
 /// The per-site priority window and digest-keyed single-flight a

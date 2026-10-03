@@ -71,6 +71,7 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::the;
 use futures_util::{StreamExt as _, TryStreamExt as _};
@@ -120,7 +121,8 @@ fn entity_attribute(entity: &Entity) -> Option<Attribute> {
 /// attribute to the layer's default scope.
 ///
 /// ```no_run
-/// # use dialog_repository::{Branch, Placement, Target};
+/// # use dialog_repository::{Branch, Placement};
+/// # use dialog_repository::placement::Target;
 /// # async fn example(branch: &Branch) -> anyhow::Result<()> {
 /// let session: dialog_artifacts::Entity = "memory:session".parse()?;
 /// branch.bind(session.clone(), Target::Session);
@@ -338,10 +340,10 @@ impl Placements {
         env: &Env,
     ) -> Result<Self, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<crate::Hydrate>
             + ConditionalSync
@@ -496,10 +498,10 @@ async fn committed_placements<Env>(
     env: &Env,
 ) -> Result<CommittedPlacements, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Resolve>>
         + Provider<crate::Hydrate>
         + ConditionalSync
@@ -549,10 +551,10 @@ async fn committed<Env>(
     env: &Env,
 ) -> Result<Vec<dialog_artifacts::Artifact>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Resolve>>
         + Provider<crate::Hydrate>
         + ConditionalSync
@@ -583,8 +585,9 @@ mod tests {
     use dialog_common::ConditionalSync;
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::Identify;
+    use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::The;
     use dialog_query::query::Output as _;
     use dialog_query::types::Scalar;
@@ -605,11 +608,11 @@ mod tests {
     ) -> Result<Vec<Value>>
     where
         V: Scalar,
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<dialog_artifacts::Speculation>
             + Provider<dialog_artifacts::Preload>
@@ -634,10 +637,10 @@ mod tests {
         of: &Entity,
     ) -> Result<Vec<Value>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<crate::Hydrate>
             + ConditionalSync
@@ -668,8 +671,8 @@ mod tests {
     /// drops exactly them.
     #[dialog_common::test]
     async fn it_routes_a_placed_attribute_to_its_bound_store() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         branch.bind(session(), Target::Session);
 
@@ -730,8 +733,8 @@ mod tests {
     /// A placement takes effect in the commit that declares it.
     #[dialog_common::test]
     async fn it_routes_in_the_declaring_commit() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         branch.bind(session(), Target::Session);
 
@@ -762,8 +765,8 @@ mod tests {
     /// head: the store changes, the tree does not.
     #[dialog_common::test]
     async fn it_keeps_a_session_only_transaction_off_the_tree() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         branch.bind(session(), Target::Session);
 
@@ -823,8 +826,8 @@ mod tests {
     /// transaction writes it, and its tree head lands in the tree.
     #[dialog_common::test]
     async fn it_induces_over_a_session_write() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         branch.bind(session(), Target::Session);
 
@@ -887,8 +890,8 @@ mod tests {
     /// subscription sees it and the tree never does.
     #[dialog_common::test]
     async fn it_concludes_into_the_session_store_observably() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         branch.bind(session(), Target::Session);
 
@@ -961,8 +964,8 @@ mod tests {
     /// binding it afterwards makes the same write succeed.
     #[dialog_common::test]
     async fn it_refuses_an_unbound_layer() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let doc: Entity = "doc:1".parse()?;
@@ -1004,8 +1007,8 @@ mod tests {
     /// attribute to the default.
     #[dialog_common::test]
     async fn it_routes_the_default_and_tree_bound_names_to_the_tree() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let shared: Entity = "memory:shared".parse()?;
         let durable: Entity = "memory:durable".parse()?;
@@ -1074,8 +1077,8 @@ mod tests {
     /// malformed declaration cannot silently route to the tree.
     #[dialog_common::test]
     async fn it_refuses_a_malformed_placement() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let result = branch

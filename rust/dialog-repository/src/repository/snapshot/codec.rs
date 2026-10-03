@@ -69,7 +69,14 @@ const CODEC_BLOB: u64 = 0x55;
 const CODEC_NODE: u64 = 0x54;
 
 /// A [`BlobSource`] over bytes already in memory.
-struct BytesBlob(Option<Vec<u8>>);
+pub(super) struct BytesBlob(Option<Vec<u8>>);
+
+impl BytesBlob {
+    /// A source that yields `bytes` as its one chunk.
+    pub(super) fn new(bytes: Vec<u8>) -> Self {
+        Self(Some(bytes))
+    }
+}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -291,7 +298,7 @@ pub fn decode_with_roots(bytes: &[u8]) -> Result<(Vec<Decoded>, Vec<Blake3Hash>)
             Item::Blob {
                 digest,
                 size: body.len() as u64,
-                chunks: Box::new(BytesBlob(Some(body))),
+                chunks: Box::new(BytesBlob::new(body)),
             }
         } else {
             Item::Block(Block { digest, content })

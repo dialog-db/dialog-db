@@ -4,8 +4,8 @@
 //! the planner's true objective (minimize round-trips) and is
 //! deterministic and machine-independent. We seed a volatile environment,
 //! run a select-by-attribute query through the real branch-select path
-//! wrapped in a `JournaledStorage`, print the recorded read counts once
-//! per fact-base size, and also let criterion time the journaled query.
+//! over a read-journaling store, print the recorded read counts once per
+//! fact-base size, and also let criterion time the journaled query.
 //!
 //! Run with:
 //!

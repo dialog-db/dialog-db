@@ -2,10 +2,12 @@
 
 #![cfg(feature = "s3-integration-tests")]
 
+use dialog_effects::memory::prelude::CellScope;
 use dialog_effects::memory::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::environment::Environment;
+use dialog_effects::MethodExt as _;
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -31,6 +33,7 @@ async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
 
     let result = env
         .subject()
+        .reader()
         .memory()
         .space(space)
         .cell("test-key")
@@ -48,7 +51,7 @@ async fn it_publishes_and_resolves_value() -> anyhow::Result<()> {
     let env = Environment::open();
     let space = &Environment::unique("publish-resolve");
     let cell_name = &Environment::unique("test-key-rw");
-    let cell = env.subject().memory().space(space).cell(cell_name);
+    let cell = CellScope::new(env.subject(), space, cell_name);
 
     let data = TestData {
         name: "test".to_string(),
@@ -81,7 +84,7 @@ async fn it_updates_existing_value() -> anyhow::Result<()> {
     let env = Environment::open();
     let space = &Environment::unique("update");
     let cell_name = &Environment::unique("test-update-key");
-    let cell = env.subject().memory().space(space).cell(cell_name);
+    let cell = CellScope::new(env.subject(), space, cell_name);
 
     let initial = TestData {
         name: "initial".to_string(),
@@ -126,7 +129,7 @@ async fn it_detects_cas_conflict() -> anyhow::Result<()> {
     let env = Environment::open();
     let space = &Environment::unique("cas-conflict");
     let cell_name = &Environment::unique("test-cas-key");
-    let cell = env.subject().memory().space(space).cell(cell_name);
+    let cell = CellScope::new(env.subject(), space, cell_name);
 
     let initial = TestData {
         name: "initial".to_string(),
@@ -184,7 +187,7 @@ async fn it_rejects_publish_with_wrong_initial_edition() -> anyhow::Result<()> {
     let env = Environment::open();
     let space = &Environment::unique("wrong-initial");
     let cell_name = &Environment::unique("test-wrong-init");
-    let cell = env.subject().memory().space(space).cell(cell_name);
+    let cell = CellScope::new(env.subject(), space, cell_name);
 
     // Try to publish with an edition when cell doesn't exist
     let result = cell
@@ -206,7 +209,7 @@ async fn it_retracts_a_published_value() -> anyhow::Result<()> {
     let env = Environment::open();
     let space = &Environment::unique("retract");
     let cell_name = &Environment::unique("test-retract");
-    let cell = env.subject().memory().space(space).cell(cell_name);
+    let cell = CellScope::new(env.subject(), space, cell_name);
 
     let edition = cell
         .clone()
@@ -239,7 +242,7 @@ async fn it_rejects_retract_with_wrong_edition() -> anyhow::Result<()> {
     let env = Environment::open();
     let space = &Environment::unique("retract-wrong");
     let cell_name = &Environment::unique("test-retract-wrong");
-    let cell = env.subject().memory().space(space).cell(cell_name);
+    let cell = CellScope::new(env.subject(), space, cell_name);
 
     cell.clone()
         .publish(b"data".to_vec(), None)

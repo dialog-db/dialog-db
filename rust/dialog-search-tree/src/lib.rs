@@ -30,24 +30,24 @@
 //!    avoid redundant storage operations. The cache is shared across tree
 //!    versions.
 //!
-//! 3. **Content-Addressed Storage**: Persistent storage where nodes are keyed
-//!    by their [`Blake3Hash`]. Storage is only accessed when a node is not
-//!    found in the delta or cache.
+//! 3. **Environment**: nodes the cache does not hold are loaded by their
+//!    [`Blake3Hash`](dialog_common::Blake3Hash) through the [`LoadBlock`] command the caller's environment
+//!    provides. Where the bytes come from is the environment's concern; the
+//!    tree checks each loaded block against the hash it asked for.
 //!
 //! Tree modifications (insert, delete) accumulate in a caller-owned [`Delta`].
 //! Each [`persist`](TransientTree::persist) writes new nodes into that delta,
 //! and you call [`Delta::flush`] and store the returned buffers to persist
 //! changes. Unflushed changes remain queryable but are lost when the delta is
-//! dropped.
+//! dropped. [`MemoryBlocks`] provides [`LoadBlock`] over blocks held in memory.
 //!
 //! Basic usage:
 //!
 //! ```
 //! # tokio_test::block_on(async {
-//! use dialog_search_tree::{PersistentTree, ContentAddressedStorage, Delta};
-//! use dialog_storage::MemoryStorageBackend;
+//! use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
 //!
-//! let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+//! let storage = MemoryBlocks::new();
 //! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 //! let mut delta = Delta::zero();
 //!
@@ -55,9 +55,7 @@
 //! tree = tree.edit().insert([0, 0, 0, 1], vec![1, 2, 3], &storage).await.unwrap().persist(&mut delta).unwrap();
 //!
 //! // Flush the persisted nodes into storage so reads can resolve them
-//! for (_, buffer) in delta.flush() {
-//!     storage.store(buffer.as_ref().to_vec(), buffer.blake3_hash()).await.unwrap();
-//! }
+//! storage.flush(&mut delta);
 //!
 //! // Retrieve entries
 //! let value = tree.get(&[0, 0, 0, 1], &storage).await.unwrap();
@@ -69,10 +67,9 @@
 //!
 //! ```
 //! # tokio_test::block_on(async {
-//! use dialog_search_tree::{PersistentTree, ContentAddressedStorage, Delta};
-//! use dialog_storage::MemoryStorageBackend;
+//! use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
 //!
-//! let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+//! let storage = MemoryBlocks::new();
 //! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 //! let mut delta = Delta::zero();
 //!
@@ -81,9 +78,7 @@
 //! // store the new nodes before the next edit descends into them.
 //! for i in 0..10u32 {
 //!     tree = tree.edit().insert(i.to_le_bytes(), vec![i as u8], &storage).await.unwrap().persist(&mut delta).unwrap();
-//!     for (_, buffer) in delta.flush() {
-//!         storage.store(buffer.as_ref().to_vec(), buffer.blake3_hash()).await.unwrap();
-//!     }
+//!     storage.flush(&mut delta);
 //! }
 //!
 //! let root_hash = tree.root().clone();
@@ -100,30 +95,23 @@
 //!
 //! ```
 //! # tokio_test::block_on(async {
-//! use dialog_search_tree::{PersistentTree, ContentAddressedStorage, Delta};
-//! use dialog_storage::MemoryStorageBackend;
+//! use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
 //!
-//! let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+//! let storage = MemoryBlocks::new();
 //! let tree_v1 = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 //! let mut delta = Delta::zero();
 //!
 //! // Create version 1 with some data. Each persist writes its new nodes into
 //! // the delta, so flush after each one before the next edit descends into them.
 //! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 1], vec![1], &storage).await.unwrap().persist(&mut delta).unwrap();
-//! for (_, buffer) in delta.flush() {
-//!     storage.store(buffer.as_ref().to_vec(), buffer.blake3_hash()).await.unwrap();
-//! }
+//! storage.flush(&mut delta);
 //! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 2], vec![2], &storage).await.unwrap().persist(&mut delta).unwrap();
-//! for (_, buffer) in delta.flush() {
-//!     storage.store(buffer.as_ref().to_vec(), buffer.blake3_hash()).await.unwrap();
-//! }
+//! storage.flush(&mut delta);
 //!
 //! // Create version 2 by modifying version 1
 //! // Note: tree_v1 remains unchanged
 //! let tree_v2 = tree_v1.edit().insert([0, 0, 0, 3], vec![3], &storage).await.unwrap().persist(&mut delta).unwrap();
-//! for (_, buffer) in delta.flush() {
-//!     storage.store(buffer.as_ref().to_vec(), buffer.blake3_hash()).await.unwrap();
-//! }
+//! storage.flush(&mut delta);
 //!
 //! // Both versions can be queried independently
 //! assert_eq!(tree_v1.get(&[0, 0, 0, 3], &storage).await.unwrap(), None);
@@ -161,8 +149,11 @@ pub use entry::*;
 mod node;
 pub use node::*;
 
-mod storage;
-pub use storage::*;
+mod load;
+pub use load::*;
+
+mod memory;
+pub use memory::*;
 
 mod traversal;
 pub use traversal::*;

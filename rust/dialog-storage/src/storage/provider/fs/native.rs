@@ -160,6 +160,41 @@ impl TryFrom<FileSystemHandle> for PathBuf {
     }
 }
 
+/// `Url::to_file_path` percent-decodes every segment, so a `%2F` in the
+/// URL becomes a separator in the OS path and `%2E%2E` a parent: the
+/// path can have more, or other, components than the URL has segments,
+/// and land outside the name that was resolved. `FileSystemHandle::resolve`
+/// encodes `%` so a handle it produced cannot carry one, but a handle
+/// can also be built from a raw URL; this is the check at the OS-path
+/// boundary. Every decoded segment must be one plain component, and the
+/// last of them must be the path's final component.
+fn verify_segments(url: &Url, path: &std::path::Path) -> Result<(), FileSystemError> {
+    use std::path::Component;
+
+    let mut last = None;
+    for segment in url.path_segments().into_iter().flatten() {
+        if segment.is_empty() {
+            continue;
+        }
+        let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+        if matches!(decoded.as_ref(), "." | "..") || decoded.chars().any(std::path::is_separator) {
+            return Err(FileSystemError::Containment(format!(
+                "URL segment '{segment}' does not decode to one path component"
+            )));
+        }
+        last = Some(decoded);
+    }
+
+    if let (Some(expected), Some(Component::Normal(actual))) = (last, path.components().next_back())
+        && actual.to_str() != Some(expected.as_ref())
+    {
+        return Err(FileSystemError::Containment(format!(
+            "URL segment '{expected}' is not the path's final component {actual:?}"
+        )));
+    }
+    Ok(())
+}
+
 impl TryFrom<&FileSystemHandle> for PathBuf {
     type Error = FileSystemError;
 
@@ -168,6 +203,7 @@ impl TryFrom<&FileSystemHandle> for PathBuf {
             .url()
             .to_file_path()
             .map_err(|_| FileSystemError::Io("Failed to convert URL to path".to_string()))?;
+        verify_segments(location.url(), &path)?;
 
         // On Windows, escape characters illegal in filenames (DIDs carry
         // colons) per path component, and drop the trailing separator that
@@ -222,6 +258,39 @@ pub(super) async fn read_optional(
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(FileSystemError::Io(e.to_string())),
     }
+}
+
+pub(super) async fn files(handle: &FileSystemHandle) -> Result<Vec<String>, FileSystemError> {
+    let io = |error: io::Error| FileSystemError::Io(error.to_string());
+    let mut files = Vec::new();
+    let mut pending: Vec<(PathBuf, String)> = vec![(handle.try_into()?, String::new())];
+
+    while let Some((directory, prefix)) = pending.pop() {
+        let mut entries = match fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io(error)),
+        };
+        while let Some(entry) = entries.next_entry().await.map_err(io)? {
+            let name = entry.file_name().into_string().map_err(|name| {
+                FileSystemError::Io(format!("file name {name:?} is not valid UTF-8"))
+            })?;
+            #[cfg(windows)]
+            let name = decode_reserved(&name);
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if entry.file_type().await.map_err(io)?.is_dir() {
+                pending.push((entry.path(), path));
+            } else {
+                files.push(path);
+            }
+        }
+    }
+
+    Ok(files)
 }
 
 pub(super) async fn write(
@@ -324,6 +393,16 @@ pub(super) async fn list(handle: &FileSystemHandle) -> Result<Vec<String>, FileS
         }
     }
     Ok(names)
+}
+
+pub(super) async fn size(handle: &FileSystemHandle) -> Result<Option<u64>, FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    match fs::metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(FileSystemError::Io(error.to_string())),
+    }
 }
 
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {

@@ -12,7 +12,7 @@
 //! have before advancing.
 //!
 //! Nothing here publishes or moves a branch head. A snapshot's commits
-//! are minted on a layer of their own (see [`Snapshot`]); making one
+//! are minted on a line of their own (see [`Snapshot`]); making one
 //! visible under a name stays a separate act, as does content transfer:
 //! [`Snapshot::export`] reads content out, [`Repository::import`] writes
 //! content in.
@@ -48,6 +48,7 @@
 //! upstream as the walk proceeds, which is what makes the result complete.
 
 use core::ops::RangeInclusive;
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use std::collections::HashSet;
 
 use async_stream::try_stream;
@@ -55,37 +56,37 @@ use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
 };
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
-    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, ShipmentRef,
-    State, Statement, shipment_ref,
+    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, LoadBlob,
+    ShipmentRef, State, Statement, shipment_ref,
 };
-use dialog_capability::{Capability, Did, Fork, Provider, Subject};
+use dialog_capability::{Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveSubjectExt as _, CatalogExt as _};
-use dialog_effects::archive::{Archive, Catalog, Get, Put};
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::archive::prelude::{
+    ArchiveExt as _, ArchiveScope, CatalogExt as _, CatalogScope, DEFAULT_CATALOG, PutBlockExt as _,
+};
+use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory;
 use dialog_query::query::Application;
-use dialog_search_tree::{
-    ArchivedNodeBody, ContentAddressedStorage as TreeStorage, NoveltyOp, Traversable as _, Visit,
-    into_owned,
-};
+use dialog_search_tree::{NodeBody, NoveltyOp, Traversable as _, Visit, into_owned};
 use futures_util::future::Either;
 use futures_util::{Stream, StreamExt as _, stream};
 use parking_lot::RwLock;
 
 use dialog_varsig::Principal;
 
+use crate::placement::Target as StoreTarget;
+use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
-    Bindings, BlobArchive, Branch, Ephemeral, Index, NetworkedIndex, PublishError,
-    RemoteRepository, RemoteSite, Repository, RepositoryArchiveExt as _, Revision, Select,
-    SelectQuery, SnapshotError, Target,
+    Bindings, BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex,
+    PublishError, RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
 };
+use dialog_effects::MethodExt as _;
 
 pub mod codec;
+use codec::BytesBlob;
 
 #[cfg(test)]
 mod read_tests;
@@ -160,7 +161,7 @@ impl Block {
 /// # }
 /// ```
 ///
-/// # Its own layer
+/// # Its own line
 ///
 /// A revision's [`Version`] is `(origin, edition)`, and an origin must be
 /// a single sequential actor: two revisions minted under one origin at
@@ -169,7 +170,7 @@ impl Block {
 /// concurrently — so its commits are minted on a *lineage* of their own.
 /// The lineage is allocated on the snapshot's first commit and kept for
 /// the ones after, which is what makes a chain of transactions one
-/// origin with increasing editions. A clone starts a layer of its own for
+/// origin with increasing editions. A clone starts a line of its own for
 /// the same reason: two clones transacting from the same base must not
 /// collide.
 ///
@@ -193,7 +194,7 @@ pub struct Snapshot {
     bindings: Bindings,
 }
 
-/// What a snapshot's commits move: the revision, and the layer they are
+/// What a snapshot's commits move: the revision, and the line they are
 /// minted on once one has been allocated.
 #[derive(Debug, Clone)]
 struct Head {
@@ -236,7 +237,7 @@ impl Branch {
                 lineage: None,
             }),
             caches: self.caches(),
-            overlay: Ephemeral::detached(),
+            overlay: Ephemeral::default(),
             bindings: self.bindings().clone(),
         })
     }
@@ -252,13 +253,13 @@ impl Snapshot {
                 lineage: None,
             }),
             caches: Caches::new(),
-            overlay: Ephemeral::detached(),
+            overlay: Ephemeral::default(),
             bindings: Bindings::default(),
         }
     }
 
     /// The staged view inside a [`TransactionBatch`](crate::TransactionBatch):
-    /// reads like any snapshot of `revision`, but its layer is pre-seeded
+    /// reads like any snapshot of `revision`, but its line is pre-seeded
     /// with the branch entity, so commits through it mint on the branch's
     /// OWN origin — successor editions of the head the batch was staged
     /// from — instead of allocating a random lineage of their own. That
@@ -277,7 +278,7 @@ impl Snapshot {
                 lineage: Some(line),
             }),
             caches,
-            overlay: Ephemeral::detached(),
+            overlay: Ephemeral::default(),
             bindings: Bindings::default(),
         }
     }
@@ -298,23 +299,23 @@ impl Snapshot {
     }
 
     /// Archive capability for this snapshot's subject.
-    pub fn archive(&self) -> Capability<Archive> {
-        self.subject().archive()
+    pub fn archive(&self) -> ArchiveScope {
+        ArchiveScope::new(self.subject())
     }
 
     /// The archive catalog this snapshot's blocks live in.
-    pub(crate) fn index(&self) -> Capability<Catalog> {
-        self.subject.clone().archive().index()
+    pub(crate) fn index(&self) -> CatalogScope {
+        ArchiveScope::new(self.subject.clone()).index()
     }
 
-    /// The revision a commit builds on and the layer it mints on, read
+    /// The revision a commit builds on and the line it mints on, read
     /// together so they name the same head.
     pub(crate) fn head(&self) -> (Revision, Option<Entity>) {
         let head = self.head.read();
         (head.revision.clone(), head.lineage.clone())
     }
 
-    /// Move the head from `base` to `next`, recording the layer `next`
+    /// Move the head from `base` to `next`, recording the line `next`
     /// was minted on.
     ///
     /// The in-memory counterpart of a branch's CAS publish: a commit
@@ -383,21 +384,21 @@ impl Snapshot {
         &self.overlay
     }
 
-    /// Bind a layer name to one of this snapshot's stores. See
+    /// Bind a scope to one of this snapshot's stores. See
     /// [`Branch::bind`].
-    pub fn bind(&self, layer: Entity, target: Target) -> &Self {
-        self.bindings.bind(layer, target);
+    pub fn bind(&self, scope: Entity, target: StoreTarget) -> &Self {
+        self.bindings.bind(scope, target);
         self
     }
 
-    /// This snapshot's layer bindings. A snapshot minted from a branch
+    /// This snapshot's scope bindings. A snapshot minted from a branch
     /// shares the branch's.
     pub fn bindings(&self) -> &Bindings {
         &self.bindings
     }
 
     /// This snapshot's blob store, the target for [`Blob`](crate::Blob)
-    /// reads. Blob writes advance the layer through the branch's memory
+    /// reads. Blob writes advance the line through the branch's memory
     /// cell, which a snapshot does not have — see [`BlobArchive`].
     pub fn blobs(&self) -> BlobArchive<'_> {
         BlobArchive::from(self)
@@ -406,9 +407,10 @@ impl Snapshot {
     /// The recorded claim lineage at this snapshot's revision. See
     /// [`Branch::history`].
     /// A snapshot tracks no upstream, so this reads purely locally.
-    pub async fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>
@@ -417,7 +419,7 @@ impl Snapshot {
             + ConditionalSync
             + 'static,
     {
-        SourceRef::from(self).history(env).await
+        SourceRef::from(self).history(env)
     }
 
     /// The snapshot's committed history, newest first — at most `limit`
@@ -428,7 +430,8 @@ impl Snapshot {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>
@@ -453,7 +456,7 @@ impl Snapshot {
     }
 }
 
-// A clone is the same view on its own layer: it copies the head (so the
+// A clone is the same view on its own line: it copies the head (so the
 // original advancing leaves it where it is, and vice versa), shares the
 // caches and the session overlay (both safe to share, like a branch
 // clone's), and starts without a lineage — see the type docs for why
@@ -547,7 +550,7 @@ pub enum Reach {
     /// Fetched content is cached locally on the way through, so the
     /// export is complete at the cost of pulling whatever is absent over
     /// the network.
-    Download(RemoteRepository),
+    Download(ConnectedReplica),
 }
 
 /// Reads a snapshot's content out of a store.
@@ -593,7 +596,7 @@ impl SnapshotExport {
     /// Fetched content is cached locally on the way through, so the export
     /// is complete at the cost of pulling whatever is absent over the
     /// network.
-    pub fn download(mut self, upstream: RemoteRepository) -> Self {
+    pub fn download(mut self, upstream: ConnectedReplica) -> Self {
         self.reach = Reach::Download(upstream);
         self
     }
@@ -669,7 +672,7 @@ impl SnapshotExport {
             // is cached; without one the index is exactly what this store
             // holds.
             let index = NetworkedIndex::new(env, catalog, upstream);
-            let storage = TreeStorage::new(TreeStorageBridge(index.clone()));
+            let storage = index.clone();
             let tree = Index::from_hash(root);
 
             let mut spills: HashSet<[u8; 32]> = HashSet::new();
@@ -719,13 +722,13 @@ impl SnapshotExport {
                 // which do not belong in a tree-walk callback.
                 let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
                 match node.body() {
-                    ArchivedNodeBody::Segment(segment) => {
+                    NodeBody::Segment(segment) => {
                         segment.for_each_entry::<Key, _>(|key, value| {
                             entries.push((Key::from(key.to_vec()), into_owned(value)?));
                             Ok(())
                         })?;
                     }
-                    ArchivedNodeBody::Index(index) => {
+                    NodeBody::Index(index) => {
                         for entry in index.all_novelty::<Key>()? {
                             if let NoveltyOp::Assert(value) = entry.op {
                                 entries.push((Key::from(entry.key), value));
@@ -751,7 +754,7 @@ impl SnapshotExport {
                 yield Item::Block(Block::new(node.buffer().clone()));
             }
 
-            // Spilled value blocks, discovered above. Their reads are
+            // Spilled values, discovered above. Their reads are
             // independent, so they run concurrently (bounded) and yield
             // as they complete — against a downloading reach this
             // overlaps the remote round-trips instead of paying them one
@@ -761,7 +764,7 @@ impl SnapshotExport {
                     let storage = &storage;
                     async move {
                         let digest = NodeHash::from(reference);
-                        let bytes = storage.retrieve(&digest).await;
+                        let bytes = LoadBlob::new(digest.clone()).perform(storage).await;
                         (digest, bytes)
                     }
                 },
@@ -769,8 +772,15 @@ impl SnapshotExport {
             .buffer_unordered(FETCH_CONCURRENCY);
             while let Some((digest, bytes)) = spill_reads.next().await {
                 match bytes? {
+                    // A spilled value lives in the blob store, so it
+                    // travels as a blob and lands in one on import.
                     Some(bytes) => {
-                        yield Item::Block(Block { digest, content: Buffer::from(bytes) });
+                        let bytes = bytes.into_vec();
+                        yield Item::Blob {
+                            digest,
+                            size: bytes.len() as u64,
+                            chunks: Box::new(BytesBlob::new(bytes)),
+                        };
                     }
                     None if sparse => {}
                     None => Err(SnapshotError::MissingBlock { digest })?,
@@ -778,25 +788,33 @@ impl SnapshotExport {
             }
             drop(spill_reads);
 
-            // Blob bytes, discovered above. The size comes from the tree's
-            // own blob index rather than the traversal: `import` is opened
+            // Blob bytes, discovered above. The size comes from what the
+            // tree records for the content (its asset fact, or a legacy
+            // blob-index entry) rather than the traversal: `import` is opened
             // with it, and reading it costs no byte fetch. Each blob's
             // whole fetch (and, under a downloading reach, its local
             // import) is one future; they run concurrently (bounded) and
-            // yield as they complete. `None` from a future means the blob
-            // is unavailable — no index record, or no bytes anywhere the
-            // reach extends — which sparse tolerates and complete refuses.
+            // yield as they complete. A blob the tree no longer references
+            // is skipped; one it references with no bytes anywhere the
+            // reach extends is unavailable, which sparse tolerates and
+            // complete refuses.
             let mut blob_reads = stream::iter(blobs.into_iter().map(|digest| {
                 let tree = &tree;
                 let index = &index;
                 let hydrate = &hydrate;
                 let subject = subject.clone();
                 async move {
-                    let Some(record) = tree.get_blob(index, digest.as_bytes()).await? else {
-                        return Ok((digest, None));
+                    // The walk takes every assert it passes for a
+                    // reference, including one a newer removal higher in
+                    // the tree supersedes. What the tree records for the
+                    // content says whether the blob is still referenced; one it no longer
+                    // names is not this export's to carry.
+                    let Some(size) = tree.content_size(index, digest.as_bytes()).await? else {
+                        return Ok((digest, Found::Unreferenced));
                     };
                     let reader = subject
                         .clone()
+                        .reader()
                         .archive()
                         .blob()
                         .read(digest.clone())
@@ -812,29 +830,44 @@ impl SnapshotExport {
                         // bytes are cached like every other download), then
                         // serve the read from the now-local copy.
                         (Err(BlobError::NotFound(_)), Some(remote)) => {
-                            let address = remote.address();
-                            let mut source = address
-                                .subject
-                                .clone()
-                                .archive()
-                                .blob()
-                                .read(digest.clone())
-                                .fork(address.site())
-                                .perform(env)
-                                .await?;
-                            let mut sink = subject
-                                .clone()
-                                .archive()
-                                .blob()
-                                .import(digest.clone(), record.size)
-                                .perform(env)
-                                .await?;
-                            while let Some(chunk) = source.next().await? {
-                                sink.write_all(&chunk).await?;
-                            }
-                            sink.finish().await?;
+                            // An attempt is the whole transfer, since
+                            // the read can fail at any point.
+                            let (digest, subject) = (&digest, &subject);
+                            remote
+                                .reach(|address| async move {
+                                    let mut source = address
+                                        .subject
+                                        .clone()
+                                        .reader()
+                                        .archive()
+                                        .blob()
+                                        .read(digest.clone())
+                                        .fork(address.site())
+                                        .perform(env)
+                                        .await
+                                        .map_err(Step::Remote)?;
+                                    let mut sink = subject
+                                        .clone()
+                                        .writer()
+                                        .archive()
+                                        .blob()
+                                        .import(digest.clone(), size)
+                                        .perform(env)
+                                        .await
+                                        .map_err(Step::Local)?;
+                                    while let Some(chunk) =
+                                        source.next().await.map_err(Step::Remote)?
+                                    {
+                                        sink.write_all(&chunk).await.map_err(Step::Local)?;
+                                    }
+                                    sink.finish().await.map_err(Step::Local)?;
+                                    Ok::<_, Step<BlobError>>(())
+                                })
+                                .await
+                                .map_err(Step::into_inner)?;
                             subject
                                 .clone()
+                                .reader()
                                 .archive()
                                 .blob()
                                 .read(digest.clone())
@@ -844,25 +877,37 @@ impl SnapshotExport {
                         (reader, _) => reader,
                     };
                     match reader {
-                        Ok(chunks) => Ok((digest, Some((record.size, chunks)))),
-                        Err(BlobError::NotFound(_)) => Ok((digest, None)),
+                        Ok(chunks) => Ok((digest, Found::Bytes(size, chunks))),
+                        Err(BlobError::NotFound(_)) => Ok((digest, Found::Absent)),
                         Err(error) => Err(SnapshotError::from(error)),
                     }
                 }
             }))
             .buffer_unordered(FETCH_CONCURRENCY);
             while let Some(fetched) = blob_reads.next().await {
-                let (digest, available) = fetched?;
-                match available {
-                    Some((size, chunks)) => {
+                let (digest, found) = fetched?;
+                match found {
+                    Found::Bytes(size, chunks) => {
                         yield Item::Blob { digest, size, chunks };
                     }
-                    None if sparse => {}
-                    None => Err(SnapshotError::MissingBlob { digest })?,
+                    Found::Unreferenced => {}
+                    Found::Absent if sparse => {}
+                    Found::Absent => Err(SnapshotError::MissingBlob { digest })?,
                 }
             }
         }
     }
+}
+
+/// What an export found for a blob its walk came across.
+enum Found<Chunks> {
+    /// The tree references it, and its bytes are within reach.
+    Bytes(u64, Chunks),
+    /// The tree references it, and no bytes are within reach.
+    Absent,
+    /// The tree no longer references it: the walk passed an assert that a
+    /// newer removal higher in the tree supersedes.
+    Unreferenced,
 }
 
 /// Writes snapshot content into a repository's storage.
@@ -926,8 +971,9 @@ where
                     }
                     subject
                         .clone()
+                        .writer()
                         .archive()
-                        .index()
+                        .catalog(DEFAULT_CATALOG)
                         .put(block.content)
                         .perform(env)
                         .await?;
@@ -940,6 +986,7 @@ where
                 } => {
                     let mut writer = subject
                         .clone()
+                        .writer()
                         .archive()
                         .blob()
                         .import(digest.clone(), size)
@@ -982,21 +1029,23 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_credentials::Credential;
+    use dialog_effects::archive::prelude::GetBlockExt as _;
     use dialog_effects::blob::BlobSource;
+    use dialog_peer::helpers::{test_grant, test_state, test_storage};
     use dialog_search_tree::PersistentNode;
-    use dialog_storage::provider::storage::{Storage, VolatileSpace};
+    use dialog_storage::provider::storage::VolatileSpace;
     use futures_util::stream;
 
     use super::*;
+
     use dialog_capability::Subject;
     use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
 
     use crate::Blob;
     use crate::helpers::test_repo;
-    use dialog_operator::DeriveOperator as _;
-    use dialog_operator::helpers::{generate_data, test_operator_with_profile, unique_name};
+    use dialog_peer::helpers::{generate_data, test_session_with_peer, unique_name};
 
     /// A blob source over bytes held in memory.
     struct Bytes(Option<Vec<u8>>);
@@ -1036,8 +1085,8 @@ mod tests {
     }
 
     struct Stage {
-        env: dialog_operator::Operator<VolatileSpace>,
-        profile: dialog_operator::Profile,
+        env: dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+        profile: dialog_peer::Peer<VolatileSpace>,
         repository: crate::Repository,
         revision: Revision,
         blob_bytes: Vec<u8>,
@@ -1045,22 +1094,27 @@ mod tests {
 
     /// A second environment with the same repository mounted, so imported
     /// content has somewhere to land.
-    async fn destination_for(stage: &Stage) -> Result<dialog_operator::Operator<VolatileSpace>> {
-        let destination = Storage::<VolatileSpace>::volatile();
+    async fn destination_for(
+        stage: &Stage,
+    ) -> Result<dialog_peer::Peer<VolatileSpace, dialog_peer::Session>> {
+        let destination = test_storage().await;
         StorageFx::profile(unique_name("snapshot-profile"))
-            .create(Credential::Signer(stage.profile.signer().clone()))
+            .create(Credential::Signer(stage.profile.credential().clone()))
             .perform(&destination)
             .await?;
         StorageFx::profile(unique_name("snapshot-repository"))
             .create(stage.repository.credential().clone())
             .perform(&destination)
             .await?;
-        Ok(stage
-            .profile
-            .derive(b"snapshot-destination")
+        let peer = dialog_peer::Peer::new(stage.profile.credential().clone())
+            .with(destination)
+            .space(test_state(&stage.profile.credential().did()))
+            .grant(test_grant().await)
+            .await?;
+        Ok(peer
+            .session(b"snapshot-destination")
+            .space(peer.state())
             .allow(Subject::any())
-            .network(dialog_network::Network::default())
-            .build(destination)
             .await?)
     }
 
@@ -1068,7 +1122,7 @@ mod tests {
     /// a value too large to inline (so it spills to its own block), and a
     /// blob.
     async fn stage() -> Result<Stage> {
-        let (env, profile) = test_operator_with_profile().await;
+        let (env, profile) = test_session_with_peer().await;
         let repository = test_repo(&env, &profile).await;
         let branch = repository.branch("main").open().perform(&env).await?;
 
@@ -1117,10 +1171,26 @@ mod tests {
         .await?;
 
         assert!(!blocks.is_empty(), "the block channel carried the tree");
-        assert_eq!(blobs.len(), 1, "the blob channel carried the blob");
         assert_eq!(
-            blobs[0].1, stage.blob_bytes,
+            blobs.len(),
+            2,
+            "the blob channel carried the blob and the spilled value"
+        );
+        assert!(
+            blobs.iter().any(|(_, bytes)| *bytes == stage.blob_bytes),
             "the blob arrived byte for byte"
+        );
+        assert!(
+            blobs
+                .iter()
+                .all(|(digest, bytes)| Buffer::from(bytes.clone()).blake3_hash() == digest),
+            "every exported blob hashes to the address it declares"
+        );
+        assert!(
+            blocks
+                .iter()
+                .all(|block| blobs.iter().all(|(digest, _)| &block.digest != digest)),
+            "a spilled value travels as a blob, never as a block"
         );
         assert!(
             blocks.iter().all(Block::is_intact),
@@ -1146,7 +1216,7 @@ mod tests {
         let imported = elsewhere.import(items).perform(&destination).await?;
 
         assert!(imported.blocks > 0, "blocks landed");
-        assert_eq!(imported.blobs, 1, "the blob landed");
+        assert_eq!(imported.blobs, 2, "the blob and the spilled value landed");
 
         let branch = elsewhere
             .branch("main")
@@ -1156,6 +1226,79 @@ mod tests {
         assert!(
             branch.revision().is_none(),
             "importing content publishes nothing"
+        );
+        Ok(())
+    }
+
+    /// A store written before spilled values moved to the blob store holds
+    /// them as blocks beside the tree's nodes. Nothing migrates them: a read
+    /// misses the blob store and falls back to the block catalog.
+    #[dialog_common::test]
+    async fn it_reads_a_spill_a_legacy_store_holds_as_a_block() -> Result<()> {
+        let stage = stage().await?;
+        let (blocks, blobs) = drain(
+            stage
+                .repository
+                .snapshot(stage.revision.clone())
+                .export()
+                .perform(&stage.env),
+        )
+        .await?;
+
+        // The legacy shape: the spilled value is a block, and the blob
+        // store holds nothing.
+        let spills: Vec<Block> = blobs
+            .into_iter()
+            .filter(|(_, bytes)| *bytes != stage.blob_bytes)
+            .map(|(_, bytes)| Block::new(Buffer::from(bytes)))
+            .collect();
+        assert_eq!(spills.len(), 1, "the stage spills one value");
+        let spilled = spills[0].digest.clone();
+
+        let destination = destination_for(&stage).await?;
+        let legacy = crate::Repository::from(stage.repository.credential().clone());
+        legacy
+            .import(stream::iter(
+                blocks.into_iter().chain(spills).map(Item::Block).map(Ok),
+            ))
+            .perform(&destination)
+            .await?;
+        let branch = legacy.branch("main").open().perform(&destination).await?;
+        branch
+            .reset(stage.revision.clone())
+            .perform(&destination)
+            .await?;
+
+        let probe = branch
+            .archive()
+            .index()
+            .archive()
+            .blob()
+            .read(spilled)
+            .perform(&destination)
+            .await;
+        assert!(
+            matches!(probe, Err(BlobError::NotFound(_))),
+            "the legacy store holds the spill only as a block"
+        );
+
+        let rows = branch
+            .claims()
+            .select(ArtifactSelector::new().the("document/body".parse()?))
+            .to_owned()
+            .perform(&destination)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].is,
+            Value::String(
+                "spilled".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1)
+            ),
+            "the spilled value reconstructs from its legacy block"
         );
         Ok(())
     }
@@ -1202,8 +1345,9 @@ mod tests {
         // And nothing was written under the address it claimed.
         let stored = elsewhere
             .subject()
+            .reader()
             .archive()
-            .index()
+            .catalog(DEFAULT_CATALOG)
             .get(honest.digest.clone())
             .perform(&destination)
             .await?;
@@ -1288,7 +1432,10 @@ mod tests {
     // without depending on the order the export yields them in.
     async fn tree_only_destination(
         stage: &Stage,
-    ) -> Result<(dialog_operator::Operator<VolatileSpace>, crate::Repository)> {
+    ) -> Result<(
+        dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+        crate::Repository,
+    )> {
         let (blocks, _) = drain(
             stage
                 .repository

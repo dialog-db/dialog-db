@@ -6,20 +6,24 @@ pub use query::{TransactionQuery, TransactionSelectQuery};
 
 use crate::Commit;
 use crate::placement::{Partitioned, Placements};
+use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::Composite;
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
-use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot};
-use dialog_artifacts::{Changes, Instruction, Statement, Update};
+use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
+use dialog_artifacts::{AssetChange, Changes, Statement};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
+use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Publish, Resolve};
 
-/// A transaction on a layer of the repository.
+/// A transaction on a line of the repository.
 ///
-/// `Layer` is what the transaction runs on, and it decides what
+/// `Line` is what the transaction runs on, and it decides what
 /// committing does:
 ///
 /// - `&`[`Branch`]: `.commit().perform(&env)` STAGES the batch. It mints
@@ -43,41 +47,40 @@ use dialog_effects::memory::{Publish, Resolve};
 ///
 /// Where an asserted or retracted fact lands is the attribute's
 /// decision, not the caller's: each instruction routes to the store
-/// the layer its attribute is [placed](crate::placement) on is
+/// the scope its attribute is [placed](crate::placement) on is
 /// [bound](crate::Bindings) to — the tree by default. A concept whose
-/// attributes span layers fans out accordingly.
+/// attributes span scopes fans out accordingly.
 ///
 /// Transients are visible to every read through [`query`](Self::query)
 /// and to inductive-rule bodies during commit-time induction, but they
 /// never enter the durable batch: they live for exactly one induction
 /// round and leave no trace in the committed tree.
-pub struct Transaction<Layer> {
-    line: Layer,
-    changes: Changes,
-    transients: Changes,
+pub struct Transaction<Line> {
+    line: Line,
+    /// The durable writes, held so reading them is a range read (see
+    /// [`Staged`]); exported to a [`Changes`] batch once, at commit.
+    changes: Staged,
+    transients: Staged,
 }
 
-impl<Layer> Transaction<Layer> {
-    pub(crate) fn on(line: Layer) -> Self {
+impl<Line> Transaction<Line> {
+    pub(crate) fn on(line: Line) -> Self {
         Transaction {
             line,
-            changes: Changes::new(),
-            transients: Changes::new(),
+            changes: Staged::default(),
+            transients: Staged::default(),
         }
     }
 
     /// Assert a claim into this transaction.
     pub fn assert<C: Statement>(mut self, claim: C) -> Self {
-        // Disambiguate from `Statement::assert` (which Changes now
-        // implements) by calling the claim's own assert into our
-        // changes buffer directly.
-        claim.assert(&mut self.changes);
+        self.changes.assert(claim);
         self
     }
 
     /// Retract a claim from this transaction.
     pub fn retract<C: Statement>(mut self, claim: C) -> Self {
-        claim.retract(&mut self.changes);
+        self.changes.retract(claim);
         self
     }
 
@@ -85,7 +88,7 @@ impl<Layer> Transaction<Layer> {
     /// reads and to inductive-rule bodies during this commit, seeding
     /// commit-time induction, but never committed to the branch.
     pub fn dispatch<C: Statement>(mut self, claim: C) -> Self {
-        claim.assert(&mut self.transients);
+        self.transients.assert(claim);
         self
     }
 
@@ -93,24 +96,13 @@ impl<Layer> Transaction<Layer> {
     ///
     /// Each instruction is replayed as if it had been asserted or
     /// retracted on the transaction directly — `Assert`/`Replace`
-    /// become additive entries, `Retract` becomes a retraction entry.
+    /// become additive entries, `Retract` becomes a retraction entry —
+    /// and the batch's asset changes are staged on the transaction.
     /// Useful for callers that build a [`Changes`] independently
     /// (e.g. a reactor accumulating effect outputs across rounds) and
     /// need to merge it into a running transaction.
     pub fn integrate(mut self, changes: Changes) -> Self {
-        for instruction in changes.into_instructions() {
-            match instruction {
-                Instruction::Assert(a) => {
-                    Update::associate(&mut self.changes, a.the, a.of, a.is);
-                }
-                Instruction::Replace(a) => {
-                    Update::associate_unique(&mut self.changes, a.the, a.of, a.is);
-                }
-                Instruction::Retract(a) => {
-                    Update::dissociate(&mut self.changes, a.the, a.of, a.is);
-                }
-            }
-        }
+        self.changes.apply(changes);
         self
     }
 
@@ -123,23 +115,28 @@ impl<Layer> Transaction<Layer> {
     /// into the commit while transient heads seed further rounds. Only
     /// then is the durable batch committed; transients are dropped,
     /// never written.
-    pub fn commit(self) -> TransactionCommit<Layer> {
+    pub fn commit(self) -> TransactionCommit<Line> {
         TransactionCommit {
             line: self.line,
-            changes: self.changes,
-            transients: self.transients,
+            changes: self.changes.export(),
+            transients: self.transients.export(),
             allow_empty: false,
             canonicalize: false,
+            amend: false,
         }
     }
 }
 
-/// The "as-if committed" view over `changes` + `transients` that
-/// [`Transaction::query`] serves on every layer kind.
-fn transaction_view(changes: &Changes, transients: &Changes) -> Changes {
-    let mut view = changes.clone();
-    transients.clone().assert(&mut view);
-    view
+impl<Line> Transaction<Line> {
+    /// The staged layers [`Transaction::query`] reads over the line:
+    /// the durable writes, then the transients. Shared, not copied.
+    fn layers(&self) -> Vec<Staged> {
+        [&self.changes, &self.transients]
+            .into_iter()
+            .filter(|layer| !layer.is_empty())
+            .cloned()
+            .collect()
+    }
 }
 
 impl<'a> Transaction<&'a Branch> {
@@ -152,10 +149,7 @@ impl<'a> Transaction<&'a Branch> {
     /// stream before the merge. Dispatched transients are part of the
     /// view too. The transaction itself stays open and committable.
     pub fn query(&self) -> TransactionQuery<'a> {
-        TransactionQuery::new(
-            SourceRef::Branch(self.line),
-            &transaction_view(&self.changes, &self.transients),
-        )
+        TransactionQuery::new(SourceRef::Branch(self.line), self.layers())
     }
 }
 
@@ -163,10 +157,7 @@ impl<'a> Transaction<&'a Snapshot> {
     /// Run queries against this transaction's "as-if committed" view of
     /// the snapshot. See [`Transaction::<&Branch>::query`].
     pub fn query(&self) -> TransactionQuery<'a> {
-        TransactionQuery::new(
-            SourceRef::Snapshot(self.line),
-            &transaction_view(&self.changes, &self.transients),
-        )
+        TransactionQuery::new(SourceRef::Snapshot(self.line), self.layers())
     }
 }
 
@@ -198,23 +189,24 @@ impl Snapshot {
 
 /// Command committing a [`Transaction`]: runs commit-time induction
 /// over the transaction's delta, then mints the settled durable batch
-/// on the layer.
+/// on the line.
 ///
-/// What `perform` returns follows the layer — see [`Transaction`]. The
+/// What `perform` returns follows the line — see [`Transaction`]. The
 /// builder mirrors [`Commit`](crate::Commit)'s surface
 /// ([`allow_empty`](Self::allow_empty) /
 /// [`canonicalize`](Self::canonicalize)); the difference is the
 /// induction step in front and that transients never reach the
 /// durable batch.
-pub struct TransactionCommit<Layer> {
-    pub(super) line: Layer,
+pub struct TransactionCommit<Line> {
+    pub(super) line: Line,
     pub(super) changes: Changes,
     pub(super) transients: Changes,
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
+    pub(super) amend: bool,
 }
 
-impl<Layer> TransactionCommit<Layer> {
+impl<Line> TransactionCommit<Line> {
     /// Mint a revision even when the settled change batch leaves the
     /// indexes untouched. See [`Commit::allow_empty`](crate::Commit::allow_empty).
     pub fn allow_empty(mut self) -> Self {
@@ -236,7 +228,10 @@ impl TransactionCommit<&Snapshot> {
     /// the settled batch is a no-op).
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -247,41 +242,29 @@ impl TransactionCommit<&Snapshot> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {
         let snapshot = self.line;
-        let mut changes = self.changes;
         let source = SourceRef::Snapshot(snapshot);
-        let view = Composite::of(source.to_source());
-        let mut witness = source.overlay();
-        let staged = Placements::resolve(source, &changes, env).await?;
-        induce::induce(
+        // A snapshot commit reports only its revision: the transients
+        // induction emitted surface on a staged
+        // [`TransactionBatch::induced`] alone.
+        let settled = settle(
             source,
-            &view,
-            &staged,
-            &mut changes,
+            &Composite::of(source.to_source()),
+            self.changes,
             self.transients,
-            &mut witness,
             env,
         )
         .await?;
 
-        // Route the settled batch by attribute placement: tree-bound
-        // instructions commit to the tree, session-bound ones land in
-        // the ephemeral store once the tree commit has succeeded, so a
-        // failed commit leaves the session untouched too.
-        let placements = Placements::resolve(source, &changes, env).await?;
-        let Partitioned {
-            tree: changes,
-            session,
-        } = placements.partition(changes, source.bindings())?;
-
         let previous = snapshot.revision();
-        let touches_rules = touches_rules(&changes);
+        let touches_rules = touches_rules(&settled.tree);
+        let changes = settled.tree;
+        let machinery = store_assets(source, settled.assets, env).await?;
 
-        let mut commit = Commit::new(snapshot, changes.into_stream());
+        let mut commit = Commit::new(snapshot, changes.into_stream()).with_machinery(machinery);
         if self.allow_empty {
             commit = commit.allow_empty();
         }
@@ -289,13 +272,81 @@ impl TransactionCommit<&Snapshot> {
             commit = commit.canonicalize();
         }
         let revision = Box::pin(commit.perform(env)).await?;
-        source.overlay().apply(session);
+        // Session-bound instructions land once the tree commit has
+        // succeeded, so a failed commit leaves the session untouched too.
+        source.overlay().apply(settled.session)?;
 
         if !touches_rules {
             carry_footprint(&source.rule_cache(), Some(&previous), &revision);
         }
         Ok(revision)
     }
+}
+
+/// A transaction's changes after commit-time induction, routed by
+/// attribute placement: what the tree commit mints, what the line's
+/// session store lands once the commit has succeeded, and the
+/// transients rule heads emitted along the way.
+pub(crate) struct Settled {
+    /// The tree-bound instructions, induction's novelty folded in.
+    pub(crate) tree: Changes,
+    /// The session-bound instructions.
+    pub(crate) session: Changes,
+    /// The asset changes, which only the tree commit stores.
+    pub(crate) assets: Vec<AssetChange>,
+    /// Every transient a rule head emitted, across all rounds.
+    pub(crate) induced: Changes,
+}
+
+/// Settle a transaction's changes against `view`: run commit-time
+/// induction (each round witnessed on `source`'s session store, so a
+/// command that fired a rule is seen by the store's observers even
+/// though the commit folds it away), then route by attribute
+/// placement. Nothing lands here: the caller mints the tree-bound
+/// remainder and applies the session-bound part once that succeeded.
+pub(crate) async fn settle<Env>(
+    source: SourceRef<'_>,
+    view: &Composite,
+    mut changes: Changes,
+    transients: Changes,
+    env: &Env,
+) -> Result<Settled, CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Identify>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    // The assets ride apart from the facts, for the tree commit alone:
+    // induction and routing rebuild the batch fact by fact.
+    let assets = changes.take_assets();
+    let mut witness = source.overlay();
+    let staged = Placements::resolve(source, &changes, env).await?;
+    let induced = induce::induce(
+        source,
+        view,
+        &staged,
+        &mut changes,
+        transients,
+        &mut witness,
+        env,
+    )
+    .await?;
+    let placements = Placements::resolve(source, &changes, env).await?;
+    let Partitioned { tree, session } = placements.partition(changes, source.bindings())?;
+    Ok(Settled {
+        tree,
+        session,
+        assets,
+        induced,
+    })
 }
 
 /// Whether a settled change batch touches the trigger structures, i.e.
@@ -323,7 +374,7 @@ pub(crate) fn carry_footprint(
     revision: &Revision,
 ) {
     let footprint = match previous {
-        // A genesis commit sees an empty layer: no committed rules
+        // A genesis commit sees an empty line: no committed rules
         // exist, so the empty footprint is exact.
         None => Some(TriggerFootprint::default()),
         Some(previous) => cache.footprint(previous),
@@ -347,7 +398,10 @@ impl Branch {
     /// themselves over the merged-in facts.
     pub async fn induce<Env>(&self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -358,7 +412,6 @@ impl Branch {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<Fork<RemoteSite, Get>>
             + ConditionalSync
             + 'static,
     {

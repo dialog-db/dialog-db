@@ -171,7 +171,7 @@ mod tests {
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
     mod person {
         use crate::Attribute;
@@ -208,7 +208,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_performs_typed_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -241,7 +241,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_typed_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -297,7 +297,7 @@ mod tests {
         use dialog_artifacts::ArtifactSelector;
         use futures_util::StreamExt as _;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

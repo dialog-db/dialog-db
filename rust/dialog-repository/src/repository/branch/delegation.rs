@@ -4,20 +4,22 @@
 //!
 //! - **Slim facts** under the reserved `dialog.ucan/*` attributes, one per
 //!   queried field (audience, subject, issuer, command, and the validity
-//!   bounds when present), on the entity `blob:<hash>` of the certificate's
+//!   bounds when present), on the entity `asset:<hash>` of the certificate's
 //!   encoded envelope. They are ordinary version-controlled facts: they ride
 //!   the fact indexes, replicate with the tree, merge with observed-remove
 //!   semantics, and answer datalog queries.
-//! - **The signed envelope as a blob**, addressed by that same hash and
-//!   recorded in the blob index so push ships the bytes and a replica
-//!   hydrates them on demand. The envelope is never decomposed: policy,
+//! - **The signed envelope as an asset**, addressed by that same hash and
+//!   recorded by its `dialog.asset/size` fact so push ships the bytes and a
+//!   replica hydrates them on demand. The envelope is never decomposed: policy,
 //!   meta, nonce, and signature live only there, and proof assembly reads
 //!   it back byte-identical.
 //!
 //! Both land in ONE commit, so the denormalized fields cannot drift from the
-//! envelope. Retraction mirrors it: the facts are retracted and the blob
-//! reference tombstoned in one commit; the bytes stay in the blob store
-//! (reclaiming unreferenced bytes is the deferred GC concern).
+//! envelope. Retraction mirrors it: the facts and the asset are retracted in
+//! one commit; the bytes stay in the blob store (reclaiming unreferenced
+//! bytes is the deferred GC concern). A certificate retained before assets
+//! recorded its envelope in the blob index instead, and its retraction
+//! tombstones that entry.
 //!
 //! The surface is a [`Delegations`] handle on the branch:
 //!
@@ -51,7 +53,7 @@
 //! // retain: every certificate in the chain becomes facts + an envelope blob
 //! let entities = branch.delegations().retain(chain.clone()).perform(env).await?;
 //!
-//! // retract: facts retracted, blob reference tombstoned, bytes untouched
+//! // retract: facts and envelope asset retracted, bytes untouched
 //! branch.delegations().retract(chain).perform(env).await?;
 //! # Ok(())
 //! # }
@@ -60,11 +62,13 @@
 mod prove;
 pub use prove::*;
 
+use crate::repository::branch::asset::recorded_size;
 use crate::repository::branch::blob::index_store;
+use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, RemoteSite};
 use dialog_artifacts::{
-    Artifact, Attribute, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity, Instruction,
-    Value,
+    Artifact, Asset, Attribute, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity,
+    Instruction, Value,
 };
 use dialog_capability::access::{Certificate as _, Delegation as _};
 use dialog_capability::{ANY_SUBJECT, Fork, Provider};
@@ -72,8 +76,9 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Write as BlobWrite;
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_ucan::{UcanCertificate, UcanDelegation};
 use futures_util::stream;
@@ -219,7 +224,9 @@ impl RetainDelegation<'_> {
     /// mints no revision).
     pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Entity>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -239,7 +246,6 @@ impl RetainDelegation<'_> {
             .map(|revision| Index::from_hash(NodeHash::from(*revision.tree.hash())));
 
         let mut instructions = Vec::new();
-        let mut entries = Vec::new();
         let mut retained = Vec::new();
         let mut batched = HashSet::new();
         for certificate in self.chains.iter().flat_map(|chain| chain.certificates()) {
@@ -262,7 +268,7 @@ impl RetainDelegation<'_> {
                 continue;
             }
             if let Some(tree) = &tree
-                && tree.get_blob(&store, &index_hash).await?.is_some()
+                && tree.content_size(&store, &index_hash).await?.is_some()
             {
                 continue;
             }
@@ -271,7 +277,8 @@ impl RetainDelegation<'_> {
             for artifact in field_artifacts(&entity, &certificate)? {
                 instructions.push(Instruction::Assert(artifact));
             }
-            entries.push(BlobRecord::new(bytes.len() as u64).entry(&index_hash));
+            let envelope = Asset::stored(index_hash, bytes.len() as u64);
+            instructions.push(Instruction::Replace(envelope.fact()?));
             retained.push(entity);
         }
 
@@ -283,7 +290,6 @@ impl RetainDelegation<'_> {
             branch
                 .commit(stream::iter(instructions))
                 .machinery()
-                .with_entries(entries)
                 .perform(env),
         )
         .await?;
@@ -312,7 +318,9 @@ impl RetractDelegation<'_> {
     /// holds — or is about to stop referencing — is idempotent.)
     pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Entity>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -343,16 +351,33 @@ impl RetractDelegation<'_> {
             let index_hash: dialog_storage::Blake3Hash = *hash.as_bytes();
 
             // A certificate the tree does not reference has nothing to
-            // retract.
-            if tree.get_blob(&store, &index_hash).await?.is_none() {
+            // retract. One retained before assets is referenced by its
+            // blob-index entry alone.
+            let asset = recorded_size(SourceRef::from(branch), &index_hash, env).await?;
+            let indexed = tree.get_blob(&store, &index_hash).await?.is_some();
+            if asset.is_none() && !indexed {
                 continue;
             }
 
+            // A certificate retained before content entities moved to
+            // `asset:` holds its facts on its `blob:` entity, so retract the
+            // facts under both names. Retracting a fact that is not there is
+            // a no-op, so the name that holds nothing costs nothing.
             let entity = Entity::from_blob(&index_hash)?;
-            for artifact in field_artifacts(&entity, &certificate)? {
-                instructions.push(Instruction::Retract(artifact));
+            let legacy = Entity::from_legacy_blob(&index_hash)?;
+            for holder in [&entity, &legacy] {
+                for artifact in field_artifacts(holder, &certificate)? {
+                    instructions.push(Instruction::Retract(artifact));
+                }
             }
-            entries.push(BlobRecord::retract_entry(&index_hash));
+            if let Some(size) = asset {
+                instructions.push(Instruction::Retract(
+                    Asset::stored(index_hash, size).fact()?,
+                ));
+            }
+            if indexed {
+                entries.push(BlobRecord::retract_entry(&index_hash));
+            }
             retracted.push(entity);
         }
 
@@ -385,15 +410,15 @@ mod tests {
     use dialog_capability::Subject;
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::blob::BlobReader;
-    use dialog_network::Network;
-    use dialog_operator::{DeriveOperator as _, Operator, Profile};
-    use dialog_storage::provider::storage::{Storage, VolatileSpace};
+    use dialog_effects::storage::Location;
+    use dialog_peer::{Peer, Session};
+    use dialog_storage::provider::storage::VolatileSpace;
     use dialog_ucan_core::subject::Subject as UcanSubject;
     use dialog_ucan_core::{DelegationBuilder, DelegationChain};
     use dialog_varsig::Principal as _;
     use futures_util::StreamExt as _;
 
-    use dialog_operator::helpers::unique_name;
+    use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 
     async fn delegate(
         issuer: &Ed25519Signer,
@@ -411,17 +436,18 @@ mod tests {
         UcanDelegation::new(DelegationChain::new(delegation))
     }
 
-    async fn open_branch(name: &str) -> Result<(crate::Branch, Operator<VolatileSpace>)> {
-        let storage = Storage::volatile();
-        let profile = Profile::open(unique_name(name)).perform(&storage).await?;
+    async fn open_branch(
+        name: &str,
+    ) -> Result<(crate::Branch, Peer<VolatileSpace, dialog_peer::Session>)> {
+        let storage = test_storage().await;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name(name))).await?;
         let operator = profile
-            .derive(b"test")
+            .session(b"test")
+            .space(profile.state())
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
             .await?;
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&operator)
             .await?;
@@ -435,6 +461,60 @@ mod tests {
             out.extend(chunk);
         }
         out
+    }
+
+    /// A complete export of a branch whose retained delegation was later
+    /// retracted asks only for the blobs the tree still references. The
+    /// retraction removes the envelope's blob record, and when the record
+    /// was asserted further down the tree than the removal landed, the
+    /// assert is still there, superseded. An export that took every assert
+    /// it walked past for a reference demanded a blob the tree no longer
+    /// has, so a replica downloading the head failed on it.
+    #[dialog_common::test]
+    async fn it_exports_a_branch_whose_retained_delegation_was_retracted() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction, Value};
+
+        let (branch, operator) = open_branch("delegation-retract-export").await?;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let chain = delegate(&space, &holder, UcanSubject::Specific(space.did())).await;
+        branch
+            .delegations()
+            .retain(chain.clone())
+            .perform(&operator)
+            .await?;
+
+        // Enough commits after the retain that its blob record is carried
+        // below the root before the retraction lands there.
+        for round in 0..64 {
+            let facts = (0..32).map(|fact| {
+                Instruction::Assert(Artifact {
+                    the: "test/fact".parse().expect("a valid attribute"),
+                    of: format!("test:{round}-{fact}")
+                        .parse()
+                        .expect("a valid entity"),
+                    is: Value::UnsignedInt(fact),
+                    cause: None,
+                })
+            });
+            branch
+                .commit(stream::iter(facts.collect::<Vec<_>>()))
+                .perform(&operator)
+                .await?;
+        }
+        branch
+            .delegations()
+            .retract(chain)
+            .perform(&operator)
+            .await?;
+
+        let snapshot = branch.snapshot().expect("the branch has a head");
+        let export = snapshot.export().perform(&operator);
+        futures_util::pin_mut!(export);
+        while let Some(item) = export.next().await {
+            item?;
+        }
+        Ok(())
     }
 
     #[dialog_common::test]
@@ -624,6 +704,96 @@ mod tests {
             branch.revision().map(|revision| revision.version()),
             head.map(|revision| revision.version()),
         );
+        Ok(())
+    }
+
+    /// The facts `branch` holds about `entity`.
+    async fn facts_of(
+        branch: &crate::Branch,
+        operator: &Peer<VolatileSpace, Session>,
+        entity: &Entity,
+    ) -> Result<Vec<Artifact>> {
+        Ok(branch
+            .claims()
+            .select(ArtifactSelector::new().of(entity.clone()))
+            .perform(operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|item| item.and_then(|view| view.to_owned()))
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// A certificate retained before content entities moved to `asset:`
+    /// keeps its facts on its `blob:` entity and its envelope in the blob
+    /// index. The envelope is still sized through the index, and
+    /// retracting the delegation reaches the facts and tombstones the entry.
+    #[dialog_common::test]
+    async fn it_retracts_a_delegation_retained_under_the_legacy_name() -> Result<()> {
+        let (branch, operator) = open_branch("delegation-legacy").await?;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let chain = delegate(&space, &holder, UcanSubject::Specific(space.did())).await;
+
+        // Retain the way it was done before the switch: the same facts and
+        // index entry, on the `blob:` entity.
+        let mut instructions = Vec::new();
+        let mut entries = Vec::new();
+        let mut legacy = Vec::new();
+        let mut envelopes = Vec::new();
+        for certificate in chain.certificates() {
+            let bytes = encode(&certificate)?;
+            let mut sink = branch.archive().blob().write().perform(&operator).await?;
+            sink.write_all(&bytes).await?;
+            let hash = *sink.finish().await?.as_bytes();
+            let entity = Entity::from_legacy_blob(&hash)?;
+            for artifact in field_artifacts(&entity, &certificate)? {
+                instructions.push(Instruction::Assert(artifact));
+            }
+            entries.push(BlobRecord::new(bytes.len() as u64).legacy_entry(&hash));
+            legacy.push(entity);
+            envelopes.push((Entity::from_blob(&hash)?, bytes.len() as u64));
+        }
+        branch
+            .commit(stream::iter(instructions))
+            .machinery()
+            .with_entries(entries)
+            .perform(&operator)
+            .await?;
+        for entity in &legacy {
+            assert!(!facts_of(&branch, &operator, entity).await?.is_empty());
+        }
+        for (envelope, size) in &envelopes {
+            assert_eq!(
+                Blob::from(envelope.clone())
+                    .size((&branch).into())
+                    .perform(&operator)
+                    .await?,
+                Some(*size)
+            );
+        }
+
+        branch
+            .delegations()
+            .retract(chain)
+            .perform(&operator)
+            .await?;
+
+        for entity in &legacy {
+            let facts = facts_of(&branch, &operator, entity).await?;
+            assert!(facts.is_empty(), "legacy facts retracted: {facts:?}");
+        }
+        for (envelope, _) in &envelopes {
+            assert_eq!(
+                Blob::from(envelope.clone())
+                    .size((&branch).into())
+                    .perform(&operator)
+                    .await?,
+                None,
+                "the legacy index entry is tombstoned"
+            );
+        }
         Ok(())
     }
 

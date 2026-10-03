@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use dialog_artifacts::Artifacts;
+use dialog_csv::CsvImporter;
 use dialog_diagnose::{DiagnoseApp, DiagnoseCli, DiagnoseState, DiagnoseTab, Promise, TreeNode};
-use dialog_storage::MemoryStorageBackend;
+use futures_util::StreamExt as _;
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -22,7 +22,7 @@ use ratatui::{
 ///
 /// This function:
 /// 1. Parses command-line arguments
-/// 2. Loads CSV data into a Dialog artifacts database
+/// 2. Commits the CSV's facts to a branch of an in-memory repository
 /// 3. Initializes the TUI with the specified starting tab
 /// 4. Runs the interactive terminal interface
 #[tokio::main]
@@ -33,17 +33,20 @@ pub async fn main() -> Result<()> {
     println!("CSV PATH: {}", csv_path.display());
     println!("{}", tokio::fs::try_exists(&csv_path).await?);
 
-    let mut csv = tokio::fs::File::open(csv_path).await?;
-    let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
-
-    artifacts.import(&mut csv).await?;
+    let csv = tokio::fs::File::open(csv_path).await?;
+    let artifacts = CsvImporter::new(csv).filter_map(|artifact| async move {
+        artifact
+            .inspect_err(|error| println!("Skipping invalid datum: {error}"))
+            .ok()
+    });
+    let explored = dialog_diagnose::explore(artifacts).await?;
 
     let starting_tab = match cli.tree {
         true => Some(DiagnoseTab::Tree),
         _ => None,
     };
 
-    let diagnose = Diagnose::new(artifacts, starting_tab).await?;
+    let diagnose = Diagnose::new(explored, starting_tab).await?;
     let mut terminal = ratatui::init();
     terminal.clear()?;
     diagnose.run(terminal)?;
@@ -64,21 +67,21 @@ pub struct Diagnose {
 }
 
 impl Diagnose {
-    /// Creates a new `Diagnose` instance with the given artifacts and optional starting tab.
+    /// Creates a new `Diagnose` instance over an explored tree and optional starting tab.
     ///
     /// # Arguments
     ///
-    /// * `artifacts` - The Dialog artifacts database to explore
+    /// * `explored` - The committed tree to explore
     /// * `starting_tab` - Optional tab to open initially (defaults to Facts view)
     ///
     /// # Returns
     ///
     /// A new `Diagnose` instance ready to run the TUI
     pub async fn new(
-        artifacts: Artifacts<MemoryStorageBackend<[u8; 32], Vec<u8>>>,
+        explored: dialog_diagnose::Explored,
         starting_tab: Option<DiagnoseTab>,
     ) -> Result<Self> {
-        let mut state = DiagnoseState::new(artifacts).await;
+        let mut state = DiagnoseState::new(explored).await;
 
         if let Some(tab) = starting_tab {
             state.tab = tab;

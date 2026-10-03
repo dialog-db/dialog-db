@@ -19,6 +19,16 @@ use native as backend;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use web as backend;
 
+/// The `info` tag for a sealed secret.
+const SEAL: u8 = 0x00;
+
+/// The `info` tag for a derived secret.
+///
+/// Distinct from [`SEAL`] so the two uses of one agreement key stay disjoint
+/// by structure: a derivation's `info` can never collide with a sealing's,
+/// whatever labels the two carry.
+const DERIVE: u8 = 0x01;
+
 /// Build the HKDF `info` string binding a key to its purpose and participants.
 ///
 /// Including both public keys means a derived key is usable only for this exact
@@ -29,9 +39,23 @@ fn info(context: Context, ephemeral: &[u8; 32], recipient: &[u8; 32]) -> Vec<u8>
     let label = context.as_str().as_bytes();
     let mut info = Vec::with_capacity(label.len() + 65);
     info.extend_from_slice(label);
-    info.push(0x00);
+    info.push(SEAL);
     info.extend_from_slice(ephemeral);
     info.extend_from_slice(recipient);
+    info
+}
+
+/// Build the HKDF `info` string for a derived secret.
+///
+/// The identity key is fixed-width and precedes the variable-width label, so
+/// the concatenation stays injective in the label without a length prefix.
+fn derivation_info(context: Context, identity: &[u8; 32], label: &[u8]) -> Vec<u8> {
+    let tag = context.as_str().as_bytes();
+    let mut info = Vec::with_capacity(tag.len() + 33 + label.len());
+    info.extend_from_slice(tag);
+    info.push(DERIVE);
+    info.extend_from_slice(identity);
+    info.extend_from_slice(label);
     info
 }
 
@@ -92,6 +116,30 @@ pub(super) async fn reveal(
     .await?;
 
     backend::decrypt(&derived, &sealed.nonce, &sealed.ciphertext, &aad(recipient)).await
+}
+
+/// Derive a deterministic secret from `key`, scoped to `context` and `label`.
+///
+/// The agreement runs against the key's OWN public key, so the shared secret
+/// is `a²·G` for the identity's scalar `a`. The peer point has to have an
+/// unknown discrete log -- against `k·G` for a publicly known `k`, anyone
+/// holding the identity's agreement public key could compute the same secret
+/// -- and the identity's own public key is the one point already in hand that
+/// qualifies. Recovering `a²·G` from `a·G` is squaring Diffie-Hellman, which
+/// is equivalent to CDH in a prime-order group; X25519's clamping clears the
+/// cofactor, so the agreement lands in Curve25519's prime-order subgroup.
+///
+/// Unlike a signature, agreement is a pure function of (secret, peer) on every
+/// platform: there is no nonce for an implementation to hedge.
+pub(super) async fn derive(
+    key: &X25519SecretKey,
+    context: Context,
+    label: &[u8],
+) -> Result<[u8; 32], SecretError> {
+    let public = key.public_key();
+    let identity = public.to_bytes();
+    let shared = key.diffie_hellman(&public).await?;
+    backend::derive_key(&shared, &derivation_info(context, &identity, label)).await
 }
 
 /// Generate a random AES-GCM nonce.

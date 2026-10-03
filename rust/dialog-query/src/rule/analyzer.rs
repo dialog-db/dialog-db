@@ -260,7 +260,7 @@ impl AnalyzedRule {
     /// fact change moves its entire group's row.
     pub fn is_entity_local(&self) -> bool {
         fn of_is_this(term: &Term<Entity>) -> bool {
-            matches!(term, Term::Variable { name: Some(name), .. } if name == "this")
+            matches!(term, Term::Variable { name: Some(name), .. } if &**name == "this")
         }
         if !self.reduce.is_empty() {
             return false;

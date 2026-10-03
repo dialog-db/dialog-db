@@ -39,6 +39,9 @@
 mod cli;
 pub use cli::*;
 
+mod source;
+pub use source::*;
+
 mod state;
 pub use state::*;
 

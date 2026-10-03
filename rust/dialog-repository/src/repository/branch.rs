@@ -1,30 +1,35 @@
 use super::memory::Cell;
 use crate::rules::SharedRuleCache;
-use crate::{ResolveError, Revision};
+use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
-use crate::placement::{Bindings, Target};
+use crate::NetworkedIndex;
+use crate::placement::{Bindings, Target as StoreTarget};
 use crate::repository::source::{Caches, SourceRef};
-use crate::{Ephemeral, NetworkedIndex};
+use dialog_artifacts::Changes;
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::Entity;
 use dialog_artifacts::history::Origin;
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version,
 };
-use dialog_artifacts::tree::SpillCache;
+use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache};
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
-use dialog_common::Blake3Hash;
-use dialog_effects::archive::Archive;
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
+use dialog_effects::authority::{Operator, OperatorExt as _};
 use dialog_query::query::Application;
-use dialog_search_tree::{Buffer, Cache};
-use std::sync::{Arc, Mutex};
+use futures_util::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+mod asset;
+pub use asset::*;
 
 mod blob;
 pub use blob::*;
@@ -55,9 +60,16 @@ pub use load::*;
 
 mod metadata;
 
+pub mod registry;
+pub use registry::{OpenRegistry, RegistryReference};
+
+pub(crate) mod resolve;
+pub use resolve::ResolveEnv;
+
 mod open;
 pub use open::*;
 
+mod merge;
 mod pull;
 pub use pull::*;
 
@@ -74,6 +86,7 @@ mod select;
 pub use select::*;
 
 pub(crate) mod session;
+use dialog_effects::archive::prelude::ArchiveScope;
 pub use session::*;
 
 mod subscription;
@@ -85,7 +98,7 @@ pub use set_upstream::*;
 pub(crate) mod transaction;
 pub use transaction::*;
 
-mod upstream;
+pub(crate) mod upstream;
 pub use upstream::*;
 
 // Either feature: `integration-tests` runs these natively, and
@@ -108,7 +121,7 @@ mod read_amplification;
 /// Type alias for the search tree index.
 pub type Index = dialog_artifacts::Index;
 
-/// A branch represents a named layer of development within a repository.
+/// A branch represents a named line of development within a repository.
 ///
 /// Holds a [`BranchReference`] (scoped to `branch/{name}`) plus cells
 /// for the branch's latest revision and optional upstream tracking.
@@ -116,7 +129,9 @@ pub type Index = dialog_artifacts::Index;
 pub struct Branch {
     reference: BranchReference,
     revision: Cell<Revision>,
-    upstream: Cell<Upstreams>,
+    /// What this branch pulls from and pushes to, as last resolved from
+    /// the registry, and how far it has synced with each.
+    tracking: Cell<Tracking>,
     /// The induction watermark: the last revision through which
     /// inductive rules evaluated on this replica. A transaction commit
     /// catches up over `(watermark, head]` before processing its own
@@ -130,7 +145,7 @@ pub struct Branch {
     /// carried (as a shared handle) into every `Select`'s tree, so blocks read
     /// by one query stay warm for the next instead of being re-fetched from
     /// storage. Content-addressed keys make sharing across revisions safe.
-    node_cache: Cache<Blake3Hash, Buffer>,
+    node_cache: ArtifactNodeCache,
     /// Shared cache of spilled value blocks, keyed by their 32-byte content
     /// reference. Like `node_cache`, created once per opened branch and carried
     /// into every select so a repeated read of the same large (spilled) value
@@ -141,14 +156,14 @@ pub struct Branch {
     /// every query's durable rule resolution, so the `dialog.rule/*` scan is
     /// paid once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
-    /// The branch's ephemeral layer: session facts folded into every
+    /// The branch's ephemeral line: session facts folded into every
     /// read of this branch, never committed, and the store behind
-    /// the procedural layer. Shared across clones like the caches;
-    /// every change mints an instant subscriptions maintain from.
-    /// See [`Ephemeral`].
+    /// the session scope. Shared across clones like the caches; every
+    /// change mints an instant subscriptions maintain from. See
+    /// [`Ephemeral`].
     overlay: Ephemeral,
-    /// Which store each layer name a placement can target is bound to
-    /// on this replica. Shared across clones like the caches. See
+    /// Which store each scope a placement can target is bound to on
+    /// this replica. Shared across clones like the caches. See
     /// [`Bindings`].
     bindings: Bindings,
     /// Shared plan cache for the deductive rules resolved on this branch,
@@ -192,7 +207,129 @@ pub struct Branch {
     /// (profile, issuer) pair so a branch handle driven under a different
     /// authority re-derives rather than serving a stale identity.
     identity_cache: Arc<Mutex<Option<CommitIdentity>>>,
+    /// Memo of the schema metadata every query folds into its overlay.
+    /// Deriving it hashes and base58-renders the replica, branch, and
+    /// revision entities, and it is asked for on every query, yet it only
+    /// changes with the profile or the head. Keyed by both, so a handle
+    /// under another profile or at another head re-derives.
+    metadata_cache: MetadataMemo,
+    /// Memo of the metadata a query layer over this branch alone folds
+    /// into its overlay: this branch's, the registry's self-description,
+    /// and the session's. Keyed by profile, operator, and head.
+    layer_metadata_cache: LayerMetadataMemo,
+    /// Which address answered last, per peer, as the host's connection to
+    /// it records it. Filled when the branch resolves its upstreams, and
+    /// shared by every clone, so a remote built from a route fails over
+    /// as the host's connection does rather than starting afresh.
+    answers: Answers,
+    /// What every handle of this branch in the process shares as its
+    /// writer: the lock the head moves under, and the head the writer's
+    /// last pull adopted. See [`Writer`].
+    writer: Arc<Writer>,
 }
+
+/// Which address answered last, per peer: the record each of the host's
+/// connections keeps, collected as a branch connects.
+pub(crate) type Answers = Arc<Mutex<HashMap<Entity, Arc<AtomicUsize>>>>;
+
+/// The writer of a branch in this process, shared by every handle of
+/// the branch: origins are unique per process, so the handles mint under
+/// one origin and must take turns moving the head.
+#[derive(Debug)]
+pub(crate) struct Writer {
+    /// Held while the head moves, by a commit, a pull or a reset, so two
+    /// of them by this writer never mint the same edition.
+    lock: AsyncMutex<()>,
+    /// The head the last pull through any handle landed. A fast-forward
+    /// adopts a revision another writer issued, so a commit cannot tell
+    /// from the issuer alone that such a head is its own writer's doing;
+    /// this record can.
+    adopted: Mutex<Option<Version>>,
+}
+
+impl Writer {
+    /// The writer of the branch `key` names, shared with every handle of
+    /// it that is open. Origins are unique per process, so no sharing is
+    /// needed beyond it.
+    fn shared(key: String) -> Arc<Self> {
+        static WRITERS: OnceLock<Mutex<HashMap<String, Weak<Writer>>>> = OnceLock::new();
+        let mut writers = WRITERS
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(writer) = writers.get(&key).and_then(Weak::upgrade) {
+            return writer;
+        }
+        // Drop the entries of branches no handle is open for any more.
+        writers.retain(|_, writer| writer.strong_count() > 0);
+        let writer = Arc::new(Writer {
+            lock: AsyncMutex::new(()),
+            adopted: Mutex::new(None),
+        });
+        writers.insert(key, Arc::downgrade(&writer));
+        writer
+    }
+
+    /// Hold the writer while moving the head. Not re-entrant: a holder
+    /// must not take it again.
+    pub(crate) async fn lock(&self) -> AsyncMutexGuard<'_, ()> {
+        self.lock.lock().await
+    }
+
+    /// The head the writer's last pull landed, if any.
+    pub(crate) fn adopted(&self) -> Option<Version> {
+        *self
+            .adopted
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Record the head a pull just landed.
+    pub(crate) fn adopt(&self, version: Version) {
+        *self
+            .adopted
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(version);
+    }
+}
+
+impl Branch {
+    /// The metadata a query layer over this branch alone folds in, as
+    /// `derive` computes it, reused while the profile, operator, and head
+    /// are those it was derived under. Shared rather than copied: every
+    /// query over the branch reads the same facts.
+    pub(crate) fn layer_metadata(
+        &self,
+        operator: &Capability<Operator>,
+        derive: impl FnOnce() -> Changes,
+    ) -> Arc<Changes> {
+        let profile = operator.profile();
+        let did = operator.did();
+        let revision = self.revision();
+        let mut cache = self
+            .layer_metadata_cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some((cached_profile, cached_operator, cached_revision, changes)) = cache.as_ref()
+            && cached_profile == profile
+            && *cached_operator == did
+            && *cached_revision == revision
+        {
+            return changes.clone();
+        }
+        let changes = Arc::new(derive());
+        *cache = Some((profile.clone(), did, revision, changes.clone()));
+        changes
+    }
+}
+
+/// A branch's metadata memo: the profile and head it was derived under,
+/// and what was derived.
+type MetadataMemo = Arc<Mutex<Option<(Did, Option<Revision>, metadata::BranchMetadata)>>>;
+
+/// A single-branch query layer's metadata memo: the profile, operator,
+/// and head it was derived under, and what was derived.
+type LayerMetadataMemo = Arc<Mutex<Option<(Did, Did, Option<Revision>, Arc<Changes>)>>>;
 
 /// A memoized commit identity: the (profile, issuer) inputs it was derived
 /// from, and the derived branch entity and origin. See
@@ -211,25 +348,29 @@ impl Branch {
         self.reference.name()
     }
 
-    /// The branch's ephemeral layer: assert or retract session facts
+    /// The branch's ephemeral line: assert or retract session facts
     /// that every read of this branch observes but no commit
-    /// persists, and the store a transaction routes procedural
-    /// attributes to. See [`Ephemeral`].
+    /// persists. See [`Ephemeral`].
     pub fn overlay(&self) -> &Ephemeral {
         &self.overlay
     }
 
-    /// Bind a layer name to one of this branch's stores, so a write to
-    /// an attribute placed on that layer routes there. Local to this
+    /// Bind a scope to one of this branch's stores, so a write to an
+    /// attribute placed on that scope routes there. Local to this
     /// replica; see [`Bindings`].
-    pub fn bind(&self, layer: Entity, target: Target) -> &Self {
-        self.bindings.bind(layer, target);
+    pub fn bind(&self, scope: Entity, target: StoreTarget) -> &Self {
+        self.bindings.bind(scope, target);
         self
     }
 
-    /// This branch's layer bindings.
+    /// This branch's scope bindings.
     pub fn bindings(&self) -> &Bindings {
         &self.bindings
+    }
+
+    /// The cell holding this branch's head.
+    pub(crate) fn revision_cell(&self) -> &Cell<Revision> {
+        &self.revision
     }
 
     /// Returns the current revision of this branch, or `None` if the branch
@@ -238,18 +379,103 @@ impl Branch {
         self.revision.content()
     }
 
-    /// Returns the default upstream — the target of a bare pull/push/fetch —
-    /// or `None` if no upstream is configured.
-    pub fn upstream(&self) -> Option<Upstream> {
-        self.upstreams().default_upstream().cloned()
+    /// The upstreams this branch pulls from, as last resolved: a bare
+    /// [`pull`](Self::pull) takes from every one.
+    pub fn pulls(&self) -> Upstreams {
+        self.sharing(self.tracked().pulls(&self.subject()))
     }
 
-    /// Returns every configured upstream tracking entry, default first. A
-    /// branch can track several upstreams and pull from / push to any of
-    /// them — see [`Pull::from`](crate::Pull::from) and
-    /// [`Push::to`](crate::Push::to).
+    /// The upstreams this branch pushes to, as last resolved: a bare
+    /// [`push`](Self::push) goes to every one.
+    pub fn pushes(&self) -> Upstreams {
+        self.sharing(self.tracked().pushes(&self.subject()))
+    }
+
+    /// `upstreams`, with each remote reaching its peer through the record
+    /// of the host's connection to it, where the branch has connected.
+    pub(crate) fn sharing(&self, upstreams: Upstreams) -> Upstreams {
+        let answers = self
+            .answers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if answers.is_empty() {
+            return upstreams;
+        }
+        upstreams
+            .iter()
+            .cloned()
+            .map(|upstream| match upstream {
+                Upstream::Remote {
+                    remote,
+                    branch,
+                    tree,
+                } => match answers.get(remote.peer()) {
+                    Some(answered) => Upstream::Remote {
+                        remote: remote.sharing(answered.clone()),
+                        branch,
+                        tree,
+                    },
+                    None => Upstream::Remote {
+                        remote,
+                        branch,
+                        tree,
+                    },
+                },
+                upstream => upstream,
+            })
+            .collect()
+    }
+
+    /// Record that the host's connection to `peer` keeps `answered`.
+    pub(crate) fn connected(&self, peer: Entity, answered: Arc<AtomicUsize>) {
+        self.answers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(peer, answered);
+    }
+
+    /// This branch's writer in the process: the lock a commit, a pull or
+    /// a reset holds while it moves the head, and the head the last pull
+    /// adopted. Every handle of the branch shares it, so a commit and a
+    /// pull by one writer take turns instead of minting the same edition
+    /// twice.
+    pub(crate) fn writer(&self) -> Arc<Writer> {
+        self.writer.clone()
+    }
+
+    /// The writer shared by every open handle of the branch `reference`
+    /// names.
+    pub(crate) fn writer_of(reference: &BranchReference) -> Arc<Writer> {
+        Writer::shared(format!("{}:{}", reference.subject(), reference.name()))
+    }
+
+    /// Where a read of content this branch holds by reference falls back
+    /// to: an upstream at a peer, or else a peer this branch pulled from
+    /// once without tracking it, whose tree it may have adopted unread.
+    pub(crate) fn fallback(&self) -> RemoteFallback {
+        match self.upstreams().fallback() {
+            RemoteFallback::None => self.tracked().synced_with(&self.subject()).fallback(),
+            fallback => fallback,
+        }
+    }
+
+    /// Every upstream, pulled from or pushed to.
     pub fn upstreams(&self) -> Upstreams {
-        self.upstream.content().unwrap_or_default()
+        self.pulls()
+            .iter()
+            .chain(self.pushes().iter())
+            .cloned()
+            .collect()
+    }
+
+    /// What this branch's tracking cell holds.
+    pub(crate) fn tracked(&self) -> Tracking {
+        self.tracking.content().unwrap_or_default()
+    }
+
+    /// This branch's tracking cell.
+    pub(crate) fn tracking(&self) -> &Cell<Tracking> {
+        &self.tracking
     }
 
     /// Re-resolve this handle's head and upstream from storage, updating its
@@ -268,7 +494,7 @@ impl Branch {
         Env: Provider<memory::Resolve> + ConditionalSync,
     {
         self.revision.resolve().perform(env).await?;
-        self.upstream.resolve().perform(env).await?;
+        self.tracking.resolve().perform(env).await?;
         Ok(())
     }
 
@@ -283,8 +509,8 @@ impl Branch {
     }
 
     /// Archive capability for this branch's subject.
-    pub fn archive(&self) -> Capability<Archive> {
-        self.subject().archive()
+    pub fn archive(&self) -> ArchiveScope {
+        ArchiveScope::new(self.subject())
     }
 
     /// The recorded claim lineage at this branch's current revision, which
@@ -297,16 +523,17 @@ impl Branch {
     /// read does, so a replica that materialized only the operational
     /// regions fetches the history it turns out to need. A branch tracking
     /// no remote reads purely locally.
-    pub async fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        SourceRef::from(self).history(env).await
+        SourceRef::from(self).history(env)
     }
 
     /// The branch's committed history, newest first — at most `limit`
@@ -321,7 +548,8 @@ impl Branch {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<memory::Resolve>
             + Provider<crate::Hydrate>
@@ -349,7 +577,7 @@ impl Branch {
     }
 
     /// A shared handle to this branch's node cache, for seeding a read tree.
-    pub(crate) fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
+    pub(crate) fn node_cache(&self) -> ArtifactNodeCache {
         self.node_cache.clone()
     }
 
@@ -382,10 +610,6 @@ impl Branch {
     }
 
     /// A shared handle to this branch's deductive-rule cache.
-    pub(crate) fn revision_cell(&self) -> &Cell<Revision> {
-        &self.revision
-    }
-
     pub(crate) fn induction_cell(&self) -> &Cell<Revision> {
         &self.induction
     }

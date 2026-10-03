@@ -1,6 +1,6 @@
 //! Command to open a remote branch.
 
-use crate::{BranchReference, OpenRemoteBranchError, RemoteBranch, RemoteRepository};
+use crate::{BranchReference, ConnectedBranch, ConnectedReplica, OpenRemoteBranchError};
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
 
@@ -10,18 +10,18 @@ use dialog_effects::memory::Resolve;
 /// upstream cell from the cache. Does not error when the cache is
 /// empty (branch not yet fetched).
 pub struct OpenRemoteBranch {
-    repository: RemoteRepository,
+    repository: ConnectedReplica,
     branch: BranchReference,
 }
 
 impl OpenRemoteBranch {
     /// Construct from an owned remote repository and a branch reference.
-    pub(super) fn new(repository: RemoteRepository, branch: BranchReference) -> Self {
+    pub(super) fn new(repository: ConnectedReplica, branch: BranchReference) -> Self {
         Self { repository, branch }
     }
 
     /// Execute the open operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteBranch, OpenRemoteBranchError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<ConnectedBranch, OpenRemoteBranchError>
     where
         Env: Provider<Resolve>,
     {
@@ -34,7 +34,7 @@ impl OpenRemoteBranch {
             upstream.reset(edition);
         }
 
-        Ok(RemoteBranch::new(
+        Ok(ConnectedBranch::new(
             self.repository,
             self.branch,
             cache,

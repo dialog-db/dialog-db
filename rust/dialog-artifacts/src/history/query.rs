@@ -1,16 +1,15 @@
+use crate::ArchiveReader;
 use std::ops::Bound;
 use std::str::FromStr;
 
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
-use dialog_search_tree::ContentAddressedStorage as NodeStorage;
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_common::Blake3Hash as NodeHash;
+use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use crate::Value;
-use crate::history::VersionExt as _;
 use crate::tree::ArtifactTreeExt as _;
 use crate::tree::{
-    ArtifactTree, SPILL_LOOKAHEAD, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache,
+    ArtifactNodeCache, ArtifactTree, SPILL_LOOKAHEAD, SpillCache, fetch_spilled_cached, spill_cache,
 };
 use crate::{
     Attribute, DialogArtifactsError, Entity, Key, State, history_claim_range, history_key_version,
@@ -56,12 +55,11 @@ impl From<&Version> for HistorySelector {
 /// merging trees unions their histories.
 pub struct TreeHistory<S>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    S: ArchiveReader + Clone,
 {
     tree: ArtifactTree,
     store: S,
-    storage: NodeStorage<TreeStorageBridge<S>>,
+    storage: S,
     /// Memoized verified records, keyed by version. A version's record
     /// is immutable (two records claiming one version is protocol
     /// corruption), so entries never invalidate; a hit skips the tree
@@ -76,8 +74,7 @@ where
 
 impl<S> TreeHistory<S>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    S: ArchiveReader + Clone,
 {
     /// Read history from the given artifact tree
     pub fn new(tree: ArtifactTree, store: S) -> Self
@@ -88,7 +85,7 @@ where
             records: dialog_search_tree::Cache::new(),
             tree,
             store: store.clone(),
-            storage: NodeStorage::new(TreeStorageBridge(store)),
+            storage: store,
             spill: spill_cache(),
         }
     }
@@ -113,11 +110,7 @@ where
     /// construction of [`extend_skips`](super::extend_skips)) re-walk the
     /// same tree spine, and content-addressed keys make sharing the cache
     /// with other readers of the same store safe.
-    pub fn from_root_with_cache(
-        root: &Blake3Hash,
-        store: S,
-        cache: dialog_search_tree::Cache<NodeHash, dialog_search_tree::Buffer>,
-    ) -> Self {
+    pub fn from_root_with_cache(root: &Blake3Hash, store: S, cache: ArtifactNodeCache) -> Self {
         Self::new(
             ArtifactTree::from_hash_with_cache(NodeHash::from(*root), cache),
             store,
@@ -199,6 +192,13 @@ where
             .buffered(SPILL_LOOKAHEAD)
     }
 
+    /// Read history over no tree at all — the shape of a branch with no
+    /// revision. There is no root to read records from, so every lookup
+    /// resolves to nothing without touching storage.
+    pub fn empty_with_cache(store: S, cache: ArtifactNodeCache) -> Self {
+        Self::new(ArtifactTree::empty_with_cache(cache), store)
+    }
+
     /// Every record in the history region, in key order (ascending by
     /// version; no record appears before one produced by an ancestor
     /// revision)
@@ -210,9 +210,7 @@ where
 
 impl<S> History for TreeHistory<S>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + ConditionalSync,
+    S: ArchiveReader + Clone,
 {
     async fn claims_at(
         &self,

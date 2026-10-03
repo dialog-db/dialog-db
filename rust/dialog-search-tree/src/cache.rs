@@ -1,4 +1,6 @@
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
+
+use crate::PersistentNode;
 
 #[cfg(not(target_arch = "wasm32"))]
 use sieve_cache::ShardedSieveCache as SieveCache;
@@ -10,6 +12,13 @@ use std::hash::Hash;
 use std::{cell::RefCell, rc::Rc};
 
 const CACHE_CAPACITY: usize = 2048;
+
+/// A cache of a tree's nodes by content hash.
+///
+/// It holds [`PersistentNode`]s rather than their bytes. A node exists only
+/// once its bytes passed the archive check, so a node read from the cache
+/// needs no check, and bytes that fail it never enter the cache.
+pub type NodeCache<Key, Value> = Cache<Blake3Hash, PersistentNode<Key, Value>>;
 
 /// A thread-safe cache for storing frequently accessed values.
 ///

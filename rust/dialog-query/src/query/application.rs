@@ -67,6 +67,20 @@ pub trait Application: Clone + ConditionalSend + 'static {
         Restriction::Unsupported
     }
 
+    /// Re-express a conclusion derived by one of this query's
+    /// [restrictions](Self::restrict) in this query's own shape. A
+    /// restriction pins the subject to a constant, so what it
+    /// realizes can differ in form from what this query realizes for
+    /// the same facts (a concept conclusion's match lacks the subject
+    /// variable's binding). Incremental maintainers pass every
+    /// re-derived row through here so maintained and recomputed rows
+    /// are indistinguishable. The default returns the conclusion
+    /// unchanged, which is right for any conclusion that carries only
+    /// resolved values.
+    fn adopt(&self, conclusion: Self::Conclusion) -> Result<Self::Conclusion, EvaluationError> {
+        Ok(conclusion)
+    }
+
     /// The concept this query applies, when it is a concept query.
     /// Incremental maintainers use it to resolve the rule set and
     /// decide whether per-entity restriction is sound (every rule

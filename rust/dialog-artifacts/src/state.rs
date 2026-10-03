@@ -3,10 +3,10 @@ use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
-use crate::{Artifact, ArtifactStore};
+use crate::Artifact;
 
-/// A [`State`] represents the presence or absence of an [`Artifact`] within a
-/// [`ArtifactStore`]
+/// A [`State`] represents the presence or absence of an [`Artifact`] within an
+/// artifact index
 #[derive(
     Clone, Debug, PartialEq, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize,
 )]

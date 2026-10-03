@@ -67,16 +67,6 @@ jobs:
           - 'test:web:debug'
           - 'test:web:release'
           - 'test:cross:integration'
-          # FIXME: Currently, NPM package tests run / pass locally, but
-          # in CI the test runner is picking up the wrong `chromium` binary
-          # The problem is subtle: it finds the correct Nix path, but it
-          # chooses the `chromium-browser` binary when it should be choosing
-          # the `chromium` binary, and attempts to override this choice
-          # through environment variables have proved fruitless. Noting
-          # that this worked before because NPM tests were run in a special
-          # job where we kept the Chrome that is installed in the Github
-          # Runner by default, which "just worked."
-          # - 'test:npm'
     steps:
       # NOTE: AppArmor became more restrictive in Ubuntu 24.04 and
       # causes problems for Puppeteer when launching Chrome; it should

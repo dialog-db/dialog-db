@@ -8,12 +8,19 @@
 use std::str::FromStr as _;
 
 use anyhow::Result;
+use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt as _, spill_cache};
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStoreMutExt as _, ArtifactView, Artifacts, Attribute,
-    Cause, Entity, Instruction, Uri, Value, default_sort_key,
+    ArchiveDelta, Artifact, ArtifactSelector, ArtifactView, Attribute, Cause, Entity, Instruction,
+    SortKey, Uri, Value, sort_key,
 };
-use dialog_storage::{Blake3Hash, MemoryStorageBackend};
+use dialog_search_tree::{Manifest, MemoryBlocks};
 use futures_util::TryStreamExt as _;
+
+/// The sort key under the format the stores here are created with: a new
+/// store's tree takes [`Manifest::default`].
+fn default_sort_key(artifact: &Artifact) -> SortKey {
+    sort_key(artifact, &Manifest::default())
+}
 
 fn entity(n: u32) -> Entity {
     Entity::from_str(&format!("entity:hardening-{n:04}")).expect("valid entity")
@@ -43,8 +50,9 @@ fn probe_values() -> Vec<Value> {
 /// interleave wrongly.
 #[tokio::test]
 async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
-    let backend = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-    let mut store = Artifacts::anonymous(backend).await?;
+    let blocks = MemoryBlocks::new();
+    let mut index = ArtifactTree::empty();
+    let mut delta = ArchiveDelta::zero();
 
     let mut instructions = Vec::new();
     for (at, value) in probe_values().into_iter().enumerate() {
@@ -59,16 +67,27 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
             },
         }));
     }
-    store.commit(instructions).await?;
+    index
+        .apply(
+            &blocks,
+            &mut delta,
+            futures_util::stream::iter(instructions),
+        )
+        .await?;
+    delta.flush_into(&blocks);
 
-    let rows: Vec<_> = store
-        .select(ArtifactSelector::new().the(Attribute::from_str("hardening/value")?))
+    let rows: Vec<_> = index
+        .scan(
+            blocks.clone(),
+            spill_cache(),
+            ArtifactSelector::new().the(Attribute::from_str("hardening/value")?),
+        )
         .try_collect()
         .await?;
     assert_eq!(rows.len(), probe_values().len(), "every fact must scan");
 
     for row in rows {
-        let from_bytes = row.sort_key()?;
+        let from_bytes = row.sort_key(&Manifest::default())?;
         let from_fields = default_sort_key(&row.to_owned()?);
         assert_eq!(
             from_bytes,

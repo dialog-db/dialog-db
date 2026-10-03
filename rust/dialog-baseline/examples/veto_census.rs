@@ -22,18 +22,12 @@
 //!   --example veto_census -- 10000
 //! ```
 
-use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Datum, IndexRoot, Key, State};
-use dialog_baseline::se::{SeLog, se_instructions};
-use dialog_search_tree::{
-    ArchivedNodeBody, Buffer as TreeBuffer, Distribution as _, Geometric, Manifest, PersistentNode,
-};
-use dialog_storage::{
-    Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
-};
-use futures_util::stream;
+use dialog_artifacts::Key;
+use dialog_baseline::nodes::walk;
+use dialog_baseline::repo::DialogRepo;
+use dialog_baseline::se::SeLog;
+use dialog_search_tree::{Distribution as _, Geometric, Manifest, NodeBody};
 use std::collections::BTreeMap;
-
-type TreeNode = PersistentNode<Key, State<Datum>>;
 
 const ENTRY_OVERHEAD: usize = 32;
 
@@ -101,45 +95,28 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let inner = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut store = Artifacts::open("veto-census".into(), inner.clone()).await?;
-        for commit in &log.transactions {
-            store.commit(stream::iter(se_instructions(commit)?)).await?;
-        }
-        store.canonicalize().await?;
+        let repo = DialogRepo::volatile().await?;
+        repo.replay_se(&log).await?;
+        repo.canonicalize().await?;
+        let root = repo
+            .root()
+            .ok_or_else(|| anyhow::anyhow!("the branch has commits, so it has a tree"))?;
 
-        let revision = store.revision().await?;
-        let bytes = inner
-            .get(&revision)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("revision block missing"))?;
-        let root: IndexRoot = CborEncoder.decode(&bytes).await?;
-
-        // In-order walk: children pushed in reverse so the stack pops
-        // left-to-right, keeping the global key sequence contiguous for
+        // In-order walk, so the global key sequence stays contiguous for
         // stretch accounting.
         let mut census = Census::default();
-        let mut stack = vec![*root.index()];
-        while let Some(hash) = stack.pop() {
-            let Some(bytes) = inner.get(&hash).await? else {
-                anyhow::bail!("reachable node missing");
-            };
-            let size = bytes.len();
-            let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
-            match node.body() {
-                ArchivedNodeBody::Index(index) => {
-                    for at in (0..index.len()).rev() {
-                        if at > 0 {
-                            let separator = index.separator(at)?;
-                            if separator.len() as u32 > manifest.max_separator {
-                                census.forced_links += 1;
-                                census.forced_separator_bytes += separator.len();
-                            }
+        walk(&repo.index(), root, |visit| {
+            match visit.node.body() {
+                NodeBody::Index(index) => {
+                    for at in 1..index.len() {
+                        let separator = index.separator(at)?;
+                        if separator.len() as u32 > manifest.max_separator {
+                            census.forced_links += 1;
+                            census.forced_separator_bytes += separator.len();
                         }
-                        stack.push(*index.hash_at(at)?.as_bytes());
                     }
                 }
-                ArchivedNodeBody::Segment(segment) => {
+                NodeBody::Segment(segment) => {
                     let mut keys = segment.keys::<Key>()?;
                     let mut leaf_seams = 0usize;
                     let mut leaf_vetoed = 0usize;
@@ -152,10 +129,12 @@ fn main() -> anyhow::Result<()> {
                         }
                         census.previous_key = Some(key.to_vec());
                     }
-                    census.leaves.push((size, leaf_seams, leaf_vetoed));
+                    census.leaves.push((visit.size, leaf_seams, leaf_vetoed));
                 }
             }
-        }
+            Ok(())
+        })
+        .await?;
         if let Some(stretch) = census.open_stretch.take() {
             census.stretches.push(stretch);
         }

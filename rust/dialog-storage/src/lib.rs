@@ -1,31 +1,9 @@
 #![warn(missing_docs)]
 
-//! This crate contains generalized API for constructing content addressed
-//! storage from different backends and encoding schemes.
-//!
-//! In order to use it, first select or implement an [Encoder], and then select
-//! or implement a [StorageBackend]. When you have selected these things, you
-//! can construct a [Storage]:
-//!
-//! ```rust
-//! use dialog_storage::{Storage, CborEncoder, MemoryStorageBackend};
-//!
-//! // Create a CBOR encoder for serialization/deserialization
-//! let encoder = CborEncoder;
-//!
-//! // Create an in-memory storage backend with explicit types
-//! // Using [u8; 32] as the key type and Vec<u8> as the value type
-//! let backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
-//!
-//! // Combine them into a Storage instance
-//! let storage = Storage {
-//!     encoder,
-//!     backend
-//! };
-//! ```
-//!
-//! The prepared `storage` will automatically implement
-//! [ContentAddressedStorage] for bounds-matching encoders and storage backends.
+//! Storage for dialog: capability providers for the effects a replica
+//! performs against its archive, memory, blobs, credentials and
+//! certificates, over volatile memory, the file system, or IndexedDB (see
+//! [`provider`]), plus the codec and hashing those effects share.
 
 extern crate self as dialog_storage;
 
@@ -35,10 +13,8 @@ pub use emulator::*;
 
 pub mod resource;
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub mod web;
-
 pub mod dup_audit;
+pub use dup_audit::{DUPLICATE_SETS, TOTAL_SETS};
 
 mod encoder;
 pub use encoder::*;

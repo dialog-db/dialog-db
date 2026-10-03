@@ -9,8 +9,8 @@
 use super::{FileSystem, FileSystemError, FileSystemHandle};
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
+use dialog_effects::memory::{Edition, List, MemoryError, Publish, Resolve, Retract, Version};
 
 const MEMORY: &str = "memory";
 
@@ -190,6 +190,25 @@ impl Provider<Retract> for FileSystem {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<List> for FileSystem {
+    async fn execute(&self, effect: Capability<List>) -> Result<Vec<String>, MemoryError> {
+        let mut paths: Vec<String> = self
+            .memory()?
+            .resolve(effect.space())?
+            .files()
+            .await?
+            .into_iter()
+            // The lock a CAS holds, and the staging file an atomic write
+            // renames into place, sit beside the cell; neither is one.
+            .filter(|path| !path.ends_with(".lock") && !path.ends_with(".tmp"))
+            .collect();
+        paths.sort();
+        Ok(paths)
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -208,7 +227,12 @@ mod tests {
         let provider = FileSystem::open(&location).await?;
         let did = unique_did().await;
 
-        let effect = did.memory().space("local").cell("missing").resolve();
+        let effect = did
+            .reader()
+            .memory()
+            .space("local")
+            .cell("missing")
+            .resolve();
 
         let result = effect.perform(&provider).await?;
         assert!(result.is_none());
@@ -227,6 +251,7 @@ mod tests {
         // Publish new content (when = None means expect empty)
         let version = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -238,6 +263,7 @@ mod tests {
 
         // Resolve to verify
         let resolved = did
+            .reader()
             .memory()
             .space("local")
             .cell("test")
@@ -264,6 +290,7 @@ mod tests {
         // Create initial content
         let v1 = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -274,6 +301,7 @@ mod tests {
         // Update with correct edition
         let v2 = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -285,6 +313,7 @@ mod tests {
 
         // Verify update
         let edition = did
+            .reader()
             .memory()
             .space("local")
             .cell("test")
@@ -309,6 +338,7 @@ mod tests {
 
         // Create initial content
         did.clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -319,6 +349,7 @@ mod tests {
         // Try to update with wrong edition
         let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
         let result = did
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -342,6 +373,7 @@ mod tests {
 
         // Create initial content
         did.clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -351,6 +383,7 @@ mod tests {
 
         // Try to create again (when = None means expect empty)
         let result = did
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -372,6 +405,7 @@ mod tests {
         // Create content
         let version = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -381,6 +415,8 @@ mod tests {
 
         // Retract with correct edition
         did.clone()
+            .user()
+            .delete()
             .memory()
             .space("local")
             .cell("test")
@@ -390,6 +426,7 @@ mod tests {
 
         // Verify deleted
         let edition = did
+            .reader()
             .memory()
             .space("local")
             .cell("test")
@@ -413,6 +450,7 @@ mod tests {
 
         // Create content
         did.clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -423,6 +461,8 @@ mod tests {
         // Try to retract with wrong edition
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = did
+            .user()
+            .delete()
             .memory()
             .space("local")
             .cell("test")
@@ -446,6 +486,7 @@ mod tests {
 
         // Publish to different spaces
         did.clone()
+            .writer()
             .memory()
             .space("space1")
             .cell("cell")
@@ -454,6 +495,7 @@ mod tests {
             .await?;
 
         did.clone()
+            .writer()
             .memory()
             .space("space2")
             .cell("cell")
@@ -464,6 +506,7 @@ mod tests {
         // Resolve from space1
         let result1 = did
             .clone()
+            .reader()
             .memory()
             .space("space1")
             .cell("cell")
@@ -474,6 +517,7 @@ mod tests {
 
         // Resolve from space2
         let result2 = did
+            .reader()
             .memory()
             .space("space2")
             .cell("cell")
@@ -497,6 +541,7 @@ mod tests {
 
         // Create initial content
         did.clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -507,6 +552,7 @@ mod tests {
         // Try to publish same content with wrong edition - should succeed
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = did
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -533,6 +579,7 @@ mod tests {
         // Create value at cell1
         let edition1 = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("cell1")
@@ -542,6 +589,7 @@ mod tests {
 
         // Create same value at cell2
         let edition2 = did
+            .writer()
             .memory()
             .space("local")
             .cell("cell2")
@@ -567,6 +615,8 @@ mod tests {
         // Try to retract non-existent cell - should succeed
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = did
+            .user()
+            .delete()
             .memory()
             .space("local")
             .cell("nonexistent")
@@ -590,6 +640,7 @@ mod tests {
         // Publish to nested space path
         let edition = did
             .clone()
+            .writer()
             .memory()
             .space("parent/child/grandchild")
             .cell("cell")
@@ -601,6 +652,7 @@ mod tests {
 
         // Resolve to verify
         let resolved = did
+            .reader()
             .memory()
             .space("parent/child/grandchild")
             .cell("cell")
@@ -628,6 +680,7 @@ mod tests {
         // This mirrors how Branch::mount uses "local/main" as an address.
         let version = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("subdir/cell")
@@ -638,6 +691,7 @@ mod tests {
         assert!(!version.is_empty());
 
         let resolved = did
+            .reader()
             .memory()
             .space("local")
             .cell("subdir/cell")
@@ -661,6 +715,7 @@ mod tests {
 
         let version = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("empty")
@@ -671,6 +726,7 @@ mod tests {
         assert!(!version.is_empty());
 
         let edition = did
+            .reader()
             .memory()
             .space("local")
             .cell("empty")
@@ -695,6 +751,7 @@ mod tests {
 
         let version = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("large")
@@ -705,6 +762,7 @@ mod tests {
         assert!(!version.is_empty());
 
         let resolved = did
+            .reader()
             .memory()
             .space("local")
             .cell("large")
@@ -729,6 +787,7 @@ mod tests {
 
         // First publish to create the directory structure
         did.clone()
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -747,6 +806,7 @@ mod tests {
         // Publish should succeed by clearing the stale lock
         let edition = did
             .clone()
+            .reader()
             .memory()
             .space("local")
             .cell("test")
@@ -756,6 +816,7 @@ mod tests {
         let edition = edition.unwrap().version;
 
         let v2 = did
+            .writer()
             .memory()
             .space("local")
             .cell("test")
@@ -764,6 +825,56 @@ mod tests {
             .await?;
 
         assert!(!v2.is_empty());
+        Ok(())
+    }
+
+    /// Listing a space names every cell under it, nested spaces
+    /// included, by path relative to it, and nothing from a space that
+    /// only shares its name as a prefix.
+    #[dialog_common::test]
+    async fn it_lists_the_cells_under_a_space() -> anyhow::Result<()> {
+        let location = StorageLocation::new(Directory::Temp, unique_name("fs-memory-list"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
+
+        for (space, cell) in [
+            ("remote/origin", "address"),
+            ("remote/origin", "branch/main/revision"),
+            ("remote", "top"),
+            ("remotes", "elsewhere"),
+            ("branch/main", "revision"),
+        ] {
+            did.clone()
+                .writer()
+                .memory()
+                .space(space)
+                .cell(cell)
+                .publish(b"x".to_vec(), None)
+                .perform(&provider)
+                .await?;
+        }
+
+        let listed = did
+            .clone()
+            .reader()
+            .memory()
+            .space("remote")
+            .list()
+            .perform(&provider)
+            .await?;
+        assert_eq!(
+            listed,
+            vec!["origin/address", "origin/branch/main/revision", "top"]
+        );
+
+        let missing = did
+            .reader()
+            .memory()
+            .space("nowhere")
+            .list()
+            .perform(&provider)
+            .await?;
+        assert!(missing.is_empty(), "{missing:?}");
         Ok(())
     }
 }

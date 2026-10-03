@@ -12,3 +12,4 @@ do_not_track
  .direnv
  .envrc
 webdriver.json
+guide/book

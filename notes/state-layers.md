@@ -531,7 +531,9 @@ names, read as one composite and written by placement.
   committed through one handle is the shape every clone reads.
 - An ephemeral layer is created and opened through the environment
   (`Ephemeral::create()`, `Ephemeral::open(address)`), from a weak
-  registry the operator holds; it lives as long as some handle does.
+  `EphemeralRegistry` the environment holds under `Holds` (the same
+  way a repository's branch registry is held), created on first use;
+  it lives as long as some handle does. A peer needs no code for it.
 - Identity is a pure function of shape. A layer's stack identity is
   `stack:<base58(blake3(dagcbor{address, links}))>` where `links` is
   the sorted `(name, id(to))` list and `address` is the layer's
@@ -699,8 +701,13 @@ decision (topology, not induction) stands.
 - The upper-layer watermark lag, and rule dispatch from a layer's
   session store (both listed under *Known limits*).
 - Per-tab layers in tonk (`memory:tab`, one layer per connection
-  linked above the state layer) and the inspector over the operator's
-  ephemeral registry.
+  linked above the state layer) and the inspector over the
+  environment's ephemeral registry.
+- Asset changes through a stack transaction. A branch transaction
+  carries its assets apart from the facts through induction and
+  routing (`settle`); the stack's own routing still rebuilds the
+  batch fact by fact, so an asset asserted through a stack is dropped
+  rather than stored. Route assets to the bottom with the facts.
 - The channel transport: a `Sync` carried over the remote site, and
   a scope's `replicated` property resolving to a channel.
 - In tonk, a commit made through the branch handle rather than the
@@ -757,6 +764,22 @@ and not accidents:
   location is asserted on `memory:state`; the tab's stamp
   subscription follows it and the next `tonk:load` clears it. No
   worker-to-client message carries a location.
+- **Placement is the only way to say where a fact goes.** The
+  explicit forms (`assert_into(scope, ..)`, `retract_from`) were
+  dropped: a writer that knows where a fact belongs declares the
+  attribute's scope (`Placement::new(attribute, scope)`) and asserts
+  the fact. Maintenance (`clear`, `forget`) stays, and lands in the
+  same instant as the layer's share of the commit, so an observer
+  never sees an entity between forget and its re-stamp.
+- **Main's single-branch ephemeral API stays public.** `Ephemeral::
+  {assert, retract, apply, export, clear, retain_entities, since}`
+  return `Result` and refuse assets, as main landed them; the stack
+  routes its own ephemeral writes through the same `apply`. Whether
+  the write API should narrow to the stack alone, as discussed, is
+  left for a change of its own.
+- **`Target` is not a root export.** `placement::Target` (`Tree` |
+  `Session`) stays under its module, since main's `upstream::Target`
+  already holds the root name.
 
 ## Open questions
 

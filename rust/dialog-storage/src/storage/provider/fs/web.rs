@@ -17,6 +17,7 @@
 //! [fsapi]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API
 
 use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle};
+use dialog_effects::MethodExt as _;
 use futures_util::StreamExt;
 use js_sys::Uint8Array;
 use std::rc::Rc;
@@ -264,17 +265,15 @@ async fn opfs_category(category: &str, name: &str) -> Result<MountedDirectory, F
 /// [isSameEntry]: https://developer.mozilla.org/en-US/docs/Web/API/FileSystemHandle/isSameEntry
 mod registry {
     use super::{FileSystemDirectoryHandle, FileSystemError, js_io_error, random_uuid};
+    use crate::storage::idb::{Database, TransactionMode};
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
 
     const DB: &str = "dialog-fs-directories";
     const STORE: &str = "directories";
 
-    async fn open_db() -> Result<rexie::Rexie, FileSystemError> {
-        rexie::Rexie::builder(DB)
-            .version(1)
-            .add_object_store(rexie::ObjectStore::new(STORE).auto_increment(false))
-            .build()
+    async fn open_db() -> Result<Database, FileSystemError> {
+        Database::open(DB, Some(1), &[STORE])
             .await
             .map_err(|e| FileSystemError::Io(format!("opening directory registry: {e}")))
     }
@@ -296,19 +295,16 @@ mod registry {
     ) -> Result<Option<FileSystemDirectoryHandle>, FileSystemError> {
         let db = open_db().await?;
         let tx = db
-            .transaction(&[STORE], rexie::TransactionMode::ReadOnly)
+            .transaction(&[STORE], TransactionMode::ReadOnly)
             .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
         let value = store
             .get(JsValue::from_str(id))
             .await
             .map_err(|e| FileSystemError::Io(format!("reading registry entry: {e}")))?;
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("closing registry transaction: {e}")))?;
 
@@ -332,13 +328,11 @@ mod registry {
 
         // Scan existing entries for a handle pointing at the same directory.
         let tx = db
-            .transaction(&[STORE], rexie::TransactionMode::ReadOnly)
+            .transaction(&[STORE], TransactionMode::ReadOnly)
             .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
         let keys = store
             .get_all_keys(None, None)
             .await
@@ -347,8 +341,7 @@ mod registry {
             .get_all(None, None)
             .await
             .map_err(|e| FileSystemError::Io(format!("listing registry entries: {e}")))?;
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("closing registry transaction: {e}")))?;
 
@@ -366,19 +359,16 @@ mod registry {
         // New directory: mint an id and store the handle under it.
         let id = random_uuid()?;
         let tx = db
-            .transaction(&[STORE], rexie::TransactionMode::ReadWrite)
+            .transaction(&[STORE], TransactionMode::ReadWrite)
             .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
         store
             .put(handle.as_ref(), Some(&JsValue::from_str(&id)))
             .await
             .map_err(|e| FileSystemError::Io(format!("storing registry entry: {e}")))?;
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("committing registry entry: {e}")))?;
         Ok(id)
@@ -388,19 +378,16 @@ mod registry {
     pub(super) async fn unmount(id: &str) -> Result<(), FileSystemError> {
         let db = open_db().await?;
         let tx = db
-            .transaction(&[STORE], rexie::TransactionMode::ReadWrite)
+            .transaction(&[STORE], TransactionMode::ReadWrite)
             .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
-        // Armed before the first request: see `crate::storage::settle`.
-        let armed = crate::storage::settle::arm(tx);
         store
             .delete(JsValue::from_str(id))
             .await
             .map_err(|e| FileSystemError::Io(format!("deleting registry entry: {e}")))?;
-        armed
-            .settle()
+        tx.settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("committing registry deletion: {e}")))?;
         Ok(())
@@ -605,6 +592,49 @@ pub(super) async fn read_optional(
         .dyn_into()
         .map_err(|_| FileSystemError::Io("expected ArrayBuffer".into()))?;
     Ok(Some(Uint8Array::new(&buffer).to_vec()))
+}
+
+pub(super) async fn files(handle: &FileSystemHandle) -> Result<Vec<String>, FileSystemError> {
+    let segments = handle.segments()?;
+    let Some(directory) = navigate_directory(&handle.root().handle, &segments, false).await? else {
+        return Ok(Vec::new());
+    };
+
+    let mut files = Vec::new();
+    let mut pending = vec![(directory, String::new())];
+    while let Some((directory, prefix)) = pending.pop() {
+        let entries = directory.values();
+        loop {
+            let next = entries
+                .next()
+                .map_err(|e| js_io_error("listing directory", e))?;
+            let next: js_sys::IteratorNext = JsFuture::from(next)
+                .await
+                .map_err(|e| js_io_error("listing directory", e))?
+                .unchecked_into();
+            if next.done() {
+                break;
+            }
+            let entry: web_sys::FileSystemHandle = next
+                .value()
+                .dyn_into()
+                .map_err(|_| FileSystemError::Io("expected FileSystemHandle".into()))?;
+            let name = entry.name();
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            match entry.kind() {
+                web_sys::FileSystemHandleKind::Directory => {
+                    pending.push((entry.unchecked_into::<FileSystemDirectoryHandle>(), path));
+                }
+                _ => files.push(path),
+            }
+        }
+    }
+
+    Ok(files)
 }
 
 /// On the web, a plain `write` is already atomic: `createWritable().close()`
@@ -935,6 +965,21 @@ pub(super) async fn list(handle: &FileSystemHandle) -> Result<Vec<String>, FileS
     Ok(names)
 }
 
+pub(super) async fn size(handle: &FileSystemHandle) -> Result<Option<u64>, FileSystemError> {
+    let Some((parent, name)) = handle.navigate_parent(false).await? else {
+        return Ok(None);
+    };
+    let Some(file_handle) = get_file_handle(&parent, &name, false).await? else {
+        return Ok(None);
+    };
+    let file: web_sys::File = JsFuture::from(file_handle.get_file())
+        .await
+        .map_err(|e| js_io_error("getting file", e))?
+        .dyn_into()
+        .map_err(|_| FileSystemError::Io("expected File".into()))?;
+    Ok(Some(file.size() as u64))
+}
+
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
     let Ok(Some((parent, name))) = handle.navigate_parent(false).await else {
         // Either the parent directory is missing, or this is the root handle.
@@ -1042,6 +1087,7 @@ fn lock_manager() -> Result<web_sys::LockManager, FileSystemError> {
 mod tests {
     use super::MountedDirectory;
     use crate::helpers::{unique_did, unique_name};
+    use dialog_effects::MethodExt as _;
     use dialog_effects::archive::prelude::*;
     use dialog_effects::memory::prelude::*;
 
@@ -1064,6 +1110,7 @@ mod tests {
         let digest = dialog_common::Blake3Hash::hash(b"never written");
 
         let result = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -1081,6 +1128,7 @@ mod tests {
         let digest = dialog_common::Blake3Hash::hash(&content);
 
         did.clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -1088,6 +1136,7 @@ mod tests {
             .await?;
 
         let result = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -1105,6 +1154,7 @@ mod tests {
 
         let version = did
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -1114,6 +1164,7 @@ mod tests {
         assert!(!version.is_empty());
 
         let resolved = did
+            .reader()
             .memory()
             .space("local")
             .cell("head")
@@ -1134,6 +1185,7 @@ mod tests {
         let did = unique_did().await;
 
         did.clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -1143,6 +1195,7 @@ mod tests {
 
         // A second IfNoneMatch publish must fail: the cell already exists.
         let result = did
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -1160,6 +1213,7 @@ mod tests {
         let content = b"branch head".to_vec();
 
         did.clone()
+            .writer()
             .memory()
             .space("local")
             .cell("branch/main")
@@ -1168,6 +1222,7 @@ mod tests {
             .await?;
 
         let resolved = did
+            .reader()
             .memory()
             .space("local")
             .cell("branch/main")
@@ -1193,6 +1248,7 @@ mod tests {
         let digest = dialog_common::Blake3Hash::hash(&content);
 
         did.clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -1200,6 +1256,7 @@ mod tests {
             .await?;
         let result = did
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(digest.clone())
@@ -1210,6 +1267,7 @@ mod tests {
         // Re-opening the same Location must reach the same directory.
         let reopened = crate::provider::FileSystem::open(&location).await?;
         let again = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -1237,6 +1295,7 @@ mod tests {
         let digest = dialog_common::Blake3Hash::hash(&content);
 
         did.clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(content.clone())
@@ -1246,6 +1305,7 @@ mod tests {
         // Re-opening the same Location must reach the same directory.
         let reopened = crate::provider::FileSystem::open(&location).await?;
         let result = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -1328,6 +1388,44 @@ mod tests {
         let second = b"short".to_vec();
         super::write_via_sync_access(&file_handle, &second).await?;
         assert_eq!(super::read_optional(&handle).await?, Some(second));
+        Ok(())
+    }
+
+    /// Listing walks OPFS directories: every cell under the space,
+    /// nested spaces included, and nothing from a sibling that only
+    /// shares its name as a prefix.
+    #[dialog_common::test]
+    async fn it_lists_the_cells_under_a_space() -> anyhow::Result<()> {
+        let provider = opfs_provider("web-memory-list").await;
+        let did = unique_did().await;
+
+        for (space, cell) in [
+            ("remote/origin", "address"),
+            ("remote/origin", "branch/main/revision"),
+            ("remote", "top"),
+            ("remotes", "elsewhere"),
+        ] {
+            did.clone()
+                .writer()
+                .memory()
+                .space(space)
+                .cell(cell)
+                .publish(b"x".to_vec(), None)
+                .perform(&provider)
+                .await?;
+        }
+
+        let listed = did
+            .reader()
+            .memory()
+            .space("remote")
+            .list()
+            .perform(&provider)
+            .await?;
+        assert_eq!(
+            listed,
+            vec!["origin/address", "origin/branch/main/revision", "top"]
+        );
         Ok(())
     }
 }

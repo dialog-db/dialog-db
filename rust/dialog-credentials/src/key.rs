@@ -273,29 +273,43 @@ pub enum WebCryptoError {
     JsError(String),
 }
 
-/// Trait for creating WebCrypto keys with extractable private key material.
+/// Keys whose private material can be read back.
 ///
-/// By default, key generation and import create **non-extractable** keys for
-/// security. Use this trait when you need extractable keys (e.g., for key
-/// backup or export).
+/// By default generation, import and derivation produce **non-extractable**
+/// keys: in the browser `WebCrypto` is asked for a `CryptoKey` that will not
+/// give its seed back. This trait is the opt-in for a consumer that cannot
+/// take a signer and needs the material itself.
+///
+/// The extractable form of a key is a distinct type, so which one you get is
+/// decided by the type rather than by a differently named method:
+///
+/// ```no_run
+/// # use dialog_credentials::{Ed25519Signer, Extractable, key::ExtractableKey};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let sealed = Ed25519Signer::import(&[7u8; 32]).await?;
+/// let readable = <Ed25519Signer<Extractable> as ExtractableKey>::import(&[7u8; 32]).await?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # Security Warning
 ///
-/// Extractable keys allow the private key material to be exported from
-/// WebCrypto. Only use extractable keys when you have a specific need
-/// for key export functionality.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+/// Extractable keys allow the private key material to be exported. Only use
+/// them when you have a specific need for it.
 pub trait ExtractableKey: Sized {
+    /// What went wrong.
+    type Error;
+
     /// Generate a new keypair with extractable private key.
-    fn generate() -> impl std::future::Future<Output = Result<Self, WebCryptoError>>;
+    fn generate() -> impl std::future::Future<Output = Result<Self, Self::Error>>;
 
     /// Import a keypair from a [`KeyExport`] with extractable private key.
     fn import(
         key: impl Into<KeyExport>,
-    ) -> impl std::future::Future<Output = Result<Self, WebCryptoError>>;
+    ) -> impl std::future::Future<Output = Result<Self, Self::Error>>;
 
     /// Export the key material.
-    fn export(&self) -> impl std::future::Future<Output = Result<KeyExport, WebCryptoError>>;
+    fn export(&self) -> impl std::future::Future<Output = Result<KeyExport, Self::Error>>;
 }
 
 /// Trait for creating WebCrypto X25519 keys with extractable key material.

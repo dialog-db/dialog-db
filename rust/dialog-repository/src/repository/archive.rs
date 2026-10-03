@@ -1,31 +1,16 @@
-//! Archive capabilities and CAS adapters.
+//! Loading a branch's tree through archive capabilities.
 //!
-//! - [`RepositoryArchiveExt`] -- extension trait adding `.index()` to archive capabilities
-//! - [`local`] -- local CAS adapter for search tree storage
-//! - [`networked`] -- networked CAS adapter falling back to a remote site
-use dialog_capability::Capability;
-use dialog_effects::archive::prelude::ArchiveExt;
-use dialog_effects::archive::{Archive, Catalog};
+//! - [`local`] -- loads nodes and spilled values from the local archive
+//! - [`networked`] -- falls back to a remote site on a local miss
 
-/// Local CAS adapter bridging capabilities with search tree's ContentAddressedStorage.
+/// Loads nodes and spilled values from the local archive.
 pub mod local;
 pub use local::*;
 
-/// CAS adapter that falls back to a remote site and caches locally on read miss.
+/// Loads nodes and spilled values locally, falling back to a remote site
+/// and caching locally on a read miss.
 pub mod networked;
 pub use networked::*;
 
-/// Extension trait for archive capabilities in the repository context.
-///
-/// Extends the base `ArchiveExt` from `dialog-effects` with repository-specific
-/// helpers.
-pub trait RepositoryArchiveExt: ArchiveExt {
-    /// The index catalog used for search tree node storage.
-    fn index(self) -> Capability<Catalog>;
-}
-
-impl RepositoryArchiveExt for Capability<Archive> {
-    fn index(self) -> Capability<Catalog> {
-        self.catalog("index")
-    }
-}
+mod persist;
+pub(crate) use persist::persist;

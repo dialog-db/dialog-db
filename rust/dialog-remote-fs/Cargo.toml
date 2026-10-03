@@ -30,7 +30,7 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 dialog-repository = { workspace = true }
-dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-network = { workspace = true }
 dialog-artifacts = { workspace = true }
 anyhow = { workspace = true }

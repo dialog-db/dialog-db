@@ -5,12 +5,9 @@
 
 use crate::Artifact;
 
-#[cfg(doc)]
-use crate::ArtifactStoreMut;
-
-/// The instruction variants that are accepted by [`ArtifactStoreMut::commit`].
+/// The instruction variants a commit applies to the artifact indexes.
 pub enum Instruction {
-    /// Add this [`Artifact`] to the [`ArtifactStoreMut`]. Purely additive:
+    /// Add this [`Artifact`] to the indexes. Purely additive:
     /// any prior entries at the same `(entity, attribute)` are left in
     /// place. Use [`Instruction::Replace`] for cardinality-one supersession.
     Assert(Artifact),
@@ -20,6 +17,6 @@ pub enum Instruction {
     /// populated from the first prior found. Asserting the same value that
     /// already exists is a no-op.
     Replace(Artifact),
-    /// Retract a [`Artifact`], removing it from the [`ArtifactStoreMut`]
+    /// Retract a [`Artifact`], removing it from the indexes.
     Retract(Artifact),
 }

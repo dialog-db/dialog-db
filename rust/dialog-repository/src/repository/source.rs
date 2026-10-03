@@ -1,5 +1,5 @@
-//! What a read or a commit needs from the layer it works on, whether
-//! that layer is a [`Branch`] or a [`Snapshot`].
+//! What a read or a commit needs from the line it works on, whether
+//! that line is a [`Branch`] or a [`Snapshot`].
 //!
 //! The two differ in one thing only: where the head lives. A branch keeps
 //! it in a memory cell that advances under CAS and that every handle to
@@ -11,45 +11,45 @@
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
 };
-use dialog_artifacts::tree::{SpillCache, spill_cache};
+use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
-use dialog_effects::archive::{Archive, Get as ArchiveGet, Put as ArchivePut};
+use dialog_common::ConditionalSync;
+use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::query::PlanCache;
-use dialog_search_tree::{Buffer, Cache};
+use dialog_search_tree::Cache;
 use dialog_storage::Blake3Hash;
 use std::sync::Arc;
 
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
-use crate::{
-    Bindings, Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback,
-    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Snapshot, Upstream,
-};
+use crate::{Bindings, Branch, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot};
 
-/// An owned layer to read from: a branch or a snapshot, cheaply cloned
-/// (both share their caches by handle). Query environments hold these
-/// so the only lifetime they carry is the capability environment's.
+/// An owned line to read from: a branch or a snapshot. Query
+/// environments hold these so the only lifetime they carry is the
+/// capability environment's. The line sits behind an [`Arc`]: a query
+/// hands one to every scan it runs, and cloning the line itself copies
+/// its identifiers and cell handles each time.
 #[derive(Debug, Clone)]
 pub(crate) enum Source {
-    /// A named layer whose head lives in a memory cell.
-    Branch(Branch),
-    /// A detached layer whose head is held by value.
-    Snapshot(Snapshot),
+    /// A named line whose head lives in a memory cell.
+    Branch(Arc<Branch>),
+    /// A detached line whose head is held by value.
+    Snapshot(Arc<Snapshot>),
     /// A branch read at a captured revision rather than its live head:
     /// the branch's caches, remote fallback, session store and
     /// bindings, with the tree root fixed. `None` is a branch captured
     /// before its first commit. What a [`Stack`](crate::Stack) reads
     /// every layer beneath its top as.
-    Pinned(Branch, Option<Revision>),
+    Pinned(Arc<Branch>, Option<Revision>),
 }
 
 impl Source {
-    /// Borrow this layer.
+    /// Borrow this line.
     pub(crate) fn as_ref(&self) -> SourceRef<'_> {
         match self {
             Source::Branch(branch) => SourceRef::Branch(branch),
@@ -61,23 +61,23 @@ impl Source {
 
 impl From<Branch> for Source {
     fn from(branch: Branch) -> Self {
-        Source::Branch(branch)
+        Source::Branch(Arc::new(branch))
     }
 }
 
 impl From<Snapshot> for Source {
     fn from(snapshot: Snapshot) -> Self {
-        Source::Snapshot(snapshot)
+        Source::Snapshot(Arc::new(snapshot))
     }
 }
 
-/// A borrowed layer to read from. `Copy`, so builders that hold one stay
+/// A borrowed line to read from. `Copy`, so builders that hold one stay
 /// as cheap to pass around as the `&Branch` they used to hold.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SourceRef<'a> {
-    /// A named layer whose head lives in a memory cell.
+    /// A named line whose head lives in a memory cell.
     Branch(&'a Branch),
-    /// A detached layer whose head is held by value.
+    /// A detached line whose head is held by value.
     Snapshot(&'a Snapshot),
     /// A branch read at a captured revision; see [`Source::Pinned`].
     Pinned(&'a Branch, Option<&'a Revision>),
@@ -102,18 +102,18 @@ impl<'a> From<&'a Source> for SourceRef<'a> {
 }
 
 impl<'a> SourceRef<'a> {
-    /// An owned handle to the same layer.
+    /// An owned handle to the same line.
     pub(crate) fn to_source(self) -> Source {
         match self {
-            SourceRef::Branch(branch) => Source::Branch(branch.clone()),
-            SourceRef::Snapshot(snapshot) => Source::Snapshot(snapshot.clone()),
+            SourceRef::Branch(branch) => Source::Branch(Arc::new(branch.clone())),
+            SourceRef::Snapshot(snapshot) => Source::Snapshot(Arc::new(snapshot.clone())),
             SourceRef::Pinned(branch, revision) => {
-                Source::Pinned(branch.clone(), revision.cloned())
+                Source::Pinned(Arc::new(branch.clone()), revision.cloned())
             }
         }
     }
 
-    /// The branch behind this layer, when it is one: a branch read live
+    /// The branch behind this line, when it is one: a branch read live
     /// or at a captured revision. A snapshot has none.
     pub(crate) fn branch(self) -> Option<&'a Branch> {
         match self {
@@ -122,7 +122,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The repository this layer lives in.
+    /// The repository this line lives in.
     pub(crate) fn subject(self) -> Subject {
         match self {
             SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.subject(),
@@ -130,12 +130,12 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The archive capability for this layer's repository.
-    pub(crate) fn archive(self) -> Capability<Archive> {
-        self.subject().archive()
+    /// The archive capability for this line's repository.
+    pub(crate) fn archive(self) -> ArchiveScope {
+        ArchiveScope::new(self.subject())
     }
 
-    /// The revision this layer currently names, or `None` for a branch
+    /// The revision this line currently names, or `None` for a branch
     /// with no commits yet. A snapshot always has one.
     pub(crate) fn revision(self) -> Option<Revision> {
         match self {
@@ -145,54 +145,38 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The tree root to read: the revision's, or the empty tree's.
-    pub(crate) fn root(self) -> Blake3Hash {
-        self.revision()
-            .map(|revision| *revision.tree.hash())
-            .unwrap_or(EMPTY_TREE_HASH)
+    /// The tree root to read: the revision's, or `None` for a branch with
+    /// no commits yet, which has no tree at all.
+    pub(crate) fn root(self) -> Option<Blake3Hash> {
+        self.revision().map(|revision| *revision.tree.hash())
     }
 
-    /// The default upstream: a branch's tracked one. A snapshot tracks
-    /// nothing, so blob reads through it are local (see
-    /// [`SnapshotExport::download`](crate::SnapshotExport::download)
-    /// for hydrating one ahead of time).
-    pub(crate) fn upstream(self) -> Option<Upstream> {
-        self.branch().and_then(Branch::upstream)
+    /// Whether a read of this line can fetch what it lacks: whether it
+    /// has a remote to fall back to (see [`Self::fallback`]). Without one
+    /// every block it reads is local already, and warming ahead of
+    /// demand has nothing to do.
+    pub(crate) fn fetches(self) -> bool {
+        !matches!(self.fallback(), RemoteFallback::None)
     }
 
     /// The remote block reads fall back to on a local miss: the first
-    /// remote among a branch's tracked upstreams (a branch whose default
-    /// upstream is local but which tracks a remote must still hydrate
-    /// blocks it holds by reference); none for a snapshot.
+    /// peer among a branch's upstreams, as last resolved (a branch that
+    /// tracks a peer must hydrate blocks it holds by reference); none for
+    /// a snapshot.
     ///
-    /// A remote that fails to load is carried as
+    /// An upstream whose peer could not be resolved is carried as
     /// [`RemoteFallback::Unavailable`] rather than dropped: reads the
-    /// local archive serves still succeed, and a local miss surfaces the
-    /// load failure as its cause instead of a bare not-found.
-    pub(crate) async fn fallback<Env>(self, env: &Env) -> RemoteFallback
-    where
-        Env: Provider<Resolve> + ConditionalSync + 'static,
-    {
-        let Some(branch) = self.branch() else {
-            return RemoteFallback::None;
-        };
-        let upstreams = branch.upstreams();
-        match upstreams.remote_name() {
-            Some(name) => {
-                let loaded = branch
-                    .subject()
-                    .remote(name.to_string())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            None => RemoteFallback::None,
+    /// local archive serves still succeed, and a local miss surfaces why
+    /// the peer is unreachable instead of a bare not-found.
+    pub(crate) fn fallback(self) -> RemoteFallback {
+        match self {
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.fallback(),
+            SourceRef::Snapshot(_) => RemoteFallback::None,
         }
     }
 
     /// The shared node cache tree reads go through.
-    pub(crate) fn node_cache(self) -> Cache<NodeHash, Buffer> {
+    pub(crate) fn node_cache(self) -> ArtifactNodeCache {
         match self {
             SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.node_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().nodes.clone(),
@@ -239,7 +223,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The live-spine slot commits on this layer reuse.
+    /// The live-spine slot commits on this line reuse.
     pub(crate) fn spine(self) -> &'a SpineSlot {
         match self {
             SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.spine(),
@@ -247,7 +231,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The ephemeral layer every read of this layer folds in.
+    /// The ephemeral layer every read of this line folds in.
     pub(crate) fn overlay(self) -> &'a Ephemeral {
         match self {
             SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.overlay(),
@@ -255,7 +239,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The layer bindings a commit on this layer routes by.
+    /// The scope bindings a commit on this line routes by.
     pub(crate) fn bindings(self) -> &'a Bindings {
         match self {
             SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.bindings(),
@@ -263,8 +247,8 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// Fold this layer's schema metadata into `changes`, returning the
-    /// branch entity when the layer is a branch (a
+    /// Fold this line's schema metadata into `changes`, returning the
+    /// branch entity when the line is a branch (a
     /// [`SessionBranch`](crate::schema::SessionBranch) row is minted
     /// per branch in scope; a snapshot is not a branch and gets none).
     ///
@@ -299,7 +283,7 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The recorded claim lineage at this layer's revision. History
+    /// The recorded claim lineage at this line's revision. History
     /// records live in the same tree as the data, so this reads the
     /// history region of the revision's tree.
     ///
@@ -309,22 +293,27 @@ impl<'a> SourceRef<'a> {
     /// hydrates the history it turns out to need instead of failing with
     /// `IncompleteHistory`. A line tracking no remote reads purely
     /// locally, so an offline replica behaves as it always did.
-    pub(crate) async fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
+    pub(crate) fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        let remote = self.fallback(env).await;
+        let remote = self.fallback();
         let store = NetworkedIndex::new(env, self.archive().index(), remote);
-        TreeHistory::from_root_with_cache(&self.root(), store, self.node_cache())
-            .with_record_cache(self.records())
+        let history = match self.root() {
+            Some(root) => TreeHistory::from_root_with_cache(&root, store, self.node_cache()),
+            // No revision, no tree, no records.
+            None => TreeHistory::empty_with_cache(store, self.node_cache()),
+        };
+        history.with_record_cache(self.records())
     }
 
-    /// This layer's committed history, newest first — at most `limit`
+    /// This line's committed history, newest first — at most `limit`
     /// entries of `(version, record)`. See [`Branch::log`].
     pub(crate) async fn log<Env>(
         self,
@@ -332,7 +321,8 @@ impl<'a> SourceRef<'a> {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -342,11 +332,11 @@ impl<'a> SourceRef<'a> {
         let Some(head) = self.revision() else {
             return Ok(Vec::new());
         };
-        log(&head.version(), &self.history(env).await, limit).await
+        log(&head.version(), &self.history(env), limit).await
     }
 }
 
-/// The caches a layer carries between its reads and commits. Every one
+/// The caches a line carries between its reads and commits. Every one
 /// is content- or version-addressed, so a set may be shared between a
 /// branch and the snapshots minted from it, and between a snapshot and
 /// the snapshots its transactions produce, without ever serving a
@@ -354,7 +344,7 @@ impl<'a> SourceRef<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct Caches {
     /// Tree nodes by hash, so blocks one read fetched stay warm for the next.
-    pub(crate) nodes: Cache<NodeHash, Buffer>,
+    pub(crate) nodes: ArtifactNodeCache,
     /// Spilled value blocks by content reference.
     pub(crate) spills: SpillCache,
     /// Deductive-rule discovery (by head) and hydrated bodies (by entity).

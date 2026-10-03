@@ -1,0 +1,1446 @@
+//! Access capability providers for [`Peer`].
+//!
+//! Proofs resolve from the profile repository's access branch: the walk
+//! over its `dialog.ucan/*` facts finds the cross-party chain proving the
+//! PROFILE's authority, and the operator's own link — the in-memory
+//! session grant minted at build — is appended on top:
+//!
+//! ```text
+//! prove(operator, subject) = prove(profile, subject) ++ [session grant]
+//! ```
+//!
+//! The session grant is never persisted: the operator key derives from
+//! the profile key, so any device holding the profile re-mints identical
+//! authority on demand. Retaining (`Retain`) is the explicit act that
+//! persists a cross-party delegation into the branch, where it replicates
+//! by ordinary push/pull.
+//!
+//! A resolved-chain cache sits over the walk. A chain is cached under
+//! `(principal, subject, command)` and re-verified on every hit against
+//! the claim's full access (policy predicates run against the fresh
+//! parameters, the chain window must cover the requested duration), so a
+//! hit is as sound as a walk — it skips the search, never the checks. The
+//! epoch is the branch head version: any commit, retain, retract, or pull
+//! drops the cache. Failures are never cached.
+//!
+//! The walk's reads replicate content on demand like any other read: a
+//! delegation record or envelope the local store does not hold is fetched
+//! from the branch's upstream through the operator's [`WalkReach`](super::WalkReach)
+//! and cached locally. The proof authorizing such a fetch resolves from
+//! what is already local (bounding the recursion — see [`AccessEnv`]);
+//! offline, the walk simply skips what it cannot read. An embedder that
+//! does not want proving to pay download latency materializes the branch
+//! up front with `Branch::download`.
+
+use super::{Grant, Local, Mode, Peer, PeerSpace};
+use dialog_capability::access::{
+    Access, Authorize, AuthorizeError, Certificate as _, Export, Proof as _, Protocol, Prove,
+    Retain, Scope as _, TimeRange,
+};
+use dialog_capability::{Capability, Command, Did, Fork, Policy as _, Provider, Subject};
+use dialog_common::time::{self, UNIX_EPOCH};
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::archive::{Get, Import, Put};
+use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead, Write as BlobWrite};
+use dialog_effects::memory::{Publish, Resolve};
+use dialog_repository::{Branch, RemoteSite};
+use dialog_storage::provider::storage::Storage;
+use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
+use dialog_ucan_core::subject::Subject as UcanSubject;
+use std::collections::HashMap;
+
+use dialog_artifacts::history::Version;
+
+/// The current moment in unix seconds, the unit delegation bounds use.
+///
+/// A clock behind the epoch cannot happen on a machine that can verify a
+/// signature; falling back to zero keeps the caller total, and nothing is
+/// lapsed relative to zero.
+fn now_s() -> u64 {
+    time::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
+}
+
+/// Resolved chains, valid for one branch head version.
+#[derive(Default)]
+pub(crate) struct ChainCache {
+    /// The branch head the cached chains were resolved against.
+    epoch: Option<Version>,
+    /// Resolved chains by `(principal, subject, command)`.
+    chains: HashMap<(Did, Did, String), Vec<UcanCertificate>>,
+}
+
+/// The local provider set the delegation walk needs from the operator.
+///
+/// Deliberately excludes the remote fork providers: forking is what
+/// requires authorization, so an env that could fork from inside a proof
+/// would make the trait solution (and the runtime) circular. See
+/// [`AccessEnv`].
+trait LocalEnv:
+    Provider<Get>
+    + Provider<Put>
+    + Provider<Import>
+    + Provider<Resolve>
+    + Provider<Publish>
+    + Provider<Identify>
+    + Provider<Attest>
+    + Provider<BlobRead>
+    + Provider<BlobWrite>
+    + Provider<BlobImport>
+    + ConditionalSync
+{
+}
+impl<T> LocalEnv for T where
+    T: Provider<Get>
+        + Provider<Put>
+        + Provider<Import>
+        + Provider<Resolve>
+        + Provider<Publish>
+        + Provider<Identify>
+        + Provider<Attest>
+        + Provider<BlobRead>
+        + Provider<BlobWrite>
+        + Provider<BlobImport>
+        + ConditionalSync
+{
+}
+
+/// The environment the delegation walk and retain run against.
+///
+/// Local effects delegate to the operator (storage and authority). The
+/// remote fork providers dispatch through the operator's [`WalkReach`] —
+/// dyn-erased fork effects installed at build — so the walk's tree and
+/// envelope reads replicate content on demand exactly as any other read
+/// does. The operator clone captured inside the reach closures carries
+/// no reach of its own: the proof that authorizes such a fetch resolves
+/// from what is already local (the retained cross-party grants and the
+/// in-memory session), which bounds the recursion a fork-inside-a-proof
+/// would otherwise open. Before the reach is installed (during build)
+/// and offline, the forks degrade to reporting content unavailable, and
+/// the walk skips what it cannot read.
+struct AccessEnv<S: Clone, M: Mode = Local> {
+    operator: Peer<S, M>,
+}
+
+macro_rules! delegate_local {
+    ($($effect:ty),+ $(,)?) => {$(
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        impl<S, M: Mode> Provider<$effect> for AccessEnv<S, M>
+        where
+            S: Clone + ConditionalSend + ConditionalSync + 'static,
+            <$effect as Command>::Input: ConditionalSend,
+            Peer<S, M>: Provider<$effect> + ConditionalSync,
+        {
+            async fn execute(
+                &self,
+                input: <$effect as Command>::Input,
+            ) -> <$effect as Command>::Output {
+                Provider::<$effect>::execute(&self.operator, input).await
+            }
+        }
+    )+};
+}
+
+delegate_local!(
+    Get, Put, Import, Resolve, Publish, Identify, Attest, BlobRead, BlobWrite, BlobImport,
+);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<Fork<RemoteSite, Get>> for AccessEnv<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: <Fork<RemoteSite, Get> as Command>::Input,
+    ) -> <Fork<RemoteSite, Get> as Command>::Output {
+        match self.operator.reach.get() {
+            Some(reach) => (reach.get)(input).await,
+            // No reach installed (mid-build, or the recursion-bounding
+            // inner clone): the block must already be local.
+            None => Ok(None),
+        }
+    }
+}
+
+// Hydration for the walk is the plain, unshared read: the local check
+// runs against the operator's storage, and the remote leg routes
+// through the reach exactly as the fork impl above does (degrading to
+// local-only before the reach is installed). Deliberately NOT joined
+// with the operator's shared hydration flight: the walk's reach-less
+// recursion-bounding clone answers `None` where a full route would
+// fetch, so its work is not interchangeable with an ordinary read's.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<dialog_repository::Hydrate> for AccessEnv<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: Provider<Get>
+        + Provider<Put>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(
+        &self,
+        input: <dialog_repository::Hydrate as Command>::Input,
+    ) -> <dialog_repository::Hydrate as Command>::Output {
+        dialog_repository::hydrate(self, input).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<Fork<RemoteSite, Resolve>> for AccessEnv<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: <Fork<RemoteSite, Resolve> as Command>::Input,
+    ) -> <Fork<RemoteSite, Resolve> as Command>::Output {
+        match self.operator.reach.get() {
+            Some(reach) => (reach.resolve)(input).await,
+            None => Ok(None),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<Fork<RemoteSite, BlobRead>> for AccessEnv<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: <Fork<RemoteSite, BlobRead> as Command>::Input,
+    ) -> <Fork<RemoteSite, BlobRead> as Command>::Output {
+        match self.operator.reach.get() {
+            Some(reach) => (reach.blob_read)(input).await,
+            None => Err(BlobError::NotFound(
+                "remote content is unavailable while the walk's reach is not installed".to_string(),
+            )),
+        }
+    }
+}
+
+impl<S: Clone, M: Mode> Peer<S, M> {
+    /// The number of chains currently cached (for tests).
+    #[cfg(test)]
+    pub(crate) fn cached_chains(&self) -> usize {
+        self.chains().lock().chains.len()
+    }
+
+    /// The cache key for a claim, or `None` when the claim is not
+    /// cacheable (a wildcard subject or self-authorization resolves to an
+    /// empty proof without touching storage).
+    fn cache_key(claim: &Prove<Ucan>) -> Option<(Did, Did, String)> {
+        let subject = match &claim.access.subject {
+            UcanSubject::Specific(did) => did.clone(),
+            UcanSubject::Any => return None,
+        };
+        if claim.principal == subject {
+            return None;
+        }
+        Some((
+            claim.principal.clone(),
+            subject,
+            claim.access.command.to_string(),
+        ))
+    }
+
+    /// Serve a claim from the cache: the chain resolved for this key at
+    /// the current epoch, re-verified against the claim's access and
+    /// duration, and still unlapsed. `None` on a miss or when the cached
+    /// chain rejects this particular claim.
+    fn cached(&self, key: &(Did, Did, String), claim: &Prove<Ucan>) -> Option<UcanProof> {
+        let branch = self.state();
+        let epoch = branch.revision().map(|revision| revision.version());
+        let cache = self.chains().lock();
+        if cache.epoch != epoch {
+            return None;
+        }
+        let chain = cache.chains.get(key)?;
+
+        let mut effective = TimeRange::unbounded();
+        for certificate in chain {
+            let range = certificate.verify(&claim.access).ok()?;
+            effective = effective.intersect(&range);
+        }
+        if !effective.covers(&claim.duration) {
+            return None;
+        }
+        // The duration above is what the caller NEEDS, which for most
+        // read paths is nothing at all -- and an unbounded requirement is
+        // met by a window that closed hours ago. A memo, unlike a
+        // certificate, has no other reader to catch that: it is replayed
+        // for every claim on this key until the access branch head moves,
+        // so an entry that lapses mid-epoch would be served long past its
+        // end. Retiring it sends the claim back to the walk, which can
+        // still find a live route the memo has outlived.
+        //
+        // Only the lapsed end. An entry that has not STARTED yet may
+        // legitimately answer a claim for the window in which it does,
+        // and `covers` above already judged that.
+        if effective
+            .expiration
+            .is_some_and(|expiration| expiration < now_s())
+        {
+            return None;
+        }
+
+        let mut proof = UcanProof::new(claim.access.clone());
+        for certificate in chain {
+            proof.push(certificate.clone());
+        }
+        proof.set_duration(effective);
+        Some(proof)
+    }
+
+    /// Record a resolved chain for this key at `epoch` — the branch head
+    /// captured BEFORE the walk that resolved it. Stamping the head at
+    /// record time instead would let a retract that lands mid-walk cache
+    /// the just-retracted chain under the post-retract head, serving it
+    /// until the next head movement; stamped with the pre-walk head, such
+    /// an entry simply never matches a live epoch again.
+    fn record(&self, key: (Did, Did, String), epoch: Option<Version>, proof: &UcanProof) {
+        let mut cache = self.chains().lock();
+        if cache.epoch != epoch {
+            cache.chains.clear();
+            cache.epoch = epoch;
+        }
+        cache.chains.insert(key, proof.proofs().to_vec());
+    }
+
+    /// A certificate held for `principal` covering `claim`.
+    fn held_for(&self, principal: &Did, claim: &Prove<Ucan>) -> Option<Grant> {
+        self.inner_held()
+            .iter()
+            .find(|grant| {
+                grant.certificate.0.audience() == principal
+                    && Self::covers_subject(&grant.certificate, claim)
+                    && grant
+                        .certificate
+                        .verify(&claim.access)
+                        .is_ok_and(|range| range.covers(&claim.duration))
+            })
+            .cloned()
+    }
+
+    /// Whether `certificate` is over the subject `claim` is about.
+    fn covers_subject(certificate: &UcanCertificate, claim: &Prove<Ucan>) -> bool {
+        match certificate.0.subject() {
+            UcanSubject::Any => true,
+            UcanSubject::Specific(did) => {
+                claim.access.subject == UcanSubject::Specific(did.clone())
+            }
+        }
+    }
+
+    /// The grants covering `claim`: its subject, its command and policy,
+    /// and its duration.
+    fn session_grants<'a>(&'a self, claim: &'a Prove<Ucan>) -> impl Iterator<Item = &'a Grant> {
+        self.grants().iter().filter(|grant| {
+            Self::covers_subject(&grant.certificate, claim)
+                && grant
+                    .certificate
+                    .verify(&claim.access)
+                    .is_ok_and(|range| range.covers(&claim.duration))
+        })
+    }
+
+    /// Re-resolve the access branch handle's head and upstream from
+    /// storage. This is what makes a pull through ANOTHER handle of the
+    /// branch visible here: a pull moves the head in storage, not in
+    /// this handle's cache, and both the walk and the chain-cache epoch
+    /// read the cache. Best-effort: on a failure the walk still runs
+    /// over the last resolved head.
+    async fn refresh(&self)
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
+        if let Err(error) = self.delegations().refresh(self).await {
+            tracing::warn!(%error, "failed to refresh the access branch head");
+        }
+    }
+
+    /// Resolve a proof for `claim` from the access branch, with the
+    /// session composition when the principal is this operator.
+    async fn resolve(&self, claim: Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
+        self.refresh().await;
+
+        let key = Self::cache_key(&claim);
+        if let Some(key) = &key
+            && let Some(proof) = self.cached(key, &claim)
+        {
+            return Ok(proof);
+        }
+        // Captured before the walk: the facts the walk reads are at most
+        // this fresh, so the record must not claim a later head.
+        let epoch = self.state().revision().map(|revision| revision.version());
+
+        let proof = if claim.principal == self.did() {
+            self.prove_as_operator(&claim).await?
+        } else {
+            self.walk(claim.principal.clone(), &claim).await?
+        };
+
+        if let Some(key) = key {
+            self.record(key, epoch, &proof);
+        }
+        Ok(proof)
+    }
+
+    /// `prove(operator, subject) = prove(profile, subject) ++ [session]`.
+    ///
+    /// The session grant covers the claim or the operator was never
+    /// allowed this scope; the branch walk then proves the PROFILE's
+    /// authority (empty for the profile's own subjects) and the in-memory
+    /// link completes the chain. When no session grant proves the claim,
+    /// fall back to a plain walk: a cross-party delegation directly to
+    /// this operator may still prove it.
+    async fn prove_as_operator(&self, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
+        // Every grant covering the claim is tried in turn: one whose
+        // issuer cannot prove the claim does not hide one that can.
+        let mut refused = None;
+        for grant in self.session_grants(claim).cloned().collect::<Vec<_>>() {
+            match self.prove_by(grant, claim).await {
+                Ok(proof) => return Ok(proof),
+                Err(error) => refused = Some(error),
+            }
+        }
+        // Nor does a covering grant hide a delegation issued to this
+        // operator's own key: a session allowed `Subject::any()` is
+        // covered for every claim, and its peer proves none of the
+        // subjects that delegated to the session alone. When the walk
+        // fails too, the grant's refusal is the one reported: it names
+        // the authority the session was opened with, where the walk's
+        // only says the key holds nothing.
+        match self.walk(claim.principal.clone(), claim).await {
+            Ok(proof) => Ok(proof),
+            Err(walked) => Err(refused.unwrap_or(walked)),
+        }
+    }
+
+    /// The proof of `claim` through `grant`: the grant's issuer's
+    /// authority, then the grant.
+    async fn prove_by(&self, grant: Grant, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
+        let Grant {
+            issuer,
+            certificate: grant,
+        } = grant;
+
+        let mut proof = self.walk(issuer, claim).await?;
+        let range = grant.verify(&claim.access)?;
+        let effective = proof.duration().intersect(&range);
+        if !effective.covers(&claim.duration) {
+            return Err(AuthorizeError::UnprovenSubject {
+                claimed: claim.principal.clone(),
+                authorized: claim.access.subject().clone(),
+            });
+        }
+        proof.push(grant);
+        proof.set_duration(effective);
+        Ok(proof)
+    }
+
+    /// The tree walk over the state branch's delegation records.
+    ///
+    /// A principal's authority over its own subject is self-issued: the
+    /// empty chain, resolved without reading the state branch.
+    async fn walk(&self, principal: Did, claim: &Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
+        if let UcanSubject::Specific(subject) = &claim.access.subject
+            && *subject == principal
+        {
+            return Ok(UcanProof::new(claim.access.clone()));
+        }
+        // A certificate this peer holds for the principal -- a session
+        // holding its peer's storage grant -- proves the principal's
+        // authority wherever it covers the claim.
+        if let Some(held) = self.held_for(&principal, claim) {
+            return Box::pin(self.prove_by(held, claim)).await;
+        }
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        Box::pin(
+            self.delegations()
+                .delegations()
+                .prove(principal, claim.access.clone())
+                .during(claim.duration)
+                .perform(&env),
+        )
+        .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<Prove<Ucan>> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: LocalEnv + ConditionalSend,
+{
+    async fn execute(&self, input: Capability<Prove<Ucan>>) -> Result<UcanProof, AuthorizeError> {
+        let claim = Prove::<Ucan>::of(&input);
+        let mut prove = Prove::<Ucan>::new(claim.principal.clone(), claim.access.clone());
+        prove.duration = claim.duration;
+        self.resolve(prove).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<Retain<Ucan>> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: LocalEnv + ConditionalSend,
+{
+    async fn execute(&self, input: Capability<Retain<Ucan>>) -> Result<(), AuthorizeError> {
+        // How many times a lost head race is retried before the failure
+        // surfaces. One concurrent writer per attempt is already unlikely;
+        // three in a row is not a race, it is a stampede worth reporting.
+        const RETRY_LIMIT: usize = 3;
+
+        let delegation = Retain::<Ucan>::of(&input).delegation.clone();
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        let mut attempt = 0;
+        loop {
+            // The access branch is the profile repository's main branch,
+            // which other handles (content commits, pulls) advance
+            // concurrently — and this handle caches its head, so the
+            // retain's commit would CAS against a snapshot the handle can
+            // never advance on its own. Refresh first, and again after a
+            // lost race, the same refresh-and-retry contract
+            // documents for its callers.
+            branch
+                .refresh(&env)
+                .await
+                .map_err(|error| AuthorizeError::Unavailable {
+                    detail: format!("failed to refresh the access branch: {error}"),
+                })?;
+            match Box::pin(
+                branch
+                    .delegations()
+                    .retain(delegation.clone())
+                    .perform(&env),
+            )
+            .await
+            {
+                Ok(_) => return Ok(()),
+                Err(dialog_repository::CommitError::Publish(
+                    dialog_repository::PublishError::VersionMismatch { .. },
+                )) if attempt < RETRY_LIMIT => {
+                    attempt += 1;
+                }
+                Err(error) => {
+                    return Err(AuthorizeError::Malformed {
+                        detail: format!("failed to retain delegation: {error}"),
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl<S: PeerSpace, M: Mode> Peer<S, M> {
+    /// The delegations retained where this peer proves from that `issuer`
+    /// issued.
+    pub(crate) async fn issued_by(
+        &self,
+        issuer: &Did,
+    ) -> Result<Vec<UcanDelegation>, AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        Box::pin(branch.delegations().issued_by(issuer.clone()).perform(&env)).await
+    }
+
+    /// The delegations `branch` retains that `issuer` issued: another
+    /// branch of this peer's space, as it stands, read as the peer.
+    pub(crate) async fn issued_by_on(
+        &self,
+        branch: &Branch,
+        issuer: &Did,
+    ) -> Result<Vec<UcanDelegation>, AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        Box::pin(branch.delegations().issued_by(issuer.clone()).perform(&env)).await
+    }
+
+    /// The delegations retained where this peer proves from that were
+    /// issued to `audience`: the grants it holds.
+    pub(crate) async fn issued_to(
+        &self,
+        audience: &Did,
+    ) -> Result<Vec<UcanDelegation>, AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        Box::pin(
+            branch
+                .delegations()
+                .issued_to(audience.clone())
+                .perform(&env),
+        )
+        .await
+    }
+
+    /// Stop proving from `delegation`: retract it where this peer retains
+    /// delegations.
+    pub(crate) async fn retract(&self, delegation: UcanDelegation) -> Result<(), AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        Box::pin(branch.delegations().retract(delegation).perform(&env))
+            .await
+            .map(|_| ())
+            .map_err(|error| AuthorizeError::Malformed {
+                detail: format!("failed to retract delegation: {error}"),
+            })
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, P, M: Mode> Provider<Export<P>> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    P: Protocol,
+    P::Certificate: ConditionalSend + ConditionalSync,
+    Storage<S>: Provider<Export<P>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<Export<P>>,
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        // Enumeration reads the legacy storage certificate provider: it
+        // exists to migrate certificates out of it.
+        input.perform(&self.storage).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, M: Mode> Provider<Authorize<Ucan>> for Peer<S, M>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Self: LocalEnv + ConditionalSend,
+{
+    async fn execute(
+        &self,
+        input: Capability<Authorize<Ucan>>,
+    ) -> Result<<Ucan as Protocol>::Authorization, AuthorizeError> {
+        let subject = input.subject().clone();
+        let prove: Prove<Ucan> = input.into_effect().into();
+
+        let proof = Subject::from(subject)
+            .attenuate(Access)
+            .invoke(prove)
+            .perform(self)
+            .await?;
+
+        let operator_signer = self.identity().operator_signer().clone();
+        proof.claim(operator_signer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::{Mode, Peer, Session};
+    use dialog_effects::storage::Location;
+
+    use crate::PeerError;
+    use crate::helpers::{open_peer, test_grant, test_storage, unique_name};
+    use anyhow::Result;
+    use dialog_common::time;
+    use dialog_credentials::Ed25519Signer;
+    use dialog_repository::Repository;
+    use dialog_storage::provider::storage::VolatileSpace;
+    use dialog_ucan::{Parameters, Scope, UcanDelegation};
+    use dialog_ucan_core::DelegationBuilder;
+    use dialog_ucan_core::DelegationChain;
+    use dialog_ucan_core::command::Command as UcanCommand;
+    use dialog_ucan_core::time::timestamp::Timestamp;
+    use dialog_varsig::Principal as _;
+
+    fn unique(prefix: &str) -> String {
+        unique_name(prefix)
+    }
+
+    async fn operator(name: &str) -> (Peer<VolatileSpace, Session>, Peer<VolatileSpace>) {
+        let storage = test_storage().await;
+        let profile = open_peer(storage.clone(), Location::profile(unique(name)))
+            .await
+            .unwrap();
+        let operator = profile
+            .session(b"test")
+            .space(profile.state())
+            .await
+            .unwrap();
+        (operator, profile)
+    }
+
+    fn storage_scope(subject: &Ed25519Signer) -> Scope {
+        Scope {
+            subject: UcanSubject::Specific(subject.did()),
+            command: UcanCommand(vec!["storage".to_string()]),
+            parameters: Parameters::default(),
+        }
+    }
+
+    async fn retain_grant(
+        operator: &Peer<VolatileSpace, impl Mode>,
+        space: &Ed25519Signer,
+        holder: &Ed25519Signer,
+        expiration: Option<Timestamp>,
+    ) -> UcanDelegation {
+        let mut builder = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(holder)
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()]);
+        if let Some(expiration) = expiration {
+            builder = builder.expiration(expiration);
+        }
+        let delegation = builder.try_build().await.unwrap();
+        let chain = UcanDelegation::new(DelegationChain::new(delegation));
+        Subject::from(operator.home().clone())
+            .attenuate(Access)
+            .invoke(Retain::<Ucan>::new(chain.clone()))
+            .perform(operator)
+            .await
+            .unwrap();
+        chain
+    }
+
+    fn claim(holder: &Ed25519Signer, space: &Ed25519Signer) -> Prove<Ucan> {
+        Prove::<Ucan>::new(holder.did(), storage_scope(space))
+    }
+
+    /// An operator built for a named access branch retains into it and
+    /// proves from it, and leaves the default branch untouched.
+    ///
+    /// A profile that keeps one branch per account names the active one:
+    /// the authority it proves with has to be that account's, and a grant
+    /// retained for one account must not be provable from another's
+    /// branch.
+    #[dialog_common::test]
+    async fn it_keeps_proofs_on_the_configured_access_branch() -> Result<()> {
+        use dialog_repository::ACCESS_BRANCH;
+
+        let storage = test_storage().await;
+        let profile =
+            open_peer(storage.clone(), Location::profile(unique("access-branch"))).await?;
+        let operator = profile
+            .session(b"test")
+            .space(Repository::from(profile.home().clone()).branch("account-test"))
+            .await?;
+
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        operator
+            .resolve(claim(&holder, &space))
+            .await
+            .expect("the operator proves from the branch it retained into");
+
+        let configured = profile
+            .repository(profile.home())
+            .branch("account-test")
+            .open()
+            .perform(&operator)
+            .await?;
+        assert!(
+            configured
+                .delegations()
+                .prove(holder.did(), storage_scope(&space))
+                .perform(&operator)
+                .await
+                .is_ok(),
+            "the grant is on the configured branch",
+        );
+
+        let default = profile
+            .repository(profile.home())
+            .branch(ACCESS_BRANCH)
+            .open()
+            .perform(&operator)
+            .await?;
+        assert!(
+            default
+                .delegations()
+                .prove(holder.did(), storage_scope(&space))
+                .perform(&operator)
+                .await
+                .is_err(),
+            "nothing was retained on the default branch",
+        );
+        Ok(())
+    }
+
+    /// A retain succeeds after another handle advanced the access branch.
+    ///
+    /// The access branch IS the profile repository's [`ACCESS_BRANCH`], so
+    /// anything else writing to the profile repo — a display-name fact, a
+    /// projection, a pull — moves the same head this operator's build-time
+    /// handle caches. That handle cannot observe the movement on its own,
+    /// so a retain CAS'ing against its cached snapshot fails with a version
+    /// mismatch, and every later delegation save through the same operator
+    /// fails identically. Field symptom: sign-in worked, then saving the
+    /// account's root delegation failed with `Version mismatch` forever.
+    #[dialog_common::test]
+    async fn it_retains_after_another_handle_moved_the_head() -> Result<()> {
+        use dialog_artifacts::{Attribute, Changes, Entity, Update as _, Value};
+        use dialog_repository::ACCESS_BRANCH;
+
+        let (operator, profile) = operator("retain-stale-head").await;
+
+        // Retain once so the operator's handle caches a real head — the
+        // state a signing session leaves after saving its session grant.
+        let first_space = Ed25519Signer::generate().await?;
+        let first_holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &first_space, &first_holder, None).await;
+
+        // Another handle on the same branch, opened fresh (so it sees that
+        // head) and then committing through it — a display-name write, a
+        // projection, a pull. This advances the head the operator's own
+        // build-time handle still caches.
+        let elsewhere = profile
+            .repository(profile.home())
+            .branch(ACCESS_BRANCH)
+            .open()
+            .perform(&operator)
+            .await?;
+        for note in ["moved the head", "and again"] {
+            let mut moved = Changes::new();
+            moved.associate(
+                Attribute::try_from("test.profile/name".to_string())?,
+                Entity::new()?,
+                Value::String(note.to_string()),
+            );
+            elsewhere
+                .transaction()
+                .integrate(moved)
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+
+        // The operator's own handle still caches the pre-commit head.
+        // Retaining through it must not fail on that staleness.
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        // The retained grant proves, so the retain really landed.
+        let proof = operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(proof.proofs().len(), 1);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_serves_repeat_proofs_from_the_cache() -> Result<()> {
+        let (operator, _profile) = operator("cache-repeat").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        let first = operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(operator.cached_chains(), 1, "the walk's chain is cached");
+        let second = operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(first.proofs().len(), second.proofs().len());
+        assert_eq!(operator.cached_chains(), 1);
+        Ok(())
+    }
+
+    /// A delegation issued directly to the session's key proves although
+    /// a session grant covers the claim and the grant's issuer cannot.
+    ///
+    /// The helpers' default session is allowed `Subject::any()`, so some
+    /// grant covers every claim. When the peer that issued the grant has
+    /// no route to the subject -- a space that delegated to this session
+    /// alone, cross-party -- the covering grant must not hide the
+    /// delegation the plain walk finds retained to the session itself.
+    #[dialog_common::test]
+    async fn it_proves_a_delegation_to_the_session_behind_a_failing_grant() -> Result<()> {
+        let storage = test_storage().await;
+        let profile = open_peer(storage.clone(), Location::profile(unique("direct-grant"))).await?;
+        let operator = profile
+            .session(b"test")
+            .space(profile.state())
+            .allow(Subject::any())
+            .await?;
+
+        let space = Ed25519Signer::generate().await?;
+        let delegation = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&operator.did())
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        Subject::from(operator.home().clone())
+            .attenuate(Access)
+            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+                DelegationChain::new(delegation),
+            )))
+            .perform(&operator)
+            .await?;
+
+        let proof = operator
+            .resolve(Prove::<Ucan>::new(operator.did(), storage_scope(&space)))
+            .await
+            .expect("the delegation retained to the session proves");
+        assert_eq!(proof.proofs().len(), 1);
+        assert_eq!(proof.proofs()[0].0.audience(), &operator.did());
+        Ok(())
+    }
+
+    /// Any head movement drops the cache: retaining another delegation
+    /// moves the branch head, and the next prove re-walks rather than
+    /// serving a chain resolved against the old head.
+    #[dialog_common::test]
+    async fn it_invalidates_on_head_movement() -> Result<()> {
+        let (operator, _profile) = operator("cache-invalidate").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(operator.cached_chains(), 1);
+
+        // A retain moves the head; the stale epoch empties the cache and
+        // the new delegation proves, which only a fresh walk can find.
+        let other = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &other, &holder, None).await;
+        let proof = operator.resolve(claim(&holder, &other)).await?;
+        assert_eq!(proof.proofs().len(), 1);
+        Ok(())
+    }
+
+    /// A hit is re-verified against the claim's duration: a cached chain
+    /// whose window cannot cover the request refuses rather than serving.
+    #[dialog_common::test]
+    async fn it_rejects_a_hit_outside_the_chain_window() -> Result<()> {
+        let (operator, _profile) = operator("cache-window").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+
+        let now = time::now()
+            .duration_since(time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expiration = Timestamp::try_from((now + 3600) as i128).unwrap();
+        retain_grant(&operator, &space, &holder, Some(expiration)).await;
+
+        // Warm with an unbounded claim.
+        operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(operator.cached_chains(), 1);
+
+        // A claim needing validity past the chain expiry must refuse.
+        let mut widened = claim(&holder, &space);
+        widened.duration = TimeRange {
+            not_before: Some(now),
+            expiration: Some(now + 7200),
+        };
+        assert!(operator.resolve(widened).await.is_err());
+        Ok(())
+    }
+
+    /// A claim naming an instant resolves a route that is good then,
+    /// even when a lapsed one to the same subject is retained beside it.
+    ///
+    /// Both grants are admissible on everything but the clock, and
+    /// candidate order follows content hashes, so without the time bound
+    /// the walk picks between them arbitrarily -- and half the time
+    /// presents authority that stopped being valid an hour ago.
+    #[dialog_common::test]
+    async fn it_resolves_the_live_route_when_a_lapsed_one_sits_beside_it() -> Result<()> {
+        let (operator, _profile) = operator("lapsed-beside-live").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let now = now_s();
+        let lapsed = Timestamp::try_from((now - 3600) as i128).unwrap();
+        let live = Timestamp::try_from((now + 3600) as i128).unwrap();
+        retain_grant(&operator, &space, &holder, Some(lapsed)).await;
+        retain_grant(&operator, &space, &holder, Some(live)).await;
+
+        let mut at_now = claim(&holder, &space);
+        at_now.duration = TimeRange {
+            not_before: Some(now),
+            expiration: Some(now),
+        };
+        let proof = operator.resolve(at_now).await?;
+
+        assert_eq!(
+            proof.duration().expiration,
+            Some(now + 3600),
+            "the walk presented the lapsed grant although a live one was retained",
+        );
+        Ok(())
+    }
+
+    /// A memo lapses with the chain it holds.
+    ///
+    /// The duration a claim carries is what the caller NEEDS, and the
+    /// read paths need nothing in particular -- an unbounded requirement
+    /// is met by a window that closed an hour ago. A certificate has the
+    /// walk to re-judge it; a memo has no other reader, and would be
+    /// replayed for every claim on its key until the branch head next
+    /// moved.
+    #[dialog_common::test]
+    async fn it_retires_a_memo_whose_chain_has_lapsed() -> Result<()> {
+        let (operator, _profile) = operator("cache-lapsed").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let now = now_s();
+        let lapsed = Timestamp::try_from((now - 60) as i128).unwrap();
+        retain_grant(&operator, &space, &holder, Some(lapsed)).await;
+
+        // The walk itself has no clock, so an unbounded claim resolves
+        // the lapsed grant and records it: exactly the entry that must
+        // not then be served back.
+        operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(operator.cached_chains(), 1, "the walk's chain is recorded");
+
+        let key = Peer::<VolatileSpace>::cache_key(&claim(&holder, &space))
+            .expect("a specific subject and a distinct holder are cacheable");
+        assert!(
+            operator.cached(&key, &claim(&holder, &space)).is_none(),
+            "a memo holding a lapsed chain answered an unbounded claim",
+        );
+        Ok(())
+    }
+
+    /// The cache key deliberately excludes parameters, so the hit-time
+    /// re-verification is all that stands between a cached chain and a
+    /// policy bypass: a chain resolved for parameters the policy covers
+    /// must not answer a claim whose parameters it refuses.
+    #[dialog_common::test]
+    async fn it_rejects_a_hit_whose_parameters_the_policy_refuses() -> Result<()> {
+        use dialog_ucan_core::delegation::policy::predicate::Predicate;
+        use dialog_ucan_core::delegation::policy::selector::filter::Filter;
+        use dialog_ucan_core::delegation::policy::selector::select::Select;
+        use ipld_core::ipld::Ipld;
+
+        let (operator, _profile) = operator("cache-policy").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+
+        let constrained = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&holder)
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .policy(vec![Predicate::Equal(
+                Select::new(vec![Filter::Field("space".to_string())]),
+                Ipld::String("alpha".to_string()),
+            )])
+            .try_build()
+            .await
+            .unwrap();
+        Subject::from(operator.home().clone())
+            .attenuate(Access)
+            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+                DelegationChain::new(constrained),
+            )))
+            .perform(&operator)
+            .await
+            .unwrap();
+
+        let with_space = |value: &str| {
+            let mut scope = storage_scope(&space);
+            scope.parameters = Parameters(
+                [("space".to_string(), Ipld::String(value.to_string()))]
+                    .into_iter()
+                    .collect(),
+            );
+            Prove::<Ucan>::new(holder.did(), scope)
+        };
+
+        operator
+            .resolve(with_space("alpha"))
+            .await
+            .expect("covered parameters prove");
+        assert_eq!(operator.cached_chains(), 1, "the chain is cached");
+        assert!(
+            operator.resolve(with_space("beta")).await.is_err(),
+            "a hit must be re-verified against this claim's parameters"
+        );
+        Ok(())
+    }
+
+    /// A record is stamped with the head captured BEFORE the walk: an
+    /// entry recorded under a stale epoch must never serve once the head
+    /// has moved (the retract-mid-walk race, sequential form).
+    #[dialog_common::test]
+    async fn it_refuses_entries_recorded_under_a_stale_epoch() -> Result<()> {
+        let (operator, _profile) = operator("cache-stale-record").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        // The epoch a hypothetical walk would have started under.
+        let stale = operator
+            .delegations()
+            .revision()
+            .map(|revision| revision.version());
+        let proof = operator.resolve(claim(&holder, &space)).await?;
+
+        // The head moves (another retain lands, as a mid-walk retract or
+        // retain would); a record stamped with the pre-move epoch must
+        // not serve afterwards.
+        let other = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &other, &holder, None).await;
+        let key =
+            Peer::<VolatileSpace>::cache_key(&claim(&holder, &space)).expect("cacheable claim");
+        operator.record(key.clone(), stale, &proof);
+        assert!(
+            operator.cached(&key, &claim(&holder, &space)).is_none(),
+            "a stale-stamped record must miss under the moved head"
+        );
+        Ok(())
+    }
+
+    /// The session is in memory only: building an operator persists no
+    /// certificate anywhere — the legacy store enumerates empty and the
+    /// access branch holds no delegation records. This is the fix for the
+    /// accumulation pathology (one immortal certificate per session).
+    #[dialog_common::test]
+    async fn it_leaves_no_session_residue() -> Result<()> {
+        let (operator, profile) = {
+            let storage = test_storage().await;
+            let profile = open_peer(storage.clone(), Location::profile(unique("no-residue")))
+                .await
+                .unwrap();
+            let operator = profile
+                .session(b"test")
+                .space(profile.state())
+                .allow(Subject::any())
+                .await
+                .unwrap();
+            (operator, profile)
+        };
+
+        let exported = Subject::from(profile.did())
+            .attenuate(Access)
+            .invoke(Export::<Ucan>::new())
+            .perform(&operator)
+            .await?;
+        assert!(exported.is_empty(), "the legacy store must stay empty");
+
+        // The profile recorded its roles when it was set up; building the
+        // operator after it committed nothing more.
+        assert_eq!(
+            operator.delegations().revision(),
+            profile.state().revision(),
+            "building an operator commits nothing to the access branch"
+        );
+
+        // And yet the operator authorizes: the session link is the chain.
+        let space = Ed25519Signer::generate().await?;
+        let proof = operator
+            .resolve(Prove::<Ucan>::new(operator.did(), storage_scope(&space)))
+            .await;
+        // A powerline session grant covers any subject, but proving access
+        // to a subject the PROFILE holds no authority over must still
+        // refuse: the session link alone reaches the profile, not the
+        // space.
+        assert!(proof.is_err());
+
+        // For the profile's own space the session link IS the whole chain.
+        let own = operator
+            .resolve(Prove::<Ucan>::new(
+                operator.did(),
+                Scope {
+                    subject: UcanSubject::Specific(operator.home().clone()),
+                    command: UcanCommand(vec![]),
+                    parameters: Parameters::default(),
+                },
+            ))
+            .await?;
+        assert_eq!(own.proofs().len(), 1, "the in-memory session link");
+        Ok(())
+    }
+
+    /// A retained cross-party chain composes with the session link:
+    /// space grants the profile, the session carries profile to operator.
+    #[dialog_common::test]
+    async fn it_composes_the_session_link_over_a_retained_chain() -> Result<()> {
+        let (operator, profile) = {
+            let storage = test_storage().await;
+            let profile = open_peer(storage.clone(), Location::profile(unique("compose")))
+                .await
+                .unwrap();
+            let operator = profile
+                .session(b"test")
+                .space(profile.state())
+                .allow(Subject::any())
+                .await
+                .unwrap();
+            (operator, profile)
+        };
+        let space = Ed25519Signer::generate().await?;
+
+        // space -> profile, retained (the explicit, synced act).
+        let delegation = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&profile.did())
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec![])
+            .try_build()
+            .await?;
+        Subject::from(profile.did())
+            .attenuate(Access)
+            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+                DelegationChain::new(delegation),
+            )))
+            .perform(&operator)
+            .await?;
+
+        // operator proves: [space->profile] ++ [profile->operator session].
+        let proof = operator
+            .resolve(Prove::<Ucan>::new(operator.did(), storage_scope(&space)))
+            .await?;
+        assert_eq!(proof.proofs().len(), 2);
+        Ok(())
+    }
+    async fn retained_count(operator: &Peer<VolatileSpace, impl Mode>) -> Result<usize> {
+        use futures_util::TryStreamExt as _;
+        let rows: Vec<_> = operator
+            .delegations()
+            .claims()
+            .select(dialog_artifacts::ArtifactSelector::new().the("dialog.ucan/audience".parse()?))
+            .perform(operator)
+            .await?
+            .try_collect()
+            .await?;
+        Ok(rows.len())
+    }
+
+    /// A peer's grant of the storage is held in memory, like every grant
+    /// it is given: opening it again and again, as a heartbeat would,
+    /// records nothing more than its account's delegation to it, once.
+    #[dialog_common::test]
+    async fn it_records_no_storage_grant_however_often_it_opens() -> Result<()> {
+        let storage = test_storage().await;
+        let location = Location::profile(unique("storage-grant"));
+        for _ in 0..3 {
+            let peer = open_peer(storage.clone(), location.clone()).await?;
+            assert_eq!(
+                retained_count(&peer).await?,
+                1,
+                "only the account's delegation to the peer, recorded once"
+            );
+        }
+        Ok(())
+    }
+
+    /// A peer keeps its state where it is told: one given no branch is
+    /// refused rather than given its own repository's.
+    #[dialog_common::test]
+    async fn it_refuses_a_peer_given_no_state() -> Result<()> {
+        let storage = test_storage().await;
+        let location = Location::profile(unique("stateless"));
+        let credential = open_peer(storage.clone(), location)
+            .await?
+            .credential()
+            .clone();
+        let built = Peer::new(credential.clone())
+            .with(storage)
+            .grant(test_grant().await)
+            .await;
+        assert!(matches!(built, Err(PeerError::State(_))), "{built:?}");
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_bounds_in_memory_sessions_without_retaining_them() -> Result<()> {
+        let storage = test_storage().await;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique("bounded-session")),
+        )
+        .await?;
+        let setup = profile.session(b"setup").space(profile.state()).await?;
+        let space = Ed25519Signer::generate().await?;
+        let now = now_s();
+        let upstream_end = now + 7200;
+        let delegation = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&profile.did())
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".into()])
+            .expiration(Timestamp::try_from(upstream_end as i128)?)
+            .try_build()
+            .await?;
+        profile
+            .access()
+            .save(UcanDelegation::new(DelegationChain::new(delegation)))
+            .perform(&setup)
+            .await?;
+        let revision = setup.delegations().revision();
+        // The space's delegation, beside the account's delegation to the
+        // profile that onboarding recorded.
+        let retained = retained_count(&setup).await?;
+        assert_eq!(retained, 2);
+        let exported = Subject::from(profile.did())
+            .attenuate(Access)
+            .invoke(Export::<Ucan>::new())
+            .perform(&setup)
+            .await?;
+        for session_end in [now + 3600, now + 10800, now - 60] {
+            let operator = profile
+                .session(session_end.to_le_bytes())
+                .space(profile.state())
+                .allow(
+                    profile
+                        .access()
+                        .claim(Subject::any())
+                        .expires(Timestamp::try_from(session_end as i128)?),
+                )
+                .await?;
+            assert_eq!(operator.delegations().revision(), revision);
+            let end = session_end.min(upstream_end);
+            let mut claim = Prove::<Ucan>::new(operator.did(), storage_scope(&space));
+            claim.duration = TimeRange {
+                not_before: Some(end - 10),
+                expiration: Some(end - 1),
+            };
+            for _ in 0..2 {
+                let proof = operator.resolve(claim.clone()).await?;
+                assert_eq!(proof.duration().expiration, Some(end));
+                assert_eq!(proof.proofs().len(), 2);
+                assert_eq!(proof.proofs()[0].0.audience(), proof.proofs()[1].0.issuer());
+                assert_eq!(proof.proofs()[1].0.audience(), &operator.did());
+            }
+            let key = Peer::<VolatileSpace>::cache_key(&claim).unwrap();
+            assert_eq!(operator.cached(&key, &claim).is_some(), session_end > now);
+            claim.duration = TimeRange {
+                not_before: Some(now),
+                expiration: Some(now),
+            };
+            assert_eq!(
+                operator.resolve(claim.clone()).await.is_ok(),
+                session_end > now
+            );
+            claim.duration = TimeRange {
+                not_before: Some(end),
+                expiration: Some(end + 1),
+            };
+            assert!(operator.resolve(claim).await.is_err());
+            assert_eq!(operator.delegations().revision(), revision);
+            let after = Subject::from(profile.did())
+                .attenuate(Access)
+                .invoke(Export::<Ucan>::new())
+                .perform(&operator)
+                .await?;
+            assert_eq!(after.len(), exported.len());
+            assert_eq!(retained_count(&operator).await?, retained);
+        }
+        Ok(())
+    }
+    #[dialog_common::test]
+    async fn it_selects_a_session_grant_covering_the_requested_window() -> Result<()> {
+        let storage = test_storage().await;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique("session-windows")),
+        )
+        .await?;
+        let now = now_s();
+        let operator = profile
+            .session(b"test")
+            .space(profile.state())
+            .allow(
+                profile
+                    .access()
+                    .claim(Subject::any())
+                    .expires(Timestamp::try_from((now - 60) as i128)?),
+            )
+            .allow(
+                profile
+                    .access()
+                    .claim(Subject::any())
+                    .expires(Timestamp::try_from((now + 3600) as i128)?),
+            )
+            .await?;
+        let mut claim = Prove::<Ucan>::new(
+            operator.did(),
+            Scope {
+                subject: UcanSubject::Specific(profile.did()),
+                command: UcanCommand(vec!["storage".into()]),
+                parameters: Parameters::default(),
+            },
+        );
+        claim.duration = TimeRange {
+            not_before: Some(now),
+            expiration: Some(now),
+        };
+        let proof = operator.resolve(claim).await?;
+        assert_eq!(proof.duration.expiration, Some(now + 3600));
+        Ok(())
+    }
+}

@@ -55,6 +55,9 @@ pub use r#async::*;
 mod impossible;
 pub use impossible::*;
 
+mod holds;
+pub use holds::{Held, Holdings, Holds};
+
 pub mod flight;
 pub use flight::{Flight, WeakFlight};
 

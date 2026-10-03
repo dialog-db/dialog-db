@@ -7,7 +7,8 @@ use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::{Credential, CredentialExport};
 use dialog_effects::credential::prelude::{
-    LoadCredentialExt, LoadSecretExt, RetractSecretExt, SaveCredentialExt, SaveSecretExt,
+    LoadCredentialExt, LoadSecretExt, RetractCredentialExt, RetractSecretExt, SaveCredentialExt,
+    SaveSecretExt,
 };
 use dialog_effects::credential::{CredentialError, Load, Retract, Save, Secret};
 
@@ -58,6 +59,15 @@ impl Provider<Save<Credential>> for FileSystem {
             .map_err(|e| CredentialError::Storage(e.to_string()))?;
 
         handle.write(export.as_bytes()).await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider<Retract<Credential>> for FileSystem {
+    async fn execute(&self, input: Capability<Retract<Credential>>) -> Result<(), CredentialError> {
+        let handle = self.credential_key(input.address())?;
+        handle.remove().await?;
         Ok(())
     }
 }

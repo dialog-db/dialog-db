@@ -18,14 +18,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Datum, IndexRoot, Key, State};
+use dialog_baseline::metered::Meter;
+use dialog_baseline::nodes::{TreeNode, node};
+use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::{SeLog, se_instructions};
-use dialog_search_tree::{ArchivedNodeBody, Buffer as TreeBuffer, PersistentNode};
-use dialog_storage::{Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend};
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_search_tree::{Buffer as TreeBuffer, LoadBlock, NodeBody};
 use futures_util::stream;
-
-type TreeNode = PersistentNode<Key, State<Datum>>;
 
 #[derive(Default, Clone, Copy)]
 struct ClassVolume {
@@ -60,8 +60,8 @@ impl Volume {
             }
         };
         match node.body() {
-            ArchivedNodeBody::Segment(_) => self.leaf.add(bytes.len()),
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Segment(_) => self.leaf.add(bytes.len()),
+            NodeBody::Index(index) => {
                 self.index.add(bytes.len());
                 self.index_novelty_ops += index.novelty_len();
             }
@@ -75,39 +75,34 @@ struct Ledger {
     reads: Volume,
 }
 
-/// Proxy backend that decodes and classifies every block moved through it.
-#[derive(Clone)]
-struct ClassifyingStorage {
+/// Decodes and classifies every block the branch moves.
+#[derive(Clone, Default)]
+struct Classifier {
     ledger: Arc<Mutex<Ledger>>,
-    backend: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl StorageBackend for ClassifyingStorage {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = <MemoryStorageBackend<Blake3Hash, Vec<u8>> as StorageBackend>::Error;
+impl Classifier {
+    /// Everything classified since the last take.
+    fn take(&self) -> Ledger {
+        std::mem::take(&mut *self.ledger.lock().expect("ledger lock"))
+    }
+}
 
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+impl Meter for Classifier {
+    fn wrote(&self, block: &[u8]) {
         self.ledger
             .lock()
             .expect("ledger lock")
             .writes
-            .classify(&value);
-        self.backend.set(key, value).await
+            .classify(block);
     }
 
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let value = self.backend.get(key).await?;
-        if let Some(value) = &value {
-            self.ledger
-                .lock()
-                .expect("ledger lock")
-                .reads
-                .classify(value);
-        }
-        Ok(value)
+    fn read(&self, block: &[u8]) {
+        self.ledger
+            .lock()
+            .expect("ledger lock")
+            .reads
+            .classify(block);
     }
 }
 
@@ -119,37 +114,26 @@ fn per_commit(class: &ClassVolume, window: usize) -> String {
     )
 }
 
-/// Probes the live tree through the RAW backend (no counter pollution):
-/// root block size, root novelty ops, root links, and depth along the
-/// leftmost path.
-async fn probe(
-    inner: &MemoryStorageBackend<Blake3Hash, Vec<u8>>,
-    revision: &Blake3Hash,
-) -> anyhow::Result<(usize, usize, usize, usize)> {
-    use dialog_storage::StorageBackend as _;
-    let bytes = inner
-        .get(revision)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("revision block missing"))?;
-    let root: IndexRoot = CborEncoder.decode(&bytes).await?;
-    let mut hash = *root.index();
+/// Probes the live tree: root block size, root novelty ops, root links,
+/// and depth along the leftmost path.
+async fn probe<Env>(env: &Env, root: Blake3Hash) -> anyhow::Result<(usize, usize, usize, usize)>
+where
+    Env: Provider<LoadBlock> + ConditionalSync,
+{
+    let mut hash = root;
     let mut depth = 0usize;
     let mut root_stats = (0usize, 0usize, 0usize);
     loop {
-        let Some(bytes) = inner.get(&hash).await? else {
-            anyhow::bail!("reachable node missing");
-        };
-        let size = bytes.len();
-        let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
+        let (node, size) = node(env, &hash).await?;
         depth += 1;
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 if depth == 1 {
                     root_stats = (size, index.novelty_len(), index.len());
                 }
-                hash = *index.hash_at(0)?.as_bytes();
+                hash = index.hash_at(0)?.clone();
             }
-            ArchivedNodeBody::Segment(_) => break,
+            NodeBody::Segment(_) => break,
         }
     }
     Ok((root_stats.0, root_stats.1, root_stats.2, depth))
@@ -169,13 +153,8 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let inner = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let ledger = Arc::new(Mutex::new(Ledger::default()));
-        let backend = ClassifyingStorage {
-            ledger: ledger.clone(),
-            backend: inner.clone(),
-        };
-        let mut store = Artifacts::anonymous(backend).await?;
+        let classifier = Classifier::default();
+        let repo = DialogRepo::metered(classifier.clone()).await?;
         let mut committed = 0usize;
         println!(
             "per-commit volume by class (blocks x KiB): W=write R=read; root/depth probed per window"
@@ -197,18 +176,20 @@ fn main() -> anyhow::Result<()> {
         );
         let mut window_started = std::time::Instant::now();
         for commit in &log.transactions {
-            store
+            repo.branch()
                 .commit(stream::iter(se_instructions(commit)?))
+                .perform(repo.operator())
                 .await?;
             committed += 1;
             if committed.is_multiple_of(window) {
                 let elapsed = window_started.elapsed().as_micros() as f64 / window as f64;
-                let taken = {
-                    let mut ledger = ledger.lock().expect("ledger lock");
-                    std::mem::take(&mut *ledger)
-                };
-                let revision = store.revision().await?;
-                let (root_size, root_ops, root_links, depth) = probe(&inner, &revision).await?;
+                let taken = classifier.take();
+                let root = repo
+                    .root()
+                    .expect("the branch has commits, so it has a tree");
+                let (root_size, root_ops, root_links, depth) = probe(&repo.index(), root).await?;
+                // The probe's own reads are not the commits' traffic.
+                classifier.take();
                 println!(
                     "{committed:>7}  {:>10} {:>10} {:>10}  {:>10} {:>10} {:>10}  {:>8.0} {:>6} {:>5} {:>5}  {:>8.0}",
                     per_commit(&taken.writes.leaf, window),

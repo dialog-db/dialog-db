@@ -1,0 +1,16 @@
+name,tag,code,status,default,description
+legacy,version,0x01,reserved,,The untagged node layout written before this table: bare rkyv bytes with an inline 28-byte manifest. Never written as a tag; reserved so no tagged layout reuses its number.
+tagged,version,0x02,draft,,Tagged node: version; kind; header length; manifest fields; zero padding to 16 bytes; rkyv body for the kind.
+segment,kind,0x00,draft,,Leaf node: sorted entries; the body is an archived Segment.
+index,kind,0x01,draft,,Interior node: child links with separators and per-link buffered ops; the body is an archived Index.
+reserved,manifest,0x00,reserved,,Never assigned.
+inline_n,manifest,0x01,draft,4096,Values whose encoded form is longer than this spill to their own block; a spilled value's key carries a prefix and the whole-value hash. Critical: it decides how values are laid out in keys.
+fanout_n,manifest,0x02,draft,8,Branching parameter n: expected fanout 2^n.
+spill_prefix,manifest,0x03,draft,64,How many leading raw value bytes a spilled value's key carries as its order-preserving prefix. Critical: it decides how values are laid out in keys.
+max_separator,manifest,0x04,draft,512,Keys longer than this never become boundaries; bounds every separator.
+max_segment,manifest,0x06,draft,65536,Node weight target in weighted bytes between coin-decided cuts; 0 turns byte pacing off.
+frame_ceiling_factor,manifest,0x08,draft,3,A frame over this multiple of max_segment is force-split at accepted seams; 0 turns the ceiling off.
+anchor_selector,manifest,0x0a,draft,1,Which candidate seam a forced cut anchors at: 0 rendezvous (hash-minimal); 1 hybrid (shortest separator; then hash-minimal).
+entry_overhead,manifest,0x0c,draft,64,Weight charged per leaf entry beyond its key bytes and value payload weight; also meters buffered ops.
+key_overhead,manifest,0x0e,draft,32,Weight the per-key cut floor charges beyond a key's bytes where the value is not in hand.
+link_overhead,manifest,0x10,draft,16,Weight charged per index link beyond its separator bytes and the 32-byte child hash.
