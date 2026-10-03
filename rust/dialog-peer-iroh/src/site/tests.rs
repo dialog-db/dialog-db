@@ -19,7 +19,7 @@ use dialog_common::Buffer;
 use dialog_did_web::{CachingResolver, WebResolver};
 use dialog_effects::archive::{self, ArchiveError};
 use dialog_effects::prelude::*;
-use dialog_operator::helpers::test_operator_with_profile;
+use dialog_peer::helpers::test_session_with_peer;
 use iroh_base::{EndpointAddr, SecretKey};
 use std::sync::Arc;
 
@@ -61,12 +61,15 @@ where
     Capability<Fx>: Ability,
     Iroh: Provider<dialog_capability::ForkInvocation<Iroh, Fx>>,
     IrohFork<Fx>: SiteFork<
-            dialog_operator::Operator<dialog_storage::provider::storage::VolatileSpace>,
+            dialog_peer::Peer<
+                dialog_storage::provider::storage::VolatileSpace,
+                dialog_peer::Session,
+            >,
             Site = Iroh,
             Effect = Fx,
         >,
 {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (session, host) = test_session_with_peer().await;
     let responder = Arc::new(Responder::new(
         Volatile::default(),
         CachingResolver::new(WebResolver::new()),
@@ -76,9 +79,9 @@ where
     // The subject is the profile the operator actually holds authority
     // for. Any other DID is a subject it cannot prove, which is the
     // point of the check and not something a test should route around.
-    let fork: IrohFork<Fx> = Fork::<Iroh, Fx>::new(build(&profile.did()), peer()).into();
+    let fork: IrohFork<Fx> = Fork::<Iroh, Fx>::new(build(&host.did()), peer()).into();
     let invocation = fork
-        .authorize(&operator)
+        .authorize(&session)
         .await
         .expect("the operator holds a powerline delegation");
     (
@@ -162,8 +165,8 @@ async fn a_stored_block_reads_back() {
     let bytes = b"written, then read".to_vec();
     let digest = Buffer::from(bytes.clone()).blake3_hash().clone();
 
-    let (operator, profile) = test_operator_with_profile().await;
-    let subject = profile.did();
+    let (session, host) = test_session_with_peer().await;
+    let subject = host.did();
     let responder = Arc::new(Responder::new(
         Volatile::default(),
         CachingResolver::new(WebResolver::new()),
@@ -172,7 +175,7 @@ async fn a_stored_block_reads_back() {
 
     for capability in [put_of(&subject, &bytes)] {
         let fork: IrohFork<archive::Put> = Fork::<Iroh, _>::new(capability, peer()).into();
-        let invocation = fork.authorize(&operator).await.expect("authorized");
+        let invocation = fork.authorize(&session).await.expect("authorized");
         let outcome: Result<(), ArchiveError> =
             Provider::<ForkInvocation<Iroh, archive::Put>>::execute(&site, invocation).await;
         outcome.expect("the put succeeds");
@@ -184,7 +187,7 @@ async fn a_stored_block_reads_back() {
         .catalog("blocks")
         .get(digest);
     let fork: IrohFork<archive::Get> = Fork::<Iroh, _>::new(read, peer()).into();
-    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let invocation = fork.authorize(&session).await.expect("authorized");
     let found: Result<Option<Vec<u8>>, ArchiveError> =
         Provider::<ForkInvocation<Iroh, archive::Get>>::execute(&site, invocation).await;
 
@@ -197,20 +200,17 @@ async fn a_stored_block_reads_back() {
 /// like any other.
 #[dialog_common::test]
 async fn a_peer_says_who_it_is() {
-    let (operator, profile) = test_operator_with_profile().await;
-    let subject = profile.did();
+    let (session, host) = test_session_with_peer().await;
+    let subject = host.did();
     let responder = Arc::new(Responder::new(
         Volatile::default(),
         CachingResolver::new(WebResolver::new()),
     ));
     let site = Iroh::new(Loopback(responder.clone()));
 
-    let hello = Subject::from(subject.clone())
-        .reader()
-        .attenuate(dialog_effects::peer::Peer)
-        .attenuate(dialog_effects::peer::Hello);
+    let hello = Subject::from(subject.clone()).reader().peers().hello();
     let fork: IrohFork<dialog_effects::peer::Hello> = Fork::<Iroh, _>::new(hello, peer()).into();
-    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let invocation = fork.authorize(&session).await.expect("authorized");
 
     let greeting =
         Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
@@ -221,7 +221,7 @@ async fn a_peer_says_who_it_is() {
         greeting.subject, subject,
         "the answer names the subject that was asked about, not one the peer chose"
     );
-    assert!(greeting.profile.to_string().starts_with("did:"));
+    assert!(greeting.peer.to_string().starts_with("did:"));
     assert!(greeting.operator.to_string().starts_with("did:"));
 }
 
@@ -237,8 +237,8 @@ async fn a_peer_says_who_it_is() {
 async fn a_peer_says_which_spaces_it_holds() {
     use dialog_effects::peer::Offer;
 
-    let (operator, profile) = test_operator_with_profile().await;
-    let subject = profile.did();
+    let (session, host) = test_session_with_peer().await;
+    let subject = host.did();
 
     let offered = vec![
         Offer {
@@ -257,12 +257,9 @@ async fn a_peer_says_which_spaces_it_holds() {
     ));
     let site = Iroh::new(Loopback(responder.clone()));
 
-    let ask = Subject::from(subject)
-        .reader()
-        .attenuate(dialog_effects::peer::Peer)
-        .attenuate(dialog_effects::peer::Spaces);
+    let ask = Subject::from(subject).reader().peers().spaces();
     let fork: IrohFork<dialog_effects::peer::Spaces> = Fork::<Iroh, _>::new(ask, peer()).into();
-    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let invocation = fork.authorize(&session).await.expect("authorized");
 
     let held =
         Provider::<ForkInvocation<Iroh, dialog_effects::peer::Spaces>>::execute(&site, invocation)
@@ -302,8 +299,8 @@ async fn a_site_connects_once_and_not_before_it_must() {
         }
     }
 
-    let (operator, profile) = test_operator_with_profile().await;
-    let subject = profile.did();
+    let (session, host) = test_session_with_peer().await;
+    let subject = host.did();
     let responder = Arc::new(Responder::new(
         Volatile::default(),
         CachingResolver::new(WebResolver::new()),
@@ -321,13 +318,10 @@ async fn a_site_connects_once_and_not_before_it_must() {
     );
 
     for _ in 0..3 {
-        let hello = Subject::from(subject.clone())
-            .reader()
-            .attenuate(dialog_effects::peer::Peer)
-            .attenuate(dialog_effects::peer::Hello);
+        let hello = Subject::from(subject.clone()).reader().peers().hello();
         let fork: IrohFork<dialog_effects::peer::Hello> =
             Fork::<Iroh, _>::new(hello, peer()).into();
-        let invocation = fork.authorize(&operator).await.expect("authorized");
+        let invocation = fork.authorize(&session).await.expect("authorized");
         Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
             .await
             .expect("the peer answers");
@@ -378,8 +372,8 @@ async fn a_site_that_could_not_connect_tries_again() {
         }
     }
 
-    let (operator, profile) = test_operator_with_profile().await;
-    let subject = profile.did();
+    let (session, host) = test_session_with_peer().await;
+    let subject = host.did();
     let responder = Arc::new(Responder::new(
         Volatile::default(),
         CachingResolver::new(WebResolver::new()),
@@ -390,15 +384,12 @@ async fn a_site_that_could_not_connect_tries_again() {
     });
 
     let ask = || {
-        let hello = Subject::from(subject.clone())
-            .reader()
-            .attenuate(dialog_effects::peer::Peer)
-            .attenuate(dialog_effects::peer::Hello);
+        let hello = Subject::from(subject.clone()).reader().peers().hello();
         Fork::<Iroh, _>::new(hello, peer())
     };
 
     let first: IrohFork<dialog_effects::peer::Hello> = ask().into();
-    let invocation = first.authorize(&operator).await.expect("authorized");
+    let invocation = first.authorize(&session).await.expect("authorized");
     Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
         .await
         .expect_err("the first exchange has no carrier to ride");
@@ -406,7 +397,7 @@ async fn a_site_that_could_not_connect_tries_again() {
     site.revive().await;
 
     let second: IrohFork<dialog_effects::peer::Hello> = ask().into();
-    let invocation = second.authorize(&operator).await.expect("authorized");
+    let invocation = second.authorize(&session).await.expect("authorized");
     Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
         .await
         .expect("the carrier arrived, so the second connects");
@@ -504,8 +495,8 @@ async fn a_broken_link_is_rebuilt_by_the_next_exchange() {
         }
     }
 
-    let (operator, profile) = test_operator_with_profile().await;
-    let subject = profile.did();
+    let (session, host) = test_session_with_peer().await;
+    let subject = host.did();
     let responder = Arc::new(Responder::new(
         Volatile::default(),
         CachingResolver::new(WebResolver::new()),
@@ -517,15 +508,12 @@ async fn a_broken_link_is_rebuilt_by_the_next_exchange() {
     });
 
     let ask = || {
-        let hello = Subject::from(subject.clone())
-            .reader()
-            .attenuate(dialog_effects::peer::Peer)
-            .attenuate(dialog_effects::peer::Hello);
+        let hello = Subject::from(subject.clone()).reader().peers().hello();
         Fork::<Iroh, _>::new(hello, peer())
     };
 
     let first: IrohFork<dialog_effects::peer::Hello> = ask().into();
-    let invocation = first.authorize(&operator).await.expect("authorized");
+    let invocation = first.authorize(&session).await.expect("authorized");
     Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
         .await
         .expect_err("the link broke mid-exchange");
@@ -534,7 +522,7 @@ async fn a_broken_link_is_rebuilt_by_the_next_exchange() {
     // No backoff to wait out: the link was up, so what broke is not
     // evidence that connecting is failing.
     let second: IrohFork<dialog_effects::peer::Hello> = ask().into();
-    let invocation = second.authorize(&operator).await.expect("authorized");
+    let invocation = second.authorize(&session).await.expect("authorized");
     Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
         .await
         .expect("the site rebuilt the link and the peer answered");
@@ -546,7 +534,7 @@ async fn a_broken_link_is_rebuilt_by_the_next_exchange() {
 
     // And the replacement is kept, rather than rebuilt per exchange.
     let third: IrohFork<dialog_effects::peer::Hello> = ask().into();
-    let invocation = third.authorize(&operator).await.expect("authorized");
+    let invocation = third.authorize(&session).await.expect("authorized");
     Provider::<ForkInvocation<Iroh, dialog_effects::peer::Hello>>::execute(&site, invocation)
         .await
         .expect("the peer answers");

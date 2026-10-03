@@ -13,6 +13,10 @@
 //! - a directory on the local filesystem is the `did:key` of the
 //!   Ed25519 key seeded by the Blake3 hash of its file URI, one for one
 //!   directory however its path is spelled.
+//!
+//! A peer reached over iroh is the exception: it does have a key, its
+//! endpoint id, so its DID is that key's `did:key` and nothing is
+//! derived.
 
 use dialog_capability::{Provider, Subject};
 use dialog_common::{Blake3Hash, ConditionalSync};
@@ -374,6 +378,10 @@ pub(crate) fn peer_did(address: &SiteAddress) -> Result<Did, PeerError> {
             web(&endpoint, [])
         }
         SiteAddress::Fs(address) => Ok(key(address.location())),
+        // An iroh peer is its key: the endpoint id is the peer's own
+        // Ed25519 public key, so the address already carries the DID
+        // and its routes are only hints for reaching it.
+        SiteAddress::Iroh(address) => Ok(address.did()),
     }
 }
 
@@ -523,6 +531,7 @@ mod tests {
     use dialog_effects::storage::{Directory, Location};
     use dialog_peer::Peer as LocalPeer;
     use dialog_peer::helpers::test_session_with_peer;
+    use dialog_peer_iroh::site::IrohAddress;
     use dialog_query::{Output as _, Query, Term};
     use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address;
@@ -687,6 +696,20 @@ mod tests {
             peer_did(&fs(Directory::Current, "backup"))?,
             peer_did(&fs(Directory::Temp, "backup"))?
         );
+        Ok(())
+    }
+
+    /// A peer reached over iroh is named by its own key, not by anything
+    /// derived from where it is: the address carries the `did:key`, and
+    /// it survives the encoding a contact records it in.
+    #[dialog_common::test]
+    async fn it_names_an_iroh_peer_by_its_key() -> anyhow::Result<()> {
+        let (_, peer) = test_session_with_peer().await;
+        let did = peer.did();
+        let address = SiteAddress::from(IrohAddress::parse_did(did.as_ref())?);
+
+        assert_eq!(peer_did(&address)?, did);
+        assert_eq!(site_address(&peer_address(&address)?)?, address);
         Ok(())
     }
 

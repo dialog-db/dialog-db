@@ -211,7 +211,7 @@ impl Provider<archive::Import> for Volatile {
 
 /// A store has no identity of its own, so it answers with the subject
 /// it was asked about and names itself in the rest. Enough to satisfy
-/// [`Store`](crate::serve::Store) without inventing a profile.
+/// [`Store`](crate::serve::Store) without inventing a peer.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<peer::Hello> for Volatile {
@@ -221,7 +221,7 @@ impl Provider<peer::Hello> for Volatile {
     ) -> Result<peer::Greeting, peer::PeerError> {
         Ok(peer::Greeting {
             subject: input.subject().clone(),
-            profile: dialog_capability::did!("key:zVolatileProfile"),
+            peer: dialog_capability::did!("key:zVolatilePeer"),
             operator: dialog_capability::did!("key:zVolatileOperator"),
         })
     }
