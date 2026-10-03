@@ -45,6 +45,43 @@ pub struct InvocationBundle {
 }
 
 impl InvocationBundle {
+    /// Assemble a bundle from a chain and the blocks its arguments
+    /// name.
+    ///
+    /// The counterpart of reading one: a sender that must ship material
+    /// alongside an invocation — a block whose checksum the arguments
+    /// state, a delegation, another invocation to redeem later — puts it
+    /// here rather than inlining it as an argument, which is what would
+    /// give up content addressing.
+    ///
+    /// Takes the whole chain rather than a bare invocation so the proofs
+    /// travel with it. A bundle whose root names proofs it does not
+    /// carry cannot produce a verifiable [`chain`](Self::chain), and
+    /// leaving that to each caller to remember would make an unprovable
+    /// request easy to build and hard to diagnose.
+    ///
+    /// Blocks are keyed by the CID they hash to, so a block offered
+    /// twice is carried once and the caller does not choose addresses:
+    /// the bytes do. Carrying a block asserts nothing about it, exactly
+    /// as on the reading side.
+    ///
+    /// The chain is encoded on the way in, which is also what settles
+    /// its signature type — any [`Signature`] goes in, and what comes
+    /// back reads as [`AnySignature`] like anything else parsed from a
+    /// container.
+    pub fn from_chain<S>(
+        chain: &InvocationChain<S>,
+        blocks: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Result<Self, ContainerError>
+    where
+        S: dialog_varsig::Signature + serde::Serialize,
+        crate::Delegation<S>: serde::Serialize,
+    {
+        let mut tokens = Container::from(chain).into_tokens();
+        tokens.extend(blocks);
+        Self::try_from(Container::new(tokens))
+    }
+
     /// The invocation at the container's root.
     #[must_use]
     pub const fn invocation(&self) -> &Invocation<AnySignature> {

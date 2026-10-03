@@ -58,6 +58,7 @@ mod branch;
 mod builder;
 mod contact;
 mod fork;
+mod hello;
 mod hydrate;
 mod mode;
 mod preload;

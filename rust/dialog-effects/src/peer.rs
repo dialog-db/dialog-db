@@ -14,18 +14,26 @@
 //!   └── Use
 //!         ├── Get → Peers
 //!         │     ├── Find { name } → Result<Vec<Entity>, PeerError>
-//!         │     └── Connect { peer } → Result<PeerConnection, PeerError>
+//!         │     ├── Connect { peer } → Result<PeerConnection, PeerError>
+//!         │     ├── Hello → Result<Greeting, PeerError>
+//!         │     └── Spaces → Result<Vec<Offer>, PeerError>
 //!         └── Put → Peers
 //!               ├── AddAddress { peer, address } → Result<(), PeerError>
 //!               └── SetName { peer, name } → Result<(), PeerError>
 //! ```
+//!
+//! [`Hello`] and [`Spaces`] are the two of these asked across a wire.
+//! Every other effect here is the host consulting its own records; these
+//! ask a peer to describe itself, which is what a caller needs before it
+//! can record the peer as a contact at all: who answers at an address,
+//! and which spaces are behind it.
 
 use crate::Rejection;
 use crate::memory::MemoryError;
 use crate::method;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::identity::Entity;
-use dialog_capability::{Attenuate, Attenuation, Constraint, Effect};
+use dialog_capability::{Attenuate, Attenuation, Constraint, Did, Effect};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -212,6 +220,102 @@ impl Effect for Connect {
     type Output = Result<PeerConnection, PeerError>;
 }
 
+/// Who a peer is.
+///
+/// Three DIDs rather than one, because they answer different questions.
+/// The *subject* is the authority the peer was asked about, the one the
+/// caller proved a delegation for. The *peer* is whoever holds its
+/// replicas. The *operator* is the key actually signing, which is the
+/// peer's own unless the answer comes from a session of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Greeting {
+    /// The authority this answer covers.
+    pub subject: Did,
+    /// The peer answering.
+    pub peer: Did,
+    /// The key signing on its behalf.
+    pub operator: Did,
+}
+
+/// Ask a peer to describe itself.
+///
+/// A capability rather than an unauthenticated banner on purpose. A
+/// peer's identity is not a secret, but reachability is not permission
+/// anywhere else in this system either, and an endpoint that answers
+/// before checking a delegation is a different security posture from one
+/// that does not. The invocation is signed and verified like any other.
+///
+/// [`Identify`](crate::authority::Identify) is the local counterpart and
+/// deliberately not this: it is a direct env query for ambient state
+/// rather than a capability invocation, so it names no command and
+/// cannot be invoked across a wire.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Attenuate)]
+pub struct Hello;
+
+impl Attenuation for Hello {
+    type Of = Peers<method::Get>;
+
+    fn attenuation() -> &'static str {
+        "peer/hello"
+    }
+}
+
+impl Effect for Hello {
+    type Output = Result<Greeting, PeerError>;
+}
+
+/// One space a peer holds.
+///
+/// The subject is the space's own identity: the DID its repository is
+/// named by, and the one a delegation for it would carry. That is the
+/// whole of what a peer can say about a space it has not been asked to
+/// open, and it is what a caller needs to ask for access to one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Offer {
+    /// The space's subject DID.
+    pub subject: Did,
+    /// What this peer calls it, when it calls it anything.
+    ///
+    /// A local label and nothing more: the peer's own, not a fact about
+    /// the space. A space's display name lives on its content branch and
+    /// is only readable once replicated, so this is what labels a space
+    /// a caller has not opened yet. Absent from a peer that knows its
+    /// spaces by DID alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Ask a peer which spaces it holds.
+///
+/// The second half of "who are you": [`Hello`] answers with the
+/// identities a peer answers for, and this with the spaces behind them.
+/// A caller invoking this holds no authority over any space in the
+/// answer, and by definition cannot, because the answer is what tells it
+/// which spaces there are to ask about.
+///
+/// # What this discloses
+///
+/// A peer's whole inventory, to anyone whose invocation it verifies. The
+/// subject of that invocation is the caller's own, not the peer's, so a
+/// peer that answers this answers strangers. What bounds it is the
+/// carrier: today the only one is a loopback rendezvous, which is to say
+/// the disclosure is to processes already on the machine. A peer reached
+/// over anything wider needs a policy here, and does not have one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Attenuate)]
+pub struct Spaces;
+
+impl Attenuation for Spaces {
+    type Of = Peers<method::Get>;
+
+    fn attenuation() -> &'static str {
+        "peer/spaces"
+    }
+}
+
+impl Effect for Spaces {
+    type Output = Result<Vec<Offer>, PeerError>;
+}
+
 /// A host's connection to a peer: the addresses it is reached at, and
 /// which of them answered last.
 ///
@@ -268,7 +372,11 @@ impl PeerConnection {
 }
 
 /// Errors that can occur during peer operations.
-#[derive(Debug, Error)]
+///
+/// Serializable because [`Hello`] is answered by another peer, and a
+/// caller that only got the rendering of a failure cannot tell a refusal
+/// from a fault.
+#[derive(Debug, Error, Serialize, Deserialize)]
 pub enum PeerError {
     /// The peer has no address to be reached at.
     #[error("No address is known for peer {peer}")]
@@ -310,6 +418,11 @@ pub enum PeerError {
     /// The request was not authorized.
     #[error(transparent)]
     Authorization(#[from] AuthorizeError),
+
+    /// The peer could not establish its own identity, which is a fault
+    /// in the peer rather than in the request.
+    #[error("this peer could not identify itself: {0}")]
+    Unidentified(String),
 }
 
 #[cfg(test)]
@@ -352,8 +465,16 @@ mod tests {
             "/use/get/dialog/peer/find"
         );
         assert_eq!(
-            host.reader().peers().connect(peer()).ability(),
+            host.clone().reader().peers().connect(peer()).ability(),
             "/use/get/dialog/peer/connect"
+        );
+        assert_eq!(
+            host.clone().reader().peers().hello().ability(),
+            "/use/get/dialog/peer/hello"
+        );
+        assert_eq!(
+            host.reader().peers().spaces().ability(),
+            "/use/get/dialog/peer/spaces"
         );
     }
 
