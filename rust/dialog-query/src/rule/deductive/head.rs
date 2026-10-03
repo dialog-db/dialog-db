@@ -105,7 +105,10 @@ impl DeductiveRule {
                 }
             }
 
-            let conclusion = ConceptDescriptor::of_attribute(field);
+            // The head derives into the relation, whatever policy the
+            // field it came from reads it under.
+            let relation = ConceptFieldDescriptor::required(field.descriptor().clone().without_select());
+            let conclusion = ConceptDescriptor::of_attribute(&relation);
             let mut body = rename_premises(&premises, &map)?;
             // An optional head field derives a value only where the
             // body bound one: the relation holds values, never

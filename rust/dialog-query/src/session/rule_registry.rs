@@ -117,14 +117,16 @@ impl RuleRegistry {
             }
         } else {
             let derived = self.derived()?;
-            let reads_derived = predicate
-                .with()
-                .iter()
-                .any(|(_, field)| derived.contains(&ConceptDescriptor::of_attribute(field).this()));
+            // A field reads through its attribute concept when a rule
+            // derives it, or when its policy is not the plain stored
+            // read: either way its candidates are gathered and elected.
+            let through = |field: &ConceptFieldDescriptor| {
+                field.descriptor().reads_elected()
+                    || derived.contains(&ConceptDescriptor::of_attribute(field).this())
+            };
+            let reads_derived = predicate.with().iter().any(|(_, field)| through(field));
             if reads_derived {
-                let selecting = DeductiveRule::selecting(predicate, &|field| {
-                    derived.contains(&ConceptDescriptor::of_attribute(field).this())
-                })
+                let selecting = DeductiveRule::selecting(predicate, &through)
                 .map_err(|error| EvaluationError::Store(error.to_string()))?;
                 let bundle = ConceptRules::with_implicit(selecting, true, PlanCache::default());
                 match self.exact(predicate)? {
