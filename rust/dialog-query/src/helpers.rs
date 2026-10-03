@@ -46,7 +46,7 @@ use dialog_peer::helpers::test_owned;
 use dialog_peer::helpers::{generate_data, open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{
-    Branch, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
+    Branch, HeldCaches, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
 };
 use dialog_search_tree::audit as tree_audit;
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
@@ -688,6 +688,19 @@ where
         Ok(count)
     }
 
+    /// Loads the branch on cold caches: what the environment holds for the
+    /// repository is released first, so the reads a query reports are the
+    /// blocks a reader with nothing warm would fetch.
+    async fn cold(&self) -> Result<Branch> {
+        HeldCaches::of(&self.operator).release(&self.repo.did());
+        Ok(self
+            .repo
+            .branch(&self.branch)
+            .load()
+            .perform(&self.operator)
+            .await?)
+    }
+
     /// Run a select-by-attribute query against the seeded branch,
     /// recording block reads via a [`CountingStore`] wrapper.
     ///
@@ -697,12 +710,7 @@ where
     /// `execute`) are excluded from the recorded counts.
     pub async fn run_query(&self, attribute: &str) -> Result<QueryRun> {
         let the: Attribute = attribute.parse()?;
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
 
         let select = branch
             .claims()
@@ -786,12 +794,7 @@ where
     /// [`Query<Stuff>`]: Query
     /// [`Application::perform`]: ::dialog_query::Application::perform
     pub async fn query_stuff(&self) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
 
         let env = JoinEnv {
             branch: &branch,
@@ -822,12 +825,7 @@ where
     /// meaningful COLD (before any scan warms the node cache); see
     /// `it_keeps_probe_queries_block_frugal`.
     pub async fn probe_reads(&self, of: &Entity) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
         let env = JoinEnv {
             branch: &branch,
             operator: &self.operator,
@@ -850,12 +848,7 @@ where
     /// Runs a full `stuff/name` attribute scan through a counting store and
     /// reports its block reads: the frugality test's contrast arm.
     pub async fn scan_reads(&self) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
         let env = JoinEnv {
             branch: &branch,
             operator: &self.operator,
@@ -1166,6 +1159,9 @@ where
         held: &mut Option<Branch>,
     ) -> Result<()> {
         if held.is_none() || !reuse {
+            // Reopening is only cold once what the environment holds for
+            // the repository is let go.
+            HeldCaches::of(&self.operator).release(&self.repo.did());
             *held = Some(
                 self.repo
                     .branch(&self.branch)
@@ -1192,12 +1188,7 @@ where
         status: Option<&str>,
         assignee: Option<&str>,
     ) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
 
         let env = JoinEnv {
             branch: &branch,
@@ -1410,12 +1401,7 @@ where
     /// constant (the "bugs with status X" query the app issues; `None` leaves
     /// status free for an all-bugs join). Reports the join's block reads.
     pub async fn query_bugs_by_status(&self, status: Option<&str>) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
 
         let env = JoinEnv {
             branch: &branch,
@@ -1578,6 +1564,9 @@ where
         for index in 0..depth {
             let entity = Entity::new()?;
             if held.is_none() || !reuse {
+                // Reopening is only cold once what the environment holds
+                // for the repository is let go.
+                HeldCaches::of(&self.operator).release(&self.repo.did());
                 held = Some(
                     self.repo
                         .branch(&self.branch)

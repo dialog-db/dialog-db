@@ -140,20 +140,22 @@ pub struct Branch {
     /// `None` (never induced) adopts the current head *without*
     /// retroactive firing.
     induction: Cell<Revision>,
-    /// Shared node cache for tree reads. Created once per opened branch and
-    /// carried (as a shared handle) into every `Select`'s tree, so blocks read
-    /// by one query stay warm for the next instead of being re-fetched from
-    /// storage. Content-addressed keys make sharing across revisions safe.
+    /// Node cache for tree reads: this repository's view of the one the
+    /// environment holds (see [`HeldCaches`](crate::HeldCaches)), carried as
+    /// a shared handle into every `Select`'s tree, so blocks read by one
+    /// query stay warm for the next, and for the next open of the branch,
+    /// instead of being re-fetched from storage. Content-addressed keys make
+    /// sharing across revisions safe.
     node_cache: ArtifactNodeCache,
     /// Shared cache of spilled value blocks, keyed by their 32-byte content
-    /// reference. Like `node_cache`, created once per opened branch and carried
+    /// reference. Held by the environment for the repository and carried
     /// into every select so a repeated read of the same large (spilled) value
     /// skips the store fetch. Content-addressed, so it never serves stale bytes.
     spill_cache: SpillCache,
     /// Shared deductive-rule cache (discovery by head + hydrated bodies).
-    /// Like `node_cache`, created once per opened branch and carried into
-    /// every query's durable rule resolution, so the `dialog.rule/*` scan is
-    /// paid once per (concept, head) rather than per query.
+    /// Held by the environment for this branch and carried into every
+    /// query's durable rule resolution, so the `dialog.rule/*` scan is paid
+    /// once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
     /// The branch's ephemeral line: session facts folded into every
     /// read of this branch, never committed. Shared across clones like

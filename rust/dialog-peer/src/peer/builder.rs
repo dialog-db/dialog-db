@@ -8,13 +8,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use dialog_capability::access::{Access, Prove};
-use dialog_capability::{Ability, Capability, Constraint, Subject, did};
-use dialog_common::{Held, Holdings};
+use dialog_capability::{Ability, Capability, Command, Constraint, Provider, Subject, did};
+use dialog_common::{ConditionalSync, Held, Holdings, Holds};
 use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential, Verifier};
+use dialog_effects::memory::Resolve;
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
 use dialog_identity::access::{Access as Accessor, Claim};
 use dialog_network::Network;
-use dialog_repository::BranchReference;
+use dialog_repository::{BranchReference, HeldCaches};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan, UcanCertificate};
 use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -287,6 +288,9 @@ pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     location: Option<Location>,
     directory: Option<Directory>,
     network: Network,
+    /// The caches the peer holds for the repositories opened through it;
+    /// its own, with the default budget, when none are given.
+    caches: Option<HeldCaches>,
     runtime: Runtime,
     issuer: Option<SignerCredential>,
     allowed: Vec<Allowance>,
@@ -315,6 +319,7 @@ impl<M> PeerBuilder<Unset, Unset, M> {
             location: None,
             directory: None,
             network: Network::default(),
+            caches: None,
             runtime: Runtime::default(),
             issuer: None,
             allowed: Vec::new(),
@@ -340,6 +345,9 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>, Session> {
             location: None,
             directory: Some(peer.directory().clone()),
             network: peer.network().clone(),
+            // A session works on its peer's repositories, through the
+            // caches its peer holds.
+            caches: Some(peer.caches()),
             runtime: peer.runtime().clone(),
             issuer: Some(peer.credential().clone()),
             allowed: Vec::new(),
@@ -443,6 +451,7 @@ impl<St> PeerBuilder<PeerKey, St, Local> {
             location: self.location,
             directory: self.directory,
             network: self.network,
+            caches: self.caches,
             runtime: self.runtime,
             issuer: self.issuer,
             allowed: self.allowed,
@@ -486,6 +495,7 @@ impl<St, M> PeerBuilder<Unset, St, M> {
             location: self.location,
             directory: self.directory,
             network: self.network,
+            caches: self.caches,
             runtime: self.runtime,
             issuer: self.issuer,
             allowed: self.allowed,
@@ -518,6 +528,7 @@ impl<K, M, S: Clone> With<Storage<S>> for PeerBuilder<K, Unset, M> {
             location: self.location,
             directory: self.directory,
             network: self.network,
+            caches: self.caches,
             runtime: self.runtime,
             issuer: self.issuer,
             allowed: self.allowed,
@@ -537,6 +548,45 @@ impl<K, St, M> With<Network> for PeerBuilder<K, St, M> {
     fn with(mut self, network: Network) -> Self {
         self.network = network;
         self
+    }
+}
+
+/// The caches the peer holds for the repositories opened through it: how
+/// an embedder bounds them, or has several peers share one set.
+impl<K, St, M> With<HeldCaches> for PeerBuilder<K, St, M> {
+    type Output = Self;
+
+    fn with(mut self, caches: HeldCaches) -> Self {
+        self.caches = Some(caches);
+        self
+    }
+}
+
+/// A peer's storage beside the holdings the peer will have: what its state
+/// branch is opened through, before there is a peer to open it through.
+struct Opening<'a, S: Clone> {
+    storage: &'a Storage<S>,
+    holdings: &'a Holdings,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S: Clone> Provider<Resolve> for Opening<'_, S>
+where
+    Storage<S>: Provider<Resolve> + ConditionalSync,
+{
+    async fn execute(&self, input: <Resolve as Command>::Input) -> <Resolve as Command>::Output {
+        Provider::<Resolve>::execute(self.storage, input).await
+    }
+}
+
+impl<S: Clone> Holds for Opening<'_, S> {
+    fn held(&self, key: &str) -> Option<Held> {
+        self.holdings.held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        self.holdings.hold(key, handle)
     }
 }
 
@@ -729,9 +779,19 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
             grants.push(grant);
         }
 
+        // The peer's state branch is opened before the peer exists, so it
+        // is opened through the storage with the holdings the peer will
+        // have: what the branch keeps is then the peer's to hold.
+        let holdings = Holdings::default();
+        if let Some(caches) = &self.caches {
+            caches.hold(&holdings);
+        }
         let state = reference
             .open()
-            .perform(&self.storage)
+            .perform(&Opening {
+                storage: &self.storage,
+                holdings: &holdings,
+            })
             .await
             .map_err(|error| PeerError::State(error.to_string()))?;
 
@@ -755,7 +815,7 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 state,
                 chains: Mutex::default(),
                 grants,
-                holdings: Holdings::default(),
+                holdings,
                 connections: Mutex::default(),
                 sites: self.sites,
                 holder,
