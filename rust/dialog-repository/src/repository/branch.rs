@@ -2,7 +2,7 @@ use super::memory::Cell;
 use crate::rules::SharedRuleCache;
 use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
-use dialog_common::{ConditionalSync, Holds};
+use dialog_common::{ConditionalSync, Holds, held_key};
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
@@ -271,7 +271,9 @@ impl Writer {
     /// nothing, such as a bare storage provider, gives every handle a
     /// writer of its own, as two environments would.
     fn held<Env: Holds>(env: &Env, key: String) -> Arc<Self> {
-        let held = env.held_or(WRITERS, &|| Arc::new(Writers::default()));
+        let held = env.held_or(&held_key::<Writers>(WRITERS), &|| {
+            Arc::new(Writers::default())
+        });
         let Some(writers) = held.downcast_ref::<Writers>() else {
             // Something else is held under the key: a writer of this
             // handle's own, which takes turns with no other handle.

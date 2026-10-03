@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use dialog_artifacts::SpineSlot;
 use dialog_artifacts::history::{CausalityCache, ContextCache, RevisionRecord, Version};
 use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
-use dialog_common::Holds;
+use dialog_common::{Holds, held_key};
 use dialog_query::concept::query::PlanCache;
 use dialog_search_tree::{Cache, NODE_CACHE_BUDGET, NodeCache, Scope};
 use dialog_varsig::Did;
@@ -131,7 +131,7 @@ impl HeldCaches {
     /// The caches `env` holds, made with the default budget if it holds
     /// none yet.
     pub fn of<Env: Holds>(env: &Env) -> Self {
-        env.held_or(HELD, &|| Arc::new(Self::new()))
+        env.held_or(&held_key::<Self>(HELD), &|| Arc::new(Self::new()))
             .downcast_ref::<Self>()
             .cloned()
             // Only if something else is held under the key: caches of the
@@ -144,7 +144,7 @@ impl HeldCaches {
     /// A branch already open keeps the caches it was opened with; what is
     /// opened from here on uses these.
     pub fn hold<Env: Holds>(&self, env: &Env) {
-        env.hold(HELD.to_string(), Arc::new(self.clone()));
+        env.hold(held_key::<Self>(HELD), Arc::new(self.clone()));
     }
 
     /// The bytes of tree nodes these caches may hold.
