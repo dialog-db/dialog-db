@@ -17,6 +17,7 @@ blake3 = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
 dialog-search-tree = { workspace = true }
 dialog-storage = { workspace = true }
 getrandom = { workspace = true }
@@ -34,7 +35,9 @@ wasm-bindgen = { workspace = true }
 
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
+anyhow = { workspace = true }
 futures-util = { workspace = true }
+dialog-varsig = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [[bench]]

@@ -58,6 +58,13 @@ pub enum KeyringError {
     #[error("storage failed: {0}")]
     Storage(String),
 
+    /// The archive refused or failed a read or write of envelopes.
+    ///
+    /// Keeps the archive's own error, so an authorization decision stays
+    /// distinguishable from a storage failure.
+    #[error(transparent)]
+    Archive(#[from] dialog_effects::archive::ArchiveError),
+
     /// The platform would not supply entropy for a new epoch.
     #[error("entropy unavailable: {0}")]
     Entropy(String),

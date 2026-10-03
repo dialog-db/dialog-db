@@ -30,9 +30,10 @@
 //!
 //! # Convergence
 //!
-//! Every key is derived from the node's plaintext and the level secrets, and
-//! every region is encrypted with a fixed nonce (each key encrypts exactly
-//! one message; see [`keys`]). So two replicas sealing the same tree under the
+//! Every key is derived from the node's plaintext and the level secrets, the
+//! range and content regions are encrypted with a fixed nonce (each of their
+//! keys encrypts exactly one message; see [`keys`]), and the structure
+//! region's nonce is derived from what it seals. So two replicas sealing the same tree under the
 //! same generations produce byte-identical envelopes at identical addresses,
 //! and a diff between them still prunes.
 //!
@@ -41,6 +42,17 @@
 //! A parent records its children's addresses, which are hashes of their
 //! envelopes, so children are sealed first. [`LayeredBlocks::write`] seals
 //! what a persist staged, from the root down to the nodes already stored.
+//!
+//! # Kept in memory or in an archive
+//!
+//! [`LayeredBlocks`] keeps envelopes in memory. [`LayeredArchive`] keeps
+//! them in an archive catalog: because an envelope's address is its hash,
+//! envelopes are ordinary content-addressed blocks there, imported with
+//! `Import` and read with `Get`, and every path that moves blocks between
+//! archives moves them unchanged.
+
+mod archive;
+pub use archive::LayeredArchive;
 
 mod envelope;
 pub use envelope::Envelope;
@@ -48,6 +60,7 @@ pub use envelope::Envelope;
 pub mod keys;
 pub use keys::{Access, Level, LevelSecret, StructureKey, Writer};
 
+mod party;
 mod projection;
 
 mod store;

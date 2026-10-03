@@ -17,7 +17,7 @@ use rkyv::validation::shared::SharedValidator;
 
 use super::envelope::Envelope;
 use super::keys::{Access, StructureKey, Writer};
-use super::projection::project;
+use super::party::Party;
 use crate::KeyringError;
 
 /// Where a layered tree starts: its root envelope's address, and the
@@ -34,10 +34,6 @@ pub struct LayeredRoot {
 /// Envelopes by address, shared by every party pointed at one store.
 type Envelopes = Arc<RwLock<HashMap<Blake3Hash, Vec<u8>>>>;
 
-/// Where each node a party has reached lives: its content identity, mapped
-/// to its envelope's address and its structure key.
-type Known = Arc<RwLock<HashMap<Blake3Hash, (Blake3Hash, StructureKey)>>>;
-
 /// Layered envelopes held in memory, read by one party at one level of
 /// [`Access`].
 ///
@@ -49,10 +45,8 @@ type Known = Arc<RwLock<HashMap<Blake3Hash, (Blake3Hash, StructureKey)>>>;
 pub struct LayeredBlocks<K, V> {
     /// Envelopes by address.
     envelopes: Envelopes,
-    /// What this party can open.
-    access: Access,
-    /// Where each node this party has reached lives.
-    known: Known,
+    /// What this party can open, and where each node it reached lives.
+    party: Party,
     /// The tree's key and value types, which reading a node's links needs.
     types: PhantomData<fn() -> (K, V)>,
 }
@@ -61,8 +55,7 @@ impl<K, V> Clone for LayeredBlocks<K, V> {
     fn clone(&self) -> Self {
         Self {
             envelopes: self.envelopes.clone(),
-            access: self.access.clone(),
-            known: self.known.clone(),
+            party: self.party.clone(),
             types: PhantomData,
         }
     }
@@ -82,8 +75,7 @@ impl<K, V> LayeredBlocks<K, V> {
     pub fn new(access: Access) -> Self {
         Self {
             envelopes: Arc::default(),
-            access,
-            known: Arc::default(),
+            party: Party::new(access),
             types: PhantomData,
         }
     }
@@ -94,8 +86,7 @@ impl<K, V> LayeredBlocks<K, V> {
     pub fn as_party(&self, access: Access) -> Self {
         Self {
             envelopes: self.envelopes.clone(),
-            access,
-            known: Arc::default(),
+            party: Party::new(access),
             types: PhantomData,
         }
     }
@@ -219,7 +210,7 @@ impl<K, V> LayeredBlocks<K, V> {
             if children.is_empty() {
                 return Ok(address);
             }
-            let separators = envelope.separators(&self.access, &structure)?;
+            let separators = envelope.separators(self.party.access(), &structure)?;
             let at = separators
                 .iter()
                 .rposition(|separator| separator.as_slice() <= key)
@@ -244,21 +235,6 @@ impl<K, V> LayeredBlocks<K, V> {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
     }
-
-    fn known(&self, identity: &Blake3Hash) -> Option<(Blake3Hash, StructureKey)> {
-        self.known
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(identity)
-            .cloned()
-    }
-
-    fn learn(&self, identity: Blake3Hash, address: Blake3Hash, structure: StructureKey) {
-        self.known
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(identity, (address, structure));
-    }
 }
 
 impl<K, V> LayeredBlocks<K, V>
@@ -270,7 +246,9 @@ where
     >,
 {
     /// Seal what a persist staged in `delta` under `writer`'s generations,
-    /// emptying it, and return where the tree rooted at `root` now starts.
+    /// emptying it once the envelopes are kept, and return where the tree
+    /// rooted at `root` now starts. A refused write keeps nothing and leaves
+    /// `delta` as it was.
     ///
     /// Sealed bottom-up from `root`: a parent records its children's
     /// addresses, so they are sealed first. A child that was not staged must
@@ -287,43 +265,11 @@ where
         delta: &mut Delta<Blake3Hash, Buffer>,
         root: &Blake3Hash,
     ) -> Result<LayeredRoot, KeyringError> {
-        let staged: HashMap<Blake3Hash, Buffer> = delta.flush().collect();
-        let (address, structure) = self.seal_node(writer, &staged, root)?;
-        Ok(LayeredRoot { address, structure })
-    }
-
-    fn seal_node(
-        &self,
-        writer: &Writer,
-        staged: &HashMap<Blake3Hash, Buffer>,
-        identity: &Blake3Hash,
-    ) -> Result<(Blake3Hash, StructureKey), KeyringError> {
-        if let Some(known) = self.known(identity) {
-            return Ok(known);
-        }
-        let block = staged
-            .get(identity)
-            .ok_or_else(|| KeyringError::UnknownNode(identity.clone()))?;
-        let projection = project::<K, V>(block)?;
-        let children = projection
-            .children
-            .iter()
-            .map(|child| self.seal_node(writer, staged, child))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let structure = writer.structure_key(block.as_ref());
-        let envelope = Envelope::seal(
-            writer,
-            &structure,
-            &children,
-            &projection.separators,
-            block.as_ref(),
-        )?;
-        let address = envelope.address();
+        let sealing = self.party.seal::<K, V>(writer, delta, root)?;
         self.envelopes_mut()
-            .insert(address.clone(), envelope.to_bytes());
-        self.learn(identity.clone(), address.clone(), structure);
-        Ok((address, structure))
+            .extend(sealing.envelopes.iter().cloned());
+        delta.flush().for_each(drop);
+        Ok(self.party.settle(sealing))
     }
 
     /// Open the root's content and return the tree's root identity, to read
@@ -335,33 +281,17 @@ where
     /// the root was sealed under, and what [`fetch`](Self::fetch) returns.
     pub fn open_root(&self, root: &LayeredRoot) -> Result<Blake3Hash, KeyringError> {
         let envelope = self.fetch(&root.address)?;
-        let plain = envelope.content(&self.access, &root.structure)?;
-        let identity = Blake3Hash::hash(&plain);
-        self.learn(identity.clone(), root.address.clone(), root.structure);
-        Ok(identity)
+        self.party.open_root(root, &envelope)
     }
 
     /// The node `identity` names, opened, with where its children live
     /// learned from it.
     fn open_node(&self, identity: &Blake3Hash) -> Result<Option<Buffer>, KeyringError> {
-        let Some((address, structure)) = self.known(identity) else {
+        let Some((address, structure)) = self.party.known(identity) else {
             return Ok(None);
         };
         let envelope = self.fetch(&address)?;
-        let plain = Buffer::from(envelope.content(&self.access, &structure)?);
-        let projection = project::<K, V>(&plain)?;
-        let children = envelope.children(&structure)?;
-        if children.len() != projection.children.len() {
-            return Err(KeyringError::Node(
-                "a node's structure and content name different children".into(),
-            ));
-        }
-        for (child, (child_address, child_structure)) in
-            projection.children.into_iter().zip(children)
-        {
-            self.learn(child, child_address, child_structure);
-        }
-        Ok(Some(plain))
+        self.party.open::<K, V>(&envelope, &structure).map(Some)
     }
 }
 
