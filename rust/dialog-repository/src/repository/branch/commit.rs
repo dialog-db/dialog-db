@@ -650,7 +650,13 @@ where
             };
             let batch = batch.record(&store, self.entries).await?;
             tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
-            persist(&source.archive().index(), &mut delta, env).await?;
+            persist(
+                &source.archive().index(),
+                &source.node_cache(),
+                &mut delta,
+                env,
+            )
+            .await?;
             revision.tree = TreeReference::from(*tree.root().as_bytes());
             revision.signature = Attest::new(revision.payload()).perform(env).await?;
             return Ok(Outcome::Minted(Box::new(Minted {
@@ -764,7 +770,13 @@ where
         // reference-counted, so nothing is copied on the way in, and
         // providers with native batching persist it in a single round trip
         // (one IndexedDB transaction).
-        persist(&source.archive().index(), &mut delta, env).await?;
+        persist(
+            &source.archive().index(),
+            &source.node_cache(),
+            &mut delta,
+            env,
+        )
+        .await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
         revision.context = Some(context.clone());
