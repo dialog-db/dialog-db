@@ -162,6 +162,16 @@ impl InductiveRule {
         format!("rule:{encoded}").parse().ok()
     }
 
+    /// Whether this rule's body is what was stored under `entity`:
+    /// `entity` is its identity, or the identity its spelling had
+    /// before identities were canonical (the hash of the stored bytes),
+    /// so a rule installed then keeps firing. Bytes stored under any
+    /// other entity are forged or corrupt.
+    pub fn stored_as(&self, entity: &Entity) -> bool {
+        self.try_this().as_ref() == Some(entity)
+            || crate::rule::deductive::legacy_identity(self.try_encode()).as_ref() == Some(entity)
+    }
+
     /// Canonical dag-cbor encoding, panicking if the rule has no
     /// encodable body. Use on the storage path where the rule is known
     /// to be storable (concept/formula bodies); prefer

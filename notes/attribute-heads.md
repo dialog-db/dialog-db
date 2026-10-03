@@ -310,10 +310,12 @@ whose operands it could not bind.
 The authored spelling is kept beside the canonical one and is what
 the rule stores and shows, so a rule reads back as written; the
 content-address check on hydration compares identities, which the
-canonical spelling makes a pure function of the rule. A body the
-notation cannot express (a raw attribute scan, as in a concept's
-implicit rule) has no encoding, hence no identity, and keeps the
-spelling it was given.
+canonical spelling makes a pure function of the rule. A body stored
+before identities were canonical sits under the hash of its bytes;
+hydration accepts that identity too, so such a rule stays live, and
+bytes under any other entity stay inert. A body the notation cannot
+express (a raw attribute scan, as in a concept's implicit rule) has
+no encoding, hence no identity, and keeps the spelling it was given.
 
 ### Caches
 
@@ -323,7 +325,10 @@ and a re-spelled single-head rule has a content address of its own, so
 plans for `{ a }` cache like any rule's. The descriptor memo of the
 implicit plan is unchanged for underived concepts; for a concept with
 a derived field the implicit rule differs by which premises are
-concept premises, so it is memoised per resolution outcome.
+concept premises, so it is memoised per resolution outcome. Whether
+an attribute has nothing stored under it, which the covering rule's
+path asks on every evaluation of its concept, is remembered on the
+query's memo beside the bodies.
 
 ### Incremental maintenance
 

@@ -37,6 +37,10 @@ use crate::types::Any;
 #[derive(Debug, Default)]
 pub struct Memo {
     rules: Mutex<HashMap<Vec<u8>, Remembered>>,
+    /// Per attribute, whether nothing is stored under it: the exact
+    /// path asks this once per evaluation of a concept, and a query
+    /// evaluates the same concept many times.
+    stored: Mutex<HashMap<Vec<u8>, bool>>,
 }
 
 /// What one rule's body yielded so far in this query.
@@ -101,6 +105,24 @@ impl Memo {
         } else {
             remembered.by_this.insert(this, rows);
         }
+    }
+
+    /// Whether `attribute` was found to have nothing stored under it
+    /// earlier in this query, if it was looked at.
+    pub fn stored_absent(&self, attribute: &[u8]) -> Option<bool> {
+        self.stored
+            .lock()
+            .expect("memo lock")
+            .get(attribute)
+            .copied()
+    }
+
+    /// Remember whether nothing is stored under `attribute`.
+    pub fn remember_stored_absent(&self, attribute: Vec<u8>, absent: bool) {
+        self.stored
+            .lock()
+            .expect("memo lock")
+            .insert(attribute, absent);
     }
 }
 

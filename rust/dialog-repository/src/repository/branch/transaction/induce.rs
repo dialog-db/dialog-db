@@ -608,7 +608,7 @@ impl<'a> Dispatch<'a> {
             .and_then(|bytes| hydrate(&bytes).ok())
             // Content-address check: forged bytes stored under a
             // mismatching entity are inert.
-            .filter(|body| body.try_this() == Some(entity.clone()))
+            .filter(|body| body.stored_as(entity))
             .inspect(|body| {
                 cache.record_body(entity.clone(), body.clone());
             }))
@@ -655,7 +655,7 @@ impl<'a> Dispatch<'a> {
         let Ok(rule) = hydrate_inductive(&bytes) else {
             return Ok(None);
         };
-        if rule.try_this() != Some(entity.clone()) {
+        if !rule.stored_as(entity) {
             return Ok(None);
         }
         cache.record_inductive(entity.clone(), rule.clone());

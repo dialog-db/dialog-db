@@ -351,6 +351,16 @@ impl DeductiveRule {
             .clone()
     }
 
+    /// Whether this rule's body is what was stored under `entity`:
+    /// `entity` is its identity, or the identity its spelling had
+    /// before identities were canonical (the hash of the stored bytes),
+    /// so a rule installed then stays live. Bytes stored under any other
+    /// entity are forged or corrupt.
+    pub fn stored_as(&self, entity: &Entity) -> bool {
+        self.try_this().as_ref() == Some(entity)
+            || legacy_identity(self.try_encode()).as_ref() == Some(entity)
+    }
+
     /// The source this head was split from, when it was.
     pub fn origin(&self) -> Option<&Origin> {
         self.origin.as_deref()
@@ -769,6 +779,15 @@ fn split(premises: &[Premise]) -> (Vec<Proposition>, Vec<Proposition>) {
 /// hashes.
 pub(crate) fn same_attribute(a: &ConceptFieldDescriptor, b: &ConceptFieldDescriptor) -> bool {
     a.the() == b.the() && a.cardinality() == b.cardinality() && a.content_type() == b.content_type()
+}
+
+/// The identity a stored body had before identities were canonical:
+/// `rule:<base58(blake3(bytes))>` over its encoding as stored.
+pub(crate) fn legacy_identity(encoded: Option<Vec<u8>>) -> Option<Entity> {
+    use base58::ToBase58;
+    let hash = blake3::hash(&encoded?);
+    let encoded = hash.as_bytes().as_ref().to_base58();
+    format!("rule:{encoded}").parse().ok()
 }
 
 #[cfg(test)]

@@ -525,8 +525,9 @@ impl ConceptQuery {
                 && stored_absent(&exact.attributes, env).await?
                 && let Some(plan) = rules.plan_exact(&app.terms, &first)
             {
+                let elect = app.elects(&rules);
                 let rows = stream::once(async { Ok(first) }).chain(selection);
-                for await merged in app.through(&plan, rows, env, false, widen) {
+                for await merged in app.through(&plan, rows, env, elect, widen) {
                     yield merged?;
                 }
                 return;
@@ -731,9 +732,30 @@ impl ConceptQuery {
             let this_term = app.terms.get("this").cloned();
             let key_operand = Relation::key_operand(ConceptDescriptor::VALUE);
 
+            // The survivors of an election no input row informed: an input
+            // binding none of the query's variables asks the same question
+            // as every other such input, so it is answered once.
+            let mut unconditional: Option<Vec<Candidate>> = None;
+
             let rows = stream::once(async { Ok(first) }).chain(rows);
             for await input in rows {
                 let input = input?;
+                let independent = app
+                    .terms
+                    .iter()
+                    .all(|(_, term)| term.name().is_none() || !input.contains(term));
+                if independent && let Some(survivors) = &unconditional {
+                    if survivors.is_empty() && widen {
+                        yield widened(&input, &app.terms)?;
+                        continue;
+                    }
+                    for candidate in survivors.clone() {
+                        if let Some(merged) = merge_candidate(&input, &app.terms, candidate, &key_operand)? {
+                            yield merged;
+                        }
+                    }
+                    continue;
+                }
                 // The entity the caller bound, if any: a constant, or a
                 // variable an earlier premise bound.
                 let entity: Option<Value> = match &this_term {
@@ -816,26 +838,17 @@ impl ConceptQuery {
                 }
 
                 let survivors = elect(candidates, one)?;
+                if independent {
+                    unconditional = Some(survivors.clone());
+                }
                 if survivors.is_empty() && widen {
                     yield widened(&input, &app.terms)?;
                     continue;
                 }
                 for candidate in survivors {
-                    let mut row = fixpoint::Row::new();
-                    row.insert("this".to_string(), candidate.this);
-                    row.insert(ConceptDescriptor::VALUE.to_string(), candidate.value);
-                    if let Some(key) = candidate.key {
-                        row.insert(key_operand.clone(), key);
+                    if let Some(merged) = merge_candidate(&input, &app.terms, candidate, &key_operand)? {
+                        yield merged;
                     }
-                    let Some(mut merged) = fixpoint::join(&input, &app.terms, &row)? else {
-                        continue;
-                    };
-                    match &candidate.source {
-                        Source::Owned(source) => merged.adopt_citations(source),
-                        Source::Shared(rows, index) => merged.adopt_citations(&rows[*index]),
-                        Source::Folded => {}
-                    }
-                    yield merged;
                 }
             }
         }
@@ -941,7 +954,9 @@ impl ConceptQuery {
 /// Whether nothing is stored under any of `attributes`, in any layer
 /// the environment reads: each attribute's range is opened and must
 /// yield no row. A range estimate would not do, since it reads the
-/// committed tree alone and an overlay may hold the fact.
+/// committed tree alone and an overlay may hold the fact. The answer
+/// per attribute is kept on the query's memo, since the facts do not
+/// change within a query and a concept is evaluated many times in one.
 async fn stored_absent<'a, Env>(
     attributes: &[crate::artifact::ArtifactsAttribute],
     env: &'a Env,
@@ -950,15 +965,52 @@ where
     Env: crate::Scope<'a>,
 {
     for attribute in attributes {
-        let selector = dialog_artifacts::ArtifactSelector::new().the(attribute.clone());
-        let mut rows = Provider::<dialog_artifacts::Select<'_>>::execute(env, selector)
-            .await
-            .map_err(|error| EvaluationError::Store(error.to_string()))?;
-        if rows.next().await.is_some() {
+        let key = attribute.to_string().into_bytes();
+        let absent = match env.memo().and_then(|memo| memo.stored_absent(&key)) {
+            Some(absent) => absent,
+            None => {
+                let selector = dialog_artifacts::ArtifactSelector::new().the(attribute.clone());
+                let mut rows = Provider::<dialog_artifacts::Select<'_>>::execute(env, selector)
+                    .await
+                    .map_err(|error| EvaluationError::Store(error.to_string()))?;
+                let absent = rows.next().await.is_none();
+                if let Some(memo) = env.memo() {
+                    memo.remember_stored_absent(key, absent);
+                }
+                absent
+            }
+        };
+        if !absent {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// The row for `candidate` merged into the caller's `input`, citing the
+/// facts the candidate came from; `None` when the caller's bindings
+/// disagree with it.
+fn merge_candidate(
+    input: &Match,
+    terms: &Parameters,
+    candidate: Candidate,
+    key_operand: &str,
+) -> Result<Option<Match>, EvaluationError> {
+    let mut row = fixpoint::Row::new();
+    row.insert("this".to_string(), candidate.this);
+    row.insert(ConceptDescriptor::VALUE.to_string(), candidate.value);
+    if let Some(key) = candidate.key {
+        row.insert(key_operand.to_string(), key);
+    }
+    let Some(mut merged) = fixpoint::join(input, terms, &row)? else {
+        return Ok(None);
+    };
+    match &candidate.source {
+        Source::Owned(source) => merged.adopt_citations(source),
+        Source::Shared(rows, index) => merged.adopt_citations(&rows[*index]),
+        Source::Folded => {}
+    }
+    Ok(Some(merged))
 }
 
 /// A cardinality-one election's incumbent for one caller and entity:
@@ -966,6 +1018,7 @@ where
 type Winner = (Option<Standing>, Value, Match, Arc<Match>);
 
 /// One value a source offers for an attribute of an entity.
+#[derive(Clone)]
 struct Candidate {
     /// The entity's merge key, for grouping.
     entity: Vec<u8>,
@@ -977,6 +1030,7 @@ struct Candidate {
 }
 
 /// Where a candidate's citations live.
+#[derive(Clone)]
 enum Source {
     /// A row the stored scan or an attribute-headed rule built in scope.
     Owned(Match),
@@ -1277,6 +1331,78 @@ mod tests {
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
     // with deeply nested async streams. The functionality is tested indirectly through integration
     // tests and the planning tests above verify the core logic.
+
+    /// The exact path elects like any other: one rule derives the
+    /// concept's only attribute and nothing is stored under it, so the
+    /// rule re-headed onto the concept is its whole answer, and where
+    /// its body offers two values for one entity a cardinality-one
+    /// read sees one row.
+    #[dialog_common::test]
+    async fn it_elects_on_the_exact_path() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let thing = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("stuff/name").of(thing.clone()).is("a".to_string()))
+            .assert(the!("stuff/name").of(thing.clone()).is("b".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let stuff = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("stuff/name"),
+                "",
+                Cardinality::Many,
+                Some(Type::String),
+            ),
+        )])?;
+        let member = ConceptDescriptor::try_from(vec![(
+            "title",
+            AttributeDescriptor::new(
+                the!("member/title"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])?;
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("this"));
+        terms.insert("name".to_string(), Term::<Any>::var("title"));
+        let rule = DeductiveRule::new(
+            member.clone(),
+            vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: stuff,
+            }))],
+        )?;
+        let mut registry = RuleRegistry::new();
+        registry.register(rule)?;
+        let source = TestEnv::new(&branch, &operator, registry);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("who"));
+        terms.insert("title".to_string(), Term::<Any>::var("title"));
+        let rows: Vec<Match> = ConceptQuery {
+            terms,
+            predicate: member,
+        }
+        .evaluate(Match::new().seed(), &source)
+        .try_collect()
+        .await?;
+        assert_eq!(rows.len(), 1, "one title survives the election");
+        assert_eq!(
+            rows[0].lookup(&Term::<Any>::var("title"))?.content()?,
+            Value::String("b".to_string()),
+            "the greatest value wins"
+        );
+        Ok(())
+    }
 
     #[dialog_common::test]
     async fn it_executes_concept_query() -> anyhow::Result<()> {

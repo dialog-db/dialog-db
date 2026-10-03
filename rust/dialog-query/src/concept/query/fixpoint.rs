@@ -522,9 +522,15 @@ where
             .collect();
         let mut stage = 0usize;
         while !base.is_empty() || !siblings.is_empty() {
-            let (ready, later): (Vec<Premise>, Vec<Premise>) = base
-                .into_iter()
-                .partition(|premise| premise.feasible(&scope).is_ok());
+            // A negated premise is feasible whatever the scope binds,
+            // since it asks about the rows that reach it; asked before a
+            // sibling occurrence binds its variables it would ask about
+            // the wrong rows, so it waits for the last stage.
+            let (ready, later): (Vec<Premise>, Vec<Premise>) =
+                base.into_iter().partition(|premise| {
+                    (siblings.is_empty() || !matches!(premise, Premise::Unless(_)))
+                        && premise.feasible(&scope).is_ok()
+                });
             base = later;
             if !ready.is_empty() {
                 let plan = match plans.get(&stage) {
@@ -2665,6 +2671,104 @@ mod derived_edge_tests {
         ];
         expected.sort_by_key(|pair| format!("{pair:?}"));
         assert_eq!(pairs, expected, "closure includes the transitive pair");
+        Ok(())
+    }
+
+    /// A negated premise of a recursive rule is answered after every
+    /// occurrence of the component bound its variables: `?ancestor`
+    /// is bound by the second occurrence alone, and asked before that
+    /// the negation would speak for the wrong rows. The step reaches
+    /// through `c`, which is blocked, so `a` never reaches `c` while
+    /// still reaching `d` through `b`.
+    #[dialog_common::test]
+    async fn it_negates_after_every_occurrence_is_bound() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let a = Entity::new()?;
+        let b = Entity::new()?;
+        let c = Entity::new()?;
+        let d = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("family/parent").of(a.clone()).is(b.clone()))
+            .assert(the!("family/parent").of(b.clone()).is(c.clone()))
+            .assert(the!("family/parent").of(c.clone()).is(d.clone()))
+            .assert(the!("family/blocked").of(c.clone()).is(true))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let edge = edge_concept();
+        let concept = ancestor_concept();
+        let occurrence = |this: &str, ancestor: &str| {
+            let mut terms = Parameters::new();
+            terms.insert("this".to_string(), Term::<Any>::var(this));
+            terms.insert("ancestor".to_string(), Term::<Any>::var(ancestor));
+            Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: concept.clone(),
+            }))
+        };
+        let base = DeductiveRule::new(
+            concept.clone(),
+            vec![edge_premise(&edge, "this", "ancestor")],
+        )?;
+        let step = DeductiveRule::new(
+            concept.clone(),
+            vec![
+                occurrence("this", "mid"),
+                occurrence("mid", "ancestor"),
+                Premise::Unless(Negation(Proposition::Attribute(Box::new(
+                    AttributeQuery::new(
+                        Term::from(the!("family/blocked")),
+                        Term::<Entity>::var("ancestor"),
+                        Term::blank(),
+                        Term::blank(),
+                        Some(Cardinality::One),
+                    ),
+                )))),
+            ],
+        )?;
+        let mut registry = RuleRegistry::new();
+        registry.register(edge_rule(&edge))?;
+        registry.register(base)?;
+        registry.register(step)?;
+        assert!(registry.is_recursive(&concept.this())?);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("who"));
+        terms.insert("ancestor".to_string(), Term::<Any>::var("relative"));
+        let source = TestEnv::new(&branch, &operator, registry);
+        let premise = Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }));
+        let plan = Planner::from(vec![premise])
+            .plan(&Environment::new())
+            .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+        let mut pairs = Vec::new();
+        for matched in results {
+            let who = matched.lookup(&Term::<Any>::var("who"))?.content()?;
+            let relative = matched.lookup(&Term::<Any>::var("relative"))?.content()?;
+            pairs.push((who, relative));
+        }
+        pairs.sort_by_key(|pair| format!("{pair:?}"));
+        let mut expected = vec![
+            (Value::Entity(a.clone()), Value::Entity(b.clone())),
+            (Value::Entity(b.clone()), Value::Entity(c.clone())),
+            (Value::Entity(c.clone()), Value::Entity(d.clone())),
+            (Value::Entity(b.clone()), Value::Entity(d.clone())),
+            (Value::Entity(a.clone()), Value::Entity(d.clone())),
+        ];
+        expected.sort_by_key(|pair| format!("{pair:?}"));
+        assert_eq!(pairs, expected, "the blocked entity is reached by nobody");
         Ok(())
     }
 }
