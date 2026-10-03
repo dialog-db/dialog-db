@@ -568,6 +568,11 @@ impl AttributeDescriptor {
         // name half of these facts holds. A plain attribute therefore
         // encodes exactly as it did before collections existed, so
         // every existing identity is preserved.
+        // An attribute is a relation read under a type, a cardinality
+        // and a policy: two reads of one relation under different
+        // policies are two attributes. The policy fields are omitted
+        // when none is declared, so every attribute declared without
+        // one keeps the identity it had.
         #[derive(Serialize)]
         struct CborAttributeDescriptor<'a> {
             domain: &'a str,
@@ -575,6 +580,10 @@ impl AttributeDescriptor {
             cardinality: Cardinality,
             #[serde(rename = "type")]
             content_type: Option<Type>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            select: Option<Select>,
+            #[serde(skip_serializing_if = "<[Value]>::is_empty")]
+            among: &'a [Value],
         }
 
         let name = match &self.the {
@@ -589,6 +598,8 @@ impl AttributeDescriptor {
             name,
             cardinality: self.cardinality(),
             content_type: self.content_type(),
+            select: self.select,
+            among: &self.among,
         };
 
         serde_ipld_dagcbor::to_vec(&schema).expect("CBOR encoding should not fail")
@@ -687,6 +698,24 @@ mod tests {
         assert!(!plain.reads_elected());
         let encoded = serde_json::to_value(&plain).expect("serializes");
         assert!(encoded.get("select").is_none() && encoded.get("among").is_none());
+    }
+
+    /// A policy is part of the attribute: two reads of one relation
+    /// under different policies are two attributes, and a read under
+    /// none keeps the identity it always had.
+    #[dialog_common::test]
+    fn it_tells_attributes_apart_by_policy() {
+        let plain = AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(Type::Entity));
+        let ranked = plain
+            .clone()
+            .with_select(Select::Top, vec![Value::Boolean(true)]);
+        let newest = plain.clone().with_select(Select::Last, Vec::new());
+        assert_ne!(plain.to_uri(), ranked.to_uri());
+        assert_ne!(ranked.to_uri(), newest.to_uri());
+        assert_eq!(
+            plain.to_uri(),
+            AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(Type::Entity)).to_uri()
+        );
     }
 
     /// A policy that does not fit its attribute is named: `top` without
