@@ -1,37 +1,49 @@
 use super::dependencies::{ProgramAnalysis, Violation};
 use crate::Entity;
 use crate::EvaluationError;
-use crate::concept::descriptor::ConceptDescriptor;
-use crate::concept::query::ConceptRules;
+use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
+use crate::concept::query::{ConceptRules, Exact, PlanCache};
 use crate::rule::deductive::DeductiveRule;
 use crate::source::SelectRules;
 use dialog_capability::Provider;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-/// Thread-safe registry of *deductive* rules, keyed by the
-/// conclusion entity. Inductive rules
+/// Thread-safe registry of *deductive* rules, keyed by the attribute
+/// each rule derives. Inductive rules
 /// ([`InductiveRule`](crate::rule::InductiveRule)) have a
 /// different lifecycle: they participate in transactions rather
 /// than queries, and will be installed via a separate path in the
 /// future.
 ///
-/// Both [`Session`](super::Session) and [`QuerySession`](super::QuerySession)
-/// hold a `RuleRegistry`. When a concept query needs rules, the registry
-/// returns a [`ConceptRules`](crate::concept::application::ConceptRules)
-/// bundle containing the default rule (derived from the concept's
-/// attributes) plus any explicitly installed rules, together with a
-/// per-adornment plan cache.
+/// A registered rule is split into [one rule per head
+/// attribute](DeductiveRule::heads), each indexed under the [attribute
+/// concept](ConceptDescriptor::of_attribute) it derives. When a
+/// concept query needs rules, the registry returns a
+/// [`ConceptRules`](crate::concept::query::ConceptRules) bundle: for
+/// an attribute concept, the implicit scan plus every rule deriving
+/// that attribute; for any other concept, its selecting rule alone,
+/// which reads each derived attribute through its attribute concept
+/// and every other attribute from stored facts.
 ///
-/// Cloning a registry is cheap: the underlying `HashMap` is wrapped in
+/// Cloning a registry is cheap: the underlying maps are wrapped in
 /// `Arc<RwLock<…>>` so all clones share the same rule set and caches.
 #[derive(Debug, Clone, Default)]
 pub struct RuleRegistry {
-    rules: Arc<RwLock<HashMap<Entity, ConceptRules>>>,
+    /// The rules deriving each attribute, keyed by the attribute
+    /// concept's entity. Every rule here is attribute-headed.
+    heads: Arc<RwLock<HashMap<Entity, Vec<DeductiveRule>>>>,
+    /// Bundles assembled per queried concept, keyed by the concept's
+    /// entity and cleared whenever the rule set changes.
+    bundles: Arc<RwLock<HashMap<Entity, ConceptRules>>>,
     /// Lazily computed program-level dependency analysis (recursion
     /// and stratification), shared across clones and invalidated by
     /// [`register`](Self::register) / [`extend`](Self::extend).
     analysis: Arc<RwLock<Option<Arc<ProgramAnalysis>>>>,
+}
+
+fn poisoned<E: std::fmt::Display>(error: E) -> EvaluationError {
+    EvaluationError::Store(error.to_string())
 }
 
 impl RuleRegistry {
@@ -40,8 +52,8 @@ impl RuleRegistry {
         Self::default()
     }
 
-    /// Register a deductive rule, deduplicating by equality.
-    /// Invalidates cached plans for the affected concept entity.
+    /// Register a deductive rule, deduplicating by identity. The rule
+    /// is indexed once per attribute its head carries.
     ///
     /// Registration is *unconditional* with respect to
     /// stratification: rules can be installed concurrently on
@@ -49,22 +61,124 @@ impl RuleRegistry {
     /// whole-set properties (recursion, negation or aggregation
     /// through recursion) are checked by
     /// [`validate`](Self::validate) and at query time, never here.
-    /// Only lock poisoning errors.
     pub fn register(&mut self, rule: DeductiveRule) -> Result<(), EvaluationError> {
-        let entity = rule.conclusion().this();
-        self.rules
-            .write()
-            .map_err(|e| EvaluationError::Store(e.to_string()))?
-            .entry(entity)
-            .or_insert_with(|| ConceptRules::new(rule.conclusion()))
-            .install(rule);
-        self.invalidate_analysis()?;
-        Ok(())
+        let heads = rule
+            .heads()
+            .map_err(|error| EvaluationError::Store(error.to_string()))?;
+        let mut index = self.heads.write().map_err(poisoned)?;
+        for head in heads {
+            let key = ConceptDescriptor::of_attribute(&head.field).this();
+            let rules = index.entry(key).or_default();
+            if !rules.iter().any(|existing| existing.same(&head.rule)) {
+                rules.push(head.rule);
+            }
+        }
+        drop(index);
+        self.invalidate()
     }
 
-    /// Acquire rules for the given concept. Creates the default rule from
-    /// the predicate's attributes on first access, so this always returns
-    /// a ConceptRules regardless of whether any rules were explicitly installed.
+    /// Whether some registered rule derives the attribute of `field`.
+    pub fn derives(&self, field: &ConceptFieldDescriptor) -> Result<bool, EvaluationError> {
+        let key = ConceptDescriptor::of_attribute(field).this();
+        Ok(self.heads.read().map_err(poisoned)?.contains_key(&key))
+    }
+
+    /// The attribute concepts some registered rule derives, by entity.
+    fn derived(&self) -> Result<HashSet<Entity>, EvaluationError> {
+        Ok(self
+            .heads
+            .read()
+            .map_err(poisoned)?
+            .keys()
+            .cloned()
+            .collect())
+    }
+
+    /// Assemble the rule bundle for `predicate` from the index.
+    fn bundle(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
+        let entity = predicate.this();
+        if let Some(bundle) = self.bundles.read().map_err(poisoned)?.get(&entity) {
+            return Ok(bundle.clone());
+        }
+        let bundle = if let Some((_, field)) = predicate.attribute_field() {
+            // An attribute concept, under whatever field name the
+            // caller spelled it: the bundle is built over the canonical
+            // spelling every rule deriving it concludes.
+            let canonical = ConceptDescriptor::of_attribute(field);
+            let mut bundle = ConceptRules::new(&canonical);
+            if let Some(rules) = self.heads.read().map_err(poisoned)?.get(&entity) {
+                for rule in rules {
+                    bundle.install(rule.clone());
+                }
+            }
+            match self.exact(&canonical)? {
+                Some(exact) => bundle.with_exact(exact),
+                None => bundle,
+            }
+        } else {
+            let derived = self.derived()?;
+            let reads_derived = predicate
+                .with()
+                .iter()
+                .any(|(_, field)| derived.contains(&ConceptDescriptor::of_attribute(field).this()));
+            if reads_derived {
+                let selecting = DeductiveRule::selecting(predicate, &|field| {
+                    derived.contains(&ConceptDescriptor::of_attribute(field).this())
+                })
+                .map_err(|error| EvaluationError::Store(error.to_string()))?;
+                let bundle = ConceptRules::with_implicit(selecting, true, PlanCache::default());
+                match self.exact(predicate)? {
+                    Some(exact) => bundle.with_exact(exact),
+                    None => bundle,
+                }
+            } else {
+                ConceptRules::new(predicate)
+            }
+        };
+        self.bundles
+            .write()
+            .map_err(poisoned)?
+            .insert(entity, bundle.clone());
+        Ok(bundle)
+    }
+
+    /// The covering rule for `predicate`, when exactly one source rule
+    /// derives every derived attribute of it, no attribute-headed rule
+    /// stands beside it, and none of them is a keyed collection.
+    fn exact(&self, predicate: &ConceptDescriptor) -> Result<Option<Exact>, EvaluationError> {
+        let index = self.heads.read().map_err(poisoned)?;
+        let mut source: Option<DeductiveRule> = None;
+        let mut attributes = Vec::new();
+        for (_, field) in predicate.with().iter() {
+            let key = ConceptDescriptor::of_attribute(field).this();
+            let Some(heads) = index.get(&key) else {
+                continue;
+            };
+            let Some(attribute) = field.the().attribute() else {
+                return Ok(None);
+            };
+            attributes.push(attribute);
+            for head in heads {
+                let Some(origin) = head.origin() else {
+                    return Ok(None);
+                };
+                match &source {
+                    None => source = Some(origin.rule.clone()),
+                    Some(known) if known.same(&origin.rule) => {}
+                    Some(_) => return Ok(None),
+                }
+            }
+        }
+        let Some(rule) = source else { return Ok(None) };
+        let covering = rule
+            .covering(predicate)
+            .map_err(|error| EvaluationError::Store(error.to_string()))?;
+        Ok(covering.map(|rule| Exact { rule, attributes }))
+    }
+
+    /// Acquire rules for the given concept. Always returns a
+    /// `ConceptRules`, whether or not any rule derives one of the
+    /// concept's attributes.
     ///
     /// Runs the query-time dependency check over the concept's
     /// closure first: an ill-stratified closure fails with
@@ -78,69 +192,69 @@ impl RuleRegistry {
     pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let analysis = self.analysis()?;
         analysis.check(predicate)?;
-        let entity = predicate.this();
-        let rules = self
-            .rules
-            .write()
-            .map_err(|e| EvaluationError::Store(e.to_string()))?
-            .entry(entity.clone())
-            .or_insert_with(|| ConceptRules::new(predicate))
-            .clone();
-        Ok(if analysis.is_recursive(&entity) {
+        let rules = self.bundle(predicate)?;
+        Ok(if analysis.is_recursive(&predicate.this()) {
             rules.with_recursion(analysis)
         } else {
             rules
         })
     }
 
-    /// Merge every per-concept rule set from `other` into this registry.
+    /// Merge every rule from `other` into this registry.
     ///
-    /// Entries that exist on both sides are folded together via
-    /// [`ConceptRules::extend`] so installed rules from both contribute.
     /// Like [`register`](Self::register), merging is unconditional:
     /// the merged set may be ill-stratified, which
     /// [`validate`](Self::validate) reports and queries surface.
     pub fn extend(&mut self, other: &RuleRegistry) -> Result<(), EvaluationError> {
-        let other_rules = other
-            .rules
-            .read()
-            .map_err(|e| EvaluationError::Store(e.to_string()))?;
-        let mut self_rules = self
-            .rules
-            .write()
-            .map_err(|e| EvaluationError::Store(e.to_string()))?;
-        for (entity, rules) in other_rules.iter() {
-            self_rules
-                .entry(entity.clone())
-                .and_modify(|existing| existing.extend(rules))
-                .or_insert_with(|| rules.clone());
+        let theirs = other.heads.read().map_err(poisoned)?;
+        let mut ours = self.heads.write().map_err(poisoned)?;
+        for (key, rules) in theirs.iter() {
+            let existing = ours.entry(key.clone()).or_default();
+            for rule in rules {
+                if !existing.iter().any(|known| known.same(rule)) {
+                    existing.push(rule.clone());
+                }
+            }
         }
-        drop(self_rules);
-        self.invalidate_analysis()?;
-        Ok(())
+        drop(ours);
+        drop(theirs);
+        self.invalidate()
     }
 
     /// The current program analysis snapshot, computing it if the
     /// rule set changed since the last one.
     pub fn analysis(&self) -> Result<Arc<ProgramAnalysis>, EvaluationError> {
-        if let Some(analysis) = self
-            .analysis
-            .read()
-            .map_err(|e| EvaluationError::Store(e.to_string()))?
-            .as_ref()
-        {
+        if let Some(analysis) = self.analysis.read().map_err(poisoned)?.as_ref() {
             return Ok(analysis.clone());
         }
-        let rules = self
-            .rules
+        // Every derived attribute is a node with its own bundle; the
+        // concepts those bundles' bodies reference join the graph
+        // through their selecting edges.
+        let keys: Vec<Entity> = self
+            .heads
             .read()
-            .map_err(|e| EvaluationError::Store(e.to_string()))?;
-        let analysis = Arc::new(ProgramAnalysis::analyze(rules.iter()));
-        drop(rules);
-        *self
-            .analysis
-            .write()
-            .map_err(|e| EvaluationError::Store(e.to_string()))? = Some(analysis.clone());
+            .map_err(poisoned)?
+            .keys()
+            .cloned()
+            .collect();
+        let mut entries: Vec<(Entity, ConceptRules)> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let index = self.heads.read().map_err(poisoned)?;
+            let Some(rules) = index.get(&key) else {
+                continue;
+            };
+            let Some(first) = rules.first() else { continue };
+            let mut bundle = ConceptRules::new(first.conclusion());
+            for rule in rules {
+                bundle.install(rule.clone());
+            }
+            entries.push((key, bundle));
+        }
+        let analysis = Arc::new(ProgramAnalysis::analyze_with(
+            entries.iter().map(|(entity, bundle)| (entity, bundle)),
+            self.derived()?,
+        ));
+        *self.analysis.write().map_err(poisoned)? = Some(analysis.clone());
         Ok(analysis)
     }
 
@@ -158,11 +272,9 @@ impl RuleRegistry {
         Ok(self.analysis()?.is_recursive(concept))
     }
 
-    fn invalidate_analysis(&self) -> Result<(), EvaluationError> {
-        *self
-            .analysis
-            .write()
-            .map_err(|e| EvaluationError::Store(e.to_string()))? = None;
+    fn invalidate(&self) -> Result<(), EvaluationError> {
+        self.bundles.write().map_err(poisoned)?.clear();
+        *self.analysis.write().map_err(poisoned)? = None;
         Ok(())
     }
 }
@@ -199,6 +311,30 @@ mod tests {
         .unwrap()
     }
 
+    fn employee_concept() -> ConceptDescriptor {
+        ConceptDescriptor::try_from([
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "person name",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+            (
+                "role",
+                AttributeDescriptor::new(
+                    the!("employee/role"),
+                    "employee role",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+        ])
+        .unwrap()
+    }
+
     #[dialog_common::test]
     async fn it_returns_implicit_rules_for_an_unseen_concept() {
         let registry = RuleRegistry::new();
@@ -219,11 +355,41 @@ mod tests {
         let rule = DeductiveRule::from(&descriptor);
         registry.register(rule.clone()).unwrap();
 
-        let rules = Provider::<SelectRules>::execute(&registry, descriptor)
+        let rules = Provider::<SelectRules>::execute(&registry, descriptor.clone())
             .await
             .expect("acquire");
         assert_eq!(rules.installed().len(), 1);
-        assert_eq!(rules.installed()[0], rule);
+        let installed = &rules.installed()[0];
+        assert!(installed.is_attribute_headed());
+        assert_eq!(installed.conclusion().this(), descriptor.this());
+    }
+
+    #[dialog_common::test]
+    async fn it_indexes_a_rule_under_each_attribute_it_derives() {
+        let mut registry = RuleRegistry::new();
+        let employee = employee_concept();
+        registry.register(DeductiveRule::from(&employee)).unwrap();
+
+        let (_, name) = person_concept()
+            .with()
+            .iter()
+            .next()
+            .map(|(n, f)| (n, f.clone()))
+            .unwrap();
+        assert!(registry.derives(&name).unwrap());
+
+        let by_name = registry.acquire(&person_concept()).unwrap();
+        assert_eq!(
+            by_name.installed().len(),
+            1,
+            "the name head reaches the name concept"
+        );
+
+        let whole = registry.acquire(&employee).unwrap();
+        assert!(
+            whole.installed().is_empty(),
+            "a concept with several attributes selects through its attribute concepts"
+        );
     }
 
     #[dialog_common::test]
@@ -235,7 +401,7 @@ mod tests {
 
         let mut dst = RuleRegistry::new();
         dst.extend(&src).unwrap();
-        assert_eq!(dst.acquire(&descriptor).unwrap().installed()[0], rule);
+        assert_eq!(dst.acquire(&descriptor).unwrap().installed().len(), 1);
     }
 
     #[dialog_common::test]
@@ -270,7 +436,5 @@ mod tests {
         a.extend(&b).unwrap();
         let merged = a.acquire(&descriptor).unwrap();
         assert_eq!(merged.installed().len(), 2);
-        assert!(merged.installed().contains(&rule_a));
-        assert!(merged.installed().contains(&rule_b));
     }
 }

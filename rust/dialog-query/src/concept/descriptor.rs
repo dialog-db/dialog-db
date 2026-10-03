@@ -192,6 +192,47 @@ impl ConceptDescriptor {
             .clone()
     }
 
+    /// The operand name an [attribute concept](Self::of_attribute)
+    /// binds its value under: the attribute triple's own `is` slot.
+    pub const VALUE: &'static str = "is";
+
+    /// The attribute concept over `field`: the concept whose only
+    /// attribute is the field's, named [`VALUE`](Self::VALUE).
+    ///
+    /// This is the relation a rule derives into and a concept selects
+    /// from. Its identity is the attribute's alone, so a user-declared
+    /// single-attribute concept over the same attribute is the same
+    /// node. Optionality and conformance are properties of a field's
+    /// place in a concept, not of the relation, so neither carries
+    /// over.
+    pub fn of_attribute(field: &ConceptFieldDescriptor) -> Self {
+        field.attribute_concept().clone()
+    }
+
+    /// [`of_attribute`](Self::of_attribute) computed afresh: what the
+    /// field memoises.
+    pub(crate) fn attribute_concept(field: &ConceptFieldDescriptor) -> Self {
+        descriptor_from_with(
+            NamedAttributes::try_from(vec![(
+                Self::VALUE.to_string(),
+                ConceptFieldDescriptor::required(field.descriptor().clone()),
+            )])
+            .expect("a single required attribute is a well-formed concept"),
+        )
+    }
+
+    /// The field of this concept when it is an attribute concept: a
+    /// single required, non-conforming attribute. Such a concept is
+    /// the relation of that attribute, whatever the field is named.
+    pub fn attribute_field(&self) -> Option<(&str, &ConceptFieldDescriptor)> {
+        let mut fields = self.with().iter();
+        let (name, field) = fields.next()?;
+        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
+            return None;
+        }
+        Some((name, field))
+    }
+
     /// The keyed-collection fields of this concept.
     pub fn collections(&self) -> impl Iterator<Item = (&str, &ConceptFieldDescriptor)> {
         self.with()

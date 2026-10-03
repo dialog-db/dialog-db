@@ -17,14 +17,19 @@
 
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::{AnalysisError, TypeError};
+use crate::negation::Negation;
 use crate::planner::Planner;
 use crate::premise::Premise;
+use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
+use crate::rule::analyzer::Authored;
 use crate::{Environment, Type};
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::sync::Arc;
 
 /// Rule analysis: inference and dependency graph over premises.
 pub mod analyzer;
+pub mod canonical;
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;
 /// Inductive rule definitions (a.k.a. effects).
@@ -180,7 +185,24 @@ pub(crate) fn compile_rule<T: Compile>(
     // Coalesce / reduce checks + dependency graph, all from the
     // premises, before any execution order is chosen. The original
     // premises are kept for the error-path display rule.
+    // A concept premise reads the fields it names and the required
+    // ones: an optional field it leaves out decides nothing, and
+    // selecting it could put the concept on a cycle with the rules
+    // deriving that field (see `ConceptQuery::narrowed`).
+    let premises: Vec<Premise> = premises
+        .into_iter()
+        .map(|premise| match premise {
+            Premise::Assert(Proposition::Concept(query)) => {
+                Premise::Assert(Proposition::Concept(query.narrowed()))
+            }
+            Premise::Unless(Negation(Proposition::Concept(query))) => {
+                Premise::Unless(Negation(Proposition::Concept(query.narrowed())))
+            }
+            other => other,
+        })
+        .collect();
     let display_premises = premises.clone();
+    let authored_reduce = reduce.clone();
     let analysis = match analyzer::analyze_with(conclusion.clone(), premises, T::KIND, reduce) {
         Ok(analysis) => analysis,
         Err(err) => {
@@ -266,6 +288,52 @@ pub(crate) fn compile_rule<T: Compile>(
             variable,
         });
     }
+
+    // The rule's canonical spelling: locals renamed by the body's
+    // structure and premises sorted, so one body spelled two ways is
+    // one rule to everything keyed by its identity. The head's operands
+    // (`this`, each field and each keyed field's key) are fixed names. The narrowed
+    // premises are canonicalised and analysed again, which is the
+    // same analysis under other names; the authored spelling is kept
+    // for storage and display.
+    let analysis = match canonical::canonicalize(
+        &conclusion,
+        &analysis.premises,
+        &authored_reduce
+            .iter()
+            .map(|(field, _)| {
+                let entry = analysis
+                    .reduce
+                    .iter()
+                    .find(|entry| entry.field == *field)
+                    .expect("an analysed reduce clause keeps every field");
+                (field.clone(), ReduceSpec::from(entry))
+            })
+            .collect::<Vec<_>>(),
+    )? {
+        Some(canonical) => {
+            let respelled = canonical.premises != analysis.premises;
+            let authored = Authored {
+                premises: analysis.premises,
+                reduce: analysis.reduce,
+            };
+            let mut analysis = analyzer::analyze_with(
+                conclusion.clone(),
+                canonical.premises,
+                T::KIND,
+                canonical.reduce,
+            )
+            .map_err(|error| TypeError::TypeInference {
+                reason: format!("canonical spelling fails analysis: {error:?}"),
+            })?;
+            if respelled {
+                analysis.authored = Some(Arc::new(authored));
+            }
+            analysis.canonical = Some(Arc::new(canonical.identity));
+            analysis
+        }
+        None => analysis,
+    };
 
     Ok(T::from_analysis(analysis))
 }

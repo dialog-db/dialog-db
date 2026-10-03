@@ -64,6 +64,15 @@ pub fn reads_attr() -> Attribute {
     the!("dialog.rule/reads").into()
 }
 
+/// The `dialog.rule/derives` head index for *deductive* rules: one claim
+/// per attribute the rule's conclusion carries, valued
+/// `on:<domain>/<name>`. Resolution probes it per attribute, so a rule
+/// is found by every concept selecting any attribute it derives, not
+/// only by the concept it was written against.
+pub fn derives_attr() -> Attribute {
+    the!("dialog.rule/derives").into()
+}
+
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
 /// Derivable from a runtime instruction alone — no schema lookup —
 /// which is what keeps dispatch probing cheap.
@@ -201,6 +210,25 @@ pub fn reads_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
     premise_trigger_entities(descriptor.when.iter().chain(descriptor.unless.iter()))
 }
 
+/// The head-index entities for a deductive rule: one per attribute of
+/// its conclusion. Stored as `dialog.rule/derives` so resolution can
+/// find, for one attribute, every rule deriving it, whatever concept
+/// the rule was written against.
+pub fn derives_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
+    head_entities(rule.conclusion())
+}
+
+/// The head-index entities of a concept: the reach entity of each of
+/// its attributes, as [`derives_entities`] records them for a rule
+/// concluding it.
+pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
+    concept
+        .with()
+        .iter()
+        .filter_map(|(_, field)| Reach::of(field.descriptor().the()).on_entity())
+        .collect()
+}
+
 /// Asserting a [`DeductiveRule`] installs it as `dialog.rule/*` facts:
 /// the `conclusion` discovery index, the `source` body, and the `reads`
 /// reverse index over the body's attributes that lets commit-time
@@ -231,6 +259,9 @@ impl Statement for &DeductiveRule {
         for reads in reads_entities(self) {
             update.associate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
         }
+        for derives in derives_entities(self) {
+            update.associate(derives_attr(), rule_entity.clone(), Value::Entity(derives));
+        }
     }
 
     fn retract(self, update: &mut impl Update) {
@@ -247,6 +278,9 @@ impl Statement for &DeductiveRule {
         );
         for reads in reads_entities(self) {
             update.dissociate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
+        }
+        for derives in derives_entities(self) {
+            update.dissociate(derives_attr(), rule_entity.clone(), Value::Entity(derives));
         }
     }
 }

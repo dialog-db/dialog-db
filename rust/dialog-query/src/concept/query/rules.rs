@@ -14,9 +14,14 @@ use super::adornment::Adornment;
 use super::fixpoint::Continuation;
 use super::plan_cache::PlanCache;
 use crate::DeductiveRule;
+use crate::attribute::Relation;
 use crate::concept::descriptor::ConceptDescriptor;
+use crate::environment::Environment;
 use crate::parameters::Parameters;
-use crate::planner::Disjunction;
+use crate::planner::Header;
+use crate::planner::{Conjunction, Disjunction, Plan};
+use crate::recall::Recall;
+use crate::rule::deductive::Origin;
 use crate::selection::Match;
 use crate::session::ProgramAnalysis;
 use std::collections::HashMap;
@@ -30,6 +35,10 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone)]
 pub struct ConceptRules {
     implicit: DeductiveRule,
+    /// Whether `implicit` is a selecting rule reading some attribute
+    /// through its attribute concept, rather than the descriptor's own
+    /// implicit scan whose plans the descriptor memoizes.
+    selecting: bool,
     installed: Vec<DeductiveRule>,
     plans: Arc<RwLock<HashMap<Adornment, Arc<Disjunction>>>>,
     /// Cross-query cache of planned per-rule [`Conjunction`]s, keyed by
@@ -49,6 +58,21 @@ pub struct ConceptRules {
     /// answer table (or rebuilds into it) instead of computing a
     /// throwaway fixpoint.
     continuation: Option<Continuation>,
+    /// For a concept selecting derived attributes that one rule alone
+    /// derives: that rule re-headed onto the concept, the exact
+    /// evaluation while nothing is stored under those attributes.
+    exact: Option<Arc<Exact>>,
+}
+
+/// The one rule that derives every derived attribute of a selecting
+/// concept, re-headed onto it, with the attributes whose stores must be
+/// empty for it to be the concept's whole answer.
+#[derive(Debug, Clone)]
+pub struct Exact {
+    /// The covering rule, concluding the selecting concept.
+    pub rule: DeductiveRule,
+    /// The attributes the rule is the only source of.
+    pub attributes: Vec<crate::artifact::ArtifactsAttribute>,
 }
 
 impl ConceptRules {
@@ -71,14 +95,53 @@ impl ConceptRules {
     /// layers; passing the branch's cache here lets each assembly reuse
     /// plans the previous one computed (see [`PlanCache`]).
     pub fn with_plan_cache(descriptor: &ConceptDescriptor, plan_cache: PlanCache) -> Self {
+        Self::with_implicit(descriptor.implicit_rule(), false, plan_cache)
+    }
+
+    /// Create a `ConceptRules` whose stored-facts branch is `implicit`
+    /// rather than the descriptor's own implicit rule.
+    ///
+    /// A concept selecting a derived attribute reads it through the
+    /// attribute concept over it, so its selecting rule differs from the
+    /// implicit scan and must not share the descriptor's memoized
+    /// implicit plan: `selecting` says so, and such a rule is planned
+    /// through this instance's own per-adornment cache instead.
+    pub fn with_implicit(implicit: DeductiveRule, selecting: bool, plan_cache: PlanCache) -> Self {
         Self {
-            implicit: descriptor.implicit_rule(),
+            implicit,
+            selecting,
             installed: Vec::new(),
             plans: Arc::new(RwLock::new(HashMap::new())),
             plan_cache,
             recursion: None,
             continuation: None,
+            exact: None,
         }
+    }
+
+    /// Attach the covering rule a selecting concept evaluates exactly by
+    /// while nothing is stored under the attributes it derives.
+    pub fn with_exact(mut self, exact: Exact) -> Self {
+        self.exact = Some(Arc::new(exact));
+        self
+    }
+
+    /// The covering rule, if one was attached.
+    pub fn exact(&self) -> Option<&Exact> {
+        self.exact.as_deref()
+    }
+
+    /// The covering rule's plan for the given binding pattern, through
+    /// the shared plan cache.
+    pub fn plan_exact(&self, terms: &Parameters, matched: &Match) -> Option<Disjunction> {
+        let exact = self.exact.as_ref()?;
+        let operands = self.implicit.conclusion().sorted_operands();
+        let adornment = Adornment::derive(&operands, terms, matched);
+        let scope = adornment.into_environment(&operands);
+        let plan = self
+            .plan_cache
+            .get_or_plan(&exact.rule, adornment, || exact.rule.plan(&scope));
+        Some(Disjunction::Solo(plan))
     }
 
     /// Attach the program analysis marking this concept recursive.
@@ -107,10 +170,19 @@ impl ConceptRules {
         self.continuation.as_ref()
     }
 
-    /// Install a deductive rule, deduplicating by equality.
-    /// Clears the plan cache when a genuinely new rule is added.
+    /// Install a deductive rule, deduplicating by identity
+    /// ([`DeductiveRule::same`]). Clears the plan cache when a genuinely
+    /// new rule is added.
     pub fn install(&mut self, rule: DeductiveRule) {
-        if !self.installed.contains(&rule) {
+        // A caller binds the head by this concept's field names, and
+        // a rule concluding the same attributes under other names is
+        // re-headed onto them first. A rule whose fields do not pair
+        // up is installed as it is, which is what happened before.
+        let rule = match rule.respelled(self.implicit.conclusion()) {
+            Ok(Some(respelled)) => respelled,
+            _ => rule,
+        };
+        if !self.installed.iter().any(|known| known.same(&rule)) {
             self.installed.push(rule);
             self.plans.write().unwrap().clear();
         }
@@ -181,18 +253,23 @@ impl ConceptRules {
         // a small branch costs, so neither is planned twice. Reducing
         // rules never join the disjunction: their folded rows are
         // computed separately (see [`Self::reducing`]).
-        let implicit = self
-            .implicit
-            .conclusion()
-            .implicit_plan(adornment, || self.implicit.plan(&scope));
+        let implicit = if self.selecting {
+            self.implicit.plan(&scope)
+        } else {
+            self.implicit
+                .conclusion()
+                .implicit_plan(adornment, || self.implicit.plan(&scope))
+        };
         let plan: Disjunction = iter::once(implicit)
             .chain(
                 self.installed
                     .iter()
                     .filter(|rule| rule.reduce().is_empty())
-                    .map(|rule| {
-                        self.plan_cache
-                            .get_or_plan(rule, adornment, || rule.plan(&scope))
+                    .map(|rule| match rule.origin() {
+                        Some(origin) => self.recall(rule, origin, &scope),
+                        None => self
+                            .plan_cache
+                            .get_or_plan(rule, adornment, || rule.plan(&scope)),
                     }),
             )
             .collect();
@@ -200,6 +277,53 @@ impl ConceptRules {
         let fork = Arc::new(plan);
         self.plans.write().unwrap().insert(adornment, fork.clone());
         fork
+    }
+}
+
+impl ConceptRules {
+    /// The plan for a head split from `origin`: one [`Recall`] step over
+    /// the source rule's body, planned with `this` bound iff `scope`
+    /// binds it and cached by the source rule, so every head of the
+    /// source shares the plan as well as the rows.
+    fn recall(&self, head: &DeductiveRule, origin: &Origin, scope: &Environment) -> Conjunction {
+        let bound = scope.contains("this");
+        let source = &origin.rule;
+        let mut source_scope = Environment::new();
+        if bound {
+            source_scope.add("this");
+        }
+        let adornment = Adornment::binding(&source.conclusion().sorted_operands(), &source_scope);
+        let body = self
+            .plan_cache
+            .get_or_plan(source, adornment, || source.plan(&source_scope));
+        let cost = body.cost;
+        let mut binds = Environment::new();
+        if !bound {
+            binds.add("this");
+        }
+        binds.add(ConceptDescriptor::VALUE);
+        if origin.key.is_some() {
+            binds.add(Relation::key_operand(ConceptDescriptor::VALUE));
+        }
+        let header = Header {
+            cost,
+            binds: binds.clone(),
+            env: scope.clone(),
+        };
+        let recall = Recall {
+            rule: source.memo_key(),
+            body: Arc::new(body),
+            bound,
+            value: origin.value.clone(),
+            key: origin.key.clone(),
+            attribute: head.conclusion().clone(),
+        };
+        Conjunction {
+            steps: vec![Plan::Recall(header, recall)],
+            cost,
+            binds,
+            env: scope.clone(),
+        }
     }
 }
 
