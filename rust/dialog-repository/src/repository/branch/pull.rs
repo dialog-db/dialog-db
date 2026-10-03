@@ -686,7 +686,13 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
-                persist(&branch.archive().index(), &mut delta, env).await?;
+                persist(
+                    &branch.archive().index(),
+                    &branch.node_cache(),
+                    &mut delta,
+                    env,
+                )
+                .await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
@@ -852,7 +858,13 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
-                persist(&branch.archive().index(), &mut delta, env).await?;
+                persist(
+                    &branch.archive().index(),
+                    &branch.node_cache(),
+                    &mut delta,
+                    env,
+                )
+                .await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
@@ -1047,7 +1059,13 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // reference-counted (nothing is copied on the way in) and
         // providers with native batching persist it in a single round
         // trip.
-        persist(&branch.archive().index(), &mut delta, env).await?;
+        persist(
+            &branch.archive().index(),
+            &branch.node_cache(),
+            &mut delta,
+            env,
+        )
+        .await?;
 
         Ok(PreparedPull::Merged(Box::new(Merged {
             branch,
