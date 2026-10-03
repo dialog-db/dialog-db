@@ -32,13 +32,15 @@
 //!   those) with a structured error.
 
 use crate::Entity;
-use crate::concept::descriptor::ConceptDescriptor;
+use crate::attribute::AttributeDescriptor;
+use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptRules;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
+use crate::rule::statement::Reach;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 
@@ -132,7 +134,22 @@ fn selecting_edges(
     derived: &HashSet<Entity>,
 ) -> Vec<(ConceptDescriptor, Polarity)> {
     let mut edges = structural_edges(descriptor);
-    if descriptor.attribute_field().is_some() {
+    if let Some((_, field)) = descriptor.attribute_field() {
+        // A ranked chain reads every relation it lists.
+        if field.descriptor().is_chain() {
+            for relation in field.descriptor().relations() {
+                let single = AttributeDescriptor::over(
+                    relation.clone(),
+                    "",
+                    field.cardinality(),
+                    field.content_type(),
+                );
+                edges.push((
+                    ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(single)),
+                    Polarity::Positive,
+                ));
+            }
+        }
         return edges;
     }
     for (_, field) in descriptor.with().iter() {
@@ -342,10 +359,12 @@ impl ProgramAnalysis {
     /// every read of it meet there; any other concept is itself.
     pub fn node(concept: &ConceptDescriptor) -> Entity {
         match concept.attribute_field() {
-            Some((_, field)) => crate::rule::statement::Reach::of(field.the())
+            // A ranked chain of relations is a concept of its own with
+            // an edge to each relation (see `selecting_edges`).
+            Some((_, field)) if !field.descriptor().is_chain() => Reach::of(field.the())
                 .on_entity()
                 .unwrap_or_else(|| concept.this()),
-            None => concept.this(),
+            _ => concept.this(),
         }
     }
 
@@ -671,5 +690,4 @@ mod tests {
             "the cycle is visible from both ends"
         );
     }
-
 }

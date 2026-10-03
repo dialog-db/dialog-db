@@ -13,6 +13,7 @@ use dialog_artifacts::{NameShape, Symbol};
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::iter;
 use std::str::FromStr;
 
 /// A validated attribute–value pair with its cardinality, produced by
@@ -244,8 +245,16 @@ impl FromStr for Relation {
     }
 }
 
-/// Static metadata for a single attribute: its storage-level selector
-/// ([`The`]), human-readable description, value type, and cardinality.
+/// Static metadata for an attribute: the relation it reads, or several
+/// ranked, its human-readable description, value type or listed value
+/// domain, and the policy it reads under.
+///
+/// An attribute is a relation read under a type and a policy. A list
+/// is a ranked choice: `the: [a, b]` reads the first listed relation
+/// holding a candidate, `as: [v1, v2]` the first listed value a
+/// candidate holds, and either implies `select: top`. Rules derive
+/// into relations and are found by them, so two attributes over one
+/// relation under different types or policies are two attributes.
 ///
 /// `AttributeDescriptor` is used in two contexts:
 /// 1. Inside a [`ConceptDescriptor`](crate::concept::descriptor::ConceptDescriptor)
@@ -254,23 +263,135 @@ impl FromStr for Relation {
 ///    validates a runtime value against the descriptor's type and produces
 ///    an [`Attribution`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Wire", into = "Wire")]
 pub struct AttributeDescriptor {
+    /// The relation read first.
     the: Relation,
-    #[serde(default)]
+    /// The relations read after it, in rank order: a candidate from an
+    /// earlier relation outranks one from a later.
+    then: Vec<Relation>,
     description: String,
-    #[serde(default)]
-    cardinality: Cardinality,
-    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
     content_type: Option<Type>,
     /// How a field over this attribute reads its relation (see
-    /// [`Select`]); absent, the cardinality decides. Not part of the
-    /// attribute's identity: the relation is, and this is one way of
-    /// reading it.
+    /// [`Select`]). The cardinality is this policy's arity.
+    select: Select,
+    /// The listed values a `top` read ranks by, best first: the
+    /// attribute's value domain.
+    among: Vec<Value>,
+}
+
+/// The wire form of an [`AttributeDescriptor`]: `the` is one relation
+/// or a ranked list, `as` a type or a ranked value list, `select` the
+/// policy where it says more than the lists imply, and `cardinality`
+/// the older spelling of `last` and `all`, read but never written.
+#[derive(Serialize, Deserialize)]
+struct Wire {
+    the: OneOrMany<Relation>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cardinality: Option<Cardinality>,
+    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+    content: Option<As>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     select: Option<Select>,
-    /// The listed values a `top` read ranks by, best first.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    among: Vec<Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum OneOrMany<T> {
+    One(T),
+    Many(Vec<T>),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum As {
+    Kind(Type),
+    Domain(Vec<Value>),
+}
+
+impl TryFrom<Wire> for AttributeDescriptor {
+    type Error = String;
+
+    fn try_from(wire: Wire) -> Result<Self, Self::Error> {
+        let (the, then) = match wire.the {
+            OneOrMany::One(the) => (the, Vec::new()),
+            OneOrMany::Many(mut list) => {
+                if list.is_empty() {
+                    return Err("`the` lists no relation".to_string());
+                }
+                let the = list.remove(0);
+                (the, list)
+            }
+        };
+        let (content_type, among) = match wire.content {
+            None => (None, Vec::new()),
+            Some(As::Kind(kind)) => (Some(kind), Vec::new()),
+            Some(As::Domain(values)) => {
+                if values.is_empty() {
+                    return Err("`as` lists no value".to_string());
+                }
+                let kind = values[0].data_type();
+                if values.iter().any(|value| value.data_type() != kind) {
+                    return Err("`as` lists values of more than one type".to_string());
+                }
+                (Some(kind), values)
+            }
+        };
+        // A listed domain or relation chain is a ranked choice, `top`
+        // unless the policy says otherwise; `cardinality` is the older
+        // spelling of `last` and `all`.
+        let select = match wire.select {
+            Some(select) => select,
+            None if !then.is_empty() || !among.is_empty() => Select::Top,
+            None => Select::of(wire.cardinality.unwrap_or_default()),
+        };
+        let descriptor = AttributeDescriptor {
+            the,
+            then,
+            description: wire.description,
+            content_type,
+            select,
+            among,
+        };
+        match descriptor.select_error() {
+            Some(reason) => Err(reason),
+            None => Ok(descriptor),
+        }
+    }
+}
+
+impl From<AttributeDescriptor> for Wire {
+    fn from(descriptor: AttributeDescriptor) -> Self {
+        let the = if descriptor.then.is_empty() {
+            OneOrMany::One(descriptor.the)
+        } else {
+            OneOrMany::Many(iter::once(descriptor.the).chain(descriptor.then).collect())
+        };
+        let content = if descriptor.among.is_empty() {
+            descriptor.content_type.map(As::Kind)
+        } else {
+            Some(As::Domain(descriptor.among))
+        };
+        // The policy is written where it says more than the lists
+        // imply: a ranked choice is `top` by itself, and a plain
+        // attribute is `last` by itself.
+        let implied = if matches!(the, OneOrMany::Many(_)) || matches!(content, Some(As::Domain(_)))
+        {
+            Select::Top
+        } else {
+            Select::Last
+        };
+        let select = Some(descriptor.select).filter(|select| *select != implied);
+        Wire {
+            the,
+            description: descriptor.description,
+            cardinality: None,
+            content,
+            select,
+        }
+    }
 }
 
 impl AttributeDescriptor {
@@ -299,12 +420,38 @@ impl AttributeDescriptor {
     ) -> Self {
         Self {
             the,
+            then: Vec::new(),
             description: description.into(),
-            cardinality,
             content_type,
-            select: None,
+            select: Select::of(cardinality),
             among: Vec::new(),
         }
+    }
+
+    /// This descriptor reading `then` after its relation, in rank
+    /// order: a ranked choice by relation, read as `top`.
+    pub fn with_then(mut self, then: Vec<Relation>) -> Self {
+        self.then = then;
+        self.select = Select::Top;
+        self
+    }
+
+    /// This descriptor over the listed value domain, best first: a
+    /// ranked choice by value, read as `top`.
+    pub fn with_domain(mut self, among: Vec<Value>) -> Self {
+        self.among = among;
+        self.select = Select::Top;
+        self
+    }
+
+    /// Every relation this attribute reads, the first ranked highest.
+    pub fn relations(&self) -> impl Iterator<Item = &Relation> {
+        iter::once(&self.the).chain(self.then.iter())
+    }
+
+    /// Whether this attribute reads several relations, ranked.
+    pub fn is_chain(&self) -> bool {
+        !self.then.is_empty()
     }
 
     /// This descriptor read under `select`, ranking by `among` when
@@ -312,30 +459,23 @@ impl AttributeDescriptor {
     /// descriptor by [`select_error`](Self::select_error) wherever a
     /// concept is built.
     pub fn with_select(mut self, select: Select, among: Vec<Value>) -> Self {
-        self.select = Some(select);
+        self.select = select;
         self.among = among;
         self
     }
 
-    /// The policy a field over this attribute reads under: the one
-    /// declared, else the cardinality's.
+    /// The policy a field over this attribute reads under.
     pub fn select(&self) -> Select {
-        self.select.unwrap_or_else(|| Select::of(self.cardinality))
-    }
-
-    /// Whether a policy was declared, rather than implied by the
-    /// cardinality.
-    pub fn declares_select(&self) -> bool {
-        self.select.is_some()
+        self.select
     }
 
     /// Whether a field over this attribute must read through the
     /// attribute concept to be read as declared: its policy is not the
-    /// plain stored read of its cardinality, so the candidates have to
-    /// be gathered and elected even where nothing derives them.
+    /// plain stored read (`last` or `all`), or it reads several
+    /// relations, so the candidates have to be gathered and elected
+    /// even where nothing derives them.
     pub fn reads_elected(&self) -> bool {
-        self.select
-            .is_some_and(|select| select != Select::of(self.cardinality))
+        !matches!(self.select, Select::Last | Select::All) || self.is_chain()
     }
 
     /// The listed values a `top` read ranks by, best first.
@@ -343,11 +483,13 @@ impl AttributeDescriptor {
         &self.among
     }
 
-    /// This descriptor read under the cardinality's own policy: the
-    /// relation itself, which is what rules derive into.
+    /// This descriptor's first relation read plainly, under its
+    /// policy's arity alone: the relation itself, which is what rules
+    /// derive into.
     pub fn without_select(mut self) -> Self {
-        self.select = None;
+        self.select = Select::of(self.select.cardinality());
         self.among = Vec::new();
+        self.then = Vec::new();
         self
     }
 
@@ -369,19 +511,20 @@ impl AttributeDescriptor {
     /// them; `sum` and `avg` fold a numeric carrier, `max` and `min`
     /// order a comparable one.
     pub fn select_error(&self) -> Option<String> {
-        let select = self.select?;
+        if self.is_chain() && self.select != Select::Top {
+            return Some(
+                "a list of relations is a ranked choice: it reads as `top` only".to_string(),
+            );
+        }
+        let select = self.select;
         let content = self.content_type;
-        let numeric = |kind: Type| {
-            matches!(kind, Type::UnsignedInt | Type::SignedInt | Type::Float)
-        };
+        let numeric =
+            |kind: Type| matches!(kind, Type::UnsignedInt | Type::SignedInt | Type::Float);
         match select {
-            Select::Top if self.among.is_empty() => {
-                Some("`top` ranks among listed values, and none are listed".to_string())
+            Select::Top if self.among.is_empty() && !self.is_chain() => {
+                Some("`top` ranks listed values or relations, and none are listed".to_string())
             }
             Select::Top => None,
-            _ if !self.among.is_empty() => {
-                Some(format!("listed values rank a `top` read, not `{select}`"))
-            }
             Select::Sum | Select::Avg => match content {
                 Some(kind) if !numeric(kind) => {
                     Some(format!("`{select}` folds a numeric carrier, not {kind:?}"))
@@ -421,15 +564,11 @@ impl AttributeDescriptor {
         &self.description
     }
 
-    /// Returns the cardinality: the arity of the policy when one is
-    /// declared (`all` is many, every other policy one), else as
-    /// declared. `cardinality` is the older spelling of `last` and
-    /// `all`, so the two never disagree.
+    /// Returns the cardinality: the policy's arity, `all` being many
+    /// and every other policy one. `cardinality` is the older spelling
+    /// of `last` and `all`, so the two never disagree.
     pub fn cardinality(&self) -> Cardinality {
-        match self.select {
-            Some(select) => select.cardinality(),
-            None => self.cardinality,
-        }
+        self.select.cardinality()
     }
 
     /// Returns the expected value type, or `None` if any type is accepted.
@@ -571,22 +710,19 @@ impl AttributeDescriptor {
         // name half of these facts holds. A plain attribute therefore
         // encodes exactly as it did before collections existed, so
         // every existing identity is preserved.
-        // An attribute is a relation read under a type and a policy:
-        // two reads of one relation under different policies are two
-        // attributes. The cardinality hashed is the policy's arity,
-        // and the policy itself is hashed only when it says more than
-        // a cardinality can, so `select: last` is `cardinality: one`,
-        // `select: all` is `cardinality: many`, and every attribute
-        // declared before policies existed keeps its identity.
+        // An attribute is a relation, or a ranked chain of them, read
+        // under a type or a listed value domain and a policy: all of
+        // it is the identity, and two reads of one relation under
+        // different policies are two attributes.
         #[derive(Serialize)]
         struct CborAttributeDescriptor<'a> {
             domain: &'a str,
             name: &'a str,
-            cardinality: Cardinality,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            then: Vec<String>,
             #[serde(rename = "type")]
             content_type: Option<Type>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            select: Option<Select>,
+            select: Select,
             #[serde(skip_serializing_if = "<[Value]>::is_empty")]
             among: &'a [Value],
         }
@@ -601,11 +737,13 @@ impl AttributeDescriptor {
         let schema = CborAttributeDescriptor {
             domain: self.domain(),
             name,
-            cardinality: self.cardinality(),
+            then: self
+                .then
+                .iter()
+                .map(|relation| relation.to_string())
+                .collect(),
             content_type: self.content_type(),
-            select: self
-                .select
-                .filter(|select| !matches!(select, Select::Last | Select::All)),
+            select: self.select(),
             among: &self.among,
         };
 
@@ -674,37 +812,76 @@ mod tests {
     use super::*;
     use crate::the;
 
-    /// A declared policy and its listed values ride the descriptor on
-    /// the wire under `select` and `among`, and are omitted when
-    /// absent, so a descriptor without them encodes as before.
+    /// A list is a ranked choice: `as: [..]` ranks values, `the: [..]`
+    /// ranks relations, and either reads as `top` without saying so.
+    /// `cardinality` is read as the older spelling of `last` and `all`
+    /// and never written; a policy is written where it says more than
+    /// the lists imply.
     #[dialog_common::test]
-    fn it_round_trips_the_select_policy() {
-        let json = serde_json::json!({
+    fn it_reads_a_list_as_a_ranked_choice() {
+        let ranked: AttributeDescriptor = serde_json::from_value(serde_json::json!({
             "the": "job/status",
-            "as": "Entity",
-            "cardinality": "one",
-            "select": "top",
-            "among": ["case:suspended", "case:active"]
-        });
-        let descriptor: AttributeDescriptor =
-            serde_json::from_value(json.clone()).expect("descriptor parses");
-        assert_eq!(descriptor.select(), Select::Top);
-        assert_eq!(descriptor.among().len(), 2);
-        assert!(descriptor.reads_elected());
-        let mut encoded = serde_json::to_value(&descriptor).expect("serializes");
-        encoded.as_object_mut().expect("an object").remove("description");
-        assert_eq!(encoded, json);
+            "as": ["case:suspended", "case:active"]
+        }))
+        .expect("descriptor parses");
+        assert_eq!(ranked.select(), Select::Top);
+        assert_eq!(
+            ranked.content_type(),
+            Some(Type::Entity),
+            "the domain's type"
+        );
+        assert_eq!(ranked.among().len(), 2);
+        assert!(ranked.reads_elected());
+        assert_eq!(
+            serde_json::to_value(&ranked).expect("serializes"),
+            serde_json::json!({ "the": "job/status", "as": ["case:suspended", "case:active"] })
+        );
 
-        let plain: AttributeDescriptor = serde_json::from_value(serde_json::json!({
-            "the": "job/status",
-            "as": "Entity",
+        let chain: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": ["user/email", "user/phone"],
+            "as": "Text"
+        }))
+        .expect("descriptor parses");
+        assert_eq!(chain.select(), Select::Top);
+        assert!(chain.is_chain());
+        assert_eq!(chain.relations().count(), 2);
+        assert_eq!(
+            serde_json::to_value(&chain).expect("serializes"),
+            serde_json::json!({ "the": ["user/email", "user/phone"], "as": "Text" })
+        );
+        assert!(
+            serde_json::from_value::<AttributeDescriptor>(serde_json::json!({
+                "the": ["user/email", "user/phone"],
+                "as": "Text",
+                "select": "all"
+            }))
+            .is_err(),
+            "a relation chain reads as top only"
+        );
+
+        let many: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/tag",
+            "as": "Text",
             "cardinality": "many"
         }))
         .expect("descriptor parses");
-        assert_eq!(plain.select(), Select::All, "the cardinality decides");
-        assert!(!plain.reads_elected());
-        let encoded = serde_json::to_value(&plain).expect("serializes");
-        assert!(encoded.get("select").is_none() && encoded.get("among").is_none());
+        assert_eq!(many.select(), Select::All, "the older spelling");
+        assert_eq!(
+            serde_json::to_value(&many).expect("serializes"),
+            serde_json::json!({ "the": "job/tag", "as": "Text", "select": "all" })
+        );
+        let one: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/tag",
+            "as": "Text"
+        }))
+        .expect("descriptor parses");
+        assert_eq!(one.select(), Select::Last);
+        assert!(
+            serde_json::to_value(&one)
+                .expect("serializes")
+                .get("select")
+                .is_none()
+        );
     }
 
     /// A policy is part of the attribute: two reads of one relation
@@ -713,20 +890,38 @@ mod tests {
     /// are the same attributes, whichever way they are spelled.
     #[dialog_common::test]
     fn it_tells_attributes_apart_by_policy() {
-        let one = AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(Type::Entity));
-        let many = AttributeDescriptor::new(the!("job/status"), "", Cardinality::Many, Some(Type::Entity));
-        let ranked = one
+        let one =
+            AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(Type::Entity));
+        let many = AttributeDescriptor::new(
+            the!("job/status"),
+            "",
+            Cardinality::Many,
+            Some(Type::Entity),
+        );
+        let ranked = one.clone().with_domain(vec![Value::Boolean(true)]);
+        let chained = one
             .clone()
-            .with_select(Select::Top, vec![Value::Boolean(true)]);
+            .with_then(vec!["job/fallback".parse().expect("a relation")]);
         let newest = many.clone().with_select(Select::Last, Vec::new());
         let every = one.clone().with_select(Select::All, Vec::new());
         assert_ne!(one.to_uri(), ranked.to_uri());
+        assert_ne!(one.to_uri(), chained.to_uri());
         assert_ne!(one.to_uri(), many.to_uri());
         assert_eq!(newest.to_uri(), one.to_uri(), "`last` is cardinality one");
         assert_eq!(every.to_uri(), many.to_uri(), "`all` is cardinality many");
         assert_eq!(newest.cardinality(), Cardinality::One);
         assert_eq!(every.cardinality(), Cardinality::Many);
-        assert_eq!(ranked.cardinality(), Cardinality::One, "a ranked read is one value");
+        assert_eq!(
+            ranked.cardinality(),
+            Cardinality::One,
+            "a ranked read is one value"
+        );
+        assert_eq!(ranked.select(), Select::Top, "a listed domain reads as top");
+        assert_eq!(
+            chained.select(),
+            Select::Top,
+            "a relation chain reads as top"
+        );
     }
 
     /// A policy that does not fit its attribute is named: `top` without
@@ -741,16 +936,32 @@ mod tests {
         };
         assert!(status(Select::Top, Vec::new(), Type::Entity).is_some());
         assert!(status(Select::Top, vec![Value::Boolean(true)], Type::Entity).is_none());
-        assert!(status(Select::Last, vec![Value::Boolean(true)], Type::Entity).is_some());
+        assert!(
+            status(Select::All, vec![Value::Boolean(true)], Type::Entity).is_none(),
+            "a listed domain read as a set is an enum-typed set"
+        );
         assert!(status(Select::Sum, Vec::new(), Type::String).is_some());
         assert!(status(Select::Sum, Vec::new(), Type::UnsignedInt).is_none());
         assert!(status(Select::Count, Vec::new(), Type::Entity).is_none());
         assert!(status(Select::Avg, Vec::new(), Type::String).is_some());
         assert!(status(Select::Avg, Vec::new(), Type::UnsignedInt).is_none());
-        let counted = AttributeDescriptor::new(the!("team/member"), "", Cardinality::Many, Some(Type::Entity))
-            .with_select(Select::Count, Vec::new());
-        assert_eq!(counted.content_type(), Some(Type::Entity), "`as` is the carrier");
-        assert_eq!(counted.read_type(), Some(Type::UnsignedInt), "a count reads a number");
+        let counted = AttributeDescriptor::new(
+            the!("team/member"),
+            "",
+            Cardinality::Many,
+            Some(Type::Entity),
+        )
+        .with_select(Select::Count, Vec::new());
+        assert_eq!(
+            counted.content_type(),
+            Some(Type::Entity),
+            "`as` is the carrier"
+        );
+        assert_eq!(
+            counted.read_type(),
+            Some(Type::UnsignedInt),
+            "a count reads a number"
+        );
         assert!(status(Select::Max, Vec::new(), Type::Boolean).is_some());
         assert!(status(Select::Max, Vec::new(), Type::String).is_none());
     }
@@ -766,8 +977,11 @@ mod tests {
         let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
         assert_eq!(json["the"], "io.gozala.person/name");
         assert_eq!(json["description"], "Name of the person");
-        assert_eq!(json["cardinality"], "one");
         assert_eq!(json["as"], "Text");
+        assert!(
+            json.get("cardinality").is_none() && json.get("select").is_none(),
+            "`last` is the policy a plain attribute implies: {json}"
+        );
     }
 
     #[dialog_common::test]
@@ -779,7 +993,8 @@ mod tests {
             Some(Type::String),
         );
         let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
-        assert_eq!(json["cardinality"], "many");
+        assert_eq!(json["select"], "all", "many is spelled as its policy");
+        assert!(json.get("cardinality").is_none(), "{json}");
     }
 
     #[dialog_common::test]

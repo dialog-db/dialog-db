@@ -1252,6 +1252,7 @@ mod tests {
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
     use dialog_peer::helpers::test_session_with_peer;
+    use dialog_query::rule::deductive::legacy_identity;
     use dialog_query::rule::statement::on_entities;
     use dialog_query::{ConceptDescriptor, InductiveRule};
     use futures_util::StreamExt as _;
@@ -2397,8 +2398,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let rule = tagger();
-        let legacy = dialog_query::rule::deductive::legacy_identity(rule.try_encode())
-            .expect("an encodable body");
+        let legacy = legacy_identity(rule.try_encode()).expect("an encodable body");
         assert_ne!(
             legacy,
             rule.this(),

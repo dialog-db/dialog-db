@@ -18,6 +18,7 @@ impl Command for SelectRules {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
+    use crate::recall::{BodyMemo, Memo};
     use crate::session::RuleRegistry;
     use dialog_artifacts::selector::Constrained;
     use dialog_artifacts::{
@@ -37,7 +38,7 @@ pub(crate) mod test {
         branch: &'b Branch,
         operator: &'b Operator,
         rules: RuleRegistry,
-        memo: crate::recall::Memo,
+        memo: Memo,
     }
 
     impl<'b> TestEnv<'b> {
@@ -46,13 +47,13 @@ pub(crate) mod test {
                 branch,
                 operator,
                 rules,
-                memo: crate::recall::Memo::default(),
+                memo: Memo::default(),
             }
         }
     }
 
-    impl crate::recall::BodyMemo for TestEnv<'_> {
-        fn memo(&self) -> Option<&crate::recall::Memo> {
+    impl BodyMemo for TestEnv<'_> {
+        fn memo(&self) -> Option<&Memo> {
             Some(&self.memo)
         }
     }

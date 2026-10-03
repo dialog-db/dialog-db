@@ -13,6 +13,7 @@ use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::descriptor::ConceptFieldDescriptor;
+use crate::concept::query::ConceptQuery;
 use crate::error::TypeError;
 use crate::formula::attribute::AttributeParts;
 use crate::memo::Memo;
@@ -482,7 +483,6 @@ fn selecting_premises(
 /// key projection of a collection and the conformance of a
 /// concept-typed field.
 fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> Vec<Premise> {
-    use crate::concept::query::ConceptQuery;
     use crate::type_system::ConceptRef;
 
     let mut premises = Vec::new();
@@ -494,7 +494,10 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             // An optional field reads the attribute concept set-widened:
             // its value term admits `Nothing`, which the concept query
             // honours by yielding one `Absent` row where no row matched.
-            let kind = match (field.descriptor().read_type().map(Kind::from), field.conforms()) {
+            let kind = match (
+                field.descriptor().read_type().map(Kind::from),
+                field.conforms(),
+            ) {
                 (Some(kind), Some(target)) => Some(
                     kind.with_conformance(ConceptRef(target.this().to_string()))
                         .expect("a conforming field is entity-valued by construction"),
@@ -704,12 +707,10 @@ impl DeductiveRule {
                 if let Some(target) = field.conforms() {
                     let mut terms = Parameters::new();
                     terms.insert("this".to_string(), Term::<Any>::var(name));
-                    body.push(Premise::Assert(Proposition::Concept(
-                        crate::concept::query::ConceptQuery {
-                            terms,
-                            predicate: target.clone(),
-                        },
-                    )));
+                    body.push(Premise::Assert(Proposition::Concept(ConceptQuery {
+                        terms,
+                        predicate: target.clone(),
+                    })));
                 }
             } else {
                 body.extend(field_premises(name, field, false));
@@ -759,7 +760,6 @@ mod tests {
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::The;
     use crate::attribute::query::AttributeQuery;
-    use crate::concept::query::ConceptQuery;
     use crate::constraint::{Coalesce, Constraint};
     use crate::proposition::Proposition;
     use crate::rule::analyzer::DependencyGraph;
@@ -1414,7 +1414,6 @@ mod tests {
     /// query, a subscription, an inductive rule).
     #[dialog_common::test]
     fn it_refuses_negation_in_a_deductive_rule() {
-        use crate::concept::query::ConceptQuery;
         use crate::negation::Negation;
 
         let conclusion = ConceptDescriptor::try_from(vec![(
@@ -1489,7 +1488,7 @@ mod tests {
             )
             .into(),
         ];
-        let reduce = std::collections::BTreeMap::from([(
+        let reduce = BTreeMap::from([(
             "total".to_string(),
             ReduceSpec {
                 apply: Aggregator::Sum,
@@ -1510,7 +1509,6 @@ mod tests {
     /// rejected.
     #[dialog_common::test]
     fn it_refuses_a_carrier_changing_field_in_a_deductive_rule() {
-        use crate::concept::query::ConceptQuery;
         use crate::schema::Select;
 
         let counted = ConceptDescriptor::try_from(vec![(

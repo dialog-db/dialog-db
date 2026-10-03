@@ -954,7 +954,7 @@ mod tests {
             .expect("Should have name attribute");
         assert_eq!(name_attr["the"], "user/name");
         assert_eq!(name_attr["description"], "User's name");
-        assert_eq!(name_attr["cardinality"], "one");
+        assert!(name_attr.get("cardinality").is_none());
         assert_eq!(name_attr["as"], "Text");
 
         let age_attr = with_obj["age"]
@@ -962,7 +962,7 @@ mod tests {
             .expect("Should have age attribute");
         assert_eq!(age_attr["the"], "user/age");
         assert_eq!(age_attr["description"], "User's age");
-        assert_eq!(age_attr["cardinality"], "one");
+        assert!(age_attr.get("cardinality").is_none());
         assert_eq!(age_attr["as"], "UnsignedInteger");
     }
 
@@ -1134,7 +1134,6 @@ mod tests {
     "id": {
       "the": "product/id",
       "description": "Product ID",
-      "cardinality": "one",
       "as": "UnsignedInteger"
     }
   }

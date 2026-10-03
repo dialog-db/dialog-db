@@ -183,8 +183,10 @@ fn premise_trigger_entities<'p>(
     for proposition in propositions {
         if let Proposition::Concept(query) = proposition {
             for (_, field) in query.predicate.with().iter() {
-                if let Some(entity) = Reach::of(field.descriptor().the()).on_entity() {
-                    entities.insert(entity);
+                for relation in field.descriptor().relations() {
+                    if let Some(entity) = Reach::of(relation).on_entity() {
+                        entities.insert(entity);
+                    }
                 }
             }
         }
@@ -225,7 +227,13 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
     concept
         .with()
         .iter()
-        .filter_map(|(_, field)| Reach::of(field.descriptor().the()).on_entity())
+        .flat_map(|(_, field)| {
+            field
+                .descriptor()
+                .relations()
+                .filter_map(|relation| Reach::of(relation).on_entity())
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 

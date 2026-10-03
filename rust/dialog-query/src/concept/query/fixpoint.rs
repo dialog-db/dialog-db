@@ -462,7 +462,9 @@ where
                     .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
                     .collect();
                 for delta_index in 0..split.occurrences.len() {
-                    let delta = table.delta(&ProgramAnalysis::node(&split.occurrences[delta_index].predicate));
+                    let delta = table.delta(&ProgramAnalysis::node(
+                        &split.occurrences[delta_index].predicate,
+                    ));
                     if delta.is_empty() {
                         continue;
                     }
@@ -918,7 +920,9 @@ where
                     let choices: Vec<Vec<Row>> = split
                         .occurrences
                         .iter()
-                        .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
+                        .map(|occurrence| {
+                            table.total(&ProgramAnalysis::node(&occurrence.predicate))
+                        })
                         .collect();
                     for combination in Combinations::new(choices.iter().map(Vec::len).collect()) {
                         let mut matched = seed_match.clone();
@@ -2504,5 +2508,4 @@ mod derived_edge_tests {
         assert_eq!(pairs, expected, "closure includes the transitive pair");
         Ok(())
     }
-
 }

@@ -14,16 +14,22 @@ use super::adornment::Adornment;
 use super::fixpoint::Continuation;
 use super::plan_cache::PlanCache;
 use crate::DeductiveRule;
-use crate::attribute::Relation;
-use crate::concept::descriptor::ConceptDescriptor;
+use crate::artifact::{ArtifactsAttribute, Entity};
+use crate::attribute::query::AttributeQuery;
+use crate::attribute::{AttributeDescriptor, Relation};
+use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::environment::Environment;
 use crate::parameters::Parameters;
 use crate::planner::Header;
 use crate::planner::{Conjunction, Disjunction, Plan};
+use crate::premise::Premise;
 use crate::recall::Recall;
+use crate::rule::compile_internal;
 use crate::rule::deductive::Origin;
 use crate::selection::Match;
 use crate::session::ProgramAnalysis;
+use crate::term::Term;
+use crate::types::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -72,7 +78,7 @@ pub struct Exact {
     /// The covering rule, concluding the selecting concept.
     pub rule: DeductiveRule,
     /// The attributes the rule is the only source of.
-    pub attributes: Vec<crate::artifact::ArtifactsAttribute>,
+    pub attributes: Vec<ArtifactsAttribute>,
 }
 
 impl ConceptRules {
@@ -173,6 +179,68 @@ impl ConceptRules {
     /// Install a deductive rule, deduplicating by identity
     /// ([`DeductiveRule::same`]). Clears the plan cache when a genuinely
     /// new rule is added.
+    /// The stored scans of the relations a ranked chain reads after
+    /// its first, each a rule concluding this bundle's concept: the
+    /// implicit rule scans the first relation, these the rest, and the
+    /// election ranks their candidates by relation.
+    pub fn chain_scans(field: &ConceptFieldDescriptor) -> Vec<DeductiveRule> {
+        let mut rules = Vec::new();
+        for relation in field.descriptor().relations().skip(1) {
+            let premise: Premise = AttributeQuery::new(
+                relation.term(ConceptDescriptor::VALUE),
+                Term::<Entity>::var("this"),
+                Term::<Any>::var(ConceptDescriptor::VALUE),
+                Term::blank(),
+                Some(field.cardinality()),
+            )
+            .into();
+            // The scan concludes the relation it reads, policy-free, as
+            // a head does: the rank of its rows is read off that.
+            let conclusion = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
+                AttributeDescriptor::over(
+                    relation.clone(),
+                    "",
+                    field.cardinality(),
+                    field.descriptor().content_type(),
+                ),
+            ));
+            if let Ok(rule) = compile_internal::<DeductiveRule>(conclusion, vec![premise]) {
+                rules.push(rule);
+            }
+        }
+        rules
+    }
+
+    /// Where the rows of each conjunction of [`plan`](Self::plan) stand
+    /// among `field`'s relations, in the plan's order: the implicit
+    /// scan reads the first relation, and each installed rule the
+    /// relation it concludes. A rule concluding no listed relation
+    /// ranks first, which is where a single-relation field puts
+    /// everything.
+    pub fn ranks(&self, field: &ConceptFieldDescriptor) -> Vec<usize> {
+        let relations: Vec<&Relation> = field.descriptor().relations().collect();
+        let rank_of = |rule: &DeductiveRule| {
+            rule.conclusion()
+                .attribute_field()
+                .and_then(|(_, concluded)| {
+                    relations
+                        .iter()
+                        .position(|relation| *relation == concluded.descriptor().the())
+                })
+                .unwrap_or(0)
+        };
+        iter::once(0)
+            .chain(
+                self.installed
+                    .iter()
+                    .filter(|rule| rule.reduce().is_empty())
+                    .map(rank_of),
+            )
+            .collect()
+    }
+
+    /// Install a rule deriving this concept, once: a rule already
+    /// installed under the same identity is not installed twice.
     pub fn install(&mut self, rule: DeductiveRule) {
         // A caller binds the head by this concept's field names, and
         // a rule concluding the same attributes under other names is

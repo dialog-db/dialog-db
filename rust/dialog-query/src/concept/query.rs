@@ -14,10 +14,11 @@ pub use rules::{ConceptRules, Exact};
 
 use std::fmt;
 
-use crate::artifact::Value;
+use crate::artifact::{ArtifactsAttribute, Value};
 use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::{Disjunction, Plan};
+use crate::reduce;
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::{CONCEPT_OVERHEAD, Select};
 use crate::selection::{Selection, Standing};
@@ -32,8 +33,10 @@ use dialog_artifacts::encode_value_owned;
 use dialog_capability::Provider;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
+use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -497,12 +500,12 @@ impl ConceptQuery {
                     Some((name, field)) => {
                         let election = Election::of(field);
                         if election.select.elects() && election.select != Select::Last {
-                            election.elect_rows(table.iter().cloned().collect(), name)?
+                            election.elect_rows(table.to_vec(), name)?
                         } else {
-                            table.iter().cloned().collect()
+                            table.to_vec()
                         }
                     }
-                    None => table.iter().cloned().collect(),
+                    None => table.to_vec(),
                 };
                 let rows = stream::once(async { Ok(first) }).chain(selection);
                 for await each in rows {
@@ -670,7 +673,7 @@ impl ConceptQuery {
         // for an entity arrive in no particular order, so the election
         // buffers the results of the whole input.
         Box::pin(try_stream! {
-            let mut groups: BTreeMap<(usize, Vec<u8>), Vec<Entry<(Match, Arc<Match>)>>> = BTreeMap::new();
+            let mut groups: Groups = BTreeMap::new();
             let mut matched: HashSet<usize> = HashSet::new();
             for await result in results {
                 let mut result = result?;
@@ -704,6 +707,7 @@ impl ConceptQuery {
                     this,
                     value,
                     identity,
+                    rank: 0,
                     carrier: (result, caller),
                 });
             }
@@ -738,7 +742,7 @@ impl ConceptQuery {
                 }
             }
             if widen {
-                let callers = std::mem::take(&mut *callers.lock().expect("callers lock"));
+                let callers = mem::take(&mut *callers.lock().expect("callers lock"));
                 for caller in callers {
                     if !matched.contains(&(Arc::as_ptr(&caller) as usize)) {
                         yield widened(&caller, &back)?;
@@ -777,11 +781,10 @@ impl ConceptQuery {
             let first = first?;
             let plan = rules.plan(&app.terms, &first);
             let widen = app.widens();
-            let election = app
-                .predicate
-                .attribute_field()
-                .map(|(_, field)| Election::of(field))
-                .unwrap_or_else(|| Election::plain(Select::Last));
+            let (election, ranks) = match app.predicate.attribute_field() {
+                Some((_, field)) => (Election::of(field), rules.ranks(field)),
+                None => (Election::plain(Select::Last), Vec::new()),
+            };
             let this_term = app.terms.get("this").cloned();
             let key_operand = Relation::key_operand(ConceptDescriptor::VALUE);
 
@@ -820,7 +823,8 @@ impl ConceptQuery {
                 };
 
                 let mut candidates: Vec<Candidate> = Vec::new();
-                for conjunction in plan.conjunctions() {
+                for (index, conjunction) in plan.conjunctions().into_iter().enumerate() {
+                    let rank = ranks.get(index).copied().unwrap_or(0);
                     match conjunction.steps.as_slice() {
                         [Plan::Recall(_, recall)] => {
                             let shared = recall.rows_for(entity.as_ref(), env).await?;
@@ -839,6 +843,7 @@ impl ConceptQuery {
                                     this,
                                     value,
                                     key,
+                                    rank,
                                     standing: row.standing(),
                                     source: Source::Shared(shared.clone(), index),
                                 });
@@ -869,6 +874,7 @@ impl ConceptQuery {
                                     this,
                                     value,
                                     key,
+                                    rank,
                                     standing: row.standing(),
                                     source: Source::Owned(row),
                                 });
@@ -890,6 +896,7 @@ impl ConceptQuery {
                         this: this.clone(),
                         value: value.clone(),
                         key: row.get(&key_operand).cloned(),
+                        rank: 0,
                         standing: None,
                         source: Source::Folded,
                     });
@@ -1022,7 +1029,7 @@ impl ConceptQuery {
 /// per attribute is kept on the query's memo, since the facts do not
 /// change within a query and a concept is evaluated many times in one.
 async fn stored_absent<'a, Env>(
-    attributes: &[crate::artifact::ArtifactsAttribute],
+    attributes: &[ArtifactsAttribute],
     env: &'a Env,
 ) -> Result<bool, EvaluationError>
 where
@@ -1085,6 +1092,9 @@ struct Candidate {
     this: Value,
     value: Value,
     key: Option<Value>,
+    /// Where the relation it came from stands among the field's, first
+    /// best: what `top` ranks by when the field lists relations.
+    rank: usize,
     standing: Option<Standing>,
     source: Source,
 }
@@ -1101,7 +1111,9 @@ enum Source {
 }
 
 /// How an attribute concept read elects: the field's policy and, for
-/// `top`, the values it ranks among, best first.
+/// `top`, the values it ranks among, best first. A `top` over listed
+/// relations ranks each candidate by the relation it came from
+/// instead, which the candidate carries.
 #[derive(Clone, Debug)]
 pub(crate) struct Election {
     select: Select,
@@ -1110,14 +1122,20 @@ pub(crate) struct Election {
     field: String,
 }
 
+/// The candidates of `through`, grouped by caller and entity: each
+/// group's entries carry the result and the caller it answers.
+type Groups = BTreeMap<(usize, Vec<u8>), Vec<Entry<(Match, Arc<Match>)>>>;
+
 /// One candidate under election: its standing, its entity and value,
 /// the key that makes it a distinct fact when the relation is a keyed
-/// collection, and whatever the caller keeps of it.
+/// collection, where its relation stands among the field's, and
+/// whatever the caller keeps of it.
 struct Entry<T> {
     standing: Option<Standing>,
     this: Value,
     value: Value,
     identity: Vec<u8>,
+    rank: usize,
     carrier: T,
 }
 
@@ -1155,20 +1173,30 @@ impl Election {
         }
     }
 
-    /// Where `value` stands among the listed values: first is best,
-    /// and an unlisted value stands last.
-    fn rank(&self, value: &Value) -> usize {
-        self.among
-            .iter()
-            .position(|listed| listed == value)
-            .unwrap_or(usize::MAX)
+    /// Where an entry stands under `top`: among the listed values when
+    /// the field lists any, first best and an unlisted value last; then
+    /// by the relation it came from, in the order the field lists them.
+    fn rank<T>(&self, entry: &Entry<T>) -> (usize, usize) {
+        let listed = if self.among.is_empty() {
+            0
+        } else {
+            self.among
+                .iter()
+                .position(|listed| *listed == entry.value)
+                .unwrap_or(usize::MAX)
+        };
+        (listed, entry.rank)
     }
 
     /// Whether `candidate` displaces `incumbent` under a choosing
     /// policy. `last` takes the newer standing, then the greater
     /// value; `top` the better rank, then as `last`; `max` and `min`
     /// the greater or lesser value, then the newer standing.
-    fn beats<T>(&self, candidate: &Entry<T>, incumbent: &Entry<T>) -> Result<bool, EvaluationError> {
+    fn beats<T>(
+        &self,
+        candidate: &Entry<T>,
+        incumbent: &Entry<T>,
+    ) -> Result<bool, EvaluationError> {
         let newer = |candidate: &Entry<T>, incumbent: &Entry<T>| -> Result<bool, EvaluationError> {
             Ok(candidate.standing > incumbent.standing
                 || (candidate.standing == incumbent.standing
@@ -1177,7 +1205,7 @@ impl Election {
         match self.select {
             Select::Last => newer(candidate, incumbent),
             Select::Top => {
-                let (mine, theirs) = (self.rank(&candidate.value), self.rank(&incumbent.value));
+                let (mine, theirs) = (self.rank(candidate), self.rank(incumbent));
                 Ok(mine < theirs || (mine == theirs && newer(candidate, incumbent)?))
             }
             Select::Max | Select::Min => {
@@ -1186,8 +1214,8 @@ impl Election {
                     None => encode_value(&candidate.value)?.cmp(&encode_value(&incumbent.value)?),
                 };
                 let wanted = match self.select {
-                    Select::Max => std::cmp::Ordering::Greater,
-                    _ => std::cmp::Ordering::Less,
+                    Select::Max => Ordering::Greater,
+                    _ => Ordering::Less,
                 };
                 Ok(ordering == wanted
                     || (ordering.is_eq() && candidate.standing > incumbent.standing))
@@ -1221,7 +1249,7 @@ impl Election {
             let Some((this, carrier)) = first else {
                 return Ok(Resolved::Chosen(Vec::new()));
             };
-            let value = crate::reduce::fold(self.select, &self.field, values)?;
+            let value = reduce::fold(self.select, &self.field, values)?;
             return Ok(Resolved::Folded {
                 this,
                 value,
@@ -1245,7 +1273,9 @@ impl Election {
                 _ => entry,
             });
         }
-        Ok(Resolved::Chosen(best.into_iter().map(|entry| entry.carrier).collect()))
+        Ok(Resolved::Chosen(
+            best.into_iter().map(|entry| entry.carrier).collect(),
+        ))
     }
 }
 
@@ -1260,7 +1290,9 @@ fn agrees(
     operands: &[&str],
 ) -> Result<bool, EvaluationError> {
     for name in operands {
-        let Some(term) = terms.get(*name) else { continue };
+        let Some(term) = terms.get(name) else {
+            continue;
+        };
         let Some(Binding::Present(actual)) = result.get(name) else {
             continue;
         };
@@ -1311,6 +1343,7 @@ impl Election {
                     Some(key) => encode_value(key)?,
                     None => Vec::new(),
                 },
+                rank: 0,
                 carrier: row,
             });
         }
@@ -1340,7 +1373,10 @@ impl Election {
 /// field's policy: one per entity for a choosing policy, every
 /// distinct value per entity for `all`, and one folded value per
 /// entity for a folding policy, citing nothing.
-fn elect(candidates: Vec<Candidate>, election: &Election) -> Result<Vec<Candidate>, EvaluationError> {
+fn elect(
+    candidates: Vec<Candidate>,
+    election: &Election,
+) -> Result<Vec<Candidate>, EvaluationError> {
     if candidates.len() <= 1 && !election.select.is_fold() {
         return Ok(candidates);
     }
@@ -1360,6 +1396,7 @@ fn elect(candidates: Vec<Candidate>, election: &Election) -> Result<Vec<Candidat
             this: candidate.this.clone(),
             value: candidate.value.clone(),
             identity,
+            rank: candidate.rank,
             carrier: candidate,
         });
     }
@@ -1384,11 +1421,16 @@ fn elect(candidates: Vec<Candidate>, election: &Election) -> Result<Vec<Candidat
         }
         match election.resolve(entries)? {
             Resolved::Chosen(chosen) => survivors.extend(chosen),
-            Resolved::Folded { this, value: Some(value), carrier } => survivors.push(Candidate {
+            Resolved::Folded {
+                this,
+                value: Some(value),
+                carrier,
+            } => survivors.push(Candidate {
                 entity: carrier.entity,
                 this,
                 value,
                 key: None,
+                rank: 0,
                 standing: carrier.standing,
                 source: Source::Folded,
             }),
@@ -2838,7 +2880,11 @@ mod tests {
             let bob: Entity = "id:bob".parse()?;
             branch
                 .transaction()
-                .assert(the!("org.employee/dept").of(alice.clone()).is(dept_a.clone()))
+                .assert(
+                    the!("org.employee/dept")
+                        .of(alice.clone())
+                        .is(dept_a.clone()),
+                )
                 .assert(the!("org.employee/salary").of(alice.clone()).is(100u32))
                 .assert(the!("org.employee/dept").of(bob.clone()).is(dept_a.clone()))
                 .assert(the!("org.employee/salary").of(bob.clone()).is(50u32))
@@ -2891,7 +2937,10 @@ mod tests {
                 .evaluate(Match::new().seed(), &source)
                 .try_vec()
                 .await?;
-            assert!(excluded.is_empty(), "a sum bound to another value drops the row");
+            assert!(
+                excluded.is_empty(),
+                "a sum bound to another value drops the row"
+            );
             Ok(())
         }
 
@@ -2908,7 +2957,11 @@ mod tests {
             let bob: Entity = "id:bob".parse()?;
             branch
                 .transaction()
-                .assert(the!("org.employee/dept").of(alice.clone()).is(dept_a.clone()))
+                .assert(
+                    the!("org.employee/dept")
+                        .of(alice.clone())
+                        .is(dept_a.clone()),
+                )
                 .assert(the!("org.employee/salary").of(alice.clone()).is(100u32))
                 .assert(the!("org.employee/dept").of(bob.clone()).is(dept_a.clone()))
                 .assert(the!("org.employee/salary").of(bob.clone()).is(50u32))
@@ -3076,11 +3129,9 @@ mod tests {
             registry.register(status("account/activated-at", "case:active"))?;
             let source = TestEnv::new(&branch, &operator, registry);
 
+            // A listed value domain is a ranked choice, `top` implied.
             let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-                "status": {
-                    "the": "account/status", "as": "Entity",
-                    "select": "top", "among": ["case:active", "case:registered"]
-                }
+                "status": { "the": "account/status", "as": ["case:active", "case:registered"] }
             }}))?;
             let mut terms = Parameters::new();
             terms.insert("this".into(), Term::var("who"));
@@ -3112,5 +3163,145 @@ mod tests {
             Ok(())
         }
 
+        /// A field listing several relations reads them as a ranked
+        /// choice: an entity's handle is its email where it has one,
+        /// stored or derived, and its phone otherwise. The ranking is
+        /// by the relation a candidate came from, whichever rule or
+        /// scan offered it, and a concept selecting the field beside
+        /// others reads the same choice.
+        #[dialog_common::test]
+        async fn it_ranks_candidates_by_relation() -> anyhow::Result<()> {
+            let (operator, profile) = test_session_with_peer().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+            let carol: Entity = "id:carol".parse()?;
+            branch
+                .transaction()
+                .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
+                .assert(
+                    the!("user/email")
+                        .of(alice.clone())
+                        .is("alice@example.com".to_string()),
+                )
+                .assert(the!("user/phone").of(alice.clone()).is("111".to_string()))
+                .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
+                .assert(the!("user/phone").of(bob.clone()).is("222".to_string()))
+                .assert(the!("user/name").of(carol.clone()).is("Carol".to_string()))
+                .assert(
+                    the!("user/legacy-email")
+                        .of(carol.clone())
+                        .is("carol@old.example".to_string()),
+                )
+                .assert(the!("user/phone").of(carol.clone()).is("333".to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+
+            // Carol's email is derived, not stored: it still outranks
+            // her stored phone.
+            let legacy = compile(serde_json::json!({
+                "deduce": { "with": { "email": { "the": "user/email", "as": "Text" } } },
+                "when": [
+                    { "assert": { "with": { "email": { "the": "user/legacy-email", "as": "Text" } } },
+                      "where": { "this": { "?": { "name": "this" } }, "email": { "?": { "name": "email" } } } }
+                ]
+            }));
+            let mut registry = RuleRegistry::new();
+            registry.register(legacy)?;
+            let source = TestEnv::new(&branch, &operator, registry);
+
+            let handles = |rows: &[Match]| -> Result<Vec<(Value, Value)>, EvaluationError> {
+                let mut handles: Vec<(Value, Value)> = rows
+                    .iter()
+                    .map(|row| {
+                        Ok((
+                            row.lookup(&Term::var("who"))?.content()?,
+                            row.lookup(&Term::var("handle"))?.content()?,
+                        ))
+                    })
+                    .collect::<Result<_, EvaluationError>>()?;
+                handles.sort_by_key(|pair| format!("{pair:?}"));
+                Ok(handles)
+            };
+            let mut expected = vec![
+                (
+                    Value::Entity(alice.clone()),
+                    Value::String("alice@example.com".into()),
+                ),
+                (Value::Entity(bob.clone()), Value::String("222".into())),
+                (
+                    Value::Entity(carol.clone()),
+                    Value::String("carol@old.example".into()),
+                ),
+            ];
+            expected.sort_by_key(|pair| format!("{pair:?}"));
+
+            // The chain read on its own.
+            let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+                "handle": { "the": ["user/email", "user/phone"], "as": "Text" }
+            }}))?;
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("who"));
+            terms.insert("handle".into(), Term::var("handle"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: read,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert_eq!(
+                handles(&rows)?,
+                expected,
+                "the attribute concept ranks by relation"
+            );
+
+            // The chain selected beside another field.
+            let contact: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+                "name": { "the": "user/name", "as": "Text" },
+                "handle": { "the": ["user/email", "user/phone"], "as": "Text" }
+            }}))?;
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("who"));
+            terms.insert("name".into(), Term::var("name"));
+            terms.insert("handle".into(), Term::var("handle"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: contact,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert_eq!(
+                handles(&rows)?,
+                expected,
+                "a concept selecting the chain reads the same choice"
+            );
+
+            // The caller's value is a filter on the choice, not a seed
+            // of it: Alice's phone is not her handle.
+            let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+                "handle": { "the": ["user/email", "user/phone"], "as": "Text" }
+            }}))?;
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("who"));
+            terms.insert("handle".into(), Term::Constant(Value::String("111".into())));
+            let rows = ConceptQuery {
+                terms,
+                predicate: read,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert!(
+                rows.is_empty(),
+                "a phone an email outranks is nobody's handle"
+            );
+            Ok(())
+        }
     }
 }

@@ -97,6 +97,7 @@ use crate::artifact::Type as ValueType;
 use crate::artifact::Value;
 use crate::error::{EvaluationError, TypeError};
 use crate::formula::number::Numeric;
+use crate::schema::Select;
 use crate::selection::{Binding, Match, Selection};
 use crate::term::Term;
 use crate::try_stream;
@@ -442,7 +443,7 @@ fn fault(entry: &ReduceEntry, reason: impl Into<String>) -> EvaluationError {
 /// rule and the store offer for one attribute of one entity. `None`
 /// means the field has no value: an identity-less fold over nothing.
 pub fn fold(
-    select: crate::schema::Select,
+    select: Select,
     field: &str,
     values: Vec<Value>,
 ) -> Result<Option<Value>, EvaluationError> {

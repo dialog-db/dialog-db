@@ -1,4 +1,5 @@
 use futures_util::stream::once;
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::{iter, mem};
 
@@ -177,17 +178,17 @@ pub struct Standing {
 }
 
 impl Ord for Standing {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.version.cmp(&other.version).then_with(|| {
             self.cause
                 .partial_cmp(&other.cause)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(Ordering::Equal)
         })
     }
 }
 
 impl PartialOrd for Standing {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }

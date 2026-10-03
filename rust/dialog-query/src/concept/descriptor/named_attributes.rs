@@ -152,9 +152,12 @@ impl ConceptFieldDescriptor {
         self.descriptor.name()
     }
 
-    /// Convenience: the attribute's content type, if known.
+    /// The type this field reads: the attribute's carrier, or what a
+    /// carrier-changing policy yields from it (a count is an unsigned
+    /// integer whatever it counts). The carrier itself is
+    /// [`AttributeDescriptor::content_type`] on the descriptor.
     pub fn content_type(&self) -> Option<Type> {
-        self.descriptor.content_type()
+        self.descriptor.read_type()
     }
 
     /// Convenience: the attribute's cardinality.
