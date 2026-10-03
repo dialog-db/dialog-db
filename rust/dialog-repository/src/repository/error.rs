@@ -494,6 +494,25 @@ pub enum CommitError {
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
 
+    /// A write targeted an attribute placed on a scope the scope does
+    /// not bind (see [`Bindings`](crate::Bindings)).
+    #[error("Attribute {attribute} is placed on scope {scope}, which this layer does not bind")]
+    UnboundScope {
+        /// The attribute the write targeted.
+        attribute: String,
+        /// The scope it is placed on.
+        scope: String,
+    },
+
+    /// A `dialog.attribute/*` declaration carries a value that is not
+    /// a scope entity.
+    #[error("Placement of {attribute} is not a layer entity: {value}")]
+    InvalidPlacement {
+        /// The attribute the declaration is about.
+        attribute: String,
+        /// The value found.
+        value: String,
+    },
     /// Reading the registry for what a write replaces failed.
     #[error("Failed to read the registry: {0}")]
     Registry(String),

@@ -1,15 +1,17 @@
 mod batch;
-mod induce;
+pub(crate) mod induce;
 mod query;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 
 use crate::Commit;
+use crate::placement::{Partitioned, Placements};
 use crate::repository::branch::asset::store_assets;
+use crate::repository::branch::session::Composite;
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
-use dialog_artifacts::{Changes, Statement};
+use dialog_artifacts::{AssetChange, Changes, Statement};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
@@ -42,6 +44,12 @@ use dialog_effects::memory::{Publish, Resolve};
 /// [`TransactionBatch::transaction`]. Accumulates durable changes via
 /// `.assert()` / `.retract()` and *transient* facts (commands) via
 /// `.dispatch()`.
+///
+/// Where an asserted or retracted fact lands is the attribute's
+/// decision, not the caller's: each instruction routes to the store
+/// the scope its attribute is [placed](crate::placement) on is
+/// [bound](crate::Bindings) to — the tree by default. A concept whose
+/// attributes span scopes fans out accordingly.
 ///
 /// Transients are visible to every read through [`query`](Self::query)
 /// and to inductive-rule bodies during commit-time induction, but they
@@ -238,22 +246,23 @@ impl TransactionCommit<&Snapshot> {
             + 'static,
     {
         let snapshot = self.line;
-        let mut changes = self.changes;
+        let source = SourceRef::Snapshot(snapshot);
         // A snapshot commit reports only its revision: the transients
         // induction emitted surface on a staged
         // [`TransactionBatch::induced`] alone.
-        induce::induce(
-            SourceRef::Snapshot(snapshot),
-            &mut changes,
+        let settled = settle(
+            source,
+            &Composite::of(source.to_source()),
+            self.changes,
             self.transients,
             env,
         )
         .await?;
 
         let previous = snapshot.revision();
-        let touches_rules = touches_rules(&changes);
-        let machinery =
-            store_assets(SourceRef::Snapshot(snapshot), changes.take_assets(), env).await?;
+        let touches_rules = touches_rules(&settled.tree);
+        let changes = settled.tree;
+        let machinery = store_assets(source, settled.assets, env).await?;
 
         let mut commit = Commit::new(snapshot, changes.into_stream()).with_machinery(machinery);
         if self.allow_empty {
@@ -263,16 +272,81 @@ impl TransactionCommit<&Snapshot> {
             commit = commit.canonicalize();
         }
         let revision = Box::pin(commit.perform(env)).await?;
+        // Session-bound instructions land once the tree commit has
+        // succeeded, so a failed commit leaves the session untouched too.
+        source.overlay().apply(settled.session)?;
 
         if !touches_rules {
-            carry_footprint(
-                &SourceRef::Snapshot(snapshot).rule_cache(),
-                Some(&previous),
-                &revision,
-            );
+            carry_footprint(&source.rule_cache(), Some(&previous), &revision);
         }
         Ok(revision)
     }
+}
+
+/// A transaction's changes after commit-time induction, routed by
+/// attribute placement: what the tree commit mints, what the line's
+/// session store lands once the commit has succeeded, and the
+/// transients rule heads emitted along the way.
+pub(crate) struct Settled {
+    /// The tree-bound instructions, induction's novelty folded in.
+    pub(crate) tree: Changes,
+    /// The session-bound instructions.
+    pub(crate) session: Changes,
+    /// The asset changes, which only the tree commit stores.
+    pub(crate) assets: Vec<AssetChange>,
+    /// Every transient a rule head emitted, across all rounds.
+    pub(crate) induced: Changes,
+}
+
+/// Settle a transaction's changes against `view`: run commit-time
+/// induction (each round witnessed on `source`'s session store, so a
+/// command that fired a rule is seen by the store's observers even
+/// though the commit folds it away), then route by attribute
+/// placement. Nothing lands here: the caller mints the tree-bound
+/// remainder and applies the session-bound part once that succeeded.
+pub(crate) async fn settle<Env>(
+    source: SourceRef<'_>,
+    view: &Composite,
+    mut changes: Changes,
+    transients: Changes,
+    env: &Env,
+) -> Result<Settled, CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Identify>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    // The assets ride apart from the facts, for the tree commit alone:
+    // induction and routing rebuild the batch fact by fact.
+    let assets = changes.take_assets();
+    let mut witness = source.overlay();
+    let staged = Placements::resolve(source, &changes, env).await?;
+    let induced = induce::induce(
+        source,
+        view,
+        &staged,
+        &mut changes,
+        transients,
+        &mut witness,
+        env,
+    )
+    .await?;
+    let placements = Placements::resolve(source, &changes, env).await?;
+    let Partitioned { tree, session } = placements.partition(changes, source.bindings())?;
+    Ok(Settled {
+        tree,
+        session,
+        assets,
+        induced,
+    })
 }
 
 /// Whether a settled change batch touches the trigger structures, i.e.
