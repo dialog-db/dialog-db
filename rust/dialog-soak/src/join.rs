@@ -43,11 +43,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
-use dialog_credentials::{Credential, SignerCredential};
+use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::{Directory, Location};
-use dialog_operator::helpers::{test_operator_with_profile, unique_name};
-use dialog_operator::{Operator, Profile};
+use dialog_peer::Peer;
+use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_query::rule::DeductiveRuleDescriptor;
 use dialog_query::{
     Concept, ConceptConclusion, ConceptDescriptor, ConceptQuery, DeductiveRule, Entity,
@@ -55,10 +55,11 @@ use dialog_query::{
 };
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::simulation::{self, NetworkShape};
-use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
+use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, contact};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource as _;
+use dialog_varsig::{Did, Principal};
 use futures_util::{StreamExt as _, stream};
 
 use crate::report::{PhaseReport, Report};
@@ -313,23 +314,31 @@ async fn seed_vault(repo: &Repository<SignerCredential>, location: &Location) ->
 /// Open a repository for `profile`, wire `origin` at `address` for the
 /// server's subject, and track its `main` branch.
 async fn mount_client(
-    operator: &Operator<VolatileSpace>,
-    profile: &Profile,
+    operator: &Peer<VolatileSpace, dialog_peer::Session>,
+    profile: &Peer<VolatileSpace>,
     server: &Repository<SignerCredential>,
     address: &FsAddress,
     name: &str,
 ) -> Result<Branch> {
     let repo = profile
-        .repository(unique_name(name))
+        .space(unique_name(name))
         .open()
         .perform(operator)
         .await?;
-    let origin = repo
-        .remote("origin")
-        .create(SiteAddress::Fs(address.clone()))
-        .subject(server.did())
-        .perform(operator)
-        .await?;
+    let origin = {
+        let site = SiteAddress::Fs(address.clone());
+        contact(&vault_peer().await?)
+            .add_address(site)
+            .name("origin")
+            .perform(operator)
+            .await?;
+        contact("origin")
+            .connect()
+            .repository(server.did())
+            .open()
+            .perform(operator)
+            .await?
+    };
     let branch = repo.branch("main").open().perform(operator).await?;
     let remote_branch = origin.branch("main").open().perform(operator).await?;
     branch.set_upstream(remote_branch).perform(operator).await?;
@@ -340,7 +349,7 @@ async fn mount_client(
 /// — a phase must observe real data, not a lazily erred stream.
 async fn select_count(
     branch: &Branch,
-    operator: &Operator<VolatileSpace>,
+    operator: &Peer<VolatileSpace, dialog_peer::Session>,
     selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
 ) -> Result<usize> {
     let rows = branch
@@ -426,7 +435,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     simulation::configure(None);
     simulation::reset_tally();
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     // Speculative preloading is ambient (the operator's queue, hints
     // default-on). The unshaped profile turns it off: its job is to pin
     // the engine's deterministic demand shape, and replication overlap
@@ -437,7 +446,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
     }
     let server = profile
-        .repository(unique_name("soak-server"))
+        .space(unique_name("soak-server"))
         .create()
         .perform(&operator)
         .await?;
@@ -457,11 +466,20 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     );
     let address = seed_vault(&server, &location).await?;
 
-    let origin = server
-        .remote("origin")
-        .create(SiteAddress::Fs(address.clone()))
-        .perform(&operator)
-        .await?;
+    let origin = {
+        let site = SiteAddress::Fs(address.clone());
+        contact(&vault_peer().await?)
+            .add_address(site)
+            .name("origin")
+            .perform(&operator)
+            .await?;
+        contact("origin")
+            .connect()
+            .repository(server.did())
+            .open()
+            .perform(&operator)
+            .await?
+    };
     let branch = server.branch("main").open().perform(&operator).await?;
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     branch
@@ -795,6 +813,9 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
 
     simulation::configure(None);
 
+    // Every tree in this run was created here, so they all carry the
+    // format a new tree takes in this process (which the sweep sets
+    // through the environment); the report labels the run with it.
     let manifest = dialog_search_tree::Manifest::default();
     let (latency_ms, auth_ms, bandwidth_mbps) = match &scenario.network {
         Some(shape) => (
@@ -834,4 +855,11 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         vault_bytes,
         phases,
     })
+}
+
+/// A DID to name the peer a vault directory is by. A directory has no DID
+/// of its own, so the soak gives it one, as an application names a peer
+/// by the DID it was given.
+async fn vault_peer() -> Result<Did> {
+    Ok(Principal::did(&Ed25519Signer::generate().await?))
 }

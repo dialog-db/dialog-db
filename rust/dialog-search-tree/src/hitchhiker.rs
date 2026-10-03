@@ -28,8 +28,8 @@
 use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
-use dialog_storage::{DialogStorageError, StorageBackend};
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use futures_util::Stream;
 use rkyv::{
     Deserialize, Serialize,
@@ -42,84 +42,83 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, ArchivedNodeBody, Buffer, Cache, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Distribution, Entry, Geometric, Key, Manifest, Node, NoveltyEntry,
-    NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientRootParts, TransientSegment,
-    TransientTree, Value, link_bounds,
+    Accessor, Buffer, Cache, Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key,
+    LoadBlock, Manifest, Node, NodeBody, NodeCache, NoveltyEntry, NoveltyOp, PersistentNode,
+    PersistentTree, TransientNode, TransientRootParts, TransientSegment, TransientTree, Value,
+    link_bounds,
 };
 
-/// The default per-node novelty capacity.
+/// The per-node op-count cap a buffered tree flushes at: the tree's expected
+/// fanout (`2^fanout_n`, 256 under the default manifest), so a buffer holds
+/// about one node's worth of links in ops before it cascades.
 ///
-/// Calibrated on the on-disk bug-tracker benchmark (300 bugs, six-field concept
-/// join): 64 -> 66ms, 256 -> 57ms, 1024 -> 111ms on the all-bugs query. Too
-/// small and writes cascade constantly; too large and every read that crosses a
-/// buffered node pays to project a big buffer over the leaves beneath it.
-///
-/// Hitchhiker trees run buffers several times the fan-out so most writes touch
-/// only the upper buffers. The base fan-out here (the geometric distribution's
-/// expected children per node) is around 254; a multiple of that keeps the
-/// amortization a hitchhiker buffer is meant to provide. Tunable per tree via
-/// [`HitchhikerTree::with_op_buf_size`].
-pub const DEFAULT_OP_BUF_SIZE: usize = 256;
+/// Calibrated on the on-disk bug-tracker benchmark (300 bugs, six-field
+/// concept join): 64 -> 66ms, 256 -> 57ms, 1024 -> 111ms on the all-bugs
+/// query. Too small and writes cascade constantly; too large and every read
+/// that crosses a buffered node pays to project a big buffer over the leaves
+/// beneath it. The count is the per-commit-cost knob: a commit re-encodes and
+/// re-hashes the root frame, whose size the buffer dominates, while a smaller
+/// buffer flushes (and pushes novelty toward the leaves) proportionally more
+/// often. Overridden per tree by [`HitchhikerTree::with_op_buf_size`], or per
+/// process by `DIALOG_TREE_OP_BUF` (experiment plumbing, native only).
+fn op_buf_size(manifest: &Manifest) -> usize {
+    usize::try_from(manifest.branch_factor()).unwrap_or(usize::MAX)
+}
 
-/// The op-buffer capacity trees open under: [`DEFAULT_OP_BUF_SIZE`] unless
-/// `DIALOG_TREE_OP_BUF` overrides it (experiment plumbing, read once per
-/// process, native only). The capacity is the per-commit-cost knob: a
-/// commit re-encodes and re-hashes the root frame, whose size the buffer
-/// dominates, while a smaller buffer flushes (and pushes novelty toward
-/// the leaves) proportionally more often — so the optimum balances
-/// O(capacity) per commit against O(flush)/capacity amortized, and it is
-/// a measurement question, not a constant to guess.
-/// Default op-buffer WEIGHT cap: the buffer flushes when its buffered
-/// weight (key bytes + value payloads + per-entry encoding overhead, the
-/// calibrated byte metering) exceeds this, whatever the op count. The
-/// count cap bounds how many ops a buffer holds; this bounds their BYTES,
-/// which is what actually rides the root frame into every per-commit
+/// The per-node op-WEIGHT cap a buffered tree flushes at: the tree's node
+/// size target (`max_segment`, 64 KiB under the default manifest), so a
+/// buffer never carries more than about one node's worth of bytes. Disabled
+/// when the manifest disables byte pacing (`max_segment == 0`).
+///
+/// The count cap bounds how many ops a buffer holds; this bounds their
+/// BYTES, which is what actually rides the root frame into every per-commit
 /// rewrite and every pushed operational block — a byte-heavy workload can
-/// pack ~200 KB into 256 ops. 64 KiB (the pacing target's scale) bounds
-/// the operational root block for a measured +17% replay cost on the
-/// byte-heavy real workload; the metering's per-op overhead charge means
-/// this cap also implies a hard op-count bound, so it is the primary
-/// knob and the count cap is secondary.
-pub const DEFAULT_OP_BUF_BYTES: usize = 64 * 1024;
+/// pack ~200 KB into 256 ops. At 64 KiB it cost a measured +17% replay on the
+/// byte-heavy real workload. Buffered ops are metered with the manifest's
+/// per-entry overhead, so this cap also implies a hard op-count bound.
+/// Overridden per tree by [`HitchhikerTree::with_op_buf_bytes`], or per
+/// process by `DIALOG_TREE_OP_BUF_BYTES` (experiment plumbing, native only;
+/// explicit 0 disables the byte trigger).
+fn op_buf_bytes(manifest: &Manifest) -> usize {
+    match manifest.max_segment {
+        0 => usize::MAX,
+        target => target as usize,
+    }
+}
 
-/// The op-buffer byte cap trees open under: [`DEFAULT_OP_BUF_BYTES`]
-/// unless `DIALOG_TREE_OP_BUF_BYTES` overrides it (experiment plumbing,
-/// read once per process, native only; explicit 0 disables the byte
-/// trigger).
-fn default_op_buf_bytes() -> usize {
+/// The process-wide `DIALOG_TREE_OP_BUF_BYTES` override, read once.
+fn env_op_buf_bytes() -> Option<usize> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        static BYTES: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
         *BYTES.get_or_init(|| {
             match std::env::var("DIALOG_TREE_OP_BUF_BYTES")
                 .ok()
                 .and_then(|raw| raw.parse().ok())
             {
-                Some(0) => usize::MAX,
-                Some(bytes) => bytes,
-                None => DEFAULT_OP_BUF_BYTES,
+                Some(0) => Some(usize::MAX),
+                other => other,
             }
         })
     }
     #[cfg(target_arch = "wasm32")]
-    DEFAULT_OP_BUF_BYTES
+    None
 }
 
-fn default_op_buf_size() -> usize {
+/// The process-wide `DIALOG_TREE_OP_BUF` override, read once.
+fn env_op_buf_size() -> Option<usize> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        static SIZE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
         *SIZE.get_or_init(|| {
             std::env::var("DIALOG_TREE_OP_BUF")
                 .ok()
                 .and_then(|raw| raw.parse().ok())
                 .filter(|&size| size > 0)
-                .unwrap_or(DEFAULT_OP_BUF_SIZE)
         })
     }
     #[cfg(target_arch = "wasm32")]
-    DEFAULT_OP_BUF_SIZE
+    None
 }
 
 /// A boxed future returning an edited [`TransientNode`], the shape `enqueue`
@@ -207,8 +206,10 @@ pub enum FlushTrigger {
 
 /// The root of a [`HitchhikerTree`], loaded lazily like a [`TransientTree`]'s.
 enum HitchhikerRoot<Key, Value> {
-    /// The durable root hash, not yet loaded. `NULL_BLAKE3_HASH` is an empty
-    /// tree.
+    /// The tree is empty and nothing durable exists yet. Persisting this
+    /// state writes the canonical manifest-carrying empty node.
+    Empty,
+    /// The durable root hash, not yet loaded.
     Unloaded(Blake3Hash),
     /// The root loaded into a live, buffered transient node.
     Loaded(TransientNode<Key, Value>),
@@ -228,18 +229,21 @@ where
     D: Distribution,
 {
     root: HitchhikerRoot<Key, Value>,
-    cache: Cache<Blake3Hash, Buffer>,
-    op_buf_size: usize,
-    op_buf_bytes: usize,
+    cache: NodeCache<Key, Value>,
+    /// Explicit op-count cap; `None` derives it from the manifest (see
+    /// [`op_buf_size`]).
+    op_buf_size: Option<usize>,
+    /// Explicit op-weight cap; `None` derives it from the manifest (see
+    /// [`op_buf_bytes`]).
+    op_buf_bytes: Option<usize>,
     policy: FlushPolicy,
     trigger: FlushTrigger,
-    /// The tree's format header, captured from the root node the first time a
-    /// write or canonicalize loads it (opening is synchronous and cannot read
-    /// it). `None` until then, and forever for a tree born empty, whose first
-    /// canonical write stamps the default format. Threaded into every replay
-    /// and persist so the buffered path re-shapes and re-stamps under the
-    /// tree's own format, mirroring the guard `TransientTree::load` enforces
-    /// on the canonical edit path.
+    /// The tree's format header. Known from opening for an empty tree, which
+    /// carries it in memory; captured from the root node the first time a
+    /// write or canonicalize loads a stored root (opening is synchronous and
+    /// cannot read it), and `None` only until then. Threaded into every
+    /// replay and persist so the buffered path re-shapes and re-stamps under
+    /// the tree's own format, as the canonical edit path does.
     manifest: Option<Manifest>,
     distribution: PhantomData<D>,
 }
@@ -265,63 +269,82 @@ where
     /// first write that descends into it, so this is synchronous and touches no
     /// storage.
     pub fn open(tree: &PersistentTree<Key, Value, D>) -> Self {
+        // An unpersisted empty tree has no stored root to load, but it
+        // knows its manifest; carry it so the session's writes shape and
+        // stamp under the tree's declared format.
+        let (root, manifest) = match tree.stored_root() {
+            Some(hash) => (HitchhikerRoot::Unloaded(hash.clone()), None),
+            None => (
+                HitchhikerRoot::Empty,
+                Some(
+                    tree.empty_manifest()
+                        .expect("a tree with no stored root is the empty tree"),
+                ),
+            ),
+        };
         Self {
-            root: HitchhikerRoot::Unloaded(tree.root().clone()),
+            root,
             cache: tree.node_cache(),
-            op_buf_size: default_op_buf_size(),
-            op_buf_bytes: default_op_buf_bytes(),
+            op_buf_size: env_op_buf_size(),
+            op_buf_bytes: env_op_buf_bytes(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
-            manifest: None,
+            manifest,
             distribution: PhantomData,
         }
     }
 
-    /// Opens an empty buffered tree.
-    pub fn empty() -> Self {
+    /// Opens a new, empty buffered tree under `manifest`.
+    pub fn empty(manifest: Manifest) -> Self {
         Self {
-            root: HitchhikerRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
+            root: HitchhikerRoot::Empty,
             cache: Cache::new(),
-            op_buf_size: default_op_buf_size(),
-            op_buf_bytes: default_op_buf_bytes(),
+            op_buf_size: env_op_buf_size(),
+            op_buf_bytes: env_op_buf_bytes(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
-            manifest: None,
+            manifest: Some(manifest),
             distribution: PhantomData,
         }
     }
 
-    /// Pins the format [`Manifest`] this session writes under while the
-    /// tree is empty. A non-empty root's stored manifest still takes
-    /// precedence on first load: until adopt-on-edit exists, edits must
-    /// run under the format the nodes already carry.
+    /// Replaces the format [`Manifest`] this session writes under while the
+    /// tree is empty. A stored root's manifest takes precedence on first
+    /// load: edits always run under the format the nodes already carry.
     ///
-    /// The manifest normally travels IN the tree (every node carries it),
-    /// which leaves one gap: an EMPTY tree has no node to carry it, so a
-    /// session opened over an empty root writes under [`Manifest::default`]
-    /// — even when the tree held a different format before its last entry
-    /// was deleted. A caller that configures a non-default format must
-    /// therefore re-impose it whenever it opens over a possibly-empty
-    /// tree, or an empty-and-refill lifecycle silently reverts the store
-    /// to the default format (and two replicas that emptied at different
-    /// points diverge on identical facts). This was found by the
-    /// adversarial convergence soak's delete-to-empty pattern.
+    /// The manifest travels IN the tree (every node carries it, and an
+    /// emptied tree persists the manifest-carrying empty node), so reopening
+    /// a tree keeps its format with no help from here. This only chooses the
+    /// format of a tree that has no stored root yet.
     pub fn with_manifest(mut self, manifest: Manifest) -> Self {
         self.manifest = Some(manifest);
         self
     }
 
-    /// Sets the per-node novelty capacity (the write-amplification knob).
+    /// The format this session writes under: known from opening for an empty
+    /// tree, and from the first root load for a stored one. Every path that
+    /// reaches a loaded or empty root has it; asking earlier is a bug here.
+    fn format(manifest: &Option<Manifest>) -> Result<Manifest, DialogSearchTreeError> {
+        manifest.clone().ok_or_else(|| {
+            DialogSearchTreeError::Node(
+                "The buffered tree's manifest is read before its root was loaded".into(),
+            )
+        })
+    }
+
+    /// Sets the per-node novelty capacity (the write-amplification knob),
+    /// in place of the one derived from the tree's manifest.
     pub fn with_op_buf_size(mut self, op_buf_size: usize) -> Self {
-        self.op_buf_size = op_buf_size.max(1);
+        self.op_buf_size = Some(op_buf_size.max(1));
         self
     }
 
-    /// Sets the per-node novelty WEIGHT cap: the buffer flushes when its
-    /// buffered weight (key bytes + value payloads) exceeds this, whatever
-    /// the op count. `usize::MAX` (the default) disables the byte trigger.
+    /// Sets the per-node novelty WEIGHT cap, in place of the one derived
+    /// from the tree's manifest: the buffer flushes when its buffered
+    /// weight exceeds this, whatever the op count. `usize::MAX` disables
+    /// the byte trigger.
     pub fn with_op_buf_bytes(mut self, op_buf_bytes: usize) -> Self {
-        self.op_buf_bytes = op_buf_bytes.max(1);
+        self.op_buf_bytes = Some(op_buf_bytes.max(1));
         self
     }
 
@@ -338,15 +361,14 @@ where
     }
 
     /// Buffers an insert (or value update) of `key` into the tree.
-    pub async fn insert<Backend>(
+    pub async fn insert<Env>(
         self,
         key: Key,
         value: Value,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write(
             vec![NoveltyEntry {
@@ -359,14 +381,9 @@ where
     }
 
     /// Buffers a delete (tombstone) of `key` into the tree.
-    pub async fn delete<Backend>(
-        self,
-        key: Key,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<Self, DialogSearchTreeError>
+    pub async fn delete<Env>(self, key: Key, storage: &Env) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write(
             vec![NoveltyEntry {
@@ -385,15 +402,14 @@ where
     /// cascades into any given child at most once instead of re-flushing it
     /// on every overflow the batch crosses. Reads are novelty-aware wherever
     /// ops sit, so a deferred tree reads exactly like a settled one.
-    pub async fn insert_deferred<Backend>(
+    pub async fn insert_deferred<Env>(
         self,
         key: Key,
         value: Value,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write_with(
             vec![NoveltyEntry {
@@ -408,14 +424,13 @@ where
 
     /// Buffers a delete WITHOUT evaluating the flush policy; see
     /// [`insert_deferred`](Self::insert_deferred).
-    pub async fn delete_deferred<Backend>(
+    pub async fn delete_deferred<Env>(
         self,
         key: Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write_with(
             vec![NoveltyEntry {
@@ -432,18 +447,14 @@ where
     /// accumulated: the settle half of batch writing. Buffers that ended the
     /// batch over their trigger cascade now, top-down, each child receiving
     /// its whole accumulated share in one flush.
-    pub async fn settle<Backend>(
-        self,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<Self, DialogSearchTreeError>
+    pub async fn settle<Env>(self, storage: &Env) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         match self.root {
             // Nothing buffered in memory: nothing to settle. (A persisted
             // root's stored buffers settle when a write next loads it.)
-            HitchhikerRoot::Unloaded(_) => Ok(self),
+            HitchhikerRoot::Empty | HitchhikerRoot::Unloaded(_) => Ok(self),
             HitchhikerRoot::Loaded(_) => self.write_with(Vec::new(), storage, true).await,
         }
     }
@@ -456,14 +467,13 @@ where
     /// leaf are collected and applied afterward through the canonical
     /// [`TransientTree`] insert/delete path so leaf landings reshape exactly as
     /// a sequential edit would.
-    async fn write<Backend>(
+    async fn write<Env>(
         self,
         msgs: Vec<NoveltyEntry<Value>>,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         self.write_with(msgs, storage, true).await
     }
@@ -473,23 +483,22 @@ where
     /// the classic behavior. Leaf-bound ops (an empty or segment-rooted
     /// tree, the `Immediate` policy) always go to the canonical edit path
     /// immediately — a leaf has no buffer to defer into.
-    async fn write_with<Backend>(
+    async fn write_with<Env>(
         mut self,
         msgs: Vec<NoveltyEntry<Value>>,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         settle: bool,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
-        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.cache.clone(), storage);
 
         // An empty tree has no node to buffer into; every op goes straight to
         // the (initially empty) canonical tree.
         let loaded = match self.root {
             HitchhikerRoot::Loaded(node) => Some(node),
-            HitchhikerRoot::Unloaded(ref hash) if hash == NULL_BLAKE3_HASH => None,
+            HitchhikerRoot::Empty => None,
             HitchhikerRoot::Unloaded(ref hash) => {
                 let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
                 // Capture the tree's format header at the first root load,
@@ -497,14 +506,24 @@ where
                 // it, and every replay and persist below must run under the
                 // tree's own format rather than the default.
                 self.manifest = Some(node.manifest()?);
-                // Measurement-only (uncommitted, env-gated) lift breadcrumb.
-                dialog_storage::dup_audit::note_lift(hash.as_bytes(), "root_open");
-                // The root's left edge is the tree's global leftmost seam,
-                // whose separator is the empty string (negative infinity).
-                Some(TransientNode::open(&node, Vec::new())?)
+                if node.is_empty()? {
+                    // The empty tree's node is a pure format marker (see
+                    // `persist_empty_root`): its manifest was captured above,
+                    // and the tree itself has no spine to buffer into.
+                    None
+                } else {
+                    // Measurement-only (uncommitted, env-gated) lift breadcrumb.
+                    dialog_storage::dup_audit::note_lift(hash.as_bytes(), "root_open");
+                    // The root's left edge is the tree's global leftmost seam,
+                    // whose separator is the empty string (negative infinity).
+                    Some(TransientNode::open(&node, Vec::new())?)
+                }
             }
         };
 
+        // The buffer caps derive from, and buffered ops are metered under,
+        // the tree's own format, known now that the root is loaded.
+        let manifest = Self::format(&self.manifest)?;
         let mut deferred = Vec::new();
         let node = match loaded {
             // Immediate never buffers: every op goes straight to the canonical
@@ -514,12 +533,13 @@ where
                 Some(node)
             }
             Some(node) => {
-                let node = enqueue::<Key, Value, D, Backend>(
+                let node = enqueue::<Key, Value, D, Env>(
                     node,
                     msgs,
                     EnqueueConfig {
-                        op_buf_size: self.op_buf_size,
-                        op_buf_bytes: self.op_buf_bytes,
+                        op_buf_size: self.op_buf_size.unwrap_or_else(|| op_buf_size(&manifest)),
+                        op_buf_bytes: self.op_buf_bytes.unwrap_or_else(|| op_buf_bytes(&manifest)),
+                        manifest,
                         policy: self.policy,
                         trigger: self.trigger,
                         settle,
@@ -580,25 +600,22 @@ where
                         })
                         .collect();
                     oplist.extend(deferred);
-                    let edit = TransientTree::<Key, Value, D>::with_manifest(
-                        NULL_BLAKE3_HASH.clone(),
+                    let edit = TransientTree::<Key, Value, D>::empty_with_manifest(
                         self.cache.clone(),
-                        self.manifest.unwrap_or_default(),
+                        Self::format(&self.manifest)?,
                     )
                     .plant(oplist, storage)
                     .await?;
                     self.root = match edit.into_root() {
+                        TransientRootParts::Empty => HitchhikerRoot::Empty,
                         TransientRootParts::Loaded(node) => HitchhikerRoot::Loaded(node),
                         TransientRootParts::Unloaded(hash) => HitchhikerRoot::Unloaded(hash),
                     };
                     return Ok(self);
                 }
-                None => match std::mem::replace(
-                    &mut self.root,
-                    HitchhikerRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
-                ) {
+                None => match std::mem::replace(&mut self.root, HitchhikerRoot::Empty) {
                     HitchhikerRoot::Loaded(node) => Some(node),
-                    HitchhikerRoot::Unloaded(_) => {
+                    HitchhikerRoot::Empty | HitchhikerRoot::Unloaded(_) => {
                         return Err(DialogSearchTreeError::Node(
                             "The bulk-dominance check lost the live spine".into(),
                         ));
@@ -617,16 +634,25 @@ where
             Some(node) => TransientTree::<Key, Value, D>::from_loaded(
                 node,
                 self.cache.clone(),
-                self.manifest.unwrap_or_default(),
+                Self::format(&self.manifest)?,
             ),
-            None => TransientTree::<Key, Value, D>::with_manifest(
-                NULL_BLAKE3_HASH.clone(),
-                self.cache.clone(),
-                self.manifest.unwrap_or_default(),
-            ),
+            None => {
+                // An empty tree replays under the SESSION's format, not the
+                // default: a `with_manifest` session's first batch must shape
+                // its nodes under the declared manifest. (With the default
+                // `new` here, a large first batch would split under default
+                // pacing while the stamped headers claimed the session's
+                // format — silent shape divergence from a replica that built
+                // the same entries canonically.)
+                TransientTree::<Key, Value, D>::empty_with_manifest(
+                    self.cache.clone(),
+                    Self::format(&self.manifest)?,
+                )
+            }
         };
         let edit = replay_ops(edit, deferred, storage).await?;
         self.root = match edit.into_root() {
+            TransientRootParts::Empty => HitchhikerRoot::Empty,
             TransientRootParts::Loaded(node) => HitchhikerRoot::Loaded(node),
             TransientRootParts::Unloaded(hash) => HitchhikerRoot::Unloaded(hash),
         };
@@ -640,14 +666,13 @@ where
     /// the canonical edit path so the returned tree is deterministic and
     /// history-independent, the same root a sequential build of the surviving
     /// fact set produces. The buffered tree is consumed.
-    pub async fn canonicalize<Backend>(
+    pub async fn canonicalize<Env>(
         self,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
         delta: &mut Delta<Blake3Hash, Buffer>,
     ) -> Result<PersistentTree<Key, Value, D>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         // Collect every buffered op across the whole spine in key order, clearing
         // the buffers as we go, then replay them as canonical edits onto the
@@ -659,8 +684,14 @@ where
         // deeper therefore means older, so after the stable sort by key the
         // SHALLOWEST (newest) op for a key sits last, and last-write-wins
         // replay lets exactly that op stand.
-        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let accessor = Accessor::new(self.cache.clone(), storage);
         let edit = match self.root {
+            // The session's manifest rides along so the empty tree
+            // canonicalizes to the manifest-carrying empty node.
+            HitchhikerRoot::Empty => TransientTree::<Key, Value, D>::empty_with_manifest(
+                self.cache.clone(),
+                Self::format(&self.manifest)?,
+            ),
             HitchhikerRoot::Unloaded(hash) => {
                 // A cold reopen of a persisted buffered tree arrives here with
                 // its buffers sealed in the stored bytes, so the root must be
@@ -668,9 +699,7 @@ where
                 // no novelty anywhere is already canonical (an empty buffer is
                 // byte-identical to a canonical node's) and keeps its hash
                 // with no rewrite.
-                if &hash == NULL_BLAKE3_HASH
-                    || !subtree_has_novelty::<Key, Value, Backend>(&hash, &accessor).await?
-                {
+                if !subtree_has_novelty::<Key, Value, Env>(&hash, &accessor).await? {
                     TransientTree::<Key, Value, D>::new(hash, self.cache.clone())
                 } else {
                     let root: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
@@ -696,7 +725,7 @@ where
                 let edit = TransientTree::<Key, Value, D>::from_loaded(
                     node,
                     self.cache.clone(),
-                    self.manifest.unwrap_or_default(),
+                    Self::format(&self.manifest)?,
                 );
                 replay_ops(edit, ops, storage).await?
             }
@@ -715,16 +744,16 @@ where
     /// [`Assert`](NoveltyOp::Assert) shadows it. With no covering buffered op the
     /// stored leaf value stands, read through the same path
     /// [`PersistentTree::get`] uses for untouched subtrees.
-    pub async fn get<Backend>(
+    pub async fn get<Env>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let mut node = match &self.root {
+            HitchhikerRoot::Empty => return Ok(None),
             HitchhikerRoot::Unloaded(hash) => {
                 return self.persistent_get(hash, key, storage).await;
             }
@@ -780,14 +809,13 @@ where
     /// [`Assert`](NoveltyOp::Assert) replaces or inserts an entry, a
     /// [`Retract`](NoveltyOp::Retract) hides one. The result is exactly what the
     /// same range would yield after [`canonicalize`](Self::canonicalize).
-    pub fn stream_range<R, Backend>(
+    pub fn stream_range<R, Env>(
         &self,
         range: R,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
         Key: Clone,
         Value: Clone,
@@ -808,7 +836,7 @@ where
                     pending.dedup_by(|later, earlier| later.key == earlier.key);
                 })
             }
-            HitchhikerRoot::Unloaded(_) => Ok(()),
+            HitchhikerRoot::Empty | HitchhikerRoot::Unloaded(_) => Ok(()),
         };
 
         let base = self.persistent_range(range, storage);
@@ -860,24 +888,23 @@ where
     /// memory) and is blind to `novelty` by construction, so this yields exactly
     /// the pre-buffer state that [`stream_range`](Self::stream_range) merges
     /// buffered ops over.
-    fn persistent_range<R, Backend>(
+    fn persistent_range<R, Env>(
         &self,
         range: R,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
         // Snapshot the spine into an owned plan (persistent subtrees as hashes,
         // live leaf entries cloned) so the stream borrows nothing from `self`.
         // Untouched subtrees stay hashes, so nothing below the spine is copied.
         let cache = self.cache.clone();
-        let storage = storage.clone();
         let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
 
         let plan = match &self.root {
+            HitchhikerRoot::Empty => Vec::new(),
             HitchhikerRoot::Unloaded(hash) => vec![StoredStep::Subtree(hash.clone())],
             HitchhikerRoot::Loaded(node) => {
                 let mut plan = Vec::new();
@@ -890,8 +917,8 @@ where
             for step in plan {
                 match step {
                     StoredStep::Subtree(hash) => {
-                        let accessor = Accessor::new(cache.clone(), storage.clone());
-                        let inner = crate::TreeWalker::<Key, Value>::new(hash)
+                        let accessor = Accessor::new(cache.clone(), storage);
+                        let inner = crate::TreeWalker::<Key, Value>::new(Some(hash))
                             .stream(bounds.clone(), accessor);
                         futures_util::pin_mut!(inner);
                         while let Some(entry) = futures_util::StreamExt::next(&mut inner).await {
@@ -911,15 +938,14 @@ where
     /// Delegates a point lookup over a fully persistent subtree to
     /// [`PersistentTree::get`], so reads of an untouched subtree match the
     /// persistent read exactly.
-    async fn persistent_get<Backend>(
+    async fn persistent_get<Env>(
         &self,
         hash: &Blake3Hash,
         key: &Key,
-        storage: &ContentAddressedStorage<Backend>,
+        storage: &Env,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         let subtree: PersistentTree<Key, Value, D> =
             PersistentTree::seal(hash.clone(), self.cache.clone());
@@ -934,22 +960,28 @@ where
         delta: &mut Delta<Blake3Hash, Buffer>,
     ) -> Result<Blake3Hash, DialogSearchTreeError> {
         match self.root {
+            // The empty tree persists the manifest-carrying empty node —
+            // the format must survive emptiness (see `persist_empty_root`).
+            HitchhikerRoot::Empty => {
+                let node =
+                    crate::persist_empty_root::<Key, Value>(&Self::format(&self.manifest)?, delta)?;
+                self.cache.insert(node.hash().clone(), node.clone());
+                Ok(node.hash().clone())
+            }
             HitchhikerRoot::Unloaded(hash) => Ok(hash),
             // Every node carries the tree's format header. A loaded root means
             // a write loaded it, and that load captured the tree's own
-            // manifest; a tree born empty in this process has no stored header
-            // yet and takes the default, which is exactly what its first
-            // canonical write would stamp.
+            // manifest; a tree born empty in this process carries the
+            // manifest it was opened under.
             HitchhikerRoot::Loaded(node) => {
-                let manifest = self.manifest.unwrap_or_default();
+                let manifest = Self::format(&self.manifest)?;
                 let node = node.persist(delta, &manifest)?;
                 // Seed the shared node cache with the frame just produced:
                 // the very next read of this root (a manifest lookup, a
                 // query descent) otherwise misses, re-fetches the bytes
                 // from storage, and pays a full blake3 re-verification of
                 // a frame this process just hashed.
-                self.cache
-                    .insert(node.hash().clone(), node.buffer().clone());
+                self.cache.insert(node.hash().clone(), node.clone());
                 Ok(node.hash().clone())
             }
         }
@@ -968,14 +1000,21 @@ where
         delta: &mut Delta<Blake3Hash, Buffer>,
     ) -> Result<Blake3Hash, DialogSearchTreeError> {
         match &mut self.root {
+            // Same empty-tree rule as `persist`: the manifest-carrying
+            // empty node.
+            HitchhikerRoot::Empty => {
+                let node =
+                    crate::persist_empty_root::<Key, Value>(&Self::format(&self.manifest)?, delta)?;
+                self.cache.insert(node.hash().clone(), node.clone());
+                Ok(node.hash().clone())
+            }
             HitchhikerRoot::Unloaded(hash) => Ok(hash.clone()),
             HitchhikerRoot::Loaded(node) => {
-                let manifest = self.manifest.unwrap_or_default();
+                let manifest = Self::format(&self.manifest)?;
                 let node = node.persist_mut(delta, &manifest)?;
                 // Same cache seeding as `persist`: the frame this commit
                 // just produced is what the next read resolves the root to.
-                self.cache
-                    .insert(node.hash().clone(), node.buffer().clone());
+                self.cache.insert(node.hash().clone(), node.clone());
                 Ok(node.hash().clone())
             }
         }
@@ -985,10 +1024,12 @@ where
 /// The knobs one `enqueue` pass runs under: the buffer capacity, how far
 /// an overflow cascades, what makes it fire, and whether it is evaluated
 /// at all (`settle` false = deferred batch routing).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct EnqueueConfig {
     op_buf_size: usize,
     op_buf_bytes: usize,
+    /// The tree's format: buffered ops are metered under it.
+    manifest: Manifest,
     policy: FlushPolicy,
     trigger: FlushTrigger,
     settle: bool,
@@ -1010,12 +1051,12 @@ struct EnqueueConfig {
 /// - **Index overflow**: each child receives its own link's buffer verbatim
 ///   via a recursive one-level `enqueue`. The grouping already happened at
 ///   enqueue, so a flush partitions nothing.
-fn enqueue<'a, Key, Value, D, Backend>(
+fn enqueue<'a, Key, Value, D, Env>(
     node: TransientNode<Key, Value>,
     msgs: Vec<NoveltyEntry<Value>>,
     config: EnqueueConfig,
     deferred: &'a mut Vec<NoveltyEntry<Value>>,
-    accessor: &'a Accessor<Backend>,
+    accessor: &'a Accessor<'_, Key, Value, Env>,
 ) -> NodeFuture<'a, Key, Value>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1025,8 +1066,7 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     D: Distribution,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     Box::pin(async move {
         let mut node = node;
@@ -1063,7 +1103,7 @@ where
         // and buffered weight rides every per-commit root rewrite and every
         // pushed operational block).
         let over_bytes = config.op_buf_bytes != usize::MAX
-            && index.novelty.weight::<Key>()? > config.op_buf_bytes;
+            && index.novelty.weight::<Key>(&config.manifest)? > config.op_buf_bytes;
         let per_child_threshold = match config.trigger {
             FlushTrigger::Capacity => None,
             FlushTrigger::PerChild { floor } => {
@@ -1100,9 +1140,9 @@ where
         // measured 24-26% duplicate-block share of sealed bytes; see bead
         // dialog-db-59). Provenance is the cheap, exact signal here — store
         // identity is not observable at persist time.
-        let mut measures = index.novelty.link_measures::<Key>()?;
+        let mut measures = index.novelty.link_measures::<Key>(&config.manifest)?;
         measures.sort_by_key(|&(_, weight, ops)| std::cmp::Reverse((weight, ops)));
-        let mut buffered_weight = index.novelty.weight::<Key>()?;
+        let mut buffered_weight = index.novelty.weight::<Key>(&config.manifest)?;
         let mut buffered_ops = index.novelty.len();
         let weight_target = if over_bytes {
             config.op_buf_bytes / 2
@@ -1140,7 +1180,7 @@ where
                 FlushPolicy::Recursive => 0,
                 _ => config.op_buf_size,
             };
-            let updated = enqueue::<Key, Value, D, Backend>(
+            let updated = enqueue::<Key, Value, D, Env>(
                 child,
                 took,
                 EnqueueConfig {
@@ -1149,7 +1189,7 @@ where
                     // the deferral applies only to the arriving batch's
                     // routing.
                     settle: true,
-                    ..config
+                    ..config.clone()
                 },
                 deferred,
                 accessor,
@@ -1164,9 +1204,9 @@ where
 
 /// Lifts `child` from a [`Node::Persistent`] reference into editable transient
 /// form, loading it from storage; a transient child is left untouched.
-async fn lift_child<Key, Value, Backend>(
+async fn lift_child<Key, Value, Env>(
     child: &mut Node<Key, Value>,
-    accessor: &Accessor<Backend>,
+    accessor: &Accessor<'_, Key, Value, Env>,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1174,8 +1214,7 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     if let Node::Persistent(link) = child {
         let persistent = accessor.get_node(&link.node).await?;
@@ -1359,10 +1398,10 @@ where
 }
 
 /// Replays a list of buffered ops as canonical inserts/deletes on an edit batch.
-async fn replay_ops<Key, Value, D, Backend>(
+async fn replay_ops<Key, Value, D, Env>(
     mut edit: TransientTree<Key, Value, D>,
     ops: Vec<NoveltyEntry<Value>>,
-    storage: &ContentAddressedStorage<Backend>,
+    storage: &Env,
 ) -> Result<TransientTree<Key, Value, D>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1377,8 +1416,7 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     D: Distribution,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     // Bulk-load fast path: a batch landing in an EMPTY tree builds the
     // canonical tree bottom-up in one pass instead of one canonical edit
@@ -1406,9 +1444,9 @@ where
 /// Novelty lives only in index nodes, so the probe walks the subtree's index
 /// spine and never touches a leaf. It is what lets the drain lift exactly the
 /// subtrees that need rewriting, leaving every clean subtree's hash untouched.
-fn subtree_has_novelty<'a, Key, Value, Backend>(
+fn subtree_has_novelty<'a, Key, Value, Env>(
     hash: &'a Blake3Hash,
-    accessor: &'a Accessor<Backend>,
+    accessor: &'a Accessor<'_, Key, Value, Env>,
 ) -> BoolFuture<'a>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1417,14 +1455,13 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     Box::pin(async move {
         let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
         let links = match node.body() {
-            ArchivedNodeBody::Segment(_) => return Ok(false),
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Segment(_) => return Ok(false),
+            NodeBody::Index(index) => {
                 if !index.novelty.is_empty() {
                     return Ok(true);
                 }
@@ -1432,7 +1469,7 @@ where
             }
         };
         for link in links {
-            if subtree_has_novelty::<Key, Value, Backend>(&link.node, accessor).await? {
+            if subtree_has_novelty::<Key, Value, Env>(&link.node, accessor).await? {
                 return Ok(true);
             }
         }
@@ -1453,10 +1490,10 @@ where
 /// the shallowest (newest) op for every key in the last position for
 /// last-write-wins replay. Within one node the buffer is already sorted with
 /// the newest op for a key last, so appending it whole keeps that order too.
-fn drain_novelty<'a, Key, Value, Backend>(
+fn drain_novelty<'a, Key, Value, Env>(
     node: &'a mut TransientNode<Key, Value>,
     ops: &'a mut Vec<NoveltyEntry<Value>>,
-    accessor: &'a Accessor<Backend>,
+    accessor: &'a Accessor<'_, Key, Value, Env>,
 ) -> UnitFuture<'a>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -1465,14 +1502,13 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     Box::pin(async move {
         if let TransientNode::Index(index) = node {
             for child in &mut index.children {
                 if let Node::Persistent(link) = child {
-                    if !subtree_has_novelty::<Key, Value, Backend>(&link.node, accessor).await? {
+                    if !subtree_has_novelty::<Key, Value, Env>(&link.node, accessor).await? {
                         continue;
                     }
                     // Measurement-only (uncommitted, env-gated) lift breadcrumb.
@@ -1493,18 +1529,17 @@ where
 mod tests {
     #![allow(unexpected_cfgs)]
 
+    use crate::MemoryBlocks;
     use anyhow::Result;
-    use dialog_common::{Blake3Hash, NULL_BLAKE3_HASH};
-    use dialog_storage::MemoryStorageBackend;
+    use dialog_common::Blake3Hash;
 
     use super::{FlushPolicy, FlushTrigger, HitchhikerTree};
     use crate::helpers::{
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
     use crate::{
-        ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta, Manifest, Node,
-        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientTree,
-        tree_spec,
+        Accessor, Buffer, Cache, Change, Delta, Manifest, Node, NodeBody, NoveltyEntry, NoveltyOp,
+        PersistentNode, PersistentTree, TransientNode, TransientTree, tree_spec,
     };
 
     /// The three flush policies, so an oracle can assert behavior is identical
@@ -1515,7 +1550,7 @@ mod tests {
         FlushPolicy::Immediate,
     ];
 
-    type TestStorage = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+    type TestStorage = MemoryBlocks;
     type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
     type TestHitchhiker = HitchhikerTree<[u8; 4], Vec<u8>>;
 
@@ -1567,9 +1602,7 @@ mod tests {
 
     async fn flush(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut TestStorage) -> Result<()> {
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(())
     }
@@ -1583,14 +1616,14 @@ mod tests {
     /// of sealed bytes (bead dialog-db-59).
     #[dialog_common::test]
     async fn it_keeps_untouched_children_persistent_through_a_cascade() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // A persisted canonical tree wide enough that one key's cascade
         // reaches a strict subset of the root's children.
         let keys: Vec<u32> = (0..2000).collect();
         let tree = sequential(&keys, &mut storage).await?;
         let root_hashes: Vec<Blake3Hash> = {
-            let accessor = crate::Accessor::new(crate::Cache::new(), storage.clone());
+            let accessor = crate::Accessor::new(crate::Cache::new(), &storage);
             let node: crate::PersistentNode<[u8; 4], Vec<u8>> =
                 accessor.get_node(tree.root()).await?;
             let index = node.as_index()?;
@@ -1642,7 +1675,7 @@ mod tests {
     /// reusing the live spine across commits.
     #[dialog_common::test]
     async fn it_persists_identically_when_the_spine_stays_live() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // A canonical base wide enough for an index root with several
         // children, so cascades touch subsets and re-sealed buffers mix
@@ -1786,7 +1819,7 @@ mod tests {
     /// novelty — the interaction under test.
     #[dialog_common::test]
     async fn it_survives_buffered_commits_under_a_small_frame_ceiling() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
         let manifest = Manifest {
             fanout_n: 4,
             max_separator: 24,
@@ -1801,11 +1834,8 @@ mod tests {
         // Seed a canonical base under the small manifest so every stored
         // node carries it and the buffered path below runs under it.
         let mut delta = Delta::zero();
-        let mut seed = TransientTree::<VarKey, Vec<u8>>::with_manifest(
-            NULL_BLAKE3_HASH.clone(),
-            Cache::new(),
-            manifest,
-        );
+        let mut seed =
+            TransientTree::<VarKey, Vec<u8>>::empty_with_manifest(Cache::new(), manifest);
         let mut rng = Rng::new(11);
         for _ in 0..96 {
             let (key, value) = small_frame_op(&mut rng);
@@ -1847,15 +1877,19 @@ mod tests {
         Ok(())
     }
 
-    /// Canonicalizing an empty buffered tree yields the null (empty) root.
+    /// Canonicalizing an empty buffered tree yields the canonical empty
+    /// node — the manifest-carrying marker, not the bare null hash.
     #[dialog_common::test]
-    async fn it_canonicalizes_empty_to_null_root() -> Result<()> {
-        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+    async fn it_canonicalizes_empty_to_the_empty_node() -> Result<()> {
+        let storage = MemoryBlocks::new();
         let mut delta = Delta::zero();
-        let canonical = TestHitchhiker::empty()
+        let canonical = TestHitchhiker::empty(Manifest::default())
             .canonicalize(&storage, &mut delta)
             .await?;
-        assert_eq!(canonical.root(), TestTree::empty().root());
+        let mut scratch = Delta::zero();
+        let empty_node =
+            crate::persist_empty_root::<[u8; 4], Vec<u8>>(&Manifest::default(), &mut scratch)?;
+        assert_eq!(canonical.root(), empty_node.hash());
         Ok(())
     }
 
@@ -1864,13 +1898,13 @@ mod tests {
     /// equal a sequential build.
     #[dialog_common::test]
     async fn it_canonicalizes_root_buffered_writes_to_sequential() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let keys: Vec<u32> = (0..200).collect();
         let expected = sequential(&keys, &mut storage).await?;
 
         // A large buffer keeps every op in the root: no cascade until canonicalize.
-        let mut tree = TestHitchhiker::empty().with_op_buf_size(100_000);
+        let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(100_000);
         for &k in &keys {
             tree = tree
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -1891,13 +1925,13 @@ mod tests {
     /// must still reproduce the sequential canonical root.
     #[dialog_common::test]
     async fn it_canonicalizes_cascaded_writes_to_sequential() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for &buf in &[1usize, 4, 16, 64] {
             let keys: Vec<u32> = (0..500).collect();
             let expected = sequential(&keys, &mut storage).await?;
 
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(buf);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(buf);
             for &k in &keys {
                 tree = tree
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -1926,7 +1960,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_retains_writes_across_persist_and_reopen_cycles() -> Result<()> {
         for &buf in &[1usize, 4, 16, 64] {
-            let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage = MemoryBlocks::new();
 
             // Each batch writes several scattered keys, the way a commit
             // touches three key orderings plus a history record.
@@ -1964,7 +1998,7 @@ mod tests {
     /// canonicalize, must match a sequential build of the union of both key sets.
     #[dialog_common::test]
     async fn it_canonicalizes_writes_over_a_persistent_base() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base_keys: Vec<u32> = (0..300).collect();
         let base = sequential(&base_keys, &mut storage).await?;
@@ -1995,7 +2029,7 @@ mod tests {
     /// same root as the sequential build, confirming history independence.
     #[dialog_common::test]
     async fn it_canonicalizes_random_order_to_sequential() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..50u64 {
             let mut keys: Vec<u32> = (0..300).collect();
@@ -2004,7 +2038,7 @@ mod tests {
 
             let expected = sequential(&sorted, &mut storage).await?;
 
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(8);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(8);
             for &k in &keys {
                 tree = tree
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -2027,7 +2061,7 @@ mod tests {
     /// the survivors.
     #[dialog_common::test]
     async fn it_canonicalizes_with_buffered_deletes() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..50u64 {
             let keys: Vec<u32> = (0..300).collect();
@@ -2043,7 +2077,7 @@ mod tests {
                 .collect();
             let expected = sequential(&survivors, &mut storage).await?;
 
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(16);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(16);
             for &k in &keys {
                 tree = tree
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -2069,7 +2103,7 @@ mod tests {
     /// same op stream applied sequentially through the canonical edit path.
     #[dialog_common::test]
     async fn it_canonicalizes_interleaved_ops_to_sequential() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..50u64 {
             let mut rng = Rng::new(seed);
@@ -2101,7 +2135,7 @@ mod tests {
             }
 
             // Buffered through the hitchhiker tree, with a cascading buffer.
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(8);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(8);
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
                     tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
@@ -2129,7 +2163,7 @@ mod tests {
     /// present and absent keys.
     #[dialog_common::test]
     async fn it_reads_buffered_ops_like_canonicalized() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..50u64 {
             let mut rng = Rng::new(seed);
@@ -2163,7 +2197,7 @@ mod tests {
 
             // Buffered: the same ops through a cascading hitchhiker tree, never
             // canonicalized; reads merge the live buffers over the leaves.
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(8);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(8);
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
                     tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
@@ -2193,7 +2227,7 @@ mod tests {
     /// a recent write only buffered.
     #[dialog_common::test]
     async fn it_scans_ranges_like_canonicalized() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..25u64 {
             let mut rng = Rng::new(seed);
@@ -2224,7 +2258,7 @@ mod tests {
 
             // A small buffer forces cascades, so ops end up spread across several
             // levels of novelty and the scan has to merge all of them.
-            let mut tree = TestHitchhiker::empty().with_op_buf_size(8);
+            let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(8);
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
                     tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
@@ -2279,7 +2313,7 @@ mod tests {
     /// cardinality-one slot.
     #[dialog_common::test]
     async fn it_hides_a_buffered_delete_from_a_range_scan() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base_keys: Vec<u32> = (0..300).collect();
         let base = sequential(&base_keys, &mut storage).await?;
@@ -2325,11 +2359,11 @@ mod tests {
     /// re-insert shadowing a prior delete, all while the ops sit in buffers.
     #[dialog_common::test]
     async fn it_reads_last_op_wins_for_buffered_writes() -> Result<()> {
-        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let storage = MemoryBlocks::new();
 
         // A large buffer keeps every op in the root buffer, so all collisions on
         // a key resolve purely within one node's novelty.
-        let mut tree = TestHitchhiker::empty().with_op_buf_size(100_000);
+        let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(100_000);
 
         tree = tree.insert(7u32.to_le_bytes(), vec![1], &storage).await?;
         assert_eq!(
@@ -2366,7 +2400,7 @@ mod tests {
     /// be visible to `get` before any flush.
     #[dialog_common::test]
     async fn it_reads_buffered_ops_over_a_persistent_base() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base_keys: Vec<u32> = (0..300).collect();
         let base = sequential(&base_keys, &mut storage).await?;
@@ -2408,7 +2442,7 @@ mod tests {
     /// the fact set they represent.
     #[dialog_common::test]
     async fn it_is_correctness_equivalent_across_flush_policies() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         for seed in 0..30u64 {
             let mut rng = Rng::new(seed);
@@ -2442,7 +2476,7 @@ mod tests {
             for policy in POLICIES {
                 // A small buffer forces cascades for Amortized and Recursive; for
                 // Immediate the buffer is never used.
-                let mut tree = TestHitchhiker::empty()
+                let mut tree = TestHitchhiker::empty(Manifest::default())
                     .with_op_buf_size(8)
                     .with_flush_policy(policy);
                 for &(is_insert, key) in &ops {
@@ -2483,12 +2517,13 @@ mod tests {
     /// step needed. This pins that Immediate is the unbuffered baseline.
     #[dialog_common::test]
     async fn it_keeps_immediate_policy_canonical_without_flush() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let keys: Vec<u32> = (0..200).collect();
         let expected = sequential(&keys, &mut storage).await?;
 
-        let mut tree = TestHitchhiker::empty().with_flush_policy(FlushPolicy::Immediate);
+        let mut tree =
+            TestHitchhiker::empty(Manifest::default()).with_flush_policy(FlushPolicy::Immediate);
         for &k in &keys {
             tree = tree
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -2584,7 +2619,7 @@ mod tests {
     /// sequential build of the union of both replicas' fact sets.
     #[dialog_common::test]
     async fn it_reconciles_when_both_replicas_overflow() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // Shared base of 0..200.
         let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
@@ -2620,7 +2655,7 @@ mod tests {
     /// triggering a flush is the point of interest).
     #[dialog_common::test]
     async fn it_reconciles_when_only_the_merge_overflows() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
 
@@ -2656,7 +2691,7 @@ mod tests {
     /// merged root must equal a sequential build of (base + B's change) minus K.
     #[dialog_common::test]
     async fn it_does_not_resurrect_a_flushed_delete_on_catch_up() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // Base contains K = 50 along with 0..200.
         let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
@@ -2708,7 +2743,7 @@ mod tests {
     /// what lets a replica keep its writes buffered across syncs.
     #[dialog_common::test]
     async fn it_reconciles_a_buffered_replica_without_canonicalizing() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
 
@@ -2752,7 +2787,7 @@ mod tests {
     async fn it_reconciles_disjoint_replicas_order_independently() -> Result<()> {
         for seed in 0..12u64 {
             let mut rng = Rng::new(0x5851F42D4C957F2D ^ seed);
-            let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage = MemoryBlocks::new();
 
             let base_keys: Vec<u32> = (0..200).map(|_| rng.next_u32() % 4000).collect();
             let base = sequential(&base_keys, &mut storage).await?;
@@ -2819,7 +2854,7 @@ mod tests {
                 ops.push((!rng.next_u32().is_multiple_of(3), rng.next_u32() % 3_000));
             }
 
-            let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage = MemoryBlocks::new();
             let mut roots = Vec::new();
 
             for trigger in [
@@ -2827,7 +2862,7 @@ mod tests {
                 FlushTrigger::PerChild { floor: 1 },
                 FlushTrigger::PerChild { floor: 16 },
             ] {
-                let mut tree = TestHitchhiker::empty()
+                let mut tree = TestHitchhiker::empty(Manifest::default())
                     .with_op_buf_size(64)
                     .with_flush_trigger(trigger);
                 for (insert, key) in &ops {
@@ -2873,9 +2908,7 @@ mod tests {
         storage: &mut SpecStorage,
     ) -> Result<()> {
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(())
     }
@@ -2885,10 +2918,9 @@ mod tests {
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<SpecKey, Vec<u8>>> {
         let bytes = storage
-            .retrieve(hash)
-            .await?
+            .get(hash)
             .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
-        Ok(PersistentNode::try_from(Buffer::from(bytes))?)
+        Ok(PersistentNode::try_from(bytes)?)
     }
 
     /// The buffered ops sealed into a stored node, owned.
@@ -2896,8 +2928,8 @@ mod tests {
         node: &PersistentNode<SpecKey, Vec<u8>>,
     ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
         Ok(match node.body() {
-            ArchivedNodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
-            ArchivedNodeBody::Segment(_) => Vec::new(),
+            NodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
+            NodeBody::Segment(_) => Vec::new(),
         })
     }
 
@@ -3007,8 +3039,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(far_key(), vec![9], &storage)
             .await?
             .insert(probe(), vec![2], &storage)
@@ -3047,8 +3078,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(far_key(), vec![9], &storage)
             .await?
             .delete(&probe(), &storage)
@@ -3223,14 +3253,14 @@ mod tests {
     /// verbatim.
     #[dialog_common::test]
     async fn it_canonicalizes_a_reopened_buffered_tree() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         let keys: Vec<u32> = (0..300).collect();
         let expected = sequential(&keys, &mut storage).await?;
 
         // A giant buffer keeps every op (after the first) in the root buffer,
         // so the persisted tree is unambiguously non-canonical.
-        let mut tree = TestHitchhiker::empty().with_op_buf_size(100_000);
+        let mut tree = TestHitchhiker::empty(Manifest::default()).with_op_buf_size(100_000);
         for &k in &keys {
             tree = tree
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -3321,8 +3351,7 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit_with_manifest(&storage)
-            .await?
+            .edit()
             .insert(left, vec![1], &storage)
             .await?
             .insert(right, vec![9], &storage)
@@ -3347,13 +3376,10 @@ mod tests {
             fanout_n: 2,
             ..Manifest::default()
         };
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
-        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
-            NULL_BLAKE3_HASH.clone(),
-            Cache::new(),
-            custom,
-        );
+        let mut edit =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
         for k in 0..50u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3388,13 +3414,10 @@ mod tests {
             fanout_n: 2,
             ..Manifest::default()
         };
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
-        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
-            NULL_BLAKE3_HASH.clone(),
-            Cache::new(),
-            custom,
-        );
+        let mut edit =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
         for k in 0..40u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3414,11 +3437,8 @@ mod tests {
         let canonical = tree.canonicalize(&storage, &mut delta).await?;
         flush(&mut delta, &mut storage).await?;
 
-        let mut oracle = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
-            NULL_BLAKE3_HASH.clone(),
-            Cache::new(),
-            custom,
-        );
+        let mut oracle =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
         for k in 0..80u32 {
             oracle = oracle
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3446,11 +3466,11 @@ mod tests {
             fanout_n: 2,
             ..Manifest::default()
         };
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // Fill a pinned session from empty, drain it back to empty, then
         // refill: every write into the empty tree must shape under the pin.
-        let mut tree = HitchhikerTree::<[u8; 4], Vec<u8>>::empty().with_manifest(custom);
+        let mut tree = HitchhikerTree::<[u8; 4], Vec<u8>>::empty(custom.clone());
         for k in 0..30u32 {
             tree = tree
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3468,11 +3488,8 @@ mod tests {
         let refilled = tree.canonicalize(&storage, &mut delta).await?;
         flush(&mut delta, &mut storage).await?;
 
-        let mut oracle = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
-            NULL_BLAKE3_HASH.clone(),
-            Cache::new(),
-            custom,
-        );
+        let mut oracle =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
         for k in 100..150u32 {
             oracle = oracle
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3486,6 +3503,220 @@ mod tests {
             refilled.root(),
             expected.root(),
             "an empty pinned session must shape its writes under the pinned manifest"
+        );
+        Ok(())
+    }
+
+    /// Emptying a tree persists the manifest-carrying empty node, not the
+    /// null root: the same fixed node an empty tree persisted from scratch
+    /// under that manifest produces (the canonical form of the empty set is
+    /// a pure function of the manifest), readable as an empty tree,
+    /// reporting its manifest. The rule is uniform — a DEFAULT-format tree
+    /// emptied the same way persists the default manifest's empty node.
+    #[dialog_common::test]
+    async fn it_persists_the_manifest_carrying_empty_node_when_emptied() -> Result<()> {
+        let custom = Manifest {
+            fanout_n: 2,
+            ..Manifest::default()
+        };
+        let mut storage = MemoryBlocks::new();
+
+        let mut edit =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
+        for k in 0..30u32 {
+            edit = edit
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let full = edit.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        let mut edit = full.edit();
+        for k in 0..30u32 {
+            edit = edit.delete(&k.to_be_bytes(), &storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let emptied = edit.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        assert!(
+            emptied.stored_root().is_some(),
+            "an emptied tree must keep a stored root node"
+        );
+        let node: PersistentNode<[u8; 4], Vec<u8>> = Accessor::new(Cache::new(), &storage)
+            .get_node(emptied.root())
+            .await?;
+        assert!(node.is_empty()?, "the empty root is a zero-entry node");
+        assert_eq!(
+            node.manifest()?,
+            custom,
+            "the empty node carries the tree's manifest"
+        );
+        assert_eq!(
+            emptied.manifest(&storage).await?,
+            custom,
+            "the emptied tree reports its own format, not the default"
+        );
+        assert_eq!(
+            emptied.get(&7u32.to_be_bytes(), &storage).await?,
+            None,
+            "the empty node reads as an empty tree"
+        );
+
+        // Pure function of (empty set, manifest): persisting an empty tree
+        // from scratch under the same manifest yields the same root.
+        let mut delta = Delta::zero();
+        let scratch = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom)
+            .persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            emptied.root(),
+            scratch.root(),
+            "the empty node is a pure function of the manifest"
+        );
+
+        // A no-op batch over the empty node is a fixpoint.
+        let mut delta = Delta::zero();
+        let stable = emptied
+            .edit()
+            .delete(&99u32.to_be_bytes(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        assert_eq!(stable.root(), scratch.root(), "no-op batches keep the root");
+
+        // The same rule under the default format: emptying lands on the
+        // default manifest's empty node, the pure function of (empty set,
+        // Manifest::default()).
+        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            Cache::new(),
+            Manifest::default(),
+        );
+        for k in 0..10u32 {
+            edit = edit
+                .insert(k.to_be_bytes(), vec![k as u8], &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let default_full = edit.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+        let mut edit = default_full.edit();
+        for k in 0..10u32 {
+            edit = edit.delete(&k.to_be_bytes(), &storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let default_emptied = edit.persist(&mut delta)?;
+        let mut scratch = Delta::zero();
+        let default_empty_node =
+            crate::persist_empty_root::<[u8; 4], Vec<u8>>(&Manifest::default(), &mut scratch)?;
+        assert_eq!(
+            default_emptied.root(),
+            default_empty_node.hash(),
+            "the default format's empty tree lands on its manifest-carrying empty node"
+        );
+        assert_ne!(
+            default_emptied.root(),
+            emptied.root(),
+            "different manifests have different empty nodes"
+        );
+        Ok(())
+    }
+
+    /// The manifest-continuity seam, closed structurally: a tree built under
+    /// a non-default format, emptied, and REOPENED WITHOUT ANY PINNING (no
+    /// `with_manifest`) recovers its format from the empty node and
+    /// converges with a replica that wrote the same final entries under the
+    /// same manifest without ever being emptied — through both the
+    /// canonical-edit and the buffered write paths.
+    #[dialog_common::test]
+    async fn it_recovers_the_manifest_across_emptiness_without_pinning() -> Result<()> {
+        let custom = Manifest {
+            fanout_n: 2,
+            ..Manifest::default()
+        };
+        let mut storage = MemoryBlocks::new();
+
+        // Build under the custom format, then empty.
+        let mut edit =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
+        for k in 0..40u32 {
+            edit = edit
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let full = edit.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+        let mut edit = full.edit();
+        for k in 0..40u32 {
+            edit = edit.delete(&k.to_be_bytes(), &storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let emptied = edit.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        // The oracle: the second-life entries written directly under the
+        // custom format by a replica that never emptied anything.
+        let mut oracle =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+        for k in 100..160u32 {
+            oracle = oracle
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let expected = oracle.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        // Second life via canonical edits, reopened with no pinning: the
+        // manifest comes off the empty node.
+        let reopened = PersistentTree::<[u8; 4], Vec<u8>>::from_hash(emptied.root().clone());
+        let mut edit = reopened.edit();
+        for k in 100..160u32 {
+            edit = edit
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let canonical_life = edit.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            canonical_life.root(),
+            expected.root(),
+            "a reopened emptied tree must continue under its own format"
+        );
+
+        // Second life via the buffered path, also unpinned.
+        let reopened = PersistentTree::<[u8; 4], Vec<u8>>::from_hash(emptied.root().clone());
+        let mut buffered = HitchhikerTree::open(&reopened).with_op_buf_size(4);
+        for k in 100..160u32 {
+            buffered = buffered
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let buffered_life = buffered.canonicalize(&storage, &mut delta).await?;
+        flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            buffered_life.root(),
+            expected.root(),
+            "an unpinned buffered session over the empty node must converge too"
+        );
+
+        // And a buffered session that EMPTIES the tree persists the empty
+        // node itself, closing the loop without any pinning.
+        let reopened = PersistentTree::<[u8; 4], Vec<u8>>::from_hash(expected.root().clone());
+        let mut buffered = HitchhikerTree::open(&reopened).with_op_buf_size(4);
+        for k in 100..160u32 {
+            buffered = buffered.delete(k.to_be_bytes(), &storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let re_emptied = buffered.canonicalize(&storage, &mut delta).await?;
+        flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            re_emptied.root(),
+            emptied.root(),
+            "a buffered empty-out lands on the same canonical empty node"
         );
         Ok(())
     }
@@ -3530,7 +3761,7 @@ mod tests {
     /// stored bytes may never depend on whether a link's buffer was touched.
     #[dialog_common::test]
     async fn it_persists_sealed_buffers_byte_identical_to_fresh_encodes() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage = MemoryBlocks::new();
 
         // A tree with buffered novelty across several links: build a broad
         // base, then buffer scattered writes at the root and seal them. Pin a
@@ -3538,7 +3769,9 @@ mod tests {
         // shipped ~64 KiB default would pack these into one leaf, leaving no
         // sealed sibling buffers to exercise). `HitchhikerTree::open` reads
         // this manifest back from the base, so every path below stays
-        // consistent.
+        // consistent. Both buffer caps are lifted so every write stays
+        // buffered: the byte cap would otherwise derive from that small
+        // segment target and flush the buffers this test needs sealed.
         let manifest = Manifest {
             max_segment: 512,
             frame_ceiling_factor: 0,
@@ -3549,15 +3782,23 @@ mod tests {
         {
             let mut delta = Delta::zero();
             for &k in &keys {
-                base =
-                    TransientTree::with_manifest(base.root().clone(), base.node_cache(), manifest)
-                        .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
-                        .await?
-                        .persist(&mut delta)?;
+                base = match base.stored_root() {
+                    Some(root) => TransientTree::with_manifest(
+                        root.clone(),
+                        base.node_cache(),
+                        manifest.clone(),
+                    ),
+                    None => TransientTree::empty_with_manifest(base.node_cache(), manifest.clone()),
+                }
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
                 flush(&mut delta, &mut storage).await?;
             }
         }
-        let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(100_000);
+        let mut buffered = HitchhikerTree::open(&base)
+            .with_op_buf_size(100_000)
+            .with_op_buf_bytes(usize::MAX);
         for k in (500..560u32).step_by(3) {
             buffered = buffered
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -3573,7 +3814,9 @@ mod tests {
         let mut roots = Vec::new();
         for fresh in [false, true] {
             let sealed: TestTree = PersistentTree::seal(root.clone(), Cache::new());
-            let mut tree = HitchhikerTree::open(&sealed).with_op_buf_size(100_000);
+            let mut tree = HitchhikerTree::open(&sealed)
+                .with_op_buf_size(100_000)
+                .with_op_buf_bytes(usize::MAX);
             for &k in &batch {
                 tree = tree
                     .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)

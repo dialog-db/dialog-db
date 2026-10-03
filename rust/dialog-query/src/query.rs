@@ -2,24 +2,9 @@
 
 mod application;
 mod output;
-mod source;
 
 pub use application::*;
 pub use output::*;
-pub use source::*;
-
-use crate::artifact::ArtifactStoreMut;
-use dialog_common::ConditionalSend;
-
-/// A mutable artifact store that can be used for writes in a [`Session`](crate::Session).
-///
-/// This is a marker trait automatically implemented for any type that
-/// satisfies `ArtifactStoreMut + Clone + ConditionalSend`. It exists to
-/// give a shorter name to the full bound and to decouple `Session` from
-/// the specific artifact storage implementation.
-pub trait Store: ArtifactStoreMut + Clone + ConditionalSend {}
-/// Blanket implementation - any type that satisfies the bounds automatically implements QueryStore
-impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 
 #[cfg(test)]
 mod tests {
@@ -33,11 +18,11 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::{Term, the};
     use anyhow::Result;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
     #[dialog_common::test]
     async fn it_queries_via_fact_selector() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -97,7 +82,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_with_variables_and_constants() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -118,7 +103,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_polymorphically() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -148,7 +133,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_chains_query_operations() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

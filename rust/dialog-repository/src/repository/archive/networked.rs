@@ -1,22 +1,26 @@
 use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::prelude::GetBlockExt as _;
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use std::sync::Arc;
 
 use crate::RemoteSite;
 use async_trait::async_trait;
+use dialog_artifacts::{DialogArtifactsError, LoadBlob};
 use dialog_capability::Fork;
 use dialog_capability::Provider;
-use dialog_common::{Buffer, ConditionalSync, Priority};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Priority};
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
-use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
-use serde::{Serialize, de::DeserializeOwned};
-use std::fmt::{Debug, Display};
+use dialog_effects::blob::{BlobError, BlobWriter, Import as BlobImport, Read as BlobRead};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+use std::fmt::Display;
 
-pub use dialog_network::{Hydrate, HydrationRequest, HydrationScheduler};
+use dialog_capability::Did;
+use dialog_network::NetworkAddress;
+pub use dialog_network::{Hydrate, HydrationLane, HydrationRequest, HydrationScheduler};
 
-use super::local::LocalIndex;
-use crate::RemoteRepository;
+use super::local::{LocalIndex, archive_error, read_all};
+use crate::ConnectedReplica;
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::CatalogScope;
 
@@ -36,7 +40,7 @@ pub enum RemoteFallback {
     /// No remote is tracked; a local miss is an ordinary `None`.
     None,
     /// Local misses fetch through this remote and cache locally.
-    Remote(RemoteRepository),
+    Remote(ConnectedReplica),
     /// A remote is tracked but could not be loaded. Reads served by the
     /// local archive succeed; a local miss is an error naming the
     /// remote and the reason it is unavailable.
@@ -55,7 +59,7 @@ impl RemoteFallback {
     /// instead of being erased into a bare not-found.
     pub fn from_load(
         remote: impl Into<String>,
-        result: Result<RemoteRepository, impl Display>,
+        result: Result<ConnectedReplica, impl Display>,
     ) -> Self {
         match result {
             Ok(loaded) => Self::Remote(loaded),
@@ -67,8 +71,8 @@ impl RemoteFallback {
     }
 }
 
-impl From<Option<RemoteRepository>> for RemoteFallback {
-    fn from(remote: Option<RemoteRepository>) -> Self {
+impl From<Option<ConnectedReplica>> for RemoteFallback {
+    fn from(remote: Option<ConnectedReplica>) -> Self {
         match remote {
             Some(remote) => Self::Remote(remote),
             None => Self::None,
@@ -76,8 +80,8 @@ impl From<Option<RemoteRepository>> for RemoteFallback {
     }
 }
 
-impl From<RemoteRepository> for RemoteFallback {
-    fn from(remote: RemoteRepository) -> Self {
+impl From<ConnectedReplica> for RemoteFallback {
+    fn from(remote: ConnectedReplica) -> Self {
         Self::Remote(remote)
     }
 }
@@ -133,29 +137,28 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
     }
 }
 
-/// Raw block access for the search tree, with the same transparent
-/// remote fallback as the content-addressed `read`: reads that miss
-/// locally are fetched from the remote and cached, writes go to the
-/// local index only. Node buffers pass through without the CBOR encoder.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> StorageBackend for NetworkedIndex<'_, Env>
+impl<Env> NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<Put> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        StorageBackend::set(&mut self.local, key, value).await
+    /// The block stored under `hash`: the local archive's copy, or else the
+    /// tracked remote's, hydrated into the local archive as it is read.
+    /// Unverified; readers outside the crate load through [`LoadBlock`] or
+    /// [`LoadBlob`], which check it.
+    pub(crate) async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
+        if let Some(block) = self.local.load(hash).await? {
+            return Ok(Some(block));
+        }
+        self.hydrate(hash, HydrationLane::Block).await
     }
 
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        if let Some(bytes) = StorageBackend::get(&self.local, key).await? {
-            return Ok(Some(bytes));
-        }
-
+    /// Fetch `hash` from the tracked remote through the env's [`Hydrate`],
+    /// into `lane`'s local store.
+    async fn hydrate(
+        &self,
+        hash: &Blake3Hash,
+        lane: HydrationLane,
+    ) -> Result<Option<Buffer>, ArchiveError> {
         let remote = match &self.remote {
             RemoteFallback::Remote(remote) => remote,
             RemoteFallback::None => return Ok(None),
@@ -165,9 +168,8 @@ where
             // `None` would surface downstream as a bare "Block not found"
             // that reads like data loss instead of what it is.
             RemoteFallback::Unavailable { remote, reason } => {
-                let key = dialog_common::Blake3Hash::from(*key);
-                return Err(DialogStorageError::Storage(format!(
-                    "block {key} is not in the local archive and the tracked \
+                return Err(ArchiveError::Storage(format!(
+                    "block {hash} is not in the local archive and the tracked \
                      remote \"{remote}\" it would hydrate from is unavailable: \
                      {reason}"
                 )));
@@ -183,11 +185,63 @@ where
             address: route.address,
             subject: route.subject,
             catalog: self.local.catalog().clone(),
-            digest: dialog_common::Blake3Hash::from(*key),
+            digest: hash.clone(),
+            lane,
             priority: self.priority,
         };
         let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
-        Ok(hydrated.map(|bytes| bytes.as_ref().clone()))
+        Ok(hydrated.map(|bytes| Buffer::from(bytes.as_ref().clone())))
+    }
+}
+
+impl<Env> NetworkedIndex<'_, Env>
+where
+    Env: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
+{
+    /// The spilled value stored under `hash`: the local copy (blob store,
+    /// then the block catalog for values spilled before they moved to
+    /// blobs), or else the tracked remote's, hydrated into the local blob
+    /// store as it is read.
+    pub async fn load_blob(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
+        if let Some(blob) = self.local.load_blob(hash).await? {
+            return Ok(Some(blob));
+        }
+        self.hydrate(hash, HydrationLane::Blob).await
+    }
+}
+
+/// Tree nodes load from the local archive, falling back to the tracked
+/// remote.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<LoadBlock> for NetworkedIndex<'_, Env>
+where
+    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+{
+    async fn execute(
+        &self,
+        LoadBlock { hash }: LoadBlock,
+    ) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        self.load(&hash)
+            .await
+            .map_err(|error| DialogSearchTreeError::Storage(error.into()))
+    }
+}
+
+/// Spilled values load from the local blob store (falling back to the
+/// block catalog for values spilled before they moved to blobs), and
+/// hydrate from the tracked remote's blob store.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<LoadBlob> for NetworkedIndex<'_, Env>
+where
+    Env: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
+{
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
+        Ok(self.load_blob(&hash).await?)
     }
 }
 
@@ -208,16 +262,26 @@ pub async fn hydrate<Env>(
     request: HydrationRequest,
 ) -> Result<Option<Arc<Vec<u8>>>, ArchiveError>
 where
-    Env:
-        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
 {
     let HydrationRequest {
         address,
         subject,
         catalog,
         digest,
+        lane,
         priority: _,
     } = request;
+    if lane == HydrationLane::Blob {
+        return hydrate_blob(env, address, subject, catalog, digest).await;
+    }
 
     if let Some(bytes) = catalog.clone().get(digest.clone()).perform(env).await? {
         return Ok(Some(Arc::new(bytes)));
@@ -260,29 +324,117 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Encoder for NetworkedIndex<'_, Env>
+/// The [`HydrationLane::Blob`] half of [`hydrate`]: a spilled value, re-checked
+/// locally (blob store, then the block catalog for values spilled before
+/// they moved to blobs), then fetched from the remote the same way, and
+/// written back into the local blob store.
+async fn hydrate_blob<Env>(
+    env: &Env,
+    address: NetworkAddress,
+    subject: Did,
+    catalog: CatalogScope,
+    digest: Blake3Hash,
+) -> Result<Option<Arc<Vec<u8>>>, ArchiveError>
 where
-    Env: ConditionalSync + 'static,
+    Env: Provider<Get>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
 {
-    type Bytes = Vec<u8>;
-    type Hash = Blake3Hash;
-    type Error = DialogStorageError;
-
-    async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
-    where
-        T: Serialize + ConditionalSync + Debug,
-    {
-        self.local.encoder().encode(block).await
+    let local = LocalIndex::new(env, catalog.clone());
+    if let Some(blob) = local.load_blob(&digest).await? {
+        return Ok(Some(Arc::new(blob.into_vec())));
     }
 
-    async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>
-    where
-        T: DeserializeOwned + ConditionalSync,
-    {
-        self.local.encoder().decode(bytes).await
+    let remote_blob = subject
+        .clone()
+        .reader()
+        .archive()
+        .blob()
+        .read(digest.clone())
+        .fork(&address)
+        .perform(env)
+        .await;
+    let bytes = match remote_blob {
+        Ok(reader) => read_all(reader).await.map_err(archive_error)?,
+        Err(BlobError::NotFound(_)) => {
+            match subject
+                .reader()
+                .archive()
+                .catalog("index")
+                .get(digest.clone())
+                .fork(&address)
+                .perform(env)
+                .await?
+            {
+                Some(bytes) => bytes,
+                None => return Ok(None),
+            }
+        }
+        Err(error) => return Err(archive_error(error)),
+    };
+
+    tracing::debug!(
+        target: "dialog::sync::hydrate",
+        blob = %digest,
+        bytes = bytes.len(),
+        "hydrated spilled value from remote"
+    );
+    // The import verifies the bytes against the digest; a failed write-back
+    // is not a failed read (the reader verifies what it loads), only a
+    // future remote round trip, so it is traced rather than raised.
+    if let Err(error) = write_blob(env, &catalog, &digest, &bytes).await {
+        tracing::debug!(
+            target: "dialog::sync::hydrate",
+            blob = %digest,
+            %error,
+            "failed to cache hydrated spilled value locally"
+        );
     }
+    Ok(Some(Arc::new(bytes)))
+}
+
+/// Write `bytes` into `catalog`'s archive's blob store under `digest`,
+/// verified against it.
+pub(crate) async fn write_blob<Env>(
+    env: &Env,
+    catalog: &CatalogScope,
+    digest: &Blake3Hash,
+    bytes: &[u8],
+) -> Result<(), BlobError>
+where
+    Env: Provider<BlobImport> + ConditionalSync + 'static,
+{
+    let sink = catalog
+        .archive()
+        .blob()
+        .import(digest.clone(), bytes.len() as u64)
+        .perform(env)
+        .await?;
+    fill_import(sink, digest, bytes).await
+}
+
+/// Write `bytes` through an import `sink` opened for `digest` and commit
+/// it. The store verifies the bytes against the declared digest and keeps
+/// nothing on a mismatch; the digest the sink commits is checked here too,
+/// so a store that answers with another one is refused rather than trusted.
+pub(crate) async fn fill_import(
+    mut sink: BlobWriter,
+    digest: &Blake3Hash,
+    bytes: &[u8],
+) -> Result<(), BlobError> {
+    sink.write_all(bytes).await?;
+    let committed = sink.finish().await?;
+    if &committed != digest {
+        return Err(BlobError::DigestMismatch {
+            expected: digest.to_string(),
+            actual: committed.to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -291,14 +443,14 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::helpers::connect;
     use std::sync::Arc;
 
     use anyhow::Result;
     use dialog_capability::{Command, Provider};
     use dialog_common::{Buffer, ConditionalSend, ConditionalSync, Priority};
     use dialog_effects::archive::{Get, Put};
-    use dialog_operator::helpers::test_operator_with_profile;
-    use dialog_storage::StorageBackend as _;
+    use dialog_peer::helpers::test_session_with_peer;
     use parking_lot::Mutex;
 
     use super::{Hydrate, HydrationRequest, NetworkedIndex, RemoteFallback};
@@ -352,37 +504,33 @@ mod tests {
     /// site's slot from a read someone is waiting on.
     #[dialog_common::test]
     async fn it_ranks_its_hydrations_at_its_priority() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let site = dialog_remote_s3::Address::builder("https://s3.us-east-1.amazonaws.com")
             .region("us-east-1")
             .bucket("bucket")
             .build()?;
-        let origin = repo
-            .remote("origin")
-            .create(site)
-            .perform(&operator)
-            .await?;
+        let origin = connect("origin", site, repo.did(), &operator).await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let env = Recording {
             inner: operator,
             priorities: Arc::new(Mutex::new(Vec::new())),
         };
 
-        let absent = *Buffer::from(&b"never stored"[..]).blake3_hash().as_bytes();
+        let absent = Buffer::from(&b"never stored"[..]).blake3_hash().clone();
         let demand = NetworkedIndex::new(
             &env,
             branch.archive().index(),
             RemoteFallback::Remote(origin.clone()),
         );
-        assert_eq!(demand.get(&absent).await?, None);
+        assert_eq!(demand.load(&absent).await?, None);
         let speculative = NetworkedIndex::new(
             &env,
             branch.archive().index(),
             RemoteFallback::Remote(origin),
         )
         .with_priority(Priority::Maybe);
-        assert_eq!(speculative.get(&absent).await?, None);
+        assert_eq!(speculative.load(&absent).await?, None);
 
         assert_eq!(
             env.priorities.lock().clone(),
@@ -400,11 +548,11 @@ mod tests {
     /// "Block not found" with the cause erased.
     #[dialog_common::test]
     async fn it_fails_a_miss_loudly_when_the_tracked_remote_is_unavailable() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let mut index = NetworkedIndex::new(
+        let index = NetworkedIndex::new(
             &operator,
             branch.archive().index(),
             RemoteFallback::Unavailable {
@@ -415,20 +563,24 @@ mod tests {
 
         // A locally held block reads back: unavailability of the remote
         // must not cost a replica anything it already holds.
-        let held = b"locally held block".to_vec();
-        let held_key = *Buffer::from(held.as_slice()).blake3_hash().as_bytes();
-        index.set(held_key, held.clone()).await?;
+        let held = Buffer::from(b"locally held block".to_vec());
+        branch
+            .archive()
+            .index()
+            .put(held.clone())
+            .perform(&operator)
+            .await?;
         assert_eq!(
-            index.get(&held_key).await?,
+            index.load(held.blake3_hash()).await?,
             Some(held),
             "a local hit succeeds regardless of the remote's availability"
         );
 
         // A miss is the read that needed the remote: it fails naming the
         // remote and why it is unavailable.
-        let absent_key = *Buffer::from(&b"never stored"[..]).blake3_hash().as_bytes();
+        let absent_key = Buffer::from(&b"never stored"[..]).blake3_hash().clone();
         let error = index
-            .get(&absent_key)
+            .load(&absent_key)
             .await
             .expect_err("a miss with an unavailable tracked remote must fail loudly");
         let message = error.to_string();
@@ -442,7 +594,7 @@ mod tests {
         let local_only =
             NetworkedIndex::new(&operator, branch.archive().index(), RemoteFallback::None);
         assert_eq!(
-            local_only.get(&absent_key).await?,
+            local_only.load(&absent_key).await?,
             None,
             "an untracked branch's miss is not an error"
         );

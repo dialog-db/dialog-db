@@ -2,9 +2,8 @@ use base58::ToBase58;
 use dialog_common::ConditionalSync;
 use serde::{Serialize, de::DeserializeOwned};
 
-/// The representation of a common hash type (BLAKE3, in this case) that will
-/// often be used as the [`KeyType`] for [`StorageBackend`]s and the
-/// [`HashType`] for [`Encoder`]s.
+/// The representation of a common hash type (BLAKE3, in this case), the
+/// [`HashType`] of the [`Encoder`](crate::Encoder)s content is addressed by.
 pub type Blake3Hash = [u8; 32];
 
 /// A trait that can be implemented for types that represent a hash.

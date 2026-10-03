@@ -308,10 +308,13 @@ use crate::resource::Resource;
 use dialog_effects::storage::{Directory, Location};
 
 /// Derive the IndexedDB database name for a [`Location`].
+///
+/// A browser has one place to keep an origin's databases, so the profile
+/// and the current directory are the same place there: both name a
+/// database by the location's name alone.
 fn database_name(location: &Location) -> String {
     match &location.directory {
-        Directory::Profile => format!("{}.profile", location.name),
-        Directory::Current => location.name.clone(),
+        Directory::Profile | Directory::Current => location.name.clone(),
         Directory::Temp => format!("temp.{}", location.name),
         Directory::At(path) => format!("{}/{}", path, location.name),
     }
@@ -323,7 +326,7 @@ fn database_name(location: &Location) -> String {
 /// *without opening* (so it never creates one). The factory is read off
 /// the global scope (`self`) rather than `window`, so it works in a
 /// worker where `window` is absent.
-async fn database_exists(name: &str) -> Result<bool, IndexedDbError> {
+pub(crate) async fn database_exists(name: &str) -> Result<bool, IndexedDbError> {
     let err = |m: String| IndexedDbError::Database(m);
 
     let scope = global();
@@ -438,8 +441,13 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_derives_database_name_from_location() -> anyhow::Result<()> {
-        let profile = IndexedDb::open(&Location::new(Directory::Profile, "alice")).await?;
-        assert_eq!(profile.name, "alice.profile");
+        // The profile directory and the current one are one place in a
+        // browser: the same name is the same database in either.
+        let alice = unique_name("alice");
+        let profile = IndexedDb::open(&Location::new(Directory::Profile, &alice)).await?;
+        assert_eq!(profile.name, alice);
+        let same = IndexedDb::open(&Location::new(Directory::Current, &alice)).await?;
+        assert!(Rc::ptr_eq(&profile.connection, &same.connection));
 
         let current = IndexedDb::open(&Location::new(Directory::Current, "contacts")).await?;
         assert_eq!(current.name, "contacts");

@@ -24,6 +24,17 @@ pub enum BlobError {
         actual: String,
     },
 
+    /// The bytes held under a digest are not the size they were named at.
+    #[error("Blob {digest} was named at {expected} bytes, {held} are held")]
+    SizeMismatch {
+        /// The blob's content hash.
+        digest: String,
+        /// The size the blob was named at.
+        expected: u64,
+        /// The size of the bytes actually held.
+        held: u64,
+    },
+
     /// The request was not authorized.
     ///
     /// Carries the decision itself rather than its rendering, so a

@@ -6,7 +6,8 @@ use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_credentials::credential::CredentialExport;
 use dialog_effects::credential::prelude::{
-    LoadCredentialExt, LoadSecretExt, RetractSecretExt, SaveCredentialExt, SaveSecretExt,
+    LoadCredentialExt, LoadSecretExt, RetractCredentialExt, RetractSecretExt, SaveCredentialExt,
+    SaveSecretExt,
 };
 use dialog_effects::credential::{CredentialError, Load, Retract, Save, Secret};
 use js_sys::Uint8Array;
@@ -64,6 +65,26 @@ impl Provider<Save<Credential>> for IndexedDb {
             .transact(|object_store| async move {
                 object_store
                     .put(&js_val, Some(&key))
+                    .await
+                    .map_err(|e| CredentialError::Storage(e.to_string()))?;
+                Ok(())
+            })
+            .await
+    }
+}
+
+#[async_trait(?Send)]
+impl Provider<Retract<Credential>> for IndexedDb {
+    async fn execute(&self, input: Capability<Retract<Credential>>) -> Result<(), CredentialError> {
+        let idb_key = format!("key/{}", input.address());
+
+        let store = self.store(CREDENTIAL).await?;
+        let key = JsValue::from_str(&idb_key);
+
+        store
+            .transact(|object_store| async move {
+                object_store
+                    .delete(key)
                     .await
                     .map_err(|e| CredentialError::Storage(e.to_string()))?;
                 Ok(())

@@ -14,8 +14,10 @@
 //!
 //! `Create` resolves the name and delegates to `storage::Create`.
 
+use std::fmt;
+
 use dialog_capability::{Attenuate, Attenuation, Capability, Did, Effect, Subject};
-use dialog_credentials::Credential;
+use dialog_credentials::{Credential, Ed25519Signer, Extractable};
 use serde::{Deserialize, Serialize};
 
 use super::storage::StorageError;
@@ -69,8 +71,13 @@ pub trait SpaceExt {
     /// Load an existing space by name.
     fn load(self) -> Capability<Load>;
 
-    /// Create a new space with the given credential.
-    fn create(self, credential: Credential) -> Capability<Create>;
+    /// Create a new space under a key the environment generates.
+    fn create(self) -> Capability<Create>;
+
+    /// Create a new space under `key`, which the environment seals and
+    /// does not keep. The key must be extractable: sealing it takes its
+    /// material.
+    fn create_with(self, key: Ed25519Signer<Extractable>) -> Capability<Create>;
 }
 
 impl SpaceExt for Capability<Space> {
@@ -78,8 +85,12 @@ impl SpaceExt for Capability<Space> {
         self.invoke(Load)
     }
 
-    fn create(self, credential: Credential) -> Capability<Create> {
-        self.invoke(Create::new(credential))
+    fn create(self) -> Capability<Create> {
+        self.invoke(Create::generated())
+    }
+
+    fn create_with(self, key: Ed25519Signer<Extractable>) -> Capability<Create> {
+        self.invoke(Create::with(key))
     }
 }
 
@@ -98,20 +109,45 @@ impl Effect for Load {
     type Output = Result<Credential, StorageError>;
 }
 
-/// Create a new space by name with the given credential.
+/// Create a new space by name.
 ///
-/// The operator resolves the name against its base directory,
-/// stores the credential, mounts the space, and returns the credential.
-#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+/// The environment resolves the name against its base directory and
+/// mounts the space. The space's key -- given, or generated -- is sealed
+/// to the account the environment acts for and not kept in the space;
+/// the space delegates its authority to that account. The creator gets
+/// the key back, in memory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Attenuate)]
 pub struct Create {
-    /// The credential to store at the new space.
-    pub credential: Credential,
+    /// The key the space is created under, or none for the environment
+    /// to generate one. Never serialized.
+    #[serde(skip)]
+    pub key: Option<SpaceKey>,
 }
 
 impl Create {
-    /// Create a new space creation effect.
-    pub fn new(credential: Credential) -> Self {
-        Self { credential }
+    /// Create a space under a key the environment generates.
+    pub fn generated() -> Self {
+        Self { key: None }
+    }
+
+    /// Create a space under `key`.
+    pub fn with(key: Ed25519Signer<Extractable>) -> Self {
+        Self {
+            key: Some(SpaceKey(key)),
+        }
+    }
+}
+
+/// A space's key, while its space is being created. Extractable, since
+/// sealing it takes its material; never serialized or printed.
+#[derive(Clone)]
+pub struct SpaceKey(pub Ed25519Signer<Extractable>);
+
+impl fmt::Debug for SpaceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SpaceKey")
+            .field(&self.0.ed25519_did().to_string())
+            .finish()
     }
 }
 

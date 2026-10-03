@@ -19,12 +19,11 @@
 
 use std::hash::Hash;
 
-use dialog_common::Blake3Hash;
+use dialog_search_tree::helpers::JournaledBlocks;
 use dialog_search_tree::{
-    ArchivedNodeBody, Buffer, Component, ContentAddressedStorage, Delta, DialogSearchTreeError,
-    Key as TreeKey, PersistentNode, PersistentTree, Schema,
+    Component, Delta, DialogSearchTreeError, Key as TreeKey, NodeBody, PersistentNode,
+    PersistentTree, Schema,
 };
-use dialog_storage::{JournaledStorage, MemoryStorageBackend};
 
 const KEY_LENGTH: usize = 162;
 const ENTITIES: usize = 5_000;
@@ -102,8 +101,7 @@ impl TreeKey for EavKey {
     }
 }
 
-type Backend = JournaledStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
-type Storage = ContentAddressedStorage<Backend>;
+type Storage = JournaledBlocks;
 type Tree = PersistentTree<EavKey, Vec<u8>>;
 
 /// Deterministic xorshift, identical to `tradeoffs.rs` so the workloads match.
@@ -221,21 +219,20 @@ async fn live_footprint(tree: &Tree, storage: &Storage) -> Footprint {
     let mut footprint = Footprint::default();
     let mut frontier = vec![tree.root().clone()];
     while let Some(hash) = frontier.pop() {
-        let Some(bytes) = storage.retrieve(&hash).await.unwrap() else {
+        let Some(bytes) = storage.get(&hash) else {
             continue;
         };
-        let size = bytes.len() as u64;
-        let node: PersistentNode<EavKey, Vec<u8>> =
-            PersistentNode::try_from(Buffer::from(bytes)).unwrap();
+        let size = bytes.as_ref().len() as u64;
+        let node: PersistentNode<EavKey, Vec<u8>> = PersistentNode::try_from(bytes).unwrap();
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 footprint.index_nodes += 1;
                 footprint.index_bytes += size;
                 for at in 0..index.len() {
                     frontier.push(index.hash_at(at).unwrap().clone());
                 }
             }
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Segment(segment) => {
                 footprint.segment_nodes += 1;
                 footprint.segment_bytes += size;
                 footprint.entries += segment.len() as u64;
@@ -252,7 +249,7 @@ fn main() {}
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let facts = workload();
-    let mut storage = Storage::new(JournaledStorage::new(MemoryStorageBackend::default()));
+    let storage = JournaledBlocks::new();
     let mut tree = Tree::empty();
     let mut delta = Delta::zero();
 
@@ -263,9 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         tree = edit.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
     }
 

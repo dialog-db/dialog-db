@@ -19,6 +19,7 @@ use dialog_capability::Provider;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
+use std::pin::Pin;
 
 /// Base EAV scan query that yields all matching artifacts.
 ///
@@ -49,6 +50,29 @@ impl AttributeQueryAll {
     /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery), so a `Nothing` bit
     /// on the `is` term's kind is meaningless here and is stripped.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+        Self::with_source(the, of, is, cause, Term::<Record>::unique())
+    }
+
+    /// The scan a resolved query reads, to be turned into its selector.
+    ///
+    /// Its claim is never cited, so it takes a blank source rather than
+    /// minting a unique one: a query resolves one of these per row.
+    pub(crate) fn lookup(
+        the: Term<The>,
+        of: Term<Entity>,
+        is: Term<Any>,
+        cause: Term<Cause>,
+    ) -> Self {
+        Self::with_source(the, of, is, cause, Term::blank())
+    }
+
+    fn with_source(
+        the: Term<The>,
+        of: Term<Entity>,
+        is: Term<Any>,
+        cause: Term<Cause>,
+        source: Term<Record>,
+    ) -> Self {
         let is = match (is.name(), is.kind()) {
             (Some(name), Some(kind)) if kind.is_optional() => {
                 Term::<Any>::typed_var(name.to_string(), kind.required())
@@ -60,7 +84,7 @@ impl AttributeQueryAll {
             of,
             is,
             cause,
-            source: Term::<Record>::unique(),
+            source,
         }
     }
 
@@ -133,23 +157,38 @@ impl AttributeQueryAll {
 
     /// Merge a matched artifact into a match: store the claim and bind
     /// the/of/is/cause values to the corresponding terms.
+    ///
+    /// Takes the artifact by value: its fields move into the cited
+    /// claim, and each slot is bound by name, so a row pays for one
+    /// copy of each bound value and none of the terms' names.
     pub(crate) fn merge(
         &self,
         candidate: &mut Match,
-        artifact: &Artifact,
+        artifact: Artifact,
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(artifact);
-        candidate.cite(&self.source, &claim)?;
-        candidate.bind(&Term::<Any>::from(&self.the), Value::from(claim.the()))?;
-        candidate.bind(
-            &Term::<Any>::from(&self.of),
-            Value::Entity(claim.of().clone()),
-        )?;
-        candidate.bind(&self.is, claim.is().clone())?;
-        candidate.bind(
-            &Term::<Any>::from(&self.cause),
-            Value::Bytes(claim.cause().clone().0.into()),
-        )?;
+        candidate.reserve(4);
+        if let Some(name) = self.the.shared_name() {
+            candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;
+        }
+        if let Some(name) = self.of.shared_name() {
+            candidate.bind_variable(
+                name,
+                self.of.binding_kind(),
+                Value::Entity(claim.of().clone()),
+            )?;
+        }
+        if let Some(name) = self.is.shared_name() {
+            candidate.bind_variable(name, self.is.kind(), claim.is().clone())?;
+        }
+        if let Some(name) = self.cause.shared_name() {
+            candidate.bind_variable(
+                name,
+                self.cause.binding_kind(),
+                Value::Bytes(claim.cause().clone().0.into()),
+            )?;
+        }
+        candidate.cite_owned(&self.source, claim);
         Ok(())
     }
 
@@ -162,11 +201,13 @@ impl AttributeQueryAll {
     /// to have no value", produced upstream by a
     /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery) left-join.
     pub(crate) fn absent_blocked(&self, base: &Match) -> bool {
-        let absent = |term: &Term<Any>| matches!(base.lookup(term), Ok(Binding::Absent));
-        absent(&Term::<Any>::from(&self.the))
-            || absent(&Term::<Any>::from(&self.of))
-            || absent(&self.is)
-            || absent(&Term::<Any>::from(&self.cause))
+        let absent = |name: Option<&str>| {
+            matches!(name.and_then(|name| base.get(name)), Some(Binding::Absent))
+        };
+        absent(self.the.name())
+            || absent(self.of.name())
+            || absent(self.is.name())
+            || absent(self.cause.name())
     }
 
     /// True when a fact inhabits the scan's typed slots: the value
@@ -314,7 +355,7 @@ impl AttributeQueryAll {
         self,
         env: &'a Env,
         selection: M,
-    ) -> impl Selection + 'a
+    ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
     {
@@ -324,15 +365,22 @@ impl AttributeQueryAll {
         // a cold replica replicates them concurrently instead of paying
         // one round trip per row (see `super::pipelined`).
         let hinted = selector.clone();
-        let selection = pipelined(selection, env, move |base| {
+        let selection = Box::pin(pipelined(selection, env, move |base| {
             if hinted.absent_blocked(base) {
                 return None;
             }
             (&hinted.resolve(base)).try_into().ok()
-        });
-        try_stream! {
+        }));
+        // The stream is boxed where it is built, and so is its input:
+        // the generator holds its input and the pinned copy it iterates,
+        // so an unboxed input sat in its state twice, and returning the
+        // generator unboxed copied the whole state again at every layer
+        // that wrapped or boxed it (several KiB per scan step, per row).
+        Box::pin(try_stream! {
             for await candidate in selection {
-                let base = candidate?;
+                let mut base = candidate?;
+                // Every row this one extends into shares its bindings.
+                base.share();
 
                 // An Absent-bound parameter matches nothing at the
                 // scalar layer: filter the row without scanning.
@@ -364,11 +412,11 @@ impl AttributeQueryAll {
                         continue;
                     }
                     let mut extension = base.clone();
-                    selector.merge(&mut extension, &artifact)?;
+                    selector.merge(&mut extension, artifact)?;
                     yield extension;
                 }
             }
-        }
+        })
     }
 
     /// Execute this query, returning a stream of claims.
@@ -637,7 +685,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::type_system::{Interval, IntervalBound, NameShape, Refinement};
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use std::collections::BTreeSet;
 
     /// A prefix refinement stamped onto a variable term becomes a
@@ -923,7 +971,7 @@ mod tests {
     /// bound-equal rows included.
     #[dialog_common::test]
     async fn it_scans_with_pushed_interval_bounds() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -963,7 +1011,7 @@ mod tests {
     /// the Datomic `[(<= "Q" ?name)]` example, index-accelerated.
     #[dialog_common::test]
     async fn it_scans_with_pushed_string_bounds() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1009,7 +1057,7 @@ mod tests {
     /// the scan produces no false negatives.
     #[dialog_common::test]
     async fn it_keeps_mixed_numeric_rows_without_single_type_kind() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1056,7 +1104,7 @@ mod tests {
     /// artifacts-layer `Directory`/`Sequence` `admit` split).
     #[dialog_common::test]
     async fn it_filters_domain_scans_by_name_shape() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1112,7 +1160,7 @@ mod tests {
     /// without the stored `AttributeDescriptor` declaring it.
     #[dialog_common::test]
     async fn it_preserves_a_name_shape_scan_across_a_json_round_trip() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1183,7 +1231,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_keeps_symbol_matches_under_prefix_pushdown() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1225,7 +1273,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_all_variables() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1269,7 +1317,7 @@ mod tests {
     /// which errors and aborts the stream.
     #[dialog_common::test]
     async fn it_does_not_emit_absent_on_optional_value_mismatch() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1315,7 +1363,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_constant_entity() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1354,7 +1402,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_multiple_values() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1405,7 +1453,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_constant_value() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

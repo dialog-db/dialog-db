@@ -17,18 +17,19 @@
 use anyhow::Result;
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_capability::Subject;
-use dialog_credentials::{Credential, SignerCredential};
+use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::prelude::*;
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::Location;
-use dialog_operator::helpers::{test_operator_with_profile, unique_name};
-use dialog_operator::{Operator, Profile};
+use dialog_peer::Peer;
+use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_remote_fs::FsAddress;
-use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress};
+use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, contact};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource;
+use dialog_varsig::{Did, Principal};
 use futures_util::{StreamExt, stream};
 
 #[cfg(target_arch = "wasm32")]
@@ -54,12 +55,12 @@ async fn seed_vault(repo: &Repository<SignerCredential>) -> Result<(Location, Fs
 /// vault as the repo's space, and add it as the `origin` remote with an
 /// upstream-tracking `main` branch.
 async fn setup_repo_with_fs_remote(
-    operator: &Operator<VolatileSpace>,
-    profile: &Profile,
+    operator: &Peer<VolatileSpace, dialog_peer::Session>,
+    profile: &Peer<VolatileSpace>,
     name: &str,
 ) -> Result<(Repository<SignerCredential>, Location, Branch)> {
     let repo = profile
-        .repository(unique_name(name))
+        .space(unique_name(name))
         .create()
         .perform(operator)
         .await?;
@@ -75,11 +76,20 @@ async fn setup_repo_with_fs_remote(
 
     let (location, address) = seed_vault(&repo).await?;
 
-    let origin = repo
-        .remote("origin")
-        .create(SiteAddress::Fs(address))
-        .perform(operator)
-        .await?;
+    let origin = {
+        let site = SiteAddress::Fs(address);
+        contact(&vault_peer().await?)
+            .add_address(site)
+            .name("origin")
+            .perform(operator)
+            .await?;
+        contact("origin")
+            .connect()
+            .repository(repo.did())
+            .open()
+            .perform(operator)
+            .await?
+    };
 
     let branch = repo.branch("main").open().perform(operator).await?;
     let remote_branch = origin.branch("main").open().perform(operator).await?;
@@ -99,7 +109,7 @@ fn artifact(of: &str, name: &str) -> Result<Artifact> {
 
 #[dialog_common::test]
 async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let (_repo, _location, branch) =
         setup_repo_with_fs_remote(&operator, &profile, "fs-push").await?;
 
@@ -135,10 +145,9 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
 #[dialog_common::test]
 async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
     // Two repos point at the same vault directory: Alice pushes, Bob pulls.
-    let (operator, profile) = test_operator_with_profile().await;
-    let (alice_repo, location, alice_branch) =
+    let (operator, profile) = test_session_with_peer().await;
+    let (alice_repo, _location, alice_branch) =
         setup_repo_with_fs_remote(&operator, &profile, "fs-share-a").await?;
-    let address = FsAddress::new(location);
 
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(artifact(
@@ -152,7 +161,7 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
     // Bob opens a second repo and points its origin at Alice's vault, targeting
     // Alice's subject.
     let bob_repo = profile
-        .repository(unique_name("fs-share-b"))
+        .space(unique_name("fs-share-b"))
         .open()
         .perform(&operator)
         .await?;
@@ -166,10 +175,12 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
         .await?;
     profile.access().save(chain).perform(&operator).await?;
 
-    let bob_origin = bob_repo
-        .remote("origin")
-        .create(SiteAddress::Fs(address))
-        .subject(alice_repo.did())
+    // The vault is already the host's contact `origin`: Bob reaches
+    // Alice's replica there through it.
+    let bob_origin = contact("origin")
+        .connect()
+        .repository(alice_repo.did())
+        .open()
         .perform(&operator)
         .await?;
 
@@ -202,14 +213,13 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
 async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
     // Two repos share a vault. The first push advances the remote head; a
     // second push that hasn't seen that advance must fail the memory CAS.
-    let (operator, profile) = test_operator_with_profile().await;
-    let (alice_repo, location, alice_branch) =
+    let (operator, profile) = test_session_with_peer().await;
+    let (alice_repo, _location, alice_branch) =
         setup_repo_with_fs_remote(&operator, &profile, "fs-cas-a").await?;
-    let address = FsAddress::new(location);
 
     // Bob shares Alice's vault and subject, tracking the same remote branch.
     let bob_repo = profile
-        .repository(unique_name("fs-cas-b"))
+        .space(unique_name("fs-cas-b"))
         .open()
         .perform(&operator)
         .await?;
@@ -220,10 +230,12 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
         .perform(&operator)
         .await?;
     profile.access().save(chain).perform(&operator).await?;
-    let bob_origin = bob_repo
-        .remote("origin")
-        .create(SiteAddress::Fs(address))
-        .subject(alice_repo.did())
+    // The vault is already the host's contact `origin`: Bob reaches
+    // Alice's replica there through it.
+    let bob_origin = contact("origin")
+        .connect()
+        .repository(alice_repo.did())
+        .open()
         .perform(&operator)
         .await?;
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
@@ -262,12 +274,12 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
 #[dialog_common::test]
 async fn it_denies_a_read_without_authorization() -> Result<()> {
     // An operator with no delegation for the vault's subject cannot read it.
-    let (operator, _profile) = test_operator_with_profile().await;
+    let (operator, _profile) = test_session_with_peer().await;
 
     // A standalone vault for some other subject.
-    let (other_operator, other_profile) = test_operator_with_profile().await;
+    let (other_operator, other_profile) = test_session_with_peer().await;
     let other_repo = other_profile
-        .repository(unique_name("fs-foreign"))
+        .space(unique_name("fs-foreign"))
         .create()
         .perform(&other_operator)
         .await?;
@@ -293,11 +305,14 @@ async fn it_denies_a_read_without_authorization() -> Result<()> {
 async fn it_allows_read_but_denies_write_with_read_only_delegation() -> Result<()> {
     // A read-only delegation authorizes Get but not Put: the command-prefix
     // match in prove gates the write for free.
-    let (operator, profile) = test_operator_with_profile().await;
-    let repo = profile
-        .repository(unique_name("fs-readonly"))
+    let (operator, profile) = test_session_with_peer().await;
+    // The space belongs to another account: a space delegates to the
+    // account it was created for, so its own would hold it whole.
+    let (owner_operator, owner) = test_session_with_peer().await;
+    let repo = owner
+        .space(unique_name("fs-readonly"))
         .create()
-        .perform(&operator)
+        .perform(&owner_operator)
         .await?;
     let (_location, address) = seed_vault(&repo).await?;
 
@@ -355,11 +370,14 @@ async fn it_allows_resolve_but_denies_publish_with_resolve_only_delegation() -> 
     // delegation authorizes resolve but not /memory/publish.
     use dialog_effects::memory::prelude::*;
 
-    let (operator, profile) = test_operator_with_profile().await;
-    let repo = profile
-        .repository(unique_name("fs-mem-readonly"))
+    let (operator, profile) = test_session_with_peer().await;
+    // The space belongs to another account: a space delegates to the
+    // account it was created for, so its own would hold it whole.
+    let (owner_operator, owner) = test_session_with_peer().await;
+    let repo = owner
+        .space(unique_name("fs-mem-readonly"))
         .create()
-        .perform(&operator)
+        .perform(&owner_operator)
         .await?;
     let (_location, address) = seed_vault(&repo).await?;
 
@@ -415,9 +433,9 @@ async fn it_allows_resolve_but_denies_publish_with_resolve_only_delegation() -> 
 async fn it_denies_when_subject_is_not_the_directory() -> Result<()> {
     // The operator is fully authorized for `repo`, but points the remote at a
     // vault that belongs to a DIFFERENT subject. verify_subject must deny.
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = profile
-        .repository(unique_name("fs-mismatch"))
+        .space(unique_name("fs-mismatch"))
         .create()
         .perform(&operator)
         .await?;
@@ -430,9 +448,9 @@ async fn it_denies_when_subject_is_not_the_directory() -> Result<()> {
     profile.access().save(chain).perform(&operator).await?;
 
     // Vault belongs to a stranger, not `repo`.
-    let (other_operator, other_profile) = test_operator_with_profile().await;
+    let (other_operator, other_profile) = test_session_with_peer().await;
     let other_repo = other_profile
-        .repository(unique_name("fs-stranger"))
+        .space(unique_name("fs-stranger"))
         .create()
         .perform(&other_operator)
         .await?;
@@ -452,4 +470,11 @@ async fn it_denies_when_subject_is_not_the_directory() -> Result<()> {
         "a vault for a different subject must be denied"
     );
     Ok(())
+}
+
+/// A DID to name the peer a vault directory is by. A directory has no DID
+/// of its own, so the test gives it one, as an application names a peer
+/// by the DID it was given.
+async fn vault_peer() -> Result<Did> {
+    Ok(Principal::did(&Ed25519Signer::generate().await?))
 }

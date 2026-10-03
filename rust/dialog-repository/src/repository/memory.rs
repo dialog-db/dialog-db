@@ -1,5 +1,5 @@
 //! Memory capabilities: cells, publish/resolve commands, and caching.
-use crate::{BranchReference, RemoteReference};
+use crate::{BranchReference, RegistryReference};
 use dialog_capability::Subject;
 use dialog_effects::memory::prelude::SpaceScope;
 
@@ -24,6 +24,9 @@ pub use resolve::*;
 /// recursion rather than special-casing it.
 pub const REGISTRY: &str = "meta";
 
+mod retract;
+pub use retract::*;
+
 /// Extension trait for repository memory navigation.
 ///
 /// Extends [`MemoryExt`] with repository-specific helpers for
@@ -32,8 +35,9 @@ pub trait RepositoryMemoryExt {
     /// Access a branch scoped to `branch/{name}`.
     fn branch(&self, name: impl Into<String>) -> BranchReference;
 
-    /// Access a remote scoped to `remote/{name}`.
-    fn remote(&self, name: impl Into<String>) -> RemoteReference;
+    /// Address the registry branch, [`REGISTRY`], which the environment
+    /// holds open once it is opened.
+    fn registry(&self) -> RegistryReference;
 }
 
 impl RepositoryMemoryExt for Subject {
@@ -42,8 +46,7 @@ impl RepositoryMemoryExt for Subject {
         SpaceScope::new(self.clone(), format!("branch/{name}")).into()
     }
 
-    fn remote(&self, name: impl Into<String>) -> RemoteReference {
-        let name = name.into();
-        SpaceScope::new(self.clone(), format!("remote/{name}")).into()
+    fn registry(&self) -> RegistryReference {
+        RegistryReference::new(self.clone())
     }
 }

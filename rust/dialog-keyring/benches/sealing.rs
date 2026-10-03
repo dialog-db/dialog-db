@@ -1,24 +1,48 @@
 //! What sealing costs.
 //!
 //! Every benchmark runs the same workload twice against the same tree code:
-//! once through a plain [`ContentAddressedStorage`], once through one with a
-//! [`NodeSealer`] attached. The delta between the two pairs is the whole
-//! answer — nothing else differs.
+//! once through plain [`MemoryBlocks`], once through [`SealedBlocks`]. The
+//! delta between the two pairs is the whole answer — nothing else differs.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dialog_common::Blake3Hash;
+use dialog_capability::Provider;
 use dialog_common::helpers::BenchData;
-use dialog_keyring::{LocalKeyring, NodeSealer};
-use dialog_search_tree::{ContentAddressedStorage, Delta, NodeCipher, PersistentTree};
-use dialog_storage::MemoryStorageBackend;
+use dialog_common::{Blake3Hash, Buffer};
+use dialog_keyring::{LocalKeyring, NodeSealer, SealedBlocks};
+use dialog_search_tree::{Delta, DialogSearchTreeError, LoadBlock, MemoryBlocks, PersistentTree};
 use futures_util::StreamExt;
 
 const BENCH_SEED: u64 = 42;
 
-/// The storage the tree writes through, in both arms of every comparison.
-type Store = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+/// The storage the tree reads and writes through, in both arms of every
+/// comparison.
+enum Store {
+    Plain(MemoryBlocks),
+    Sealed(SealedBlocks),
+}
+
+impl Store {
+    /// Keep every block `delta` stages, sealing them in the sealed arm.
+    fn flush(&self, delta: &mut Delta<Blake3Hash, Buffer>) {
+        match self {
+            Store::Plain(blocks) => blocks.flush(delta),
+            Store::Sealed(blocks) => blocks.flush(delta).unwrap(),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider<LoadBlock> for Store {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        match self {
+            Store::Plain(blocks) => blocks.execute(load).await,
+            Store::Sealed(blocks) => blocks.execute(load).await,
+        }
+    }
+}
 
 /// A sealer over a fixed keyring, resolved once outside any benchmark.
 ///
@@ -37,10 +61,8 @@ fn sealer(runtime: &tokio::runtime::Runtime) -> Arc<NodeSealer> {
 /// Storage for one run, sealed or not.
 fn storage(sealer: Option<&Arc<NodeSealer>>) -> Store {
     match sealer {
-        Some(sealer) => {
-            ContentAddressedStorage::with_cipher(MemoryStorageBackend::default(), sealer.clone())
-        }
-        None => ContentAddressedStorage::new(MemoryStorageBackend::default()),
+        Some(sealer) => Store::Sealed(SealedBlocks::new(sealer.clone())),
+        None => Store::Plain(MemoryBlocks::new()),
     }
 }
 
@@ -48,7 +70,7 @@ fn storage(sealer: Option<&Arc<NodeSealer>>) -> Store {
 /// persist, one flush. This is the shape a commit actually has, and the one
 /// where sealing cost is proportional to the nodes a commit writes.
 async fn commit(
-    storage: &mut Store,
+    storage: &Store,
     keys: &[[u8; 16]],
     values: &[[u8; 32]],
 ) -> PersistentTree<[u8; 16], Vec<u8>> {
@@ -62,14 +84,7 @@ async fn commit(
             .unwrap();
     }
     let tree = transient.persist(&mut delta).unwrap();
-
-    for (_, buffer) in delta.flush() {
-        storage
-            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-            .await
-            .unwrap();
-    }
-
+    storage.flush(&mut delta);
     tree
 }
 
@@ -78,7 +93,7 @@ async fn commit(
 /// root-to-leaf path, so this seals far more nodes per entry than a commit
 /// does — the pessimistic end of the range.
 async fn build(
-    storage: &mut Store,
+    storage: &Store,
     keys: &[[u8; 16]],
     values: &[[u8; 32]],
 ) -> PersistentTree<[u8; 16], Vec<u8>> {
@@ -93,12 +108,7 @@ async fn build(
             .unwrap()
             .persist(&mut delta)
             .unwrap();
-        for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await
-                .unwrap();
-        }
+        storage.flush(&mut delta);
     }
 
     tree
@@ -120,8 +130,8 @@ fn bench_insert(c: &mut Criterion) {
             group.bench_with_input(BenchmarkId::new(label, size), &size, |b, _| {
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let mut store = storage(sealer.as_ref());
-                        build(&mut store, &keys, &values).await;
+                        let store = storage(sealer.as_ref());
+                        build(&store, &keys, &values).await;
                     });
             });
         }
@@ -146,8 +156,8 @@ fn bench_commit(c: &mut Criterion) {
             group.bench_with_input(BenchmarkId::new(label, size), &size, |b, _| {
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let mut store = storage(sealer.as_ref());
-                        commit(&mut store, &keys, &values).await;
+                        let store = storage(sealer.as_ref());
+                        commit(&store, &keys, &values).await;
                     });
             });
         }
@@ -169,8 +179,8 @@ fn bench_get(c: &mut Criterion) {
         let label = if sealed { "sealed" } else { "plain" };
         let sealer = sealed.then(|| sealer.clone());
         let (store, tree) = setup.block_on(async {
-            let mut store = storage(sealer.as_ref());
-            let tree = build(&mut store, &keys, &values).await;
+            let store = storage(sealer.as_ref());
+            let tree = build(&store, &keys, &values).await;
             (store, tree)
         });
 
@@ -206,8 +216,8 @@ fn bench_scan(c: &mut Criterion) {
         let label = if sealed { "sealed" } else { "plain" };
         let sealer = sealed.then(|| sealer.clone());
         let (store, tree) = setup.block_on(async {
-            let mut store = storage(sealer.as_ref());
-            let tree = build(&mut store, &keys, &values).await;
+            let store = storage(sealer.as_ref());
+            let tree = build(&store, &keys, &values).await;
             (store, tree)
         });
 

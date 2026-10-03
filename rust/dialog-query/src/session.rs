@@ -44,7 +44,7 @@ mod tests {
         Type,
     };
     use dialog_capability::Provider;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use implicit_attr_test::{Name, Role};
 
     /// Lower a single proposition to its compiled `Plan` for the
@@ -63,7 +63,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_asserted_facts() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
@@ -194,7 +194,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_asserts_and_queries_concept() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -349,7 +349,7 @@ mod tests {
             ],
         )?;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let mut rules = RuleRegistry::new();
@@ -471,7 +471,7 @@ mod tests {
             )
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -563,7 +563,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_resolves_rules_via_source_trait() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let _branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -608,7 +608,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_accepts_source_trait_implementations() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -635,7 +635,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_source_explicitly() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let _branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -711,7 +711,7 @@ mod tests {
             )
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let query_m = Query::<MatchingNote>::default();
@@ -807,7 +807,7 @@ mod tests {
             )
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let query_n = Query::<NonDraftNote>::default();
@@ -907,7 +907,7 @@ mod tests {
             )
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1172,27 +1172,29 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
+        let operands = person.sorted_operands();
         let free = Match::new();
-        let adornment_free = Adornment::derive(&terms, &free);
-        let env_free = adornment_free.into_environment(&terms);
+        let adornment_free = Adornment::derive(&operands, &terms, &free);
+        let env_free = adornment_free.into_environment(&operands);
         let free_plan = rules.plan(&terms, &free);
 
         let mut bound = Match::new();
         bound
             .bind(&Term::var("e"), Value::from(Entity::new().unwrap()))
             .unwrap();
-        let adornment_bound = Adornment::derive(&terms, &bound);
-        let env_bound = adornment_bound.into_environment(&terms);
+        let adornment_bound = Adornment::derive(&operands, &terms, &bound);
+        let env_bound = adornment_bound.into_environment(&operands);
         let bound_plan = rules.plan(&terms, &bound);
 
-        // The entity-bound environment should contain "e"
+        // The entity-bound scope names the concept's `this` field, which
+        // the rule body is evaluated over; the free scope does not.
         assert!(
-            env_bound.contains("e"),
-            "Bound adornment should include entity variable in environment"
+            env_bound.contains("this"),
+            "Bound adornment should include the entity field in scope"
         );
         assert!(
-            !env_free.contains("e"),
-            "Free adornment should not include entity variable in environment"
+            !env_free.contains("this"),
+            "Free adornment should not include the entity field in scope"
         );
 
         // Verify the plans are structurally different
@@ -1206,7 +1208,7 @@ mod tests {
     async fn it_produces_correct_results_from_cached_plan() -> anyhow::Result<()> {
         // End-to-end test: verify that evaluating a concept with the plan cache
         // produces the same correct results as the pre-cache implementation.
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
@@ -1273,7 +1275,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_produces_correct_results_from_cached_plan_with_bound_entity() -> anyhow::Result<()>
     {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

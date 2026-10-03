@@ -1,8 +1,10 @@
-//! Remote repository navigation and operations.
+//! Replicas on connected peers, and their branches.
 //!
 //! ```text
-//! repo.remote("origin").load().perform(&env)  → RemoteRepository
-//!   └── .branch("main")                       → RemoteBranchReference
+//! contact("origin").connect()               → ContactConnection
+//!   └── .repository(did)                    → PeerReplica
+//!         ├── .open()                       → ConnectedReplica
+//!         └── .branch("main").open()        → ConnectedBranch
 //! ```
 
 mod address;
@@ -14,14 +16,8 @@ pub use archive::*;
 mod branch;
 pub use branch::*;
 
-mod create;
-pub use create::*;
-
-mod load;
-pub use load::*;
-
-mod reference;
-pub use reference::*;
+mod connection;
+pub use connection::*;
 
 mod repository;
 pub use repository::*;

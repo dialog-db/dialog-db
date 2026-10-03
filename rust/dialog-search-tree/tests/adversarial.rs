@@ -20,13 +20,12 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use anyhow::Result;
-use dialog_common::{Blake3Hash, NULL_BLAKE3_HASH};
+use dialog_common::Blake3Hash;
 use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree,
+    Buffer, Delta, HitchhikerTree, Manifest, MemoryBlocks, PersistentTree, TransientTree,
 };
-use dialog_storage::MemoryStorageBackend;
 
-type Store = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+type Store = MemoryBlocks;
 type TreeKey = [u8; 40];
 type Tree = PersistentTree<TreeKey, Vec<u8>>;
 
@@ -154,9 +153,7 @@ fn manifests() -> Vec<(&'static str, Manifest)> {
 
 async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
     for (_, buffer) in delta.flush() {
-        storage
-            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-            .await?;
+        storage.store(buffer);
     }
     Ok(())
 }
@@ -174,15 +171,15 @@ async fn checkpoint_root(tree: &Tree, storage: &Store, label: &str) -> Result<Bl
 /// Canonical sequential edits under `manifest`: the first write stamps it,
 /// every later edit recovers it from the root.
 async fn run_canonical(program: &Program, manifest: Manifest) -> Result<Vec<Blake3Hash>> {
-    let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+    let mut storage: Store = MemoryBlocks::new();
     let mut tree = Tree::empty();
     let mut roots = Vec::new();
     for (at, op) in program.ops.iter().enumerate() {
         let mut delta = Delta::zero();
-        let edit = if tree.root() == NULL_BLAKE3_HASH {
-            TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Default::default(), manifest)
+        let edit = if tree.stored_root().is_none() {
+            TransientTree::empty_with_manifest(Default::default(), manifest.clone())
         } else {
-            tree.edit_with_manifest(&storage).await?
+            tree.edit()
         };
         tree = match *op {
             Op::Insert(key, len) => {
@@ -217,15 +214,14 @@ async fn run_buffered(
         session += 1;
         chosen
     };
-    let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+    let mut storage: Store = MemoryBlocks::new();
 
     // Stamp the manifest with the first op through a canonical edit, so the
     // buffered session opens over a root that carries it.
     let mut ops = program.ops.iter();
     let first = *ops.next().expect("programs are non-empty");
     let mut delta = Delta::zero();
-    let seed_edit =
-        TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Default::default(), manifest);
+    let seed_edit = TransientTree::empty_with_manifest(Default::default(), manifest.clone());
     let mut tree = match first {
         Op::Insert(key, len) => {
             seed_edit
@@ -251,7 +247,7 @@ async fn run_buffered(
     if program.checkpoints.contains(&1) {
         roots.push(checkpoint_root(&tree, &storage, "buffered/first").await?);
     }
-    let mut buffered = open(&tree, next_buf());
+    let mut buffered = open.clone()(&tree, next_buf());
     for (at, op) in ops.enumerate() {
         buffered = match *op {
             Op::Insert(key, len) => {
@@ -267,13 +263,13 @@ async fn run_buffered(
             tree = buffered.canonicalize(&storage, &mut delta).await?;
             settle(&mut delta, &mut storage).await?;
             roots.push(checkpoint_root(&tree, &storage, "buffered checkpoint").await?);
-            buffered = open(&tree, next_buf());
+            buffered = open.clone()(&tree, next_buf());
         } else if done.is_multiple_of(persist_every) {
             let mut delta = Delta::zero();
             let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
             tree = Tree::from_hash_with_cache(root, Default::default());
-            buffered = open(&tree, next_buf());
+            buffered = open.clone()(&tree, next_buf());
         }
     }
     Ok(roots)
@@ -297,11 +293,12 @@ async fn it_converges_under_adversarial_manifests() -> Result<()> {
     for (label, manifest) in manifests() {
         for seed in 0..seeds {
             let program = generate(seed, op_count);
-            let canonical = run_canonical(&program, manifest).await?;
-            let tiny = run_buffered(&program, manifest, &[Some(4)], 13).await?;
-            let medium = run_buffered(&program, manifest, &[Some(32)], 7).await?;
-            let default_buf = run_buffered(&program, manifest, &[None], 50).await?;
-            let mixed = run_buffered(&program, manifest, &[Some(4), Some(32), None], 11).await?;
+            let canonical = run_canonical(&program, manifest.clone()).await?;
+            let tiny = run_buffered(&program, manifest.clone(), &[Some(4)], 13).await?;
+            let medium = run_buffered(&program, manifest.clone(), &[Some(32)], 7).await?;
+            let default_buf = run_buffered(&program, manifest.clone(), &[None], 50).await?;
+            let mixed =
+                run_buffered(&program, manifest.clone(), &[Some(4), Some(32), None], 11).await?;
             for (arm, roots) in [
                 ("buffered(4)/persist-13", &tiny),
                 ("buffered(32)/persist-7", &medium),
@@ -325,7 +322,6 @@ async fn it_converges_under_adversarial_manifests() -> Result<()> {
 #[tokio::test]
 #[ignore]
 async fn minimize_caught_divergence() -> Result<()> {
-    use dialog_search_tree::ContentAddressedStorage as Cas;
     use futures_util::StreamExt as _;
 
     let manifest = manifests()
@@ -347,7 +343,7 @@ async fn minimize_caught_divergence() -> Result<()> {
         Ok(out)
     }
 
-    let _ = |storage: &Cas<MemoryStorageBackend<Blake3Hash, Vec<u8>>>| storage.clone();
+    let _ = |storage: &Store| storage.clone();
 
     // Find the shortest prefix (scanning coarsely then finely) where the
     // mixed arm diverges.
@@ -358,8 +354,9 @@ async fn minimize_caught_divergence() -> Result<()> {
             ops: full.ops[..len].to_vec(),
             checkpoints: vec![len],
         };
-        let canonical = run_canonical(&program, manifest).await?;
-        let mixed = run_buffered(&program, manifest, &[Some(4), Some(32), None], 11).await?;
+        let canonical = run_canonical(&program, manifest.clone()).await?;
+        let mixed =
+            run_buffered(&program, manifest.clone(), &[Some(4), Some(32), None], 11).await?;
         if canonical != mixed {
             bad = Some(len);
             break;
@@ -378,8 +375,9 @@ async fn minimize_caught_divergence() -> Result<()> {
             ops: full.ops[..probe].to_vec(),
             checkpoints: vec![probe],
         };
-        let canonical = run_canonical(&program, manifest).await?;
-        let mixed = run_buffered(&program, manifest, &[Some(4), Some(32), None], 11).await?;
+        let canonical = run_canonical(&program, manifest.clone()).await?;
+        let mixed =
+            run_buffered(&program, manifest.clone(), &[Some(4), Some(32), None], 11).await?;
         if canonical != mixed {
             break;
         }
@@ -410,14 +408,14 @@ async fn minimize_caught_divergence() -> Result<()> {
         checkpoints: vec![minimal],
     };
     // Re-run both arms, retaining the trees this time.
-    let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+    let mut storage: Store = MemoryBlocks::new();
     let mut tree = Tree::empty();
     for op in &program.ops {
         let mut delta = Delta::zero();
-        let edit = if tree.root() == NULL_BLAKE3_HASH {
-            TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Default::default(), manifest)
+        let edit = if tree.stored_root().is_none() {
+            TransientTree::empty_with_manifest(Default::default(), manifest.clone())
         } else {
-            tree.edit_with_manifest(&storage).await?
+            tree.edit()
         };
         tree = match *op {
             Op::Insert(key, len) => {
@@ -434,12 +432,11 @@ async fn minimize_caught_divergence() -> Result<()> {
     // Mixed arm, retaining the final canonicalized tree: reuse run_buffered
     // by reading back its root through a fresh replay with the same store
     // is intrusive; instead re-run its logic inline at this small size.
-    let mut storage2: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+    let mut storage2: Store = MemoryBlocks::new();
     let mut ops2 = program.ops.iter();
     let first = *ops2.next().expect("non-empty");
     let mut delta = Delta::zero();
-    let seed_edit =
-        TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Default::default(), manifest);
+    let seed_edit = TransientTree::empty_with_manifest(Default::default(), manifest.clone());
     let mut tree2 = match first {
         Op::Insert(key, len) => {
             seed_edit
@@ -459,7 +456,7 @@ async fn minimize_caught_divergence() -> Result<()> {
             None => buffered,
         }
     };
-    let mut buffered = open(&tree2, bufs[session % bufs.len()]);
+    let mut buffered = open.clone()(&tree2, bufs[session % bufs.len()]);
     session += 1;
     for (at, op) in ops2.enumerate() {
         buffered = match *op {
@@ -481,7 +478,7 @@ async fn minimize_caught_divergence() -> Result<()> {
             let root = buffered.persist(&mut delta)?;
             settle(&mut delta, &mut storage2).await?;
             tree2 = Tree::from_hash_with_cache(root, Default::default());
-            buffered = open(&tree2, bufs[session % bufs.len()]);
+            buffered = open.clone()(&tree2, bufs[session % bufs.len()]);
             session += 1;
         }
     }

@@ -2,15 +2,12 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, State, Storage};
-use dialog_search_tree::{
-    ArchivedNodeBody, Buffer, Entry, Key as TreeKey, PersistentNode, into_owned,
-};
-use dialog_storage::{Blake3Hash, MemoryStorageBackend, StorageBackend};
+use dialog_artifacts::{Datum, DialogArtifactsError, Key, LoadBlock, State};
+use dialog_search_tree::{Entry, Key as TreeKey, NodeBody, PersistentNode, into_owned};
+use dialog_storage::Blake3Hash;
 
 use super::store::WorkerMessage;
-
-type DiagnoseStorage = Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+use crate::Blocks;
 
 /// Represents a node in the prolly tree hierarchy.
 ///
@@ -39,8 +36,8 @@ pub enum TreeNode {
 /// This worker loads individual tree nodes on-demand as the UI navigates
 /// the prolly tree structure.
 pub struct ArtifactsHierarchy {
-    /// The storage backend for tree operations
-    storage: DiagnoseStorage,
+    /// Where the tree's blocks load from
+    storage: Blocks,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -52,7 +49,7 @@ impl ArtifactsHierarchy {
     ///
     /// * `tree` - The prolly tree index to load nodes from
     /// * `tx` - Channel sender for worker messages
-    pub fn new(storage: DiagnoseStorage, tx: Sender<WorkerMessage>) -> Self {
+    pub fn new(storage: Blocks, tx: Sender<WorkerMessage>) -> Self {
         Self { storage, tx }
     }
 
@@ -70,22 +67,21 @@ impl ArtifactsHierarchy {
         let hash = hash.to_owned();
 
         tokio::spawn(async move {
-            let Some(bytes) = storage.get(&hash).await? else {
+            let Some(bytes) = LoadBlock::new(hash.into()).perform(&storage).await? else {
                 // TODO: This should be an error condition
                 return Ok(());
             };
 
-            let block: PersistentNode<Key, State<Datum>> =
-                PersistentNode::try_from(Buffer::from(bytes))?;
+            let block: PersistentNode<Key, State<Datum>> = PersistentNode::try_from(bytes)?;
             let node = match block.body() {
-                ArchivedNodeBody::Index(index) => {
+                NodeBody::Index(index) => {
                     let links = index.links()?;
                     TreeNode::Branch {
                         separators: links.iter().map(|link| link.separator.clone()).collect(),
                         children: links.iter().map(|link| *link.node.as_bytes()).collect(),
                     }
                 }
-                ArchivedNodeBody::Segment(segment) => {
+                NodeBody::Segment(segment) => {
                     let mut entries = Vec::with_capacity(segment.len());
                     let mut keys = segment.keys::<Key>()?;
                     while let Some((at, key)) = keys.next_key()? {

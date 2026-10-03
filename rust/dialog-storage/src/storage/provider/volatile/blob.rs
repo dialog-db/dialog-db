@@ -16,9 +16,9 @@ use base58::ToBase58;
 use blake3::Hasher;
 use dialog_capability::{Capability, Did, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
+use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _, BlobSizeExt as _};
 use dialog_effects::blob::{
-    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Import, Read, Write,
+    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Import, Read, Size, Write,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -135,6 +135,22 @@ impl Provider<Read> for Volatile {
         };
 
         Ok(Box::new(MemoryBlobSource(Some(ranged))))
+    }
+}
+
+/// The length of the buffer held under the digest; nothing is copied.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Size> for Volatile {
+    async fn execute(&self, effect: Capability<Size>) -> Result<Option<u64>, BlobError> {
+        let subject: Did = effect.subject().into();
+        let key = blob_key(effect.digest());
+        Ok(self
+            .sessions
+            .read()
+            .get(&subject)
+            .and_then(|session| session.blobs.get(&key))
+            .map(|bytes| bytes.len() as u64))
     }
 }
 

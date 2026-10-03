@@ -9,8 +9,9 @@
 
 use std::collections::BTreeSet;
 
-use dialog_artifacts::Artifacts;
-use dialog_storage::{Blake3Hash, MemoryStorageBackend};
+use dialog_storage::Blake3Hash;
+
+use crate::Explored;
 
 mod tab;
 pub use tab::*;
@@ -179,11 +180,11 @@ impl DiagnoseState {
     ///
     /// This initializes all the state components and sets up the tree view
     /// to start at the root of the prolly tree.
-    pub async fn new(artifacts: Artifacts<MemoryStorageBackend<[u8; 32], Vec<u8>>>) -> Self {
-        let root_hash = *artifacts.index().read().await.root().as_bytes();
+    pub async fn new(explored: Explored) -> Self {
+        let root_hash = *explored.tree.root().as_bytes();
 
         Self {
-            store: DiagnoseStore::new(artifacts).await,
+            store: DiagnoseStore::new(explored).await,
             tab: Default::default(),
             facts: Default::default(),
             tree: TreeState {

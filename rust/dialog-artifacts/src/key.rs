@@ -58,27 +58,8 @@ use crate::{
     selector::Constrained,
 };
 
-/// Helper macro for creating mutable slices from byte arrays at compile time.
-///
-/// Still used by the padded `[u8; N]` byte representations that [`Entity`] and
-/// [`Uri`](crate::Uri) carry alongside their string form.
-macro_rules! mutable_slice {
-    ( $array:expr, $index:expr, $run:expr ) => {{
-        const START: usize = $index;
-        const END: usize = $index + $run;
-        &mut $array[START..END]
-    }};
-}
-
-pub(crate) use mutable_slice;
-
 /// Length of the key tag field in bytes
 pub(crate) const TAG_LENGTH: usize = 1;
-/// Length of the padded entity byte representation carried by [`Entity`].
-///
-/// Keys no longer pad entities (they are lossless and variable-length); this
-/// width only sizes the legacy `[u8; ENTITY_LENGTH]` companion buffer.
-pub(crate) const ENTITY_LENGTH: usize = 64;
 /// Maximum attribute length in bytes (still capped for the dictionary column
 /// and for filler-based range bounds).
 pub(crate) const ATTRIBUTE_LENGTH: usize = 64;
@@ -173,18 +154,6 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
         Value::Boolean(_) => 1,
         Value::Symbol(_) => 0,
     }
-}
-
-/// The default key format: the [`Manifest`] a tree with no manifest of its own
-/// (an empty tree) would be created under.
-///
-/// This is a *fallback*, not the answer. The format that governs a given tree
-/// is the manifest of that tree, recovered with
-/// [`PersistentTree::manifest`](dialog_search_tree::PersistentTree::manifest)
-/// and threaded to the key builders. Reach for this default only where no tree
-/// can be in scope, and say why at the call site.
-pub(crate) fn default_manifest() -> Manifest {
-    Manifest::default()
 }
 
 /// Builds all three index keys — `(EAV, AEV, VAE)` — for an artifact from a
@@ -640,10 +609,7 @@ mod tests {
 
     use std::str::FromStr;
 
-    use super::{
-        AttributeKey, EntityKey, FromKey, KeyView, Manifest, ValueKey, default_manifest,
-        value_payload,
-    };
+    use super::{AttributeKey, EntityKey, FromKey, KeyView, Manifest, ValueKey, value_payload};
     use crate::{Artifact, Attribute, Entity, Value, decode_value, key::varkey::ValuePayload};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -689,9 +655,9 @@ mod tests {
         for value in values {
             let fact = fact(value.clone());
             let keys = [
-                EntityKey::from_artifact(&fact, &default_manifest()).into_key(),
-                AttributeKey::from_artifact(&fact, &default_manifest()).into_key(),
-                ValueKey::from_artifact(&fact, &default_manifest()).into_key(),
+                EntityKey::from_artifact(&fact, &Manifest::default()).into_key(),
+                AttributeKey::from_artifact(&fact, &Manifest::default()).into_key(),
+                ValueKey::from_artifact(&fact, &Manifest::default()).into_key(),
             ];
             for key in keys {
                 assert!(
@@ -722,21 +688,21 @@ mod tests {
     /// (cardinality-many must not collapse).
     #[dialog_common::test]
     async fn it_sorts_spilled_values_into_their_type_band() -> anyhow::Result<()> {
-        let big = "z".repeat(default_manifest().inline_n as usize + 1);
+        let big = "z".repeat(Manifest::default().inline_n as usize + 1);
         let spilled_key =
-            EntityKey::from_artifact(&fact(Value::String(big.clone())), &default_manifest())
+            EntityKey::from_artifact(&fact(Value::String(big.clone())), &Manifest::default())
                 .into_key();
 
         // In-band neighbors: ordered by leading value bytes, not banished
         // above the type band.
         let below =
-            EntityKey::from_artifact(&fact(Value::String("y-below".into())), &default_manifest())
+            EntityKey::from_artifact(&fact(Value::String("y-below".into())), &Manifest::default())
                 .into_key();
         let shorter =
-            EntityKey::from_artifact(&fact(Value::String("zz".into())), &default_manifest())
+            EntityKey::from_artifact(&fact(Value::String("zz".into())), &Manifest::default())
                 .into_key();
         let next_band =
-            EntityKey::from_artifact(&fact(Value::UnsignedInt(1)), &default_manifest()).into_key();
+            EntityKey::from_artifact(&fact(Value::UnsignedInt(1)), &Manifest::default()).into_key();
         assert!(
             below < spilled_key,
             "sorts by leading bytes within the band"
@@ -752,9 +718,10 @@ mod tests {
 
         // Cardinality-many: two large values sharing their entire key-prefix
         // differ only in the trailing hash — distinct keys, both spilled.
-        let sibling = format!("{}A", "z".repeat(default_manifest().inline_n as usize + 1));
+        let sibling = format!("{}A", "z".repeat(Manifest::default().inline_n as usize + 1));
         let sibling_key =
-            EntityKey::from_artifact(&fact(Value::String(sibling)), &default_manifest()).into_key();
+            EntityKey::from_artifact(&fact(Value::String(sibling)), &Manifest::default())
+                .into_key();
         assert_ne!(
             spilled_key, sibling_key,
             "same-prefix large values stay distinct via the trailing hash"
@@ -781,7 +748,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_round_trips_a_small_value_inline() -> anyhow::Result<()> {
         let value = Value::String("Alice".into());
-        let key = EntityKey::from_artifact(&fact(value.clone()), &default_manifest());
+        let key = EntityKey::from_artifact(&fact(value.clone()), &Manifest::default());
 
         assert!(!key.value_is_spilled(), "a small value stays inline");
         assert_eq!(key.value_type(), value.data_type());
@@ -800,9 +767,9 @@ mod tests {
         let value = Value::UnsignedInt(1234);
         let fact = fact(value.clone());
 
-        let eav = EntityKey::from_artifact(&fact, &default_manifest());
-        let aev = AttributeKey::from_artifact(&fact, &default_manifest());
-        let vae = ValueKey::from_artifact(&fact, &default_manifest());
+        let eav = EntityKey::from_artifact(&fact, &Manifest::default());
+        let aev = AttributeKey::from_artifact(&fact, &Manifest::default());
+        let vae = ValueKey::from_artifact(&fact, &Manifest::default());
 
         assert_eq!(eav.value_payload(), aev.value_payload());
         assert_eq!(eav.value_payload(), vae.value_payload());
@@ -838,7 +805,7 @@ mod tests {
         let raw = value.to_bytes();
         let mut expected = Vec::new();
         crate::encode_bytes(
-            &raw[..raw.len().min(default_manifest().spill_prefix as usize)],
+            &raw[..raw.len().min(Manifest::default().spill_prefix as usize)],
             &mut expected,
         );
         assert_eq!(
@@ -861,7 +828,7 @@ mod tests {
     /// trailing 32 bytes are the whole-value hash.
     #[dialog_common::test]
     async fn it_builds_a_spilled_key_with_prefix_and_trailing_hash() -> anyhow::Result<()> {
-        let manifest = default_manifest();
+        let manifest = Manifest::default();
         let value = Value::String("x".repeat(manifest.inline_n as usize + 1));
         let key = EntityKey::from_artifact(&fact(value.clone()), &manifest);
 

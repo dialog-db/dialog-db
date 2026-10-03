@@ -19,7 +19,7 @@
 //!   use [`DidExt::this`].
 //!
 //! - **Content-derived** — for entities defined by their inputs (an
-//!   replica is `(profile, subject)`, a branch is `(replica, name)`). The
+//!   replica is `(peer, subject)`, a branch is `(replica, name)`). The
 //!   entity URI is `did:key:z6Mk<base58(blake3(dag-cbor(inputs)))>`;
 //!   use [`EntityExt::of`]. Two parties independently describing the
 //!   same logical entity converge on the same URI.
@@ -36,6 +36,7 @@
 use base58::ToBase58;
 use dialog_artifacts::Entity;
 use dialog_common::Blake3Hash;
+use dialog_effects::branch::BranchRecord;
 use dialog_query::{Attribute, Concept};
 use dialog_varsig::Did;
 use serde::Serialize;
@@ -147,6 +148,28 @@ pub mod branch {
         pub u128,
     );
 
+    /// `dialog.branch/pull` — a branch this one pulls from, by entity:
+    /// a branch on this replica, or one on a peer's replica, derived
+    /// from `(replica, name)` like any other. A pull takes from every
+    /// one, so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.branch")]
+    #[cardinality(many)]
+    pub struct Pull(
+        /// The pulled-from branch's entity.
+        pub Entity,
+    );
+
+    /// `dialog.branch/push` — a branch this one pushes to, by entity,
+    /// as for [`Pull`]. A push goes to every one, so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.branch")]
+    #[cardinality(many)]
+    pub struct Push(
+        /// The pushed-to branch's entity.
+        pub Entity,
+    );
+
     /// `dialog.branch/revision` — the content-derived entity of the
     /// current revision: the join key from "where is this branch now?"
     /// to everything recorded about that revision (see
@@ -178,12 +201,216 @@ pub mod replica {
         pub Entity,
     );
 
-    /// `dialog.replica/profile` — the profile that owns this replica.
+    /// `dialog.replica/peer` — the peer that holds this replica.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.replica")]
-    pub struct Profile(
-        /// The profile entity (its DID as Entity).
+    pub struct Peer(
+        /// The peer entity (its DID as Entity).
         pub Entity,
+    );
+
+    /// `dialog.replica/active-branch` — the branch this replica has
+    /// switched to. Cardinality-one: switching again supersedes it.
+    ///
+    /// A branch *entity*, not a name, so it can name a branch that is
+    /// not on this replica at all -- one on another replica of the same
+    /// repository, reached by its `(replica, name)` hash.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.replica")]
+    pub struct ActiveBranch(
+        /// The active branch's entity (a [`Branch`](super::Branch)
+        /// entity).
+        pub Entity,
+    );
+}
+
+/// Attribute newtypes for sealed messages ([`SealedMessage`],
+/// [`SealedKey`]).
+///
+/// All attributes here live under the `dialog.secret` domain: ciphertext
+/// only its recipient can open, and what it holds.
+pub mod secret {
+    use super::{Attribute, Entity};
+
+    /// `dialog.secret/to` — who can open the message: the principal it
+    /// was sealed to.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct To(
+        /// The recipient's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.secret/message` — the sealed bytes.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct Message(
+        /// The ciphertext.
+        pub Vec<u8>,
+    );
+
+    /// `dialog.secret/key-of` — the principal whose key a message holds,
+    /// when it holds one: a role's key sealed to one of its members.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct KeyOf(
+        /// The principal's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.secret/kind` — what a principal whose key is held sealed
+    /// is: `space` for a repository's key.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct Kind(
+        /// The kind.
+        pub String,
+    );
+
+    /// `dialog.secret/seed` — the message holding a principal's key.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.secret")]
+    pub struct Seed(
+        /// The message's entity.
+        pub Entity,
+    );
+}
+
+/// Attribute newtypes for [`RootVault`] and [`ChildVault`] entities.
+///
+/// All attributes here live under the `dialog.vault` domain: the vaults a
+/// space records, each named within its parent, and the parent's proof
+/// that it derived a child.
+pub mod vault {
+    use super::{Attribute, Entity};
+
+    /// `dialog.vault/name` — the vault's name within its parent, or among
+    /// the top-level vaults.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault")]
+    pub struct Name(
+        /// The name.
+        pub String,
+    );
+
+    /// `dialog.vault/parent` — the vault a child is derived from.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault")]
+    pub struct Parent(
+        /// The parent's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.vault/signature` — the parent's signature over a child's
+    /// name and DID, so a record naming a key its parent did not derive
+    /// is ignored.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault")]
+    pub struct Signature(
+        /// The signature bytes.
+        pub Vec<u8>,
+    );
+}
+
+/// Attribute newtypes for [`VaultSecret`] entities.
+///
+/// All attributes here live under the `dialog.vault.secret` domain: the
+/// secrets a vault keeps by name.
+pub mod vault_secret {
+    use super::{Attribute, Entity};
+
+    /// `dialog.vault.secret/vault` — the vault the secret is sealed to.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault.secret")]
+    pub struct Vault(
+        /// The vault's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.vault.secret/name` — the secret's name within its vault.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault.secret")]
+    pub struct Name(
+        /// The name.
+        pub String,
+    );
+
+    /// `dialog.vault.secret/message` — the sealed message holding it.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.vault.secret")]
+    pub struct Message(
+        /// The message's entity.
+        pub Entity,
+    );
+}
+
+/// Attribute newtypes for [`Space`].
+///
+/// All attributes here live under the `dialog.space` domain: the
+/// repositories a peer keeps, by name, and where each is stored.
+pub mod space {
+    use super::{Attribute, Entity};
+
+    /// `dialog.space/peer` — the peer that keeps the repository.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Peer(
+        /// The peer's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.space/repository` — the repository kept.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Repository(
+        /// The repository's entity: its DID.
+        pub Entity,
+    );
+
+    /// `dialog.space/name` — the name the peer knows the repository by.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Name(
+        /// The name.
+        pub String,
+    );
+
+    /// `dialog.space/address` — where the repository is stored, as the
+    /// URI of its storage location (`file:///path/name`,
+    /// `file:profile/name`).
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.space")]
+    pub struct Address(
+        /// The location's URI.
+        pub String,
+    );
+}
+
+/// Attribute newtypes for [`PeerAddress`] and [`Contact`].
+///
+/// All attributes here live under the `dialog.peer` domain: what a host
+/// knows about the peers it can reach.
+pub mod peer {
+    use super::Attribute;
+
+    /// `dialog.peer/name` — the name the host knows the peer by.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.peer")]
+    pub struct Name(
+        /// The peer's local name.
+        pub String,
+    );
+
+    /// `dialog.peer/address` — an address the peer is reached at, as
+    /// the dag-cbor encoding of a
+    /// [`SiteAddress`](crate::SiteAddress). One per address, so
+    /// cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.peer")]
+    #[cardinality(many)]
+    pub struct Address(
+        /// The encoded site address.
+        pub Vec<u8>,
     );
 }
 
@@ -257,6 +484,120 @@ pub mod revision {
     );
 }
 
+/// Attribute newtypes for the [`PullUpstream`] / [`PushUpstream`]
+/// concepts.
+///
+/// Like the revision attributes, none of these is ever stored: they are
+/// the conclusion shape of the built-in rules that resolve a branch's
+/// pull and push relations to where the tracked branch lives (see
+/// [`rules`](crate::rules)). One domain per direction, since a concept
+/// is identified by its attributes and the two carry the same fields.
+pub mod pull {
+    use super::{Attribute, Entity};
+
+    /// `dialog.pull/upstream` — the branch pulled from.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.pull")]
+    pub struct Upstream(
+        /// The tracked branch's entity.
+        pub Entity,
+    );
+
+    /// `dialog.pull/name` — the tracked branch's name.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.pull")]
+    pub struct Name(
+        /// The branch name.
+        pub String,
+    );
+
+    /// `dialog.pull/subject` — the repository the tracked branch is in.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.pull")]
+    pub struct Subject(
+        /// The repository entity.
+        pub Entity,
+    );
+
+    /// `dialog.pull/peer` — the peer holding that repository's replica.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.pull")]
+    pub struct Peer(
+        /// The peer entity.
+        pub Entity,
+    );
+}
+
+/// The push counterpart of [`pull`].
+pub mod push {
+    use super::{Attribute, Entity};
+
+    /// `dialog.push/upstream` — the branch pushed to.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.push")]
+    pub struct Upstream(
+        /// The tracked branch's entity.
+        pub Entity,
+    );
+
+    /// `dialog.push/name` — the tracked branch's name.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.push")]
+    pub struct Name(
+        /// The branch name.
+        pub String,
+    );
+
+    /// `dialog.push/subject` — the repository the tracked branch is in.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.push")]
+    pub struct Subject(
+        /// The repository entity.
+        pub Entity,
+    );
+
+    /// `dialog.push/peer` — the peer holding that repository's replica.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.push")]
+    pub struct Peer(
+        /// The peer entity.
+        pub Entity,
+    );
+}
+
+/// A branch `this` pulls from, resolved to where it lives: its name,
+/// the repository it is in, and the peer holding that repository's
+/// replica -- this profile, for a local branch. Derived at query time
+/// by a built-in rule; never stored.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PullUpstream {
+    /// The pulling branch.
+    pub this: Entity,
+    /// The branch pulled from.
+    pub upstream: pull::Upstream,
+    /// Its name.
+    pub name: pull::Name,
+    /// The repository it is in.
+    pub subject: pull::Subject,
+    /// The peer holding it.
+    pub peer: pull::Peer,
+}
+
+/// A branch `this` pushes to, resolved as [`PullUpstream`] is.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PushUpstream {
+    /// The pushing branch.
+    pub this: Entity,
+    /// The branch pushed to.
+    pub upstream: push::Upstream,
+    /// Its name.
+    pub name: push::Name,
+    /// The repository it is in.
+    pub subject: push::Subject,
+    /// The peer holding it.
+    pub peer: push::Peer,
+}
+
 /// Attribute newtypes for the [`Session`] concept.
 ///
 /// `Profile` / `Operator` are cardinality-one (one per session); the
@@ -303,9 +644,16 @@ pub mod session {
 /// The single-variant enum shape tags the CBOR encoding with the
 /// concept name: two inputs with the same data but different
 /// concepts produce distinct hashes.
+///
+/// The peer is encoded under its old name, `profile`: the field name is
+/// part of the hash, and every replica entity -- and every branch
+/// entity derived from one -- already recorded depends on it.
+///
+/// Both fields are the DIDs' strings, which is how a [`Did`] encodes, so
+/// a replica can be derived from a peer entity without reparsing it.
 #[derive(Debug, Clone, Serialize)]
 enum ReplicaHash<'a> {
-    Replica { subject: &'a Did, profile: &'a Did },
+    Replica { subject: &'a str, profile: &'a str },
 }
 
 /// Hash input for [`Branch::this`].
@@ -320,51 +668,62 @@ enum BranchHash<'a> {
 
 /// This device's view of a specific repository.
 ///
-/// `this` is content-derived from `(profile, subject)` (see
+/// `this` is content-derived from `(peer, subject)` (see
 /// [`ReplicaHash`]), so:
 ///
-/// - two devices holding the same profile converge on the same
-///   replica entity for a given repository, and
-/// - different profiles produce different replica entities even when
+/// - two devices acting as the same peer converge on the same replica
+///   entity for a given repository, and
+/// - different peers produce different replica entities even when
 ///   pointing at the same repository.
 ///
 /// # Redundant by design
 ///
-/// [`replica::Subject`] and [`replica::Profile`] carry the same two
+/// [`replica::Subject`] and [`replica::Peer`] carry the same two
 /// DIDs that went into the hash. The hash is one-way, so without
 /// these attributes it would be impossible to answer "find the
-/// replica this profile has for subject X" without re-hashing every
+/// replica this peer has for subject X" without re-hashing every
 /// candidate. The attributes make the relationships discoverable
 /// through normal queries.
 ///
 /// # No name field
 ///
-/// Dialog's `Replica` carries identity (`subject`, `profile`) only.
+/// Dialog's `Replica` carries identity (`subject`, `peer`) only.
 /// Downstream that wants a display name can assert a name attribute of
 /// its own (e.g. `app.meta/name` — the `dialog.` namespace is reserved)
 /// on the same `Replica.this`; that attribute composes at query time
 /// without affecting identity.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Replica {
-    /// The replica's entity. Derived from `(profile, subject)`.
+    /// The replica's entity. Derived from `(peer, subject)`.
     pub this: Entity,
     /// Reference to the repository this replica is a view of.
     pub subject: replica::Subject,
-    /// Reference to the profile that owns this replica.
-    pub profile: replica::Profile,
+    /// Reference to the peer that holds this replica.
+    pub peer: replica::Peer,
 }
 
 impl Replica {
-    /// Build an replica concept from a profile DID and a subject DID.
-    pub fn new(profile: Did, subject: Did) -> Self {
+    /// Build a replica concept from a peer DID and a subject DID.
+    pub fn new(peer: Did, subject: Did) -> Self {
+        Self::derive(peer.this(), subject.this())
+    }
+
+    /// Build a replica concept from the entities of its peer and
+    /// subject, each a DID viewed as an entity.
+    pub fn derive(peer: Entity, subject: Entity) -> Self {
         Self {
             this: Entity::of(&ReplicaHash::Replica {
-                subject: &subject,
-                profile: &profile,
+                subject: &subject.to_string(),
+                profile: &peer.to_string(),
             }),
-            subject: replica::Subject(subject.this()),
-            profile: replica::Profile(profile.this()),
+            subject: replica::Subject(subject),
+            peer: replica::Peer(peer),
         }
+    }
+
+    /// The branch named `name` on this replica.
+    pub fn branch(&self, name: impl Into<branch::Name>) -> Branch {
+        Branch::new(self, name)
     }
 }
 
@@ -419,10 +778,195 @@ impl Branch {
     }
 }
 
+impl From<Branch> for BranchRecord {
+    fn from(branch: Branch) -> Self {
+        Self {
+            this: branch.this,
+            name: branch.name.0,
+            replica: branch.replica.0,
+        }
+    }
+}
+
+impl From<BranchRecord> for Branch {
+    fn from(record: BranchRecord) -> Self {
+        Self {
+            this: record.this,
+            name: branch::Name(record.name),
+            replica: branch::Replica(record.replica),
+        }
+    }
+}
+
 impl AsRef<Entity> for Branch {
     fn as_ref(&self) -> &Entity {
         &self.this
     }
+}
+
+/// An address a peer is reached at, as the host records it.
+///
+/// A peer is a role, not a record: an entity is a peer because a
+/// [`Replica`] names it as the holder. Which peers the host can reach is
+/// the host's own business, recorded in its own state, one of these per
+/// address. Its entity is the peer's DID.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PeerAddress {
+    /// The peer's entity: its DID.
+    pub this: Entity,
+    /// An address the peer is reached at, encoded.
+    pub address: peer::Address,
+}
+
+impl AsRef<Entity> for PeerAddress {
+    fn as_ref(&self) -> &Entity {
+        &self.this
+    }
+}
+
+/// A repository a peer keeps, by the name it knows it by and where it
+/// is stored on that peer's device. Its entity is derived from the peer
+/// and the repository, so peers whose records sync into one space each
+/// keep their own names and locations.
+///
+/// What a peer's space names resolve to: looking a repository up by name
+/// reads these before anything is looked for on disk.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Space {
+    /// The record's entity, derived from the peer and the repository.
+    pub this: Entity,
+    /// The peer that keeps it.
+    pub peer: space::Peer,
+    /// The repository.
+    pub repository: space::Repository,
+    /// The name the peer knows it by.
+    pub name: space::Name,
+    /// Where it is stored.
+    pub address: space::Address,
+}
+
+/// Ciphertext only its recipient can open.
+///
+/// Keyed by the ciphertext itself: sealing is randomized, so sealing the
+/// same bytes twice is two messages, and a re-seal adds one rather than
+/// silently replacing what it supersedes.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SealedMessage {
+    /// The message's entity, derived from its ciphertext.
+    pub this: Entity,
+    /// Who can open it.
+    pub to: secret::To,
+    /// The ciphertext.
+    pub message: secret::Message,
+}
+
+/// A sealed message that holds a principal's key: a role's key sealed to
+/// one of its members, or to the role above it.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SealedKey {
+    /// The message's entity.
+    pub this: Entity,
+    /// The principal whose key it holds.
+    pub key_of: secret::KeyOf,
+}
+
+/// A principal whose key is held sealed: a repository whose key is
+/// sealed for its owner.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SecretPrincipal {
+    /// The principal's entity: its DID.
+    pub this: Entity,
+    /// What the principal is.
+    pub kind: secret::Kind,
+    /// The message holding its key.
+    pub seed: secret::Seed,
+}
+
+/// A top-level vault: its key generated when it was created, and sealed
+/// to its owners.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RootVault {
+    /// The vault's entity: its DID.
+    pub this: Entity,
+    /// Its name among the top-level vaults.
+    pub name: vault::Name,
+}
+
+/// A vault derived from its parent's key, with the parent's signature
+/// over its name and DID.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChildVault {
+    /// The vault's entity: its DID.
+    pub this: Entity,
+    /// The vault it is derived from.
+    pub parent: vault::Parent,
+    /// Its name within its parent.
+    pub name: vault::Name,
+    /// The parent's signature over its name and DID.
+    pub signature: vault::Signature,
+}
+
+/// A secret a vault keeps by name: the sealed message holding it.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VaultSecret {
+    /// The secret's entity, derived from its vault and name.
+    pub this: Entity,
+    /// The vault it is sealed to.
+    pub vault: vault_secret::Vault,
+    /// Its name within the vault.
+    pub name: vault_secret::Name,
+    /// The sealed message holding it.
+    pub message: vault_secret::Message,
+}
+
+/// A contact: a peer the host knows by name.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Contact {
+    /// The peer's entity: its DID.
+    pub this: Entity,
+    /// The name the host knows it by.
+    pub name: peer::Name,
+}
+
+impl AsRef<Entity> for Contact {
+    fn as_ref(&self) -> &Entity {
+        &self.this
+    }
+}
+
+/// One branch a branch pulls from. Cardinality-many: a branch pulling
+/// from several has one of these per branch, and a pull takes from all.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BranchPull {
+    /// The pulling branch's entity (same as [`Branch::this`]).
+    pub this: Entity,
+    /// The pulled-from branch's entity.
+    pub pull: branch::Pull,
+}
+
+/// One branch a branch pushes to. Cardinality-many: a branch pushing to
+/// several has one of these per branch, and a push goes to all.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BranchPush {
+    /// The pushing branch's entity (same as [`Branch::this`]).
+    pub this: Entity,
+    /// The pushed-to branch's entity.
+    pub push: branch::Push,
+}
+
+/// The branch a replica has switched to.
+///
+/// Attached to the [`Replica`] entity (`this == Replica.this`) -- a
+/// separate concept rather than a field on `Replica` because a replica
+/// that never switched has no active branch, and concepts require
+/// every field to be present. Recorded in the registry branch by
+/// [`registry::switch`](crate::registry::switch).
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ActiveBranch {
+    /// The replica entity (same as [`Replica::this`]).
+    pub this: Entity,
+    /// The branch entity the replica has switched to.
+    pub branch: replica::ActiveBranch,
 }
 
 /// The current revision of a branch.
@@ -616,12 +1160,29 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_reflects_subject_and_profile_on_replica_attributes() {
-        let profile = did!("test:profile-x");
+    fn it_reflects_subject_and_peer_on_replica_attributes() {
+        let peer = did!("test:profile-x");
         let subject = did!("test:repo-y");
-        let replica = Replica::new(profile.clone(), subject.clone());
-        assert_eq!(replica.profile.0.to_string(), profile.as_str());
+        let replica = Replica::new(peer.clone(), subject.clone());
+        assert_eq!(replica.peer.0.to_string(), peer.as_str());
         assert_eq!(replica.subject.0.to_string(), subject.as_str());
+    }
+
+    /// Replica and branch entities are stored wherever a branch is
+    /// referenced, so their derivation may never change. Pinned to the
+    /// values it produced before `profile` was renamed to `peer`.
+    #[dialog_common::test]
+    fn it_derives_replica_and_branch_entities_stably() {
+        let replica = Replica::new(did!("test:peer"), did!("test:repo"));
+        let branch = Branch::new(&replica, "main");
+        assert_eq!(
+            replica.this.to_string(),
+            "did:key:z6Mk7M7sobJMZBRBsA5tiE1AWaNpnmE4dZzjj35c4LK2MQy1"
+        );
+        assert_eq!(
+            branch.this.to_string(),
+            "did:key:z6Mk67GBkC1e56fwjn3hQ3t6BqwRkP2cfTWJLSPjfVYoHTxC"
+        );
     }
 
     #[dialog_common::test]

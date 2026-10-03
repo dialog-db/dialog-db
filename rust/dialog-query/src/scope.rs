@@ -4,13 +4,13 @@
 //! Evaluation reaches the world exclusively through effects the
 //! environment provides: range scans ([`Select`]) with demand
 //! recording, rule discovery ([`SelectRules`]), idempotent
-//! content-addressed block loads ([`Load`]) for resolver premises, and
+//! content-addressed loads for resolver premises (tree nodes through
+//! [`LoadBlock`], spilled values through [`LoadBlob`]), and
 //! advisory replication hints ([`Preload`]) for ranges evaluation
 //! expects to need. `Scope` names that bundle once so premise
 //! evaluation signatures stay stable as effects are added.
 
-use dialog_artifacts::inspect::Load;
-use dialog_artifacts::{Estimate, Preload, Select};
+use dialog_artifacts::{Estimate, LoadBlob, LoadBlock, Preload, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 
@@ -21,7 +21,8 @@ use crate::source::SelectRules;
 pub trait Scope<'a>:
     Provider<Select<'a>>
     + Provider<SelectRules>
-    + Provider<Load>
+    + Provider<LoadBlock>
+    + Provider<LoadBlob>
     + Provider<Preload>
     + Provider<Estimate>
     + ConditionalSync
@@ -31,7 +32,8 @@ pub trait Scope<'a>:
 impl<'a, T> Scope<'a> for T where
     T: Provider<Select<'a>>
         + Provider<SelectRules>
-        + Provider<Load>
+        + Provider<LoadBlock>
+        + Provider<LoadBlob>
         + Provider<Preload>
         + Provider<Estimate>
         + ConditionalSync

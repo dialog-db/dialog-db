@@ -1,44 +1,45 @@
+use dialog_effects::blob::Read as BlobRead;
 use std::collections::HashSet;
 
-use dialog_artifacts::inspect::Load;
+use dialog_artifacts::LoadBlob;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey,
+    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select,
     Speculation, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
-use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
+use dialog_query::concept::query::ConceptRules;
 use dialog_query::concept::query::fixpoint::Continuation;
-use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
-use dialog_search_tree::Buffer;
-use dialog_storage::{Blake3Hash, StorageBackend};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use futures_util::future::try_join_all;
-use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+use futures_util::{TryStreamExt as _, stream};
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 use crate::REGISTRY;
-use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, tombstones_from};
+use crate::repository::branch::select::line_manifest;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
-    assemble, builtin, conclusion_attr, conclusion_selector, hydrate, overlay_rules, rule_entities,
-    source_attr, source_bytes, source_selector,
+    assemble, builtin, conclusion_attr, conclusion_selector, has_overlay_rules, holds_rules,
+    hydrate, overlay_rules, rule_entities, source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
-use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot};
+use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -153,6 +154,24 @@ impl<'a> QueryLayer<'a> {
     /// `operator` (from [`Identify`]) supplies the profile + operator
     /// DIDs the schema entities are derived from.
     pub fn metadata(&self, operator: &Capability<Operator>) -> Changes {
+        Changes::clone(&self.shared_metadata(operator))
+    }
+
+    /// [`metadata`](Self::metadata), shared with every other query over
+    /// the same branch, profile, operator and head.
+    fn shared_metadata(&self, operator: &Capability<Operator>) -> Arc<Changes> {
+        // Every query folds this in, and for a layer over one branch it
+        // depends only on the profile, the operator and the head, so the
+        // branch keeps it: deriving it hashes and base58-renders entities
+        // and re-parses both DIDs each time.
+        if let [SourceRef::Branch(branch)] = self.sources.as_slice() {
+            return branch.layer_metadata(operator, || self.derive_metadata(operator));
+        }
+        Arc::new(self.derive_metadata(operator))
+    }
+
+    /// Derive what [`metadata`](Self::metadata) folds in.
+    fn derive_metadata(&self, operator: &Capability<Operator>) -> Changes {
         let mut changes = Changes::new();
 
         let mut branch_entities = Vec::with_capacity(self.sources.len());
@@ -202,10 +221,18 @@ impl<'a> QueryLayer<'a> {
     /// [`changes`](Self::changes) with [`metadata`](Self::metadata)
     /// folded in. This is exactly what `.select(..).perform(..)`
     /// queries against alongside the branch streams.
-    pub fn overlay(&self, operator: &Capability<Operator>) -> Changes {
+    ///
+    /// A layer that adds no changes of its own queries the metadata
+    /// alone, which is then the branch's shared copy rather than a new
+    /// one rebuilt fact by fact for every query.
+    pub fn overlay(&self, operator: &Capability<Operator>) -> Arc<Changes> {
+        let metadata = self.shared_metadata(operator);
+        if self.changes.is_empty() {
+            return metadata;
+        }
         let mut overlay = self.changes.clone();
-        self.metadata(operator).assert(&mut overlay);
-        overlay
+        Changes::clone(&metadata).assert(&mut overlay);
+        Arc::new(overlay)
     }
 
     /// Stage a query application. Call `.perform(&operator)` to execute.
@@ -277,7 +304,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// with the overlay.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Identify>
@@ -329,17 +357,16 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
     /// All overlay facts — caller-asserted + auto-injected metadata —
-    /// merged into one batch. Queried via `Provider<Select> for Changes`.
-    changes: Changes,
-    /// `sort_key`s of every retracted fact in `changes`. Each line's
-    /// session overlay stream is filtered against these before the
-    /// merge so a staged retract suppresses a session fact.
-    staged: Arc<HashSet<SortKey>>,
-    /// `staged` plus every line's session tombstones. Each line's tree
-    /// stream is filtered against these before the merge so retracts
-    /// in the per-query changes and session tombstones suppress
-    /// matching facts in the tree.
-    tombstones: Arc<HashSet<SortKey>>,
+    /// merged into one batch. Queried via [`Changes::select`] under the
+    /// lines' format.
+    changes: Arc<Changes>,
+    /// A transaction's writes and dispatched transients, each held so a
+    /// selector is a range read (see [`Staged`]) and shared, never
+    /// copied, per query.
+    layers: Vec<Staged>,
+    /// The lines' format and the tombstones keyed under it, resolved on
+    /// the first read (it needs the lines' tree roots) and shared by clones.
+    format: Arc<OnceCell<Format>>,
     /// When present, every selector this environment executes —
     /// fact scans and rule-discovery reads alike — records its
     /// demanded range here. Subscriptions use the recorded cover to
@@ -350,15 +377,59 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// evaluation continues (or rebuilds into) the retained answer
     /// table instead of computing a throwaway one.
     fixpoint: Option<(Entity, Continuation)>,
+    /// Whether any line can fetch what it lacks (see
+    /// [`SourceRef::fetches`](crate::repository::source::SourceRef)):
+    /// preload hints are refused when none can.
+    fetches: bool,
     env: &'a Env,
+}
+
+/// The format [`Manifest`]s of the trees a [`QueryEnv`] reads, and the
+/// tombstone sets keyed under them.
+///
+/// A line's rows are keyed under its tree's manifest. Overlay facts and
+/// retracts are keyed under the lines' manifest too, so they order and
+/// match exactly as the trees' own rows do. Lines written under different
+/// manifests are still read together rather than refused: each line's rows
+/// are filtered with tombstones keyed under its own manifest, and the merge
+/// derives every row's key from its fields under the first line's
+/// ([`MergeKeys::Fields`]), a slower path that keeps retracts and dedup
+/// exact across formats.
+struct Format {
+    /// The manifest overlay rows and merge keys are taken under: the lines'
+    /// shared manifest, or the first line's when they differ.
+    manifest: Manifest,
+    /// How the merge keys rows: off stored bytes when every line shares
+    /// `manifest`, from fields when they do not.
+    keys: MergeKeys,
+    /// Per line, in line order: its manifest and the tombstone sets its
+    /// streams are filtered with.
+    lines: Vec<LineFormat>,
+}
+
+/// One line's manifest and the tombstone sets its streams are filtered
+/// with before the merge, keyed under that manifest.
+struct LineFormat {
+    /// The manifest of the line's tree.
+    manifest: Manifest,
+    /// Every fact the per-query changes and the staged layers retract.
+    /// The line's session overlay stream is filtered against these so a
+    /// staged retract suppresses a session fact. Cells a replace claimed
+    /// are not: the session's facts outlive the commit, so they show
+    /// over it.
+    staged: Hidden,
+    /// `staged`, the cells the layers' replaces claimed, and the line's
+    /// session tombstones. The line's tree stream is filtered against
+    /// these, so a read sees the tree as the commit will leave it.
+    tombstones: Hidden,
 }
 
 impl<'a, Env> QueryEnv<'a, Env> {
     /// Build a runtime env from already-resolved parts: the lines to
     /// read, the per-query overlay (caller changes + injected metadata),
     /// and the underlying capability env. The tombstones are lifted
-    /// here: the per-query retracts, plus each line's session
-    /// tombstones for the tree streams.
+    /// on first read, once the lines' format is known: the per-query
+    /// retracts, keyed under each line's manifest.
     ///
     /// `Branch::query`, `Snapshot::query`, and the transaction-query
     /// paths all construct through here so there is exactly one query
@@ -366,30 +437,30 @@ impl<'a, Env> QueryEnv<'a, Env> {
     /// Deductive-rule resolution is built in (a durable layer per line,
     /// its session overlay, and the per-query changes as a transient
     /// layer), so the paths can never diverge on it.
-    pub(crate) fn new(sources: Vec<Source>, changes: Changes, env: &'a Env) -> Self {
-        let staged = tombstones_from(&changes);
-        // The common case, one line and nothing staged, shares the
-        // overlay's own set rather than copying it per query.
-        let tombstones = match sources.as_slice() {
-            [only] if staged.is_empty() => only.as_ref().overlay().tombstones(),
-            _ => {
-                let mut tombstones = staged.clone();
-                for source in &sources {
-                    let session = source.as_ref().overlay().tombstones();
-                    tombstones.extend(session.iter().cloned());
-                }
-                Arc::new(tombstones)
-            }
-        };
+    pub(crate) fn new(
+        sources: Vec<Source>,
+        changes: impl Into<Arc<Changes>>,
+        env: &'a Env,
+    ) -> Self {
+        let changes = changes.into();
+        let fetches = sources.iter().any(|source| source.as_ref().fetches());
         Self {
             sources,
             changes,
-            staged: Arc::new(staged),
-            tombstones,
+            layers: Vec::new(),
+            format: Arc::new(OnceCell::new()),
             demand: None,
             fixpoint: None,
+            fetches,
             env,
         }
+    }
+
+    /// Read `layers` above the lines too: a transaction's writes, held
+    /// so reading them costs a range read however many there are.
+    pub(crate) fn with_layers(mut self, layers: Vec<Staged>) -> Self {
+        self.layers = layers;
+        self
     }
 
     /// Record every selector this environment executes into
@@ -408,11 +479,80 @@ impl<'a, Env> QueryEnv<'a, Env> {
         self
     }
 
-    /// Record a selector's demanded range, when recording is on.
-    fn record_demand(&self, selector: &ArtifactSelector<Constrained>) {
+    /// Record a selector's demanded range under `manifest`, when
+    /// recording is on.
+    fn record_demand(&self, selector: &ArtifactSelector<Constrained>, manifest: &Manifest) {
         if let Some(demand) = &self.demand {
-            demand.record(selector);
+            demand.record(selector, manifest);
         }
+    }
+}
+
+impl<Env> QueryEnv<'_, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    /// The lines' formats and the tombstones keyed under them, resolved
+    /// from the lines' tree roots on first use (see [`Format`]).
+    async fn format(&self) -> Result<&Format, DialogArtifactsError> {
+        self.format
+            .get_or_try_init(|| async {
+                let mut lines = Vec::with_capacity(self.sources.len());
+                for source in &self.sources {
+                    lines.push(line_manifest(source.as_ref(), self.env).await?);
+                }
+                // With no line there is no tree, and the overlay is read
+                // as a new tree would order it.
+                let manifest = lines.first().cloned().unwrap_or_default();
+                let keys = if lines.iter().all(|line| *line == manifest) {
+                    MergeKeys::Stored
+                } else {
+                    MergeKeys::Fields
+                };
+                let shared = Arc::new(tombstones_from(&self.changes, &manifest));
+                let lines = self
+                    .sources
+                    .iter()
+                    .zip(lines)
+                    .map(|(source, line)| {
+                        let changes = if line == manifest {
+                            shared.clone()
+                        } else {
+                            Arc::new(tombstones_from(&self.changes, &line))
+                        };
+                        // Every set is shared, never merged, so this costs
+                        // nothing per query however much the layers or the
+                        // session hold.
+                        let mut staged = Hidden::default().facts(changes);
+                        for layer in &self.layers {
+                            staged = staged.facts(layer.tombstones(&line));
+                        }
+                        let mut tombstones = staged
+                            .clone()
+                            .facts(source.as_ref().overlay().tombstones(&line));
+                        for layer in &self.layers {
+                            tombstones = tombstones.cells(layer.cells());
+                        }
+                        LineFormat {
+                            manifest: line,
+                            staged,
+                            tombstones,
+                        }
+                    })
+                    .collect();
+                Ok(Format {
+                    manifest,
+                    keys,
+                    lines,
+                })
+            })
+            .await
     }
 }
 
@@ -421,10 +561,11 @@ impl<Env> Clone for QueryEnv<'_, Env> {
         Self {
             sources: self.sources.clone(),
             changes: self.changes.clone(),
-            staged: self.staged.clone(),
-            tombstones: self.tombstones.clone(),
+            layers: self.layers.clone(),
+            format: self.format.clone(),
             demand: self.demand.clone(),
             fixpoint: self.fixpoint.clone(),
+            fetches: self.fetches,
             env: self.env,
         }
     }
@@ -435,16 +576,20 @@ impl<Env> Clone for QueryEnv<'_, Env> {
 /// helper so every line in a [`QueryEnv`] shares the exact same read path
 /// (a transaction query is itself a single-line `QueryEnv`).
 ///
-/// Takes the line by value (a cheap clone: shared caches) and moves it
-/// into the returned stream, so the stream borrows only the env —
-/// errors surface as the stream's first item.
-pub(crate) fn select_from_source<'a, Env>(
-    source: Source,
+/// The line is only borrowed while the scan is set up: the returned
+/// stream borrows nothing but the env. The setup runs here rather than
+/// inside the stream so the stream boxed per scan holds only the scan,
+/// not the setup's futures alongside it (together they came to 16 KiB,
+/// allocated and copied for every scan a query ran), and the scan is
+/// built in its box ([`Select::execute_boxed`](crate::Select)).
+pub(crate) async fn select_from_source<'a, Env>(
+    source: SourceRef<'_>,
     env: &'a Env,
     input: ArtifactSelector<Constrained>,
-) -> ArtifactStream<'a>
+) -> Result<ArtifactStream<'a>, DialogArtifactsError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -452,18 +597,13 @@ where
         + ConditionalSync
         + 'static,
 {
-    Box::pin(async_stream::try_stream! {
-        let select = crate::Select::from_source(source.as_ref(), input);
-        let remote = source.as_ref().fallback(env).await;
-        // Concurrent reads of one digest share fetch-and-hydrate through
-        // the env's own `Hydrate` flight (see `crate::Hydrate`), with
-        // every other evaluation in the process.
-        let store = NetworkedIndex::new(env, select.catalog(), remote);
-        let stream = select.execute(store).await?;
-        for await artifact in stream {
-            yield artifact?;
-        }
-    })
+    let select = crate::Select::from_source(source, input);
+    let remote = source.fallback();
+    // Concurrent reads of one digest share fetch-and-hydrate through
+    // the env's own `Hydrate` flight (see `crate::Hydrate`), with
+    // every other evaluation in the process.
+    let store = NetworkedIndex::new(env, select.catalog(), remote);
+    Ok(select.execute_boxed(store).await?)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -483,7 +623,8 @@ where
 // variable.
 impl<'a, Env> Provider<Select<'a>> for QueryEnv<'a, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -495,49 +636,72 @@ where
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        self.record_demand(&input);
+        let format = self.format().await?;
+        let manifest = format.manifest.clone();
+        self.record_demand(&input, &manifest);
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
 
         // Line streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
         // retract in `with(..)`) suppresses matching source facts, and
-        // by the line's session tombstones. Each owns its line clone
-        // and borrows only `self.env`.
-        for source in &self.sources {
-            let raw = select_from_source(source.clone(), self.env, input.clone());
-            streams.push(filter_tombstones(raw, self.tombstones.clone()));
+        // by the line's session tombstones. Each line's stream is
+        // filtered with the tombstones keyed under its own manifest, and
+        // borrows only `self.env`.
+        for (source, line) in self.sources.iter().zip(&format.lines) {
+            let raw = select_from_source(source.as_ref(), self.env, input.clone()).await?;
+            streams.push(filter_hidden(
+                raw,
+                line.tombstones.within(&input),
+                line.manifest.clone(),
+            ));
         }
 
         // Each line's session overlay, read live. Filtered by the
         // staged retracts only: the overlay's own tombstones hide facts
         // *beneath* it, never its own. Pushed only when it has rows,
         // for the same reason the per-query stream is below.
-        for source in &self.sources {
-            let mut session =
-                Provider::<Select<'a>>::execute(source.as_ref().overlay(), input.clone()).await?;
-            if let Some(first) = futures_util::StreamExt::next(&mut session).await {
-                let rows: ArtifactStream<'a> = Box::pin(stream::iter(vec![first]).chain(session));
-                streams.push(filter_tombstones(rows, self.staged.clone()));
+        for (source, line) in self.sources.iter().zip(&format.lines) {
+            let rows = source.as_ref().overlay().select(&input, &line.manifest);
+            if rows.is_empty() {
+                continue;
+            }
+            let rows: ArtifactStream<'a> =
+                Box::pin(stream::iter(rows.into_iter().map(|fact| Ok(fact.into()))));
+            streams.push(filter_hidden(
+                rows,
+                line.staged.clone(),
+                line.manifest.clone(),
+            ));
+        }
+
+        // Overlay stream — the per-query changes, read in the lines'
+        // format so the rows order as the tree's own. The overlay always
+        // carries facts (session metadata at minimum), but MATCHES the
+        // typical fact selector rarely: a join's inner premise probes one
+        // entity per outer binding, and pushing an empty overlay stream
+        // anyway forced the k-way merge (and its per-row sort keys) on
+        // every one of those probes. Push the overlay's materialized
+        // result only when it has rows, so the single-source common case
+        // flows through `merge_grouped`'s passthrough arm.
+        let overlay = self.changes.select(&input, &manifest);
+        if !overlay.is_empty() {
+            streams.push(Box::pin(stream::iter(
+                overlay.into_iter().map(|fact| Ok(fact.into())),
+            )));
+        }
+
+        // Staged layers — a range read each, in the lines' format, and
+        // pushed only when they have rows, for the same reason.
+        for layer in &self.layers {
+            let rows = layer.select(&input, &manifest);
+            if !rows.is_empty() {
+                streams.push(Box::pin(stream::iter(
+                    rows.into_iter().map(|fact| Ok(fact.into())),
+                )));
             }
         }
 
-        // Overlay stream — Changes itself is a Provider<Select>. The
-        // overlay always carries facts (session metadata at minimum), but
-        // MATCHES the typical fact selector rarely: a join's inner premise
-        // probes one entity per outer binding, and pushing an empty overlay
-        // stream anyway forced the k-way merge (and its per-row sort keys)
-        // on every one of those probes. Peek the overlay's materialized
-        // result and push it only when it has rows, so the single-source
-        // common case flows through `merge_grouped`'s passthrough arm.
-        let mut overlay = Provider::<Select<'a>>::execute(&self.changes, input).await?;
-        match futures_util::StreamExt::next(&mut overlay).await {
-            None => {}
-            Some(first) => {
-                streams.push(Box::pin(stream::iter(vec![first]).chain(overlay)));
-            }
-        }
-
-        Ok(merge_grouped(streams))
+        Ok(merge_grouped(streams, manifest, format.keys))
     }
 }
 
@@ -552,7 +716,8 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Env> Provider<Estimate> for QueryEnv<'_, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -567,7 +732,7 @@ where
         let mut total: Option<u64> = None;
         for source in &self.sources {
             let select = crate::Select::from_source(source.as_ref(), input.clone());
-            let remote = source.as_ref().fallback(self.env).await;
+            let remote = source.as_ref().fallback();
             let store = NetworkedIndex::new(self.env, select.catalog(), remote);
             if let Some(estimate) = select.estimate(store).await? {
                 total = Some(total.unwrap_or(0).saturating_add(estimate));
@@ -580,10 +745,17 @@ where
 // A `Preload` hint forwards to the underlying env's ambient queue —
 // the enqueue half of speculative replication; whichever driven
 // evaluation stream polls next does the fetching (see
-// `crate::repository::fetch`). Forwarding unconditionally is the whole
-// point of the ambient design: every construction site (plain queries,
+// `crate::repository::fetch`). Forwarding is the whole point of the
+// ambient design: every construction site (plain queries,
 // subscriptions, transaction queries) emits hints with no per-path
 // wiring, and the env's budget decides whether anyone listens.
+//
+// The one exception is an env none of whose lines has a remote: the
+// job a hint becomes warms this query's own lines, and with nowhere to
+// fetch from it does nothing (see `warm_source`). Such an env refuses
+// hints, which also tells an evaluator to stop composing them: a
+// selection that hands each scan many rows otherwise queues a hint per
+// row only for it to be dropped.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Env> Provider<Preload> for QueryEnv<'_, Env>
@@ -591,7 +763,43 @@ where
     Env: Provider<Preload> + ConditionalSync,
 {
     async fn execute(&self, input: PreloadRequest) -> bool {
+        if !self.fetches {
+            return false;
+        }
         Provider::<Preload>::execute(self.env, input).await
+    }
+}
+
+// The spilled-value load behind `tree/value`: the same line-by-line
+// walk as `Load`, reading each line's spill lane (its blob store, then
+// the block catalog for values spilled before they moved to blobs,
+// with the remote fallback a fact scan uses). Spilled values are not
+// nodes, so the node cache is not consulted.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<'a, Env> Provider<LoadBlob> for QueryEnv<'a, Env>
+where
+    Env: Provider<Get>
+        + Provider<BlobRead>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(
+        &self,
+        LoadBlob { hash }: LoadBlob,
+    ) -> Result<Option<Buffer>, DialogArtifactsError> {
+        for source in &self.sources {
+            let source = source.as_ref();
+            let store = NetworkedIndex::new(self.env, source.archive().index(), source.fallback());
+            if let Some(bytes) = store.load_blob(&hash).await? {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -610,7 +818,7 @@ where
 // block every time.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a, Env> Provider<Load> for QueryEnv<'a, Env>
+impl<'a, Env> Provider<LoadBlock> for QueryEnv<'a, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -620,30 +828,49 @@ where
         + ConditionalSync
         + 'static,
 {
-    async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
         for source in &self.sources {
             let source = source.as_ref();
-            let remote = source.fallback(self.env).await;
+            let remote = source.fallback();
             let store = NetworkedIndex::new(self.env, source.archive().index(), remote);
-            let cached = source
-                .node_cache()
-                .get_or_fetch(&NodeHash::from(input), async |hash| {
-                    StorageBackend::get(&store, hash.as_bytes())
-                        .await
-                        .map(|bytes| bytes.map(Buffer::from))
-                })
-                .await?;
-            if let Some(buffer) = cached {
-                return Ok(Some(buffer.into_vec()));
+            let cache = source.node_cache();
+            if let Some(node) = cache.get_cached(&load.hash) {
+                return Ok(Some(node.buffer().clone()));
+            }
+            if let Some(block) = load.clone().perform(&store).await? {
+                // A block that checks as a node joins the cache; any other
+                // block is returned as it is, for the caller to read.
+                if let Ok(node) = PersistentNode::try_from(block.clone()) {
+                    cache.insert(load.hash.clone(), node);
+                }
+                return Ok(Some(block));
             }
         }
         Ok(None)
     }
 }
 
+/// The rules a staged layer holds concluding `concept`: two range
+/// reads, as a session's are. The layer is per query, so it is read
+/// fresh and records no demand; a body that does not hydrate is
+/// skipped, as an overlay's is.
+fn staged_rules(layer: &Staged, concept: &Entity) -> Vec<DeductiveRule> {
+    let entities = rule_entities(layer.scan(&conclusion_selector(concept)));
+    let mut rules = Vec::with_capacity(entities.len());
+    for rule_entity in entities {
+        if let Some(bytes) = source_bytes(layer.scan(&source_selector(&rule_entity)))
+            && let Ok(rule) = hydrate(&bytes)
+        {
+            rules.push(rule);
+        }
+    }
+    rules
+}
+
 impl<'a, Env> QueryEnv<'a, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -668,11 +895,12 @@ where
         // demand: a hit here invalidates the whole result, not one
         // entity's slice.
         if let Some(demand) = &self.demand {
-            demand.record_rules(&selector);
+            demand.record_rules(&selector, &self.format().await?.manifest);
         }
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
-        select_from_source(source.clone(), self.env, selector)
+        select_from_source(source.as_ref(), self.env, selector)
+            .await?
             .owned()
             .try_collect()
             .await
@@ -687,18 +915,19 @@ where
         &self,
         source: &Source,
         concept: &Entity,
+        manifest: &Manifest,
     ) -> Result<Vec<DeductiveRule>, EvaluationError> {
         let overlay = source.as_ref().overlay();
         let conclusions = conclusion_selector(concept);
         if let Some(demand) = &self.demand {
-            demand.record_rules(&conclusions);
+            demand.record_rules(&conclusions, manifest);
         }
         let entities = rule_entities(overlay.scan(&conclusions));
         let mut rules = Vec::with_capacity(entities.len());
         for rule_entity in entities {
             let sources = source_selector(&rule_entity);
             if let Some(demand) = &self.demand {
-                demand.record_rules(&sources);
+                demand.record_rules(&sources, manifest);
             }
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
                 continue;
@@ -791,7 +1020,8 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Env> Provider<SelectRules> for QueryEnv<'_, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -815,6 +1045,38 @@ where
     /// [`RuleRegistry::acquire`]: dialog_query::session::RuleRegistry::acquire
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let concept = input.this();
+
+        // An assembled rule set depends only on the committed layers it was
+        // resolved from, so while none has moved the last one assembled
+        // stands. Not when rules are read fresh: from the query's overlay,
+        // or from a line's session overlay, which moves without moving its
+        // root. Nor when the query records what it reads, since reading
+        // the rules is what records a subscription's demand on them.
+        let roots: Vec<_> = self
+            .sources
+            .iter()
+            .map(|source| source.as_ref().root())
+            .collect();
+        let cache = self
+            .sources
+            .first()
+            .map(|source| source.as_ref().rule_cache())
+            .filter(|_| {
+                self.demand.is_none()
+                    && !has_overlay_rules(&self.changes)
+                    && !self.layers.iter().any(Staged::holds_rules)
+                    && !self
+                        .sources
+                        .iter()
+                        .any(|source| holds_rules(source.as_ref().overlay()))
+            });
+        if let Some(bundle) = cache
+            .as_ref()
+            .and_then(|cache| cache.bundle(&input, &roots))
+        {
+            return Ok(self.continuing(&concept, bundle));
+        }
+
         let mut rules: Vec<DeductiveRule> = Vec::new();
 
         // Built-in rules first: the derived version-control concepts
@@ -827,12 +1089,17 @@ where
 
         // Durable layers — one per line — and each line's session
         // overlay, read fresh.
+        let manifest = &self.format().await?.manifest;
         for source in &self.sources {
             rules.extend(self.durable_rules(source, &concept).await?);
-            rules.extend(self.session_rules(source, &concept)?);
+            rules.extend(self.session_rules(source, &concept, manifest)?);
         }
-        // Transient layer — the per-query overlay, read fresh.
+        // Transient layers — the per-query overlay and the staged
+        // writes, read fresh.
         rules.extend(overlay_rules(&self.changes, &concept));
+        for layer in &self.layers {
+            rules.extend(staged_rules(layer, &concept));
+        }
 
         // Plan cache rides a line (peers share content-addressed plans;
         // any line's cache is correct). The overlay-only query has no
@@ -846,23 +1113,36 @@ where
         let bundle = assemble(&input, rules, plan_cache);
         let analysis = self.program_analysis(&input, &bundle).await?;
         analysis.check(&input)?;
-        Ok(if analysis.is_recursive(&concept) {
-            let bundle = bundle.with_recursion(analysis);
-            match &self.fixpoint {
-                Some((entity, continuation)) if *entity == concept => {
-                    bundle.with_continuation(continuation.clone())
-                }
-                _ => bundle,
-            }
+        let bundle = if analysis.is_recursive(&concept) {
+            bundle.with_recursion(analysis)
         } else {
             bundle
-        })
+        };
+        if let Some(cache) = cache {
+            cache.record_bundle(input.clone(), roots, bundle.clone());
+        }
+        Ok(self.continuing(&concept, bundle))
+    }
+}
+
+impl<Env> QueryEnv<'_, Env> {
+    /// `bundle` carrying this query's retained fixpoint, when a polling
+    /// subscription is evaluating `concept` recursively. Attached per
+    /// query, never cached: it belongs to the subscription.
+    fn continuing(&self, concept: &Entity, bundle: ConceptRules) -> ConceptRules {
+        match &self.fixpoint {
+            Some((entity, continuation)) if entity == concept && bundle.recursion().is_some() => {
+                bundle.with_continuation(continuation.clone())
+            }
+            _ => bundle,
+        }
     }
 }
 
 impl<'a, Env> QueryEnv<'a, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -923,12 +1203,19 @@ where
             let resolved =
                 try_join_all(frontier.into_iter().map(|(entity, descriptor)| async move {
                     let mut rules: Vec<DeductiveRule> = builtin(&entity);
+                    let manifest = &self.format().await?.manifest;
                     for source in &self.sources {
                         rules.extend(self.durable_rules(source, &entity).await?);
-                        rules.extend(self.session_rules(source, &entity)?);
+                        rules.extend(self.session_rules(source, &entity, manifest)?);
                     }
                     rules.extend(overlay_rules(&self.changes, &entity));
-                    let bundle = assemble(&descriptor, rules, PlanCache::default());
+                    for layer in &self.layers {
+                        rules.extend(staged_rules(layer, &entity));
+                    }
+                    // The analysis reads premises and never plans, so
+                    // these bundles share the root's cache rather than
+                    // allocating one each.
+                    let bundle = assemble(&descriptor, rules, root_bundle.plan_cache().clone());
                     Ok::<_, EvaluationError>((entity, bundle))
                 }))
                 .await?;
@@ -975,8 +1262,8 @@ mod rule_tests {
 
     use super::*;
     use crate::Branch;
-    use crate::helpers::{Counting, test_repo};
-    use dialog_operator::helpers::test_operator_with_profile;
+    use crate::helpers::{Counting, connect, test_repo};
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
     use dialog_query::rule::DeductiveRuleDescriptor;
@@ -1017,7 +1304,8 @@ mod rule_tests {
     /// Query `employee` and return the derived entities.
     async fn query_employees<Env>(branch: &Branch, operator: &Env) -> anyhow::Result<Vec<Entity>>
     where
-        Env: dialog_capability::Provider<Get>
+        Env: Provider<BlobRead>
+            + dialog_capability::Provider<Get>
             + dialog_capability::Provider<Put>
             + dialog_capability::Provider<Resolve>
             + dialog_capability::Provider<Identify>
@@ -1044,11 +1332,89 @@ mod rule_tests {
         Ok(rows.iter().map(|c| c.entity().clone()).collect())
     }
 
+    /// A concept over `org/person-name` under the field `field`.
+    fn person_under(field: &str) -> ConceptDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "with": { field: { "the": "org/person-name", "as": "Text" } }
+        }))
+        .expect("descriptor parses")
+    }
+
+    /// Names read through a concept with a single field `field`.
+    async fn names_under<Env>(
+        branch: &Branch,
+        operator: &Env,
+        field: &str,
+    ) -> anyhow::Result<Vec<String>>
+    where
+        Env: Provider<BlobRead>
+            + dialog_capability::Provider<Get>
+            + dialog_capability::Provider<Put>
+            + dialog_capability::Provider<Resolve>
+            + dialog_capability::Provider<Identify>
+            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<dialog_artifacts::Preload>
+            + dialog_capability::Provider<dialog_artifacts::Speculation>
+            + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert(field.into(), Term::var("value"));
+        let query = ConceptQuery {
+            predicate: person_under(field),
+            terms,
+        };
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(query)
+            .perform(operator)
+            .try_vec()
+            .await?;
+        rows.iter()
+            .map(|row| Ok(row.get::<String>(field)?))
+            .collect()
+    }
+
+    /// Two concepts over the same attributes under different field names
+    /// share an identity, since identity ignores field names. Each must
+    /// still be answered by its own implicit rule: querying one first
+    /// must not leave the other planned over the first one's fields.
+    #[dialog_common::test]
+    async fn it_answers_concepts_that_differ_only_in_field_names() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(person_under("name").this(), person_under("label").this());
+        assert_eq!(
+            names_under(&branch, &operator, "name").await?,
+            vec!["Alice"]
+        );
+        assert_eq!(
+            names_under(&branch, &operator, "label").await?,
+            vec!["Alice"]
+        );
+        Ok(())
+    }
+
     // ----- (1) committed rule resolves via the durable (tree) layer ----
 
     #[dialog_common::test]
     async fn it_resolves_a_committed_rule() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1079,19 +1445,66 @@ mod rule_tests {
     /// scans it, and warming it whole makes every deeper closure
     /// level's discovery and hydration local. The query's own driven
     /// stream executes the hints, leaving nothing pending.
+    ///
+    /// The branch tracks a remote, since hints are only taken from a
+    /// query whose lines can fetch; the remote is never reached, because
+    /// every block the query reads is local.
     #[dialog_common::test]
     async fn it_hints_the_rule_region_when_resolving_cold() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let env = Counting::new(operator);
         let branch = repo.branch("main").open().perform(&env).await?;
-
-        let alice: Entity = "id:alice".parse()?;
         branch
             .transaction()
             .assert(
                 the!("org/person-name")
-                    .of(alice.clone())
+                    .of("id:alice".parse::<Entity>()?)
+                    .is("Alice".to_string()),
+            )
+            .assert(employee_from_person())
+            .commit()
+            .publish()
+            .perform(&env)
+            .await?;
+        let site = dialog_remote_s3::Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()?;
+        let origin = connect("origin", site, repo.did(), &env).await?;
+        let remote_main = origin.branch("main").open().perform(&env).await?;
+        branch.set_upstream(&remote_main).perform(&env).await?;
+        let branch = repo.branch("main").open().perform(&env).await?;
+
+        env.reset();
+        let employees = query_employees(&branch, &env).await?;
+        assert!(
+            employees.contains(&"id:alice".parse()?),
+            "committed rule must resolve"
+        );
+        assert!(
+            env.count("Preload") >= 2,
+            "cold rule resolution hints the conclusion and source spans"
+        );
+        let queue = Provider::<Speculation>::execute(&env, ()).await;
+        assert_eq!(queue.pending(), 0, "the query's own stream drove the hints");
+        Ok(())
+    }
+
+    /// A query whose lines have no remote reads only local blocks, so
+    /// there is nothing to warm ahead of it: it takes no hints, and
+    /// resolves the same.
+    #[dialog_common::test]
+    async fn it_takes_no_hints_over_local_lines() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let env = Counting::new(operator);
+        let branch = repo.branch("main").open().perform(&env).await?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of("id:alice".parse::<Entity>()?)
                     .is("Alice".to_string()),
             )
             .assert(employee_from_person())
@@ -1103,13 +1516,13 @@ mod rule_tests {
 
         env.reset();
         let employees = query_employees(&branch, &env).await?;
-        assert!(employees.contains(&alice), "committed rule must resolve");
         assert!(
-            env.count("Preload") >= 2,
-            "cold rule resolution hints the conclusion and source spans"
+            employees.contains(&"id:alice".parse()?),
+            "committed rule must resolve"
         );
+        assert_eq!(env.count("Preload"), 0, "a local query forwards no hints");
         let queue = Provider::<Speculation>::execute(&env, ()).await;
-        assert_eq!(queue.pending(), 0, "the query's own stream drove the hints");
+        assert_eq!(queue.pending(), 0, "nothing was queued");
         Ok(())
     }
 
@@ -1119,7 +1532,7 @@ mod rule_tests {
     /// its fold over committed facts.
     #[dialog_common::test]
     async fn it_resolves_a_committed_reducing_rule() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1192,7 +1605,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_returns_empty_when_no_rules() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1215,7 +1628,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_resolves_an_overlay_rule() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1258,7 +1671,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_resolves_overlay_rule_after_prior_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1304,7 +1717,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_does_not_leak_overlay_rule_into_later_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1353,7 +1766,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_invalidates_discovery_on_head_move() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1398,7 +1811,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_resolves_two_distinct_rules_and_reuses_bodies() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1449,7 +1862,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_unions_committed_and_overlay_rules() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1516,7 +1929,7 @@ mod rule_tests {
     /// own, read fresh every query and never head-cached.
     #[dialog_common::test]
     async fn it_resolves_a_rule_held_in_the_session_overlay() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1543,7 +1956,7 @@ mod rule_tests {
 
         branch
             .overlay()
-            .assert(rule_with_person_attr("org/contractor-name"));
+            .assert(rule_with_person_attr("org/contractor-name"))?;
         let after: Vec<ConceptConclusion> = branch
             .select(employees())
             .perform(&operator)
@@ -1575,7 +1988,7 @@ mod rule_tests {
     /// poll wrongly reports nothing changed.
     #[dialog_common::test]
     async fn it_propagates_a_session_rule_to_a_subscription() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1598,7 +2011,7 @@ mod rule_tests {
 
         branch
             .overlay()
-            .assert(rule_with_person_attr("org/contractor-name"));
+            .assert(rule_with_person_attr("org/contractor-name"))?;
         let delta = subscription
             .poll(&operator)
             .await?
@@ -1629,7 +2042,7 @@ mod rule_tests {
     #[dialog_common::test]
     async fn it_ignores_unrelated_overlay_writes_under_a_rule_backed_subscription()
     -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1658,7 +2071,7 @@ mod rule_tests {
             let site = Entity::new()?;
             branch
                 .overlay()
-                .assert(the!("xyz.tonk.site/path").of(site).is(path.to_string()));
+                .assert(the!("xyz.tonk.site/path").of(site).is(path.to_string()))?;
             assert!(
                 subscription.poll(&operator).await?.is_none(),
                 "an unrelated session stamp changes nothing"
@@ -1676,7 +2089,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_keeps_discovery_cached_until_head_advances() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         let alice: Entity = "id:alice".parse()?;
@@ -1733,7 +2146,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_unions_rules_across_joined_branches() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
         // `main` holds a person + the person rule.
@@ -1807,7 +2220,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_invalidates_discovery_when_a_rule_is_retracted() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1854,7 +2267,7 @@ mod rule_tests {
 
     #[dialog_common::test]
     async fn it_does_not_reuse_a_body_across_distinct_rule_entities() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1919,8 +2332,8 @@ mod resolver_tests {
     use crate::{Branch, Repository};
     use base58::ToBase58;
     use dialog_artifacts::{Entity, Value};
-    use dialog_operator::Operator;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::Peer;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output as _;
     use dialog_query::{
         ResolverConclusion, ResolverQuery, Term, TreeEntryQuery, TreeKeyQuery, TreeNodeQuery,
@@ -1933,7 +2346,7 @@ mod resolver_tests {
     /// carries it).
     async fn committed_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Operator<VolatileSpace>,
+        operator: &Peer<VolatileSpace, dialog_peer::Session>,
     ) -> anyhow::Result<(Branch, String)> {
         let branch = repo.branch("main").open().perform(operator).await?;
         let mut tx = branch.transaction();
@@ -2029,7 +2442,7 @@ mod resolver_tests {
     /// span/descent surface runs against a real multi-level tree.
     async fn committed_wide_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Operator<VolatileSpace>,
+        operator: &Peer<VolatileSpace, dialog_peer::Session>,
         count: usize,
     ) -> anyhow::Result<(Branch, String)> {
         let branch = repo.branch("main").open().perform(operator).await?;
@@ -2055,7 +2468,7 @@ mod resolver_tests {
     /// only refuses an unbound *variable* input.
     #[dialog_common::test]
     async fn it_yields_nothing_for_a_blank_reference() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, _root) = committed_branch(&repo, &operator).await?;
 
@@ -2085,7 +2498,7 @@ mod resolver_tests {
     /// segment entries.
     #[dialog_common::test]
     async fn it_descends_a_multi_level_tree() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
 
@@ -2171,7 +2584,7 @@ mod resolver_tests {
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptConclusion, Parameters};
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
@@ -2241,7 +2654,7 @@ mod resolver_tests {
     /// query path: one row, a real kind, a positive size, and a count.
     #[dialog_common::test]
     async fn it_reads_the_root_node_through_resolvers() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
@@ -2267,7 +2680,7 @@ mod resolver_tests {
     /// (the descent chain).
     #[dialog_common::test]
     async fn it_descends_consistently() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
@@ -2331,7 +2744,7 @@ mod resolver_tests {
     /// contribute nothing — zero rows, no error.
     #[dialog_common::test]
     async fn it_yields_nothing_for_absent_or_malformed_references() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, _root) = committed_branch(&repo, &operator).await?;
 
@@ -2352,7 +2765,7 @@ mod resolver_tests {
     /// commit the old root still answers, and the new root differs.
     #[dialog_common::test]
     async fn it_keeps_old_roots_queryable() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, first) = committed_branch(&repo, &operator).await?;
 
@@ -2384,7 +2797,7 @@ mod resolver_tests {
     /// resolvers are available in the as-if-committed view too.
     #[dialog_common::test]
     async fn it_serves_resolvers_in_transaction_queries() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
@@ -2406,7 +2819,7 @@ mod resolver_tests {
     /// history region legible.
     #[dialog_common::test]
     async fn it_reads_spilled_values_and_claim_metadata() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2493,7 +2906,7 @@ mod ordered_relation_tests {
         Artifact, ArtifactSelector, ArtifactViewStream as _, Attribute, Directory, Entity,
         Sequence, Symbol, Value,
     };
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::AttributeStatement;
     use dialog_query::attribute::The;
     use futures_util::TryStreamExt as _;
@@ -2525,7 +2938,7 @@ mod ordered_relation_tests {
     /// prepend-free insertion between neighbors and all.
     #[dialog_common::test]
     async fn it_reads_ordered_members_from_one_scan() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
