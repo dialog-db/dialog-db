@@ -10,14 +10,23 @@
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+use dialog_artifacts::{Artifact, ArtifactSelector, Asset, Instruction, Value};
 use dialog_capability::Subject;
 use dialog_common::Blake3Hash;
+use dialog_effects::blob::BlobError;
 use dialog_effects::storage::Location;
 use dialog_keyring::layered::{Access, Level, LevelSecret, Writer};
 use dialog_keyring::{EpochId, KeyringError};
 use dialog_peer::helpers::{open_peer, test_storage, unique_name};
+use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
+#[cfg(not(target_arch = "wasm32"))]
+use {
+    dialog_peer::helpers::test_owned,
+    dialog_storage::provider::storage::Storage,
+    dialog_storage::temp_storage_base,
+    std::{fs, io, path::Path},
+};
 
 use super::{SealedReadError, TreeSpace, admit, reader_space, writer_space};
 use crate::{CommitError, LocalIndex, RepositoryExt as _};
@@ -45,7 +54,7 @@ fn writer() -> TreeSpace {
 
 /// A value long enough to spill out of its leaf.
 fn spilling(marker: &str) -> String {
-    let inline = dialog_search_tree::Manifest::default().inline_n as usize;
+    let inline = Manifest::default().inline_n as usize;
     format!("{marker}{}", "x".repeat(inline + 16))
 }
 
@@ -138,7 +147,7 @@ macro_rules! on_both_stores {
         #[dialog_common::test]
         async fn $fs() -> Result<()> {
             let (operator, repo) =
-                rig!(dialog_peer::helpers::test_owned(dialog_storage::provider::storage::Storage::temp()).await);
+                rig!(test_owned(Storage::temp()).await);
             let ($operator, $repo) = (&operator, &repo);
             $body
         }
@@ -299,6 +308,123 @@ on_both_stores!(
         assert!(
             matches!(index.load_node(&root).await, Ok(None)),
             "the archive holds the root under its plaintext identity"
+        );
+        Ok(())
+    }
+);
+
+/// Whether any file under `root` holds `marker`.
+#[cfg(not(target_arch = "wasm32"))]
+fn on_disk(root: &Path, marker: &str) -> io::Result<bool> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            for entry in fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        } else if fs::read(&path)?
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Nothing a sealed branch commits reaches the disk in the clear, inline
+/// or spilled, while the same values committed on a plain branch of the
+/// same repository do (which is what shows the scan can see them).
+///
+/// Native only: it reads the files `Storage::temp` lays out under the
+/// platform temp directory. On the web there is no such directory to
+/// read; `it_reads_nothing_of_a_sealed_tree_without_the_space` and the
+/// remote tests' walk of every envelope and sealed value cover what the
+/// store holds there.
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn it_writes_no_value_in_the_clear_to_disk() -> Result<()> {
+    let (operator, repo) = rig!(test_owned(Storage::temp()).await);
+    let sealed = unique_name("sealed-on-disk");
+    let plain = unique_name("plain-on-disk");
+
+    repo.branch("main")
+        .open()
+        .sealed(writer())
+        .perform(&operator)
+        .await?
+        .commit(stream::iter(facts(&sealed)?))
+        .perform(&operator)
+        .await?;
+    repo.branch("other")
+        .open()
+        .perform(&operator)
+        .await?
+        .commit(stream::iter(facts(&plain)?))
+        .perform(&operator)
+        .await?;
+
+    let root = temp_storage_base();
+    assert!(
+        on_disk(&root, &plain)?,
+        "the scan sees a plain commit's values"
+    );
+    assert!(
+        !on_disk(&root, &sealed)?,
+        "a sealed commit's values reached the disk in the clear"
+    );
+    Ok(())
+}
+
+on_both_stores!(
+    /// A sealed line refuses to store an asset, by import or by a
+    /// transaction asserting one, with `SealedAsset`: the bytes would land
+    /// in the blob store in the clear. Nothing is written, and the head
+    /// does not move.
+    it_refuses_an_asset_on_a_sealed_line,
+    it_refuses_an_asset_on_a_sealed_line_on_the_filesystem,
+    |operator, repo| {
+        let branch = repo
+            .branch("main")
+            .open()
+            .sealed(writer())
+            .perform(operator)
+            .await?;
+        let payload = unique_name("asset").into_bytes();
+        let asset = Asset::from(payload.clone());
+
+        let imported = branch
+            .asset(stream::iter(vec![Ok(payload.clone())]))
+            .import()
+            .perform(operator)
+            .await;
+        assert!(
+            matches!(imported, Err(CommitError::SealedAsset)),
+            "a sealed line imported an asset: {imported:?}"
+        );
+
+        let asserted = branch
+            .transaction()
+            .assert(asset.clone())
+            .commit()
+            .publish()
+            .perform(operator)
+            .await;
+        assert!(
+            matches!(asserted, Err(CommitError::SealedAsset)),
+            "a sealed line recorded an asset: {asserted:?}"
+        );
+
+        assert_eq!(branch.revision(), None, "the head moved");
+        let stored = branch
+            .archive()
+            .blob()
+            .read(Blake3Hash::from(*asset.hash()))
+            .perform(operator)
+            .await;
+        assert!(
+            matches!(stored, Err(BlobError::NotFound(_))),
+            "the asset's bytes reached the blob store"
         );
         Ok(())
     }

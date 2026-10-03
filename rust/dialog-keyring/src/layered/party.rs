@@ -176,6 +176,20 @@ impl Party {
         sealing.root
     }
 
+    /// A sealing with nothing to keep, when the tree rooted at `root` is
+    /// already sealed where this party has reached it: everything below a
+    /// stored root is stored.
+    pub(crate) fn already(&self, root: &Blake3Hash) -> Option<Sealing> {
+        let (address, structure) = self.known(root)?;
+        Some(Sealing {
+            root: LayeredRoot { address, structure },
+            envelopes: Vec::new(),
+            values: Vec::new(),
+            learned: Vec::new(),
+            learned_values: Vec::new(),
+        })
+    }
+
     /// Open the root's content and return the tree's root identity,
     /// learning where the root lives.
     pub(crate) fn open_root(

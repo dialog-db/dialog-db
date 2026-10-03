@@ -117,6 +117,7 @@ where
     where
         Env: Provider<BlobWrite> + ConditionalSync + 'static,
     {
+        refuse_on_sealed(self.source)?;
         let mut sink = self.source.archive().blob().write().perform(env).await?;
         let mut size: u64 = 0;
         while let Some(chunk) = self.chunks.next().await {
@@ -127,6 +128,18 @@ where
         let hash = sink.finish().await?;
         Ok(Asset::stored(*hash.as_bytes(), size))
     }
+}
+
+/// Refuse to store an asset on a sealed line. An asset's bytes stream into
+/// the blob store whole and are addressed by their plaintext hash; sealing
+/// covers the tree and the values it spills, not them. Writing them anyway
+/// would put a sealed line's content on disk, and on every remote a push
+/// reaches, in the clear.
+fn refuse_on_sealed(source: SourceRef<'_>) -> Result<(), CommitError> {
+    if source.sealing().is_some() {
+        return Err(CommitError::SealedAsset);
+    }
+    Ok(())
 }
 
 /// Store the assets a transaction changes and return the facts recording
@@ -165,6 +178,7 @@ where
     for change in changes {
         match change {
             AssetChange::Import(asset) => {
+                refuse_on_sealed(source)?;
                 match asset.content() {
                     Some(content) => write_asset(source, &asset, content, env).await?,
                     None => check_stored_asset(source, &asset, env).await?,

@@ -78,7 +78,7 @@ use dialog_varsig::Principal;
 
 use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
-use crate::sealing::admit;
+use crate::sealing::{TreeSpace, admit};
 use crate::{
     BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex, PublishError,
     RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
@@ -253,6 +253,14 @@ impl Snapshot {
             caches: Caches::new(),
             overlay: Ephemeral::default(),
         }
+    }
+
+    /// This view reading and writing a sealed line through `space`, or a
+    /// plain one with `None`. See [`crate::sealing`].
+    #[must_use]
+    pub fn sealed(mut self, space: Option<TreeSpace>) -> Self {
+        self.caches.sealing = space;
+        self
     }
 
     /// The staged view inside a [`TransactionBatch`](crate::TransactionBatch):
@@ -736,7 +744,24 @@ impl SnapshotExport {
                     }
                 }
 
-                yield Item::Block(Block::new(node.buffer().clone()));
+                // A sealed line exports what its archive holds: the
+                // envelope, under its own address, never the node it
+                // opens to.
+                let block = match &sealing {
+                    None => node.buffer().clone(),
+                    Some(_) => {
+                        let address = index.node_address(node.hash()).ok_or_else(|| {
+                            SnapshotError::MissingBlock {
+                                digest: node.hash().clone(),
+                            }
+                        })?;
+                        index
+                            .load(&address)
+                            .await?
+                            .ok_or(SnapshotError::MissingBlock { digest: address })?
+                    }
+                };
+                yield Item::Block(Block::new(block));
             }
 
             // Spilled values, discovered above. Their reads are
@@ -747,9 +772,22 @@ impl SnapshotExport {
             let mut spill_reads = stream::iter(spills.into_iter().map(
                 |reference| {
                     let storage = &storage;
+                    let sealed = sealing.is_some();
                     async move {
-                        let digest = NodeHash::from(reference);
-                        let bytes = LoadBlob::new(digest.clone()).perform(storage).await;
+                        let reference = NodeHash::from(reference);
+                        if !sealed {
+                            let bytes = LoadBlob::new(reference.clone()).perform(storage).await;
+                            return (reference, bytes);
+                        }
+                        // A sealed line's value travels sealed, under its
+                        // sealed copy's address.
+                        let Some(digest) = storage.value_address(&reference) else {
+                            return (reference, Ok(None));
+                        };
+                        let bytes = storage
+                            .load_stored_blob(&digest)
+                            .await
+                            .map_err(DialogArtifactsError::from);
                         (digest, bytes)
                     }
                 },

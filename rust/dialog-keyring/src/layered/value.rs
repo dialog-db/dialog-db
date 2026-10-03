@@ -97,3 +97,75 @@ fn header(generation: &EpochId) -> [u8; HEADER] {
     header[1..].copy_from_slice(generation.as_bytes());
     header
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layered::keys::{Level, LevelSecret};
+
+    fn content() -> LevelSecret {
+        LevelSecret::new(EpochId::from([2; 32]), [22; 32])
+    }
+
+    fn writer() -> Writer {
+        Writer::new(
+            LevelSecret::new(EpochId::from([1; 32]), [11; 32]),
+            content(),
+        )
+    }
+
+    fn member() -> Access {
+        Access::content(
+            Level::new().with(LevelSecret::new(EpochId::from([1; 32]), [11; 32])),
+            Level::new().with(content()),
+        )
+    }
+
+    /// A value seals deterministically, opens for a member under its
+    /// reference, and carries nothing of its plaintext.
+    #[test]
+    fn it_seals_a_value_that_opens_under_its_reference() {
+        let plain = b"a spilled value, long enough to have spilled";
+        let reference = Blake3Hash::hash(plain);
+        let sealed = seal(&writer(), plain).expect("seal");
+        assert_eq!(sealed, seal(&writer(), plain).expect("seal"));
+        assert!(!sealed.windows(plain.len()).any(|window| window == plain));
+        assert_eq!(open(&member(), &reference, &sealed).expect("open"), plain);
+    }
+
+    /// Without the content generation a value does not open; under
+    /// another reference, or relabelled with another generation, it
+    /// fails rather than opening wrong.
+    #[test]
+    fn it_refuses_a_value_without_its_generation_or_reference() {
+        let plain = b"a spilled value";
+        let reference = Blake3Hash::hash(plain);
+        let sealed = seal(&writer(), plain).expect("seal");
+
+        assert!(matches!(
+            open(&Access::structure(), &reference, &sealed),
+            Err(KeyringError::MissingGeneration(generation)) if &generation == content().generation()
+        ));
+        assert!(matches!(
+            open(&member(), &Blake3Hash::hash(b"another value"), &sealed),
+            Err(KeyringError::Failed)
+        ));
+
+        let mut relabelled = sealed.clone();
+        relabelled[1..HEADER].copy_from_slice(&[1; 32]);
+        let both = Access::content(
+            Level::new().with(LevelSecret::new(EpochId::from([1; 32]), [11; 32])),
+            Level::new()
+                .with(content())
+                .with(LevelSecret::new(EpochId::from([1; 32]), [11; 32])),
+        );
+        assert!(matches!(
+            open(&both, &reference, &relabelled),
+            Err(KeyringError::Failed)
+        ));
+        assert!(matches!(
+            open(&member(), &reference, &sealed[..HEADER - 1]),
+            Err(KeyringError::Malformed)
+        ));
+    }
+}

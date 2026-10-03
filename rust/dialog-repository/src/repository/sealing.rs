@@ -14,6 +14,20 @@
 //! that root's envelope lives ([`SealedTree`]), and the space learns where
 //! each node below it lives as each parent opens. So a party reaches
 //! exactly what descends from the heads it reads.
+//!
+//! # What stays in the clear
+//!
+//! - The head. Its branch, issuer, edition and causal context, as on any
+//!   line; its plaintext root, which lets whoever reads the head confirm
+//!   an exact guess of the root node and nothing more; and its sealed
+//!   root, whose structure key lets whoever reads the head walk the tree's
+//!   shape (how many nodes, how they link, how large each envelope is)
+//!   and copy it, which is what a remote has to do.
+//! - Assets. Their bytes stream into the blob store whole, under their
+//!   plaintext hash, so a sealed line refuses them
+//!   ([`CommitError::SealedAsset`](crate::CommitError::SealedAsset))
+//!   rather than store them in the clear.
+//! - Sync records, which stay on the replica that keeps them.
 
 use std::collections::BTreeSet;
 use std::fmt::Display;
@@ -179,3 +193,9 @@ impl From<SealedReadError> for ArchiveError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(
+    test,
+    any(feature = "integration-tests", feature = "web-integration-tests")
+))]
+mod remote_tests;

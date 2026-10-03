@@ -519,6 +519,11 @@ pub enum CommitError {
     /// reached.
     #[error("Sealing failed: {0}")]
     Sealing(#[from] dialog_keyring::KeyringError),
+
+    /// A sealed line does not store assets: their bytes would reach the
+    /// blob store, and every remote a push reaches, in the clear.
+    #[error("A sealed line does not store assets")]
+    SealedAsset,
 }
 
 /// Errors specific to a pull operation.
