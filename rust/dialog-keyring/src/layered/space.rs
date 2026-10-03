@@ -11,6 +11,7 @@ use rkyv::validation::Validator;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 
+use super::asset::{AssetOpener, AssetSealer};
 use super::envelope::Envelope;
 use super::keys::{Access, Writer};
 use super::party::{Party, Sealing, Staged};
@@ -89,6 +90,34 @@ impl<K, V, A> Space<K, V, A> {
             party: Party::new(access),
             types: PhantomData,
         }
+    }
+
+    /// A sealer for an asset whose plaintext hashes to `reference`, or for
+    /// one streamed in whose hash is not yet known when `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyringError::ReadOnly`] if this party holds no writer,
+    /// and [`KeyringError::Entropy`] if a fresh salt cannot be drawn.
+    pub fn asset_sealer(
+        &self,
+        reference: Option<&Blake3Hash>,
+    ) -> Result<AssetSealer, KeyringError> {
+        let writer = self.writer.as_ref().ok_or(KeyringError::ReadOnly)?;
+        match reference {
+            Some(reference) => Ok(AssetSealer::convergent(writer, reference)),
+            None => AssetSealer::fresh(writer),
+        }
+    }
+
+    /// An opener for the sealed asset starting with `header`, whose
+    /// plaintext is `size` bytes.
+    ///
+    /// # Errors
+    ///
+    /// See [`AssetOpener::new`].
+    pub fn asset_opener(&self, header: &[u8], size: u64) -> Result<AssetOpener, KeyringError> {
+        AssetOpener::new(self.party.access(), header, size)
     }
 
     /// Whether this party can seal.

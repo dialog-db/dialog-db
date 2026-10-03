@@ -743,7 +743,14 @@ where
         // differential already read), so shipping needs no point read of
         // the current tree — such a read would descend by-reference
         // regions the novelty walk is careful never to require.
-        ShipmentRef::BlobAdded { hash, size } => {
+        // A sealed asset's copy is an ordinary blob under its own address;
+        // its plaintext is stored nowhere and does not ship.
+        ShipmentRef::BlobAdded { hash, size }
+        | ShipmentRef::SealedAdded {
+            address: hash,
+            size,
+            ..
+        } => {
             let digest = dialog_common::Blake3Hash::from(hash);
             // Local bytes -> remote import sink. Mirrors the remote `Read`
             // fork in `branch/blob.rs` and `RemotePut`'s `Put` fork in
@@ -1292,7 +1299,12 @@ where
                 stream::iter(references)
                     .map(|reference| async move {
                         match reference {
-                            ShipmentRef::BlobAdded { hash, size } => {
+                            ShipmentRef::BlobAdded { hash, size }
+                            | ShipmentRef::SealedAdded {
+                                address: hash,
+                                size,
+                                ..
+                            } => {
                                 let digest = dialog_common::Blake3Hash::from(hash);
                                 ensure_blob_on_target(digest, size, branch, target, sources, env)
                                     .await

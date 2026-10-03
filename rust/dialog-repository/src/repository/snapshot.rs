@@ -669,7 +669,9 @@ impl SnapshotExport {
             let tree = Index::from_hash(root);
 
             let mut spills: HashSet<[u8; 32]> = HashSet::new();
-            let mut blobs: Vec<NodeHash> = Vec::new();
+            // Each blob's digest, and for a sealed asset's copy, the asset
+            // it is a copy of.
+            let mut blobs: Vec<(NodeHash, Option<[u8; 32]>)> = Vec::new();
             // A key may surface twice — its stored leaf entry plus a
             // buffered op riding an ancestor index node — naming the same
             // content; ship each blob once.
@@ -737,7 +739,15 @@ impl SnapshotExport {
                         Some(ShipmentRef::BlobAdded { hash, .. }) => {
                             let hash = NodeHash::from(hash);
                             if blob_seen.insert(hash.clone()) {
-                                blobs.push(hash);
+                                blobs.push((hash, None));
+                            }
+                        }
+                        // A sealed asset travels as its sealed copy, an
+                        // ordinary blob under its own address.
+                        Some(ShipmentRef::SealedAdded { hash, address, .. }) => {
+                            let address = NodeHash::from(address);
+                            if blob_seen.insert(address.clone()) {
+                                blobs.push((address, Some(hash)));
                             }
                         }
                         _ => {}
@@ -821,7 +831,7 @@ impl SnapshotExport {
             // is skipped; one it references with no bytes anywhere the
             // reach extends is unavailable, which sparse tolerates and
             // complete refuses.
-            let mut blob_reads = stream::iter(blobs.into_iter().map(|digest| {
+            let mut blob_reads = stream::iter(blobs.into_iter().map(|(digest, sealed_of)| {
                 let tree = &tree;
                 let index = &index;
                 let hydrate = &hydrate;
@@ -832,7 +842,16 @@ impl SnapshotExport {
                     // the tree supersedes. What the tree records for the
                     // content says whether the blob is still referenced; one it no longer
                     // names is not this export's to carry.
-                    let Some(size) = tree.content_size(index, digest.as_bytes()).await? else {
+                    let size = match sealed_of {
+                        None => tree.content_size(index, digest.as_bytes()).await?,
+                        Some(hash) => match tree.sealed_asset(index, &hash).await? {
+                            Some((copy, _)) if &copy.address == digest.as_bytes() => {
+                                Some(copy.length)
+                            }
+                            _ => None,
+                        },
+                    };
+                    let Some(size) = size else {
                         return Ok((digest, Found::Unreferenced));
                     };
                     let reader = subject

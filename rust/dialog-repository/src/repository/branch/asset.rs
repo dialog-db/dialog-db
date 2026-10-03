@@ -39,12 +39,32 @@
 //!
 //! Recording and dropping an asset are both a transaction's job:
 //! `tx.assert(asset)` records it and `tx.retract(asset)` drops it.
+//!
+//! # On a sealed line
+//!
+//! A sealed line seals its assets too, unless told not to. The commit
+//! seals the bytes an asset carries, and an import seals as it streams;
+//! either way only the sealed copy is written, under the hash of its own
+//! bytes, and the line records where it lives in place of the asset's
+//! size (`asset:<hash> dialog.asset/sealed <copy>`), inside its sealed
+//! tree.
+//! Reads open the sealed copy, whole or in ranges; push, export and
+//! download move it and never the plaintext.
+//!
+//! To keep a given asset in the clear on a sealed line, say so:
+//! [`Asset::plaintext`] for one asserted on a transaction, and
+//! [`AssetStream::plaintext`] for an import. A stored asset that names
+//! plaintext bytes without saying so is refused there
+//! ([`CommitError::PlaintextAsset`]).
 
 use crate::repository::archive::networked::write_blob;
 use crate::repository::branch::blob::index_store;
 use crate::repository::source::SourceRef;
+use crate::sealing::asset::{SealingSink, seal_whole};
 use crate::{Branch, CommitError, Hydrate, Index, Snapshot};
-use dialog_artifacts::{Asset, AssetChange, BlobIndexExt as _, Instruction};
+use dialog_artifacts::{
+    Asset, AssetChange, AssetSealing, BlobIndexExt as _, Instruction, SealedCopy,
+};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
@@ -52,6 +72,7 @@ use dialog_effects::blob::{
     BlobError, Import as BlobImport, Read as BlobRead, Size as BlobSize, Write as BlobWrite,
 };
 use dialog_effects::memory::Resolve;
+use dialog_keyring::layered::asset::sealed_len;
 use futures_util::{Stream, StreamExt};
 
 impl Branch {
@@ -61,6 +82,7 @@ impl Branch {
         AssetStream {
             source: SourceRef::from(self),
             chunks,
+            plaintext: false,
         }
     }
 }
@@ -72,6 +94,7 @@ impl Snapshot {
         AssetStream {
             source: SourceRef::from(self),
             chunks,
+            plaintext: false,
         }
     }
 }
@@ -81,9 +104,18 @@ impl Snapshot {
 pub struct AssetStream<'a, S> {
     source: SourceRef<'a>,
     chunks: S,
+    plaintext: bool,
 }
 
 impl<'a, S> AssetStream<'a, S> {
+    /// Keep the imported bytes in the clear, even on a sealed line. See
+    /// [`Asset::plaintext`] for what that gives away.
+    #[must_use]
+    pub fn plaintext(mut self) -> Self {
+        self.plaintext = true;
+        self
+    }
+
     /// Import the chunks into the line's blob store as an [`Asset`].
     ///
     /// The import only writes bytes: it records nothing and advances no
@@ -94,6 +126,7 @@ impl<'a, S> AssetStream<'a, S> {
         ImportAsset {
             source: self.source,
             chunks: self.chunks,
+            plaintext: self.plaintext,
         }
     }
 }
@@ -103,6 +136,7 @@ impl<'a, S> AssetStream<'a, S> {
 pub struct ImportAsset<'a, S> {
     source: SourceRef<'a>,
     chunks: S,
+    plaintext: bool,
 }
 
 impl<S> ImportAsset<'_, S>
@@ -112,12 +146,29 @@ where
     /// Execute the import, returning the asset naming the stored bytes.
     ///
     /// The bytes stream through the blob store, which hashes them as they
-    /// are written, so they are never held whole in memory.
+    /// are written, so they are never held whole in memory. On a sealed
+    /// line they are sealed on the way, unless the import was made
+    /// [`plaintext`](AssetStream::plaintext), and the asset returned names
+    /// the sealed copy ([`Asset::sealed`]).
     pub async fn perform<Env>(mut self, env: &Env) -> Result<Asset, CommitError>
     where
         Env: Provider<BlobWrite> + ConditionalSync + 'static,
     {
-        refuse_on_sealed(self.source)?;
+        if let Some(space) = self.source.sealing().filter(|_| !self.plaintext) {
+            let mut sink = SealingSink::open(self.source, &space, None, env).await?;
+            while let Some(chunk) = self.chunks.next().await {
+                sink.write(&chunk?).await?;
+            }
+            let sealed = sink.finish().await?;
+            return Ok(Asset::sealed(
+                *sealed.hash.as_bytes(),
+                sealed.size,
+                SealedCopy {
+                    address: *sealed.address.as_bytes(),
+                    length: sealed_len(sealed.size),
+                },
+            ));
+        }
         let mut sink = self.source.archive().blob().write().perform(env).await?;
         let mut size: u64 = 0;
         while let Some(chunk) = self.chunks.next().await {
@@ -126,20 +177,28 @@ where
             sink.write_all(&chunk).await?;
         }
         let hash = sink.finish().await?;
-        Ok(Asset::stored(*hash.as_bytes(), size))
+        let asset = Asset::stored(*hash.as_bytes(), size);
+        Ok(if self.plaintext {
+            asset.plaintext()
+        } else {
+            asset
+        })
     }
 }
 
-/// Refuse to store an asset on a sealed line. An asset's bytes stream into
-/// the blob store whole and are addressed by their plaintext hash; sealing
-/// covers the tree and the values it spills, not them. Writing them anyway
-/// would put a sealed line's content on disk, and on every remote a push
-/// reaches, in the clear.
-fn refuse_on_sealed(source: SourceRef<'_>) -> Result<(), CommitError> {
-    if source.sealing().is_some() {
-        return Err(CommitError::SealedAsset);
-    }
-    Ok(())
+/// The fact recording `asset`: where its sealed copy lives when it is
+/// `sealed`, its size otherwise.
+pub(crate) fn asset_fact(
+    asset: &Asset,
+    sealed: Option<&SealedCopy>,
+) -> Result<Instruction, CommitError> {
+    // A replace, not an assert: an asset has one size and one sealed copy,
+    // and replacing a fact with the value it already has is a no-op, so
+    // re-asserting a recorded asset mints nothing.
+    Ok(Instruction::Replace(match sealed {
+        Some(copy) => asset.sealed_fact(copy)?,
+        None => asset.fact()?,
+    }))
 }
 
 /// Store the assets a transaction changes and return the facts recording
@@ -178,26 +237,68 @@ where
     for change in changes {
         match change {
             AssetChange::Import(asset) => {
-                refuse_on_sealed(source)?;
-                match asset.content() {
-                    Some(content) => write_asset(source, &asset, content, env).await?,
-                    None => check_stored_asset(source, &asset, env).await?,
-                }
-                // A replace, not an assert: an asset has one size, and
-                // replacing a fact with the value it already has is a no-op,
-                // so re-asserting a recorded asset mints nothing.
-                instructions.push(Instruction::Replace(asset.fact()?));
+                let sealed = store_asset(source, &asset, env).await?;
+                instructions.push(asset_fact(&asset, sealed.as_ref())?);
             }
             AssetChange::Discard(asset) => {
-                if let Some(size) = recorded_size(source, asset.hash(), env).await? {
-                    instructions.push(Instruction::Retract(
-                        Asset::stored(*asset.hash(), size).fact()?,
-                    ));
-                }
+                instructions.extend(recorded_facts(source, asset.hash(), env).await?);
             }
         }
     }
     Ok(instructions)
+}
+
+/// Make `asset`'s bytes durable in `source`'s blob store as the line and
+/// the asset say they are kept, returning where the sealed copy lives when
+/// it is sealed.
+async fn store_asset<Env>(
+    source: SourceRef<'_>,
+    asset: &Asset,
+    env: &Env,
+) -> Result<Option<SealedCopy>, CommitError>
+where
+    Env: Provider<BlobImport>
+        + Provider<BlobRead>
+        + Provider<BlobSize>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    match (source.sealing(), asset.sealing()) {
+        (None, AssetSealing::Sealed(_)) => Err(CommitError::SealedAssetOnPlainLine),
+        (Some(_), AssetSealing::Sealed(copy)) => {
+            check_sealed_asset(source, asset, copy, env).await?;
+            Ok(Some(*copy))
+        }
+        (Some(space), AssetSealing::Line) => {
+            let Some(content) = asset.content() else {
+                return Err(CommitError::PlaintextAsset);
+            };
+            // Recorded already: its sealed copy is held here or by
+            // reference, and sealing it again would only move the fact.
+            if let Some((copy, _)) = recorded_sealed(source, asset.hash(), env).await? {
+                return Ok(Some(copy));
+            }
+            let reference = Blake3Hash::from(*asset.hash());
+            let sealed = seal_whole(&space, &reference, content)?;
+            let address = Blake3Hash::hash(&sealed);
+            write_blob(env, &source.archive().index(), &address, &sealed).await?;
+            Ok(Some(SealedCopy {
+                address: *address.as_bytes(),
+                length: sealed.len() as u64,
+            }))
+        }
+        (_, AssetSealing::Line | AssetSealing::Plaintext) => {
+            match asset.content() {
+                Some(content) => write_asset(source, asset, content, env).await?,
+                None => check_stored_asset(source, asset, env).await?,
+            }
+            Ok(None)
+        }
+    }
 }
 
 /// The size `source`'s current tree records for the asset `hash`, if it
@@ -223,6 +324,104 @@ where
     Ok(Index::from_hash(NodeHash::from(*revision.tree.hash()))
         .asset_size(&store, hash)
         .await?)
+}
+
+/// The sealed copy `source`'s current tree records of the asset `hash`,
+/// and the asset's size, if it records one.
+pub(crate) async fn recorded_sealed<Env>(
+    source: SourceRef<'_>,
+    hash: &dialog_storage::Blake3Hash,
+    env: &Env,
+) -> Result<Option<(SealedCopy, u64)>, CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let Some(revision) = source.revision() else {
+        return Ok(None);
+    };
+    let store = index_store(source, env).await;
+    Ok(Index::from_hash(NodeHash::from(*revision.tree.hash()))
+        .sealed_asset(&store, hash)
+        .await?)
+}
+
+/// Retractions of every fact `source`'s current tree records for the asset
+/// `hash`: its size, its sealed copy, or both when it was kept both ways.
+pub(crate) async fn recorded_facts<Env>(
+    source: SourceRef<'_>,
+    hash: &dialog_storage::Blake3Hash,
+    env: &Env,
+) -> Result<Vec<Instruction>, CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let mut retractions = Vec::new();
+    if let Some((copy, size)) = recorded_sealed(source, hash, env).await? {
+        retractions.push(Instruction::Retract(
+            Asset::stored(*hash, size).sealed_fact(&copy)?,
+        ));
+    }
+    if let Some(size) = recorded_size(source, hash, env).await? {
+        retractions.push(Instruction::Retract(Asset::stored(*hash, size).fact()?));
+    }
+    Ok(retractions)
+}
+
+/// Check that a sealed asset's copy is reachable from `source` at its
+/// length, as [`check_stored_asset`] checks plaintext bytes: held locally,
+/// or recorded by the line as this very copy already.
+async fn check_sealed_asset<Env>(
+    source: SourceRef<'_>,
+    asset: &Asset,
+    copy: &SealedCopy,
+    env: &Env,
+) -> Result<(), CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<BlobSize>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let digest = Blake3Hash::from(copy.address);
+    let expected = sealed_len(asset.size());
+    let local = source
+        .archive()
+        .blob()
+        .size(digest.clone())
+        .perform(env)
+        .await?;
+    let held = match local {
+        Some(length) => length,
+        None => match recorded_sealed(source, asset.hash(), env).await? {
+            Some((recorded, _)) if recorded == *copy => copy.length,
+            _ => return Err(BlobError::NotFound(digest.to_string()).into()),
+        },
+    };
+    if held != expected || copy.length != expected {
+        return Err(BlobError::SizeMismatch {
+            digest: digest.to_string(),
+            expected,
+            held,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Import `content` into `source`'s blob store under `asset`'s hash and

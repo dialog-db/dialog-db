@@ -1607,6 +1607,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base58",
+ "blake3",
  "criterion",
  "dialog-artifacts",
  "dialog-capability",
