@@ -703,11 +703,6 @@ decision (topology, not induction) stands.
 - Per-tab layers in tonk (`memory:tab`, one layer per connection
   linked above the state layer) and the inspector over the
   environment's ephemeral registry.
-- Asset changes through a stack transaction. A branch transaction
-  carries its assets apart from the facts through induction and
-  routing (`settle`); the stack's own routing still rebuilds the
-  batch fact by fact, so an asset asserted through a stack is dropped
-  rather than stored. Route assets to the bottom with the facts.
 - The channel transport: a `Sync` carried over the remote site, and
   a scope's `replicated` property resolving to a channel.
 - In tonk, a commit made through the branch handle rather than the
@@ -777,6 +772,13 @@ and not accidents:
   routes its own ephemeral writes through the same `apply`. Whether
   the write API should narrow to the stack alone, as discussed, is
   left for a change of its own.
+- **Assets land on the bottom.** A batch's asset changes ride apart
+  from its facts through induction and routing (both rebuild the batch
+  fact by fact) and are stored by the tree the commit mints on: a
+  branch transaction's own tree, a stack transaction's bottom layer,
+  whatever layer the facts referencing the asset route to. Only a tree
+  can store an asset (an ephemeral layer refuses one), and the bottom
+  is the tree every layer of the stack reads.
 - **`Target` is not a root export.** `placement::Target` (`Tree` |
   `Session`) stays under its module, since main's `upstream::Target`
   already holds the root name.
