@@ -229,7 +229,7 @@ fn in_component<'p>(
         _ => return None,
     };
     analysis
-        .in_same_cycle(root, &query.predicate.this())
+        .in_same_cycle(root, &ProgramAnalysis::node(&query.predicate))
         .then_some(query)
 }
 
@@ -333,11 +333,11 @@ async fn discover<'a, Env>(
 where
     Env: crate::Scope<'a>,
 {
-    let root_entity = root.this();
+    let root_entity = ProgramAnalysis::node(root);
     let mut members: HashMap<Entity, Member> = HashMap::new();
     let mut queue = vec![root.clone()];
     while let Some(descriptor) = queue.pop() {
-        let entity = descriptor.this();
+        let entity = ProgramAnalysis::node(&descriptor);
         if members.contains_key(&entity) || !analysis.in_same_cycle(&root_entity, &entity) {
             continue;
         }
@@ -424,7 +424,7 @@ where
     Env: crate::Scope<'a>,
 {
     for row in collect_rule_rows(member, split, rest, matched, scope, env).await? {
-        table.insert(&member.descriptor.this(), row);
+        table.insert(&ProgramAnalysis::node(&member.descriptor), row);
     }
     Ok(())
 }
@@ -459,17 +459,17 @@ where
                 let totals: Vec<Vec<Row>> = split
                     .occurrences
                     .iter()
-                    .map(|occurrence| table.total(&occurrence.predicate.this()))
+                    .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
                     .collect();
                 for delta_index in 0..split.occurrences.len() {
-                    let delta = table.delta(&split.occurrences[delta_index].predicate.this());
+                    let delta = table.delta(&ProgramAnalysis::node(&split.occurrences[delta_index].predicate));
                     if delta.is_empty() {
                         continue;
                     }
                     for row in
                         fire_occurrence(member, split, delta_index, &delta, &totals, env).await?
                     {
-                        table.insert(&member.descriptor.this(), row);
+                        table.insert(&ProgramAnalysis::node(&member.descriptor), row);
                     }
                 }
             }
@@ -555,7 +555,7 @@ where
                     return Err(EvaluationError::Planning {
                         message: format!(
                             "premises of a recursive rule for {} cannot be bound",
-                            member.descriptor.this()
+                            ProgramAnalysis::node(&member.descriptor)
                         ),
                     });
                 }
@@ -609,7 +609,7 @@ pub async fn evaluate_table<'a, Env>(
 where
     Env: crate::Scope<'a>,
 {
-    let root_entity = root.this();
+    let root_entity = ProgramAnalysis::node(root);
     let members = discover(root, analysis, env).await?;
 
     // Seed round: rules with no recursive occurrence evaluate fully
@@ -633,7 +633,7 @@ where
             };
             for matched in results {
                 table.insert(
-                    &member.descriptor.this(),
+                    &ProgramAnalysis::node(&member.descriptor),
                     project(&member.descriptor, &matched),
                 );
             }
@@ -826,7 +826,7 @@ pub async fn extend<'a, Env>(
 where
     Env: crate::Scope<'a>,
 {
-    let root_entity = root.this();
+    let root_entity = ProgramAnalysis::node(root);
     let members = discover(root, analysis, env).await?;
     // A reducing seed rule's folded rows are a function of its whole
     // body relation: a new fact *replaces* the group's aggregate row
@@ -918,7 +918,7 @@ where
                     let choices: Vec<Vec<Row>> = split
                         .occurrences
                         .iter()
-                        .map(|occurrence| table.total(&occurrence.predicate.this()))
+                        .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
                         .collect();
                     for combination in Combinations::new(choices.iter().map(Vec::len).collect()) {
                         let mut matched = seed_match.clone();
@@ -985,7 +985,7 @@ pub async fn retract<'a, Env>(
 where
     Env: crate::Scope<'a>,
 {
-    let root_entity = root.this();
+    let root_entity = ProgramAnalysis::node(root);
     let members = discover(root, analysis, env).await?;
     // A deletion shrinks a reducing seed rule's groups, replacing
     // aggregate rows rather than removing them; DRed's per-row
@@ -1077,7 +1077,7 @@ where
             if patterns.is_empty() {
                 continue;
             }
-            let entity = member.descriptor.this();
+            let entity = ProgramAnalysis::node(&member.descriptor);
             for row in table.total(&entity) {
                 let suspect = patterns.iter().any(|pattern| {
                     pattern
@@ -1110,7 +1110,7 @@ where
                         .iter()
                         .enumerate()
                         .map(|(index, occurrence)| {
-                            let target = occurrence.predicate.this();
+                            let target = ProgramAnalysis::node(&occurrence.predicate);
                             if index == delta_index {
                                 frontier
                                     .get(&target)
@@ -1151,7 +1151,7 @@ where
                             env,
                         )
                         .await?;
-                        let entity = member.descriptor.this();
+                        let entity = ProgramAnalysis::node(&member.descriptor);
                         for row in rows {
                             let key = row_key(&row);
                             let known = suspects
@@ -1183,7 +1183,7 @@ where
     loop {
         let mut rederived = false;
         for member in members.values() {
-            let entity = member.descriptor.this();
+            let entity = ProgramAnalysis::node(&member.descriptor);
             let Some(rows) = suspects.get(&entity) else {
                 continue;
             };
@@ -1249,7 +1249,7 @@ where
         let choices: Vec<Vec<Row>> = split
             .occurrences
             .iter()
-            .map(|occurrence| table.total(&occurrence.predicate.this()))
+            .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
             .collect();
         let combinations: Vec<Vec<usize>> = if split.occurrences.is_empty() {
             vec![Vec::new()]
@@ -1360,7 +1360,7 @@ impl Continuation {
                     None => None,
                     Some(()) => {
                         if self.additions.is_empty() {
-                            let rows = table.total(&root.this());
+                            let rows = table.total(&ProgramAnalysis::node(root));
                             Some((table, rows))
                         } else {
                             extend(root, analysis, env, &mut table, &self.additions)
