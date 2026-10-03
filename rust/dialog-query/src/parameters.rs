@@ -35,6 +35,12 @@ impl Parameters {
         self.0.insert(name, param);
     }
 
+    /// Removes the parameter binding for the given name, returning it
+    /// when there was one.
+    pub fn remove(&mut self, name: &str) -> Option<Term<Any>> {
+        self.0.remove(name)
+    }
+
     /// Checks if a parameter binding exists for the given name.
     pub fn contains(&self, name: &str) -> bool {
         self.0.contains_key(name)
