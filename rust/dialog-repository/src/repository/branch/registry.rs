@@ -25,7 +25,9 @@ use futures_util::stream;
 use std::sync::Arc;
 
 use crate::schema::{ActiveBranch, Branch as BranchConcept, BranchPull, BranchPush, Replica};
-use crate::{Branch, CommitError, REGISTRY, RemoteSite, RepositoryMemoryExt as _, ResolveError};
+use crate::{
+    Branch, CommitError, PublishError, REGISTRY, RemoteSite, RepositoryMemoryExt as _, ResolveError,
+};
 
 /// The environment a registry write runs against.
 pub trait RegistryEnv:
@@ -307,11 +309,19 @@ pub(crate) fn push(branch: &BranchConcept, upstream: &BranchConcept) -> BranchPu
     }
 }
 
+/// How many times [`apply`] commits again after another writer moved the
+/// branch head between its read and its publish.
+const MOVED_HEAD_RETRIES: usize = 4;
+
 /// Commit `changes` to the registry under the machinery scope, which
 /// is what lets them write the reserved `dialog.` namespace.
 ///
 /// The registry records facts only: a batch that changes an asset is
 /// refused before anything commits, rather than committed without it.
+///
+/// A commit that loses the head to another writer is applied again on
+/// the head that won. The changes are statements, not edits derived from
+/// what the head held, so they mean the same on either head.
 pub(crate) async fn apply<Env: RegistryEnv>(
     registry: &Branch,
     changes: Changes,
@@ -320,21 +330,33 @@ pub(crate) async fn apply<Env: RegistryEnv>(
     if changes.has_assets() {
         return Err(DialogArtifactsError::AssetsUnsupported("the replica registry".into()).into());
     }
-    let instructions = changes.into_instructions();
+    let mut instructions = changes.clone().into_instructions();
     if instructions.is_empty() {
         return Ok(());
     }
 
-    Box::pin(
-        registry
-            .commit(stream::iter(instructions))
-            .machinery()
-            .allow_empty()
-            .perform(env),
-    )
-    .await?;
-
-    Ok(())
+    let mut attempt = 0;
+    loop {
+        let committed = Box::pin(
+            registry
+                .commit(stream::iter(instructions))
+                .machinery()
+                .allow_empty()
+                .perform(env),
+        )
+        .await;
+        match committed {
+            Ok(_) => return Ok(()),
+            Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+                if attempt < MOVED_HEAD_RETRIES =>
+            {
+                attempt += 1;
+                registry.refresh(env).await?;
+                instructions = changes.clone().into_instructions();
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// The branch the replica `operator` views has switched to, if any.
