@@ -9,15 +9,19 @@
 use std::mem::replace;
 
 use async_trait::async_trait;
+use dialog_artifacts::SealedCopy;
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_effects::blob::{BlobError, BlobReader, BlobSource, BlobWriter, Write as BlobWrite};
+use dialog_effects::blob::{
+    BlobError, BlobReader, BlobSource, BlobWriter, ByteRange, Read as BlobRead, Write as BlobWrite,
+};
 use dialog_keyring::KeyringError;
-use dialog_keyring::layered::asset::{Span, sealed_len};
+use dialog_keyring::layered::asset::{HEADER, Span, sealed_len, span};
 use dialog_keyring::layered::{AssetOpener, AssetSealer};
 
 use super::TreeSpace;
 use crate::CommitError;
+use crate::repository::archive::local::read_all;
 use crate::repository::source::SourceRef;
 
 /// Writes an asset's sealed copy into a line's blob store as the asset's
@@ -117,6 +121,9 @@ pub(crate) struct OpenedAsset {
     buffer: Vec<u8>,
     skip: usize,
     take: u64,
+    /// For a read of the whole asset: the plaintext hashed so far, and the
+    /// hash it must come to.
+    verify: Option<(blake3::Hasher, Blake3Hash)>,
 }
 
 impl OpenedAsset {
@@ -131,8 +138,90 @@ impl OpenedAsset {
             buffer: Vec::new(),
             skip: span.skip as usize,
             take: span.take,
+            verify: None,
         }
     }
+
+    /// Check, once the last byte is read, that the plaintext hashes to
+    /// `hash`; the read fails with `DigestMismatch` if it does not. Only
+    /// meaningful for a read of the whole asset.
+    fn verifying(mut self, hash: Blake3Hash) -> Self {
+        self.verify = Some((blake3::Hasher::new(), hash));
+        self
+    }
+
+    /// Finish a verified read: compare what was hashed with what the asset
+    /// is named by.
+    fn verified(&mut self) -> Result<(), BlobError> {
+        if let Some((hasher, expected)) = self.verify.take() {
+            let actual = Blake3Hash::from(*hasher.finalize().as_bytes());
+            if actual != expected {
+                return Err(BlobError::DigestMismatch {
+                    expected: expected.to_string(),
+                    actual: actual.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Open `range` (all of it when `None`) of the asset `hash`, of `size`
+/// bytes, through its sealed `copy` in `source`'s own blob store: the
+/// header first, then only the pieces the range touches. A read of the
+/// whole asset checks that it opens to `hash`. A copy this store does not
+/// hold is `NotFound`; hydrating it is the caller's to do.
+pub(crate) async fn open_copy<Env>(
+    source: SourceRef<'_>,
+    space: &TreeSpace,
+    hash: &Blake3Hash,
+    copy: &SealedCopy,
+    size: u64,
+    range: Option<ByteRange>,
+    env: &Env,
+) -> Result<BlobReader, CommitError>
+where
+    Env: Provider<BlobRead> + ConditionalSync + 'static,
+{
+    let address = Blake3Hash::from(copy.address);
+    let read = |range: ByteRange| {
+        source.archive().blob().invoke(BlobRead {
+            digest: address.clone(),
+            range: Some(range),
+        })
+    };
+    let header = read(ByteRange {
+        offset: 0,
+        length: Some(HEADER as u64),
+    })
+    .perform(env)
+    .await?;
+    let opener = space.asset_opener(&read_all(header).await?, size)?;
+    let range = range.unwrap_or(ByteRange {
+        offset: 0,
+        length: None,
+    });
+    let span = span(size, range.offset, range.length);
+    // A range holding no bytes touches no piece, and reads nothing.
+    let pieces = if span.count == 0 {
+        None
+    } else {
+        Some(
+            read(ByteRange {
+                offset: span.offset,
+                length: Some(span.length),
+            })
+            .perform(env)
+            .await?,
+        )
+    };
+    let whole = span.skip == 0 && span.take == size && span.first == 0;
+    let opened = OpenedAsset::new(pieces, opener, span);
+    Ok(Box::new(if whole {
+        opened.verifying(hash.clone())
+    } else {
+        opened
+    }))
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -165,10 +254,14 @@ impl BlobSource for OpenedAsset {
             self.skip = 0;
             plain.truncate(usize::try_from(self.take).unwrap_or(usize::MAX));
             self.take -= plain.len() as u64;
+            if let Some((hasher, _)) = self.verify.as_mut() {
+                hasher.update(&plain);
+            }
             if !plain.is_empty() {
                 return Ok(Some(plain));
             }
         }
+        self.verified()?;
         Ok(None)
     }
 }

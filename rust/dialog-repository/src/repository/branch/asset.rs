@@ -60,7 +60,8 @@
 use crate::repository::archive::networked::write_blob;
 use crate::repository::branch::blob::index_store;
 use crate::repository::source::SourceRef;
-use crate::sealing::asset::{SealingSink, seal_whole};
+use crate::sealing::TreeSpace;
+use crate::sealing::asset::{SealingSink, open_copy, seal_whole};
 use crate::{Branch, CommitError, Hydrate, Index, Snapshot};
 use dialog_artifacts::{
     Asset, AssetChange, AssetSealing, BlobIndexExt as _, Instruction, SealedCopy,
@@ -72,6 +73,7 @@ use dialog_effects::blob::{
     BlobError, Import as BlobImport, Read as BlobRead, Size as BlobSize, Write as BlobWrite,
 };
 use dialog_effects::memory::Resolve;
+use dialog_keyring::KeyringError;
 use dialog_keyring::layered::asset::sealed_len;
 use futures_util::{Stream, StreamExt};
 
@@ -233,6 +235,17 @@ where
         + ConditionalSync
         + 'static,
 {
+    // A handle that cannot seal cannot commit to a sealed line, so it
+    // stores nothing for one, not even an asset kept in the clear: the
+    // commit's refusal must leave nothing behind.
+    if let Some(space) = source.sealing()
+        && !space.can_write()
+        && changes
+            .iter()
+            .any(|change| matches!(change, AssetChange::Import(_)))
+    {
+        return Err(KeyringError::ReadOnly.into());
+    }
     let mut instructions = Vec::with_capacity(changes.len());
     for change in changes {
         match change {
@@ -269,19 +282,27 @@ where
 {
     match (source.sealing(), asset.sealing()) {
         (None, AssetSealing::Sealed(_)) => Err(CommitError::SealedAssetOnPlainLine),
-        (Some(_), AssetSealing::Sealed(copy)) => {
-            check_sealed_asset(source, asset, copy, env).await?;
+        (Some(space), AssetSealing::Sealed(copy)) => {
+            check_sealed_asset(source, &space, asset, copy, env).await?;
             Ok(Some(*copy))
         }
         (Some(space), AssetSealing::Line) => {
+            // Recorded already: its sealed copy is held here or by
+            // reference, and sealing it again would only move the fact.
+            if let Some((copy, size)) = recorded_sealed(source, asset.hash(), env).await? {
+                if size != asset.size() {
+                    return Err(BlobError::SizeMismatch {
+                        digest: Blake3Hash::from(*asset.hash()).to_string(),
+                        expected: asset.size(),
+                        held: size,
+                    }
+                    .into());
+                }
+                return Ok(Some(copy));
+            }
             let Some(content) = asset.content() else {
                 return Err(CommitError::PlaintextAsset);
             };
-            // Recorded already: its sealed copy is held here or by
-            // reference, and sealing it again would only move the fact.
-            if let Some((copy, _)) = recorded_sealed(source, asset.hash(), env).await? {
-                return Ok(Some(copy));
-            }
             let reference = Blake3Hash::from(*asset.hash());
             let sealed = seal_whole(&space, &reference, content)?;
             let address = Blake3Hash::hash(&sealed);
@@ -379,11 +400,16 @@ where
     Ok(retractions)
 }
 
-/// Check that a sealed asset's copy is reachable from `source` at its
-/// length, as [`check_stored_asset`] checks plaintext bytes: held locally,
-/// or recorded by the line as this very copy already.
+/// Check that a sealed asset's copy is reachable from `source` and is a
+/// copy of that asset, as [`check_stored_asset`] checks plaintext bytes.
+///
+/// A copy held locally is opened through and hashed: the asset names its
+/// content by hash, and nothing about a copy's address or length ties it
+/// to that content. One the line already records as this very copy is
+/// held by reference and was checked when it was recorded.
 async fn check_sealed_asset<Env>(
     source: SourceRef<'_>,
+    space: &TreeSpace,
     asset: &Asset,
     copy: &SealedCopy,
     env: &Env,
@@ -400,28 +426,38 @@ where
 {
     let digest = Blake3Hash::from(copy.address);
     let expected = sealed_len(asset.size());
+    if copy.length != expected {
+        return Err(BlobError::SizeMismatch {
+            digest: digest.to_string(),
+            expected,
+            held: copy.length,
+        }
+        .into());
+    }
     let local = source
         .archive()
         .blob()
         .size(digest.clone())
         .perform(env)
         .await?;
-    let held = match local {
-        Some(length) => length,
-        None => match recorded_sealed(source, asset.hash(), env).await? {
-            Some((recorded, _)) if recorded == *copy => copy.length,
-            _ => return Err(BlobError::NotFound(digest.to_string()).into()),
-        },
-    };
-    if held != expected || copy.length != expected {
-        return Err(BlobError::SizeMismatch {
+    match local {
+        Some(held) if held != expected => Err(BlobError::SizeMismatch {
             digest: digest.to_string(),
             expected,
             held,
         }
-        .into());
+        .into()),
+        Some(_) => {
+            let hash = Blake3Hash::from(*asset.hash());
+            let mut opened = open_copy(source, space, &hash, copy, asset.size(), None, env).await?;
+            while opened.next().await?.is_some() {}
+            Ok(())
+        }
+        None => match recorded_sealed(source, asset.hash(), env).await? {
+            Some((recorded, _)) if recorded == *copy => Ok(()),
+            _ => Err(BlobError::NotFound(digest.to_string()).into()),
+        },
     }
-    Ok(())
 }
 
 /// Import `content` into `source`'s blob store under `asset`'s hash and

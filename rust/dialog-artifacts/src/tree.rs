@@ -41,11 +41,11 @@ use std::sync::{Arc, Mutex};
 use crate::history::{Cause as HistoryCause, Claim, Record, RecordEntries, Version};
 use crate::key::value_payload as build_value_payload;
 use crate::{
-    ATTRIBUTE_KEY_TAG, ArchiveDelta, ArchiveReader, Artifact, ArtifactSelector, ArtifactView,
-    ArtifactWriter, AttributeKey, AttributeKeyPart, Datum, DeltaOverlay, DialogArtifactsError,
-    ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct,
-    KeyViewMut, LoadBlob, SelectorMatch, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey,
-    decode_value_parts, encode_bytes, encode_value_owned,
+    ASSET_SEALED, ATTRIBUTE_KEY_TAG, ArchiveDelta, ArchiveReader, Artifact, ArtifactSelector,
+    ArtifactView, ArtifactWriter, AttributeKey, AttributeKeyPart, Datum, DeltaOverlay,
+    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView,
+    KeyViewConstruct, KeyViewMut, LoadBlob, SelectorMatch, State, VALUE_KEY_TAG, Value,
+    ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     match_selector_and_key_ref,
@@ -1405,6 +1405,7 @@ where
                 // three index keys, and a spilling value's block bytes and
                 // reference come from the same pass.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
+                refuse_spilled_sealed_asset(&artifact, &encoded)?;
                 let (entity_key, attribute_key, value_key) =
                     artifact_index_keys_with(&artifact, encoded.payload);
 
@@ -1572,6 +1573,7 @@ where
 
                 // ONE value encode per instruction, exactly as in `Assert`.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
+                refuse_spilled_sealed_asset(&artifact, &encoded)?;
                 let (entity_key, attribute_key, value_key) =
                     artifact_index_keys_with(&artifact, encoded.payload);
 
@@ -2220,4 +2222,23 @@ mod corrupt_row_tests {
         assert_eq!(rows.len(), 3, "materialization drops the corrupt rows");
         Ok(())
     }
+}
+
+/// Refuse a sealed asset's fact whose value would spill out of its keys.
+///
+/// Push and export ship a sealed asset's copy by reading the fact's key
+/// alone ([`shipment_ref`](crate::shipment_ref)), which works only while
+/// the 48-byte value sits in the key. Every shipped manifest keeps it
+/// there; one whose inline threshold is smaller would record an asset no
+/// push could ship, so it is refused here instead.
+fn refuse_spilled_sealed_asset(
+    artifact: &Artifact,
+    encoded: &EncodedValue,
+) -> Result<(), DialogArtifactsError> {
+    if encoded.spill.is_some() && artifact.the.as_str() == ASSET_SEALED {
+        return Err(DialogArtifactsError::InvalidValue(format!(
+            "{ASSET_SEALED} must stay inline, but this tree's inline threshold spills it"
+        )));
+    }
+    Ok(())
 }

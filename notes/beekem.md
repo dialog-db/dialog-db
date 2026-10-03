@@ -1129,7 +1129,15 @@ piece authenticates the header (version, content generation, salt).
   the plaintext is stored nowhere to be shipped.
 - **Reads.** A read finds the fact, hydrates the copy whole on a local
   miss, reads the header, then reads and opens only the pieces the
-  requested range touches.
+  requested range touches. A read of the whole asset hashes what it opens
+  and fails with `DigestMismatch` unless it comes to the asset's hash; a
+  ranged read cannot, since it does not see every byte.
+- **Checked on the way in.** Nothing about a copy's address or length ties
+  it to the content its asset names, so a commit recording a sealed copy it
+  holds opens it through and hashes it first; a copy of other content is
+  refused with `DigestMismatch`. A sealed fact whose value would spill out
+  of its keys, under a tree with an inline threshold below 48 bytes, is
+  refused too, since push reads it from the key.
 - **Opting out.** `Asset::plaintext`, `AssetStream::plaintext` and
   `Blob::import(..).plaintext()` keep an asset in the clear on a sealed
   line, for content meant to be public. A stored asset naming plaintext
@@ -1162,8 +1170,13 @@ on the filesystem one:
 - An asset marked plaintext is stored in the clear and reads back.
 - Refusals, each with the head unmoved: an unmarked plaintext asset
   (`PlaintextAsset`), a sealed asset on a plain line
-  (`SealedAssetOnPlainLine`), and a reader sealing an asset by import or
-  assertion (`ReadOnly`), which also records and stores nothing.
+  (`SealedAssetOnPlainLine`), a copy of other content than the asset names
+  (`DigestMismatch`), and a reader sealing an asset by import or assertion,
+  or recording one marked plaintext (`ReadOnly`), which also records and
+  stores nothing.
+- Naming an already sealed asset by hash and size alone mints nothing.
+- A location learned while reading never displaces one already known, so a
+  node sealed under two generations is read where this replica holds it.
 - Retracting a sealed asset retracts its fact.
 - On disk (native), a sealed commit's values and sealed assets appear
   nowhere, while the same values on a plain branch, and an asset marked

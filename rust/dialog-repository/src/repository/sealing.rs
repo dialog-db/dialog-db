@@ -40,8 +40,9 @@ use dialog_common::{Blake3Hash, Buffer};
 use dialog_effects::archive::ArchiveError;
 use dialog_keyring::KeyringError;
 use dialog_keyring::layered::{Access, Attach, LayeredRoot, Sealing, Space, StructureKey, Writer};
-use dialog_search_tree::{Delta, NodeBody, NoveltyOp, PersistentNode, into_owned};
+use dialog_search_tree::{Delta, PersistentNode};
 
+use crate::repository::archive::node_entries;
 use crate::{Revision, SealedTree, TreeReference};
 
 /// One party's keys for the sealed trees of a space, and where each node
@@ -87,26 +88,8 @@ pub fn spilled_values(
     node: &PersistentNode<Key, State<Datum>>,
 ) -> Result<Vec<Blake3Hash>, KeyringError> {
     let failed = |error: &dyn Display| KeyringError::Node(error.to_string());
-    let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
-    match node.body() {
-        NodeBody::Segment(segment) => {
-            segment
-                .for_each_entry::<Key, _>(|key, value| {
-                    entries.push((Key::from(key.to_vec()), into_owned(value)?));
-                    Ok(())
-                })
-                .map_err(|error| failed(&error))?;
-        }
-        NodeBody::Index(index) => {
-            for entry in index.all_novelty::<Key>().map_err(|error| failed(&error))? {
-                if let NoveltyOp::Assert(value) = entry.op {
-                    entries.push((Key::from(entry.key), value));
-                }
-            }
-        }
-    }
     let mut references = BTreeSet::new();
-    for (key, value) in entries {
+    for (key, value) in node_entries(node).map_err(|error| failed(&error))? {
         if let Some(ShipmentRef::SpilledValue(reference)) =
             shipment_ref(&key, &value, false).map_err(|error| failed(&error))?
         {

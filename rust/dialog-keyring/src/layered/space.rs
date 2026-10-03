@@ -127,8 +127,10 @@ impl<K, V, A> Space<K, V, A> {
     }
 
     /// Learn that the tree whose root has content identity `identity` starts
-    /// at `root`. Unchecked here: the root is checked when it is opened,
-    /// against `identity` by whoever asked for it.
+    /// at `root`, unless this party already knows where that root lives: a
+    /// location learned while reading never displaces one already known.
+    /// Unchecked here: the root is checked when it is opened, against
+    /// `identity` by whoever asked for it.
     pub fn admit(&self, identity: Blake3Hash, root: &LayeredRoot) {
         self.party
             .learn(identity, root.address.clone(), root.structure);

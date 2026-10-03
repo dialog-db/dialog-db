@@ -11,9 +11,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::{
-    MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, TreeDifference, into_owned,
-};
+use dialog_search_tree::{MissingBlocks, MissingPolicy, NodeBody, PersistentNode, TreeDifference};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::collections::HashSet;
 
@@ -21,6 +19,7 @@ use super::resolve::resolve;
 use crate::ResolveEnv;
 use crate::repository::archive::local::read_all;
 use crate::repository::archive::networked::fill_import;
+use crate::repository::archive::node_entries;
 use crate::repository::remote::Step;
 use crate::sealing::open_node;
 use crate::{
@@ -1274,24 +1273,8 @@ where
                 // buffered in an index) may name blob bytes and spilled
                 // value blocks the target also lacks; ship those before
                 // the node lands, mirroring the top-level shipment loop.
-                let mut entries: Vec<(ArtifactKey, State<Datum>)> = Vec::new();
-                match node.body() {
-                    NodeBody::Segment(segment) => {
-                        segment.for_each_entry::<ArtifactKey, _>(|key, value| {
-                            entries.push((ArtifactKey::from(key.to_vec()), into_owned(value)?));
-                            Ok(())
-                        })?;
-                    }
-                    NodeBody::Index(index) => {
-                        for entry in index.all_novelty::<ArtifactKey>()? {
-                            if let NoveltyOp::Assert(value) = entry.op {
-                                entries.push((ArtifactKey::from(entry.key), value));
-                            }
-                        }
-                    }
-                }
                 let mut references = Vec::new();
-                for (key, value) in entries {
+                for (key, value) in node_entries(&node)? {
                     if let Some(reference) = shipment_ref(&key, &value, false)? {
                         references.push(reference);
                     }
