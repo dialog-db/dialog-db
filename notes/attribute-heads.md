@@ -428,9 +428,25 @@ heads, all of them found by running this load:
   set of bound values, estimating every scan's range per row, which
   walked the tree about as much as the scan did; it decides once.
 
-What remains is the re-poll after a change, where each affected
-entity is re-derived by a query of its own at about thirty
-milliseconds each.
+The re-poll after a change looked like thirty milliseconds per
+affected entity. Profiled, nine tenths of it was not the re-derivation
+but finding the affected entities: discovery took every concept a
+rule reads as touched by every changed subject, so a replica's
+status change was joined sideways through `space`, `db/session`,
+`space/replica` and `space/replicating` as well, and a premise
+naming none of `this` joined the rest of the body with nothing
+bound, which is the whole relation again. A concept selecting stored
+attributes is touched only by a change under an attribute it reads,
+which leaves the one concept that changed and a lookup per changed
+subject. Ten replicas' status changes re-polled the presence
+subscription in 287 ms before and 103 ms after, with the same delta.
+What remains is the re-derivation itself: each affected entity
+evaluates every presence rule's body with `this` bound, and each
+body's negated premises evaluate a concept query of their own, with
+its rule resolution, its merge decision and its index probes, so
+forty bodies cost about a hundred negation pipelines. Refusing
+`unless` in deductive rules, which the monotone design does, removes
+that cost from these rules rather than optimising it.
 
 Without the shared body, the single-pass election and the covering
 rule, `member` was three times main and `titled` twice `member`. With
