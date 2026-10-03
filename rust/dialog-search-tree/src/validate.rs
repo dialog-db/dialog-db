@@ -229,7 +229,9 @@ mod tests {
     use anyhow::Result;
     use dialog_common::Blake3Hash;
 
-    use crate::{Buffer, Cache, Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree};
+    use crate::{
+        Buffer, Delta, HitchhikerTree, Manifest, NodeCache, PersistentTree, TransientTree,
+    };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -360,7 +362,7 @@ mod tests {
         ] {
             let mut delta = Delta::zero();
             let emptied =
-                TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), manifest)
+                TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), manifest)
                     .persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
             assert!(emptied.stored_root().is_some());
