@@ -489,6 +489,21 @@ impl ConceptQuery {
                     }
                     None => fixpoint::evaluate(&app.predicate, analysis, env).await?,
                 };
+                // The component yields its candidates as a set; a read
+                // under a policy that is a function of that set elects
+                // at the exit. `last` is not: a fixpoint row has no
+                // standing, so it reads the set as before.
+                let table: Vec<fixpoint::Row> = match app.predicate.attribute_field() {
+                    Some((_, field)) => {
+                        let election = Election::of(field);
+                        if election.select.elects() && election.select != Select::Last {
+                            election.elect_rows(table.iter().cloned().collect())?
+                        } else {
+                            table.iter().cloned().collect()
+                        }
+                    }
+                    None => table.iter().cloned().collect(),
+                };
                 let rows = stream::once(async { Ok(first) }).chain(selection);
                 for await each in rows {
                     let input = each?;
@@ -608,9 +623,17 @@ impl ConceptQuery {
     where
         Env: crate::Scope<'a>,
     {
-        let into = self.terms.clone();
-        let back = self.terms.clone();
         let key_operand = Relation::key_operand(ConceptDescriptor::VALUE);
+        // Under an election the caller's value, bound or constant, is
+        // tested against what the election yields, never used to seed
+        // the body: seeding would elect among the candidates that happen
+        // to equal it, or sum only those.
+        let mut into = self.terms.clone();
+        if elect.is_some() {
+            into.remove(ConceptDescriptor::VALUE);
+            into.remove(&key_operand);
+        }
+        let back = self.terms.clone();
         // A set-widened read keeps every caller to tell, once the plan
         // has run, which of them nothing matched.
         let callers: Arc<Mutex<Vec<Arc<Match>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -658,11 +681,11 @@ impl ConceptQuery {
                 })?;
                 let caller_id = Arc::as_ptr(&caller) as usize;
                 matched.insert(caller_id);
-                let Some(election) = &elect else {
+                if elect.is_none() {
                     yield merge_parameters(&caller, &result, &back)
                         .map_err(|e| EvaluationError::Store(e.to_string()))?;
                     continue;
-                };
+                }
                 let this = match result.lookup(&Term::<Any>::var("this")) {
                     Ok(Binding::Present(value)) => value,
                     _ => continue,
@@ -689,6 +712,9 @@ impl ConceptQuery {
                     match election.resolve(entries)? {
                         Resolved::Chosen(chosen) => {
                             for (result, caller) in chosen {
+                                if !agrees(&result, &caller, &back, &[ConceptDescriptor::VALUE, &key_operand])? {
+                                    continue;
+                                }
                                 yield merge_parameters(&caller, &result, &back)
                                     .map_err(|e| EvaluationError::Store(e.to_string()))?;
                             }
@@ -697,6 +723,9 @@ impl ConceptQuery {
                             let mut row = Match::new();
                             row.bind(&Term::<Any>::var("this"), this)?;
                             row.bind(&Term::<Any>::var(ConceptDescriptor::VALUE), value)?;
+                            if !agrees(&row, &caller, &back, &[ConceptDescriptor::VALUE])? {
+                                continue;
+                            }
                             yield merge_parameters(&caller, &row, &back)
                                 .map_err(|e| EvaluationError::Store(e.to_string()))?;
                         }
@@ -816,7 +845,12 @@ impl ConceptQuery {
                             }
                         }
                         _ => {
-                            let mut scoped = extract_parameters(&input, &app.terms)
+                            // Seeded with the caller's entity only: its
+                            // value is tested after the election.
+                            let mut seed = app.terms.clone();
+                            seed.remove(ConceptDescriptor::VALUE);
+                            seed.remove(&key_operand);
+                            let mut scoped = extract_parameters(&input, &seed)
                                 .map_err(|e| EvaluationError::Store(e.to_string()))?;
                             scoped.share();
                             let results: Vec<Match> = conjunction
@@ -1212,6 +1246,88 @@ impl Election {
             });
         }
         Ok(Resolved::Chosen(best.into_iter().map(|entry| entry.carrier).collect()))
+    }
+}
+
+/// Whether `result` agrees with what the caller bound or fixed for
+/// `operands`: a constant term must equal the result's value, a
+/// variable the caller bound must too, and an unbound one agrees with
+/// anything.
+fn agrees(
+    result: &Match,
+    caller: &Match,
+    terms: &Parameters,
+    operands: &[&str],
+) -> Result<bool, EvaluationError> {
+    for name in operands {
+        let Some(term) = terms.get(*name) else { continue };
+        let Some(Binding::Present(actual)) = result.get(name) else {
+            continue;
+        };
+        let expected: Option<Value> = match term {
+            Term::Constant(value) => Some(value.clone()),
+            Term::Variable {
+                name: Some(variable),
+                ..
+            } => match caller.get(variable) {
+                Some(Binding::Present(value)) => Some(value.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if expected.is_some_and(|expected| expected != *actual) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+impl Election {
+    /// The rows a recursive component yields, elected per entity under
+    /// this policy at the component's exit: the chosen rows, or one
+    /// folded row per entity.
+    fn elect_rows(&self, rows: Vec<fixpoint::Row>) -> Result<Vec<fixpoint::Row>, EvaluationError> {
+        let key_operand = Relation::key_operand(ConceptDescriptor::VALUE);
+        let mut order: Vec<Vec<u8>> = Vec::new();
+        let mut groups: HashMap<Vec<u8>, Vec<Entry<fixpoint::Row>>> = HashMap::new();
+        for row in rows {
+            let (Some(this), Some(value)) = (row.get("this"), row.get(ConceptDescriptor::VALUE)) else {
+                continue;
+            };
+            let key = entity_key(this)?;
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+            }
+            groups.entry(key).or_default().push(Entry {
+                standing: None,
+                this: this.clone(),
+                value: value.clone(),
+                identity: match row.get(&key_operand) {
+                    Some(key) => encode_value(key)?,
+                    None => Vec::new(),
+                },
+                carrier: row,
+            });
+        }
+        let mut elected = Vec::new();
+        for key in order {
+            let entries = groups.remove(&key).unwrap_or_default();
+            match self.resolve(entries)? {
+                Resolved::Chosen(chosen) => elected.extend(chosen),
+                Resolved::Folded {
+                    this,
+                    value: Some(value),
+                    ..
+                } => {
+                    let mut row = fixpoint::Row::new();
+                    row.insert("this".to_string(), this);
+                    row.insert(ConceptDescriptor::VALUE.to_string(), value);
+                    elected.push(row);
+                }
+                Resolved::Folded { value: None, .. } => {}
+            }
+        }
+        Ok(elected)
     }
 }
 
