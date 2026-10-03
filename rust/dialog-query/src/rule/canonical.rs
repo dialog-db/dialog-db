@@ -36,6 +36,7 @@
 //! hashes the canonical spelling.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::iter;
 
 use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
@@ -203,7 +204,7 @@ pub(crate) fn canonicalize(
     let heads: BTreeSet<&String> = rule
         .fields
         .iter()
-        .flat_map(|(name, key)| std::iter::once(name).chain(key.iter()))
+        .flat_map(|(name, key)| iter::once(name).chain(key.iter()))
         .collect();
     let mut prefix = String::from(PREFIX);
     while heads.iter().any(|name| {
@@ -660,32 +661,6 @@ mod tests {
         let decoded = DeductiveRule::decode(&authored.encode()).expect("stored bytes decode");
         assert_eq!(decoded.this(), authored.this());
         assert_eq!(decoded.descriptor(), descriptor);
-    }
-
-    /// A fold over one of two interchangeable locals is the same fold
-    /// whichever the author picked, and whatever the reduced field is
-    /// called.
-    #[dialog_common::test]
-    fn it_identifies_a_reducing_rule_by_which_local_it_folds() {
-        let fold = |field: &str, input: &str| {
-            let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
-                "deduce": { "with": { field: { "the": "payroll/total", "as": "UnsignedInteger" } } },
-                "when": [
-                    {
-                        "assert": { "with": { "pays": { "the": "payroll/pays", "as": "UnsignedInteger" } } },
-                        "where": { "this": { "?": { "name": "this" } }, "pays": { "?": { "name": "x" } } }
-                    },
-                    {
-                        "assert": { "with": { "pays": { "the": "payroll/pays", "as": "UnsignedInteger" } } },
-                        "where": { "this": { "?": { "name": "this" } }, "pays": { "?": { "name": "y" } } }
-                    }
-                ],
-                "reduce": { field: { "apply": "sum", "of": { "?": { "name": input } } } }
-            }))
-            .expect("descriptor parses");
-            descriptor.compile().expect("rule compiles")
-        };
-        assert_eq!(fold("total", "x").this(), fold("sum", "y").this());
     }
 
     /// A rule installed into a bundle whose concept spells the same

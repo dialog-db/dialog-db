@@ -12,6 +12,7 @@
 use crate::type_system;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Describes the parameter signature of a premise.
@@ -116,6 +117,103 @@ pub enum Cardinality {
     One,
     /// The attribute holds multiple values per entity.
     Many,
+}
+
+/// How a concept field reads the relation of its attribute: the
+/// policy that turns an entity's candidates, stored and derived, into
+/// the field's value. The field is the read; rules only ever add
+/// candidates to the relation, so two fields over one attribute may
+/// read it under different policies.
+///
+/// `last`, `all`, `top`, `max`, `min` and `sum` are closed over the
+/// attribute's carrier: what comes out is one of the candidates, or
+/// their set, or their sum in the same numeric band. `count`,
+/// `count-distinct` and `avg` change the carrier: the field's `as`
+/// types what comes out, not what goes in. A deductive rule may read
+/// or conclude through a carrier-closed field only, which is what
+/// keeps every rule set composable: inside a recursive component a
+/// carrier-closed field reads the candidate set, and a count read as
+/// a set would be entities read as a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Select {
+    /// The newest candidate: today's cardinality one.
+    Last,
+    /// Every distinct candidate: today's cardinality many.
+    All,
+    /// The first value of the field's listed domain that a candidate
+    /// holds; a candidate holding none of them loses to any that does.
+    Top,
+    /// The greatest candidate under the values' own order.
+    Max,
+    /// The least candidate under the values' own order.
+    Min,
+    /// The sum of the candidates, in their numeric band.
+    Sum,
+    /// How many candidates there are.
+    Count,
+    /// How many distinct values the candidates hold.
+    CountDistinct,
+    /// The mean of the candidates, as a float.
+    Avg,
+}
+
+impl Select {
+    /// Whether the policy's result is a value of the attribute's own
+    /// carrier, or a set of them.
+    pub fn is_carrier_closed(self) -> bool {
+        !matches!(self, Select::Count | Select::CountDistinct | Select::Avg)
+    }
+
+    /// Whether the policy folds every candidate into one value rather
+    /// than choosing among them.
+    pub fn is_fold(self) -> bool {
+        matches!(
+            self,
+            Select::Sum | Select::Count | Select::CountDistinct | Select::Avg
+        )
+    }
+
+    /// Whether the policy needs the whole candidate set before it can
+    /// answer: everything but `last` over a relation nothing derives,
+    /// where the stored value is the answer.
+    pub fn elects(self) -> bool {
+        !matches!(self, Select::All)
+    }
+
+    /// The arity of this policy: a set for `all`, one value for the
+    /// rest. `cardinality` is the older spelling of `last` and `all`.
+    pub fn cardinality(self) -> Cardinality {
+        match self {
+            Select::All => Cardinality::Many,
+            _ => Cardinality::One,
+        }
+    }
+
+    /// The policy a cardinality reads under when none is declared.
+    pub fn of(cardinality: Cardinality) -> Self {
+        match cardinality {
+            Cardinality::One => Select::Last,
+            Cardinality::Many => Select::All,
+        }
+    }
+}
+
+impl fmt::Display for Select {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Select::Last => "last",
+            Select::All => "all",
+            Select::Top => "top",
+            Select::Max => "max",
+            Select::Min => "min",
+            Select::Sum => "sum",
+            Select::Count => "count",
+            Select::CountDistinct => "count-distinct",
+            Select::Avg => "avg",
+        };
+        f.write_str(name)
+    }
 }
 
 impl Cardinality {

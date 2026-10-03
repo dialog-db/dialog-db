@@ -32,13 +32,15 @@
 //!   those) with a structured error.
 
 use crate::Entity;
-use crate::concept::descriptor::ConceptDescriptor;
+use crate::attribute::AttributeDescriptor;
+use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptRules;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
+use crate::rule::statement::Reach;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 
@@ -132,12 +134,27 @@ fn selecting_edges(
     derived: &HashSet<Entity>,
 ) -> Vec<(ConceptDescriptor, Polarity)> {
     let mut edges = structural_edges(descriptor);
-    if descriptor.attribute_field().is_some() {
+    if let Some((_, field)) = descriptor.attribute_field() {
+        // A ranked chain reads every relation it lists.
+        if field.descriptor().is_chain() {
+            for relation in field.descriptor().relations() {
+                let single = AttributeDescriptor::over(
+                    relation.clone(),
+                    "",
+                    field.cardinality(),
+                    field.content_type(),
+                );
+                edges.push((
+                    ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(single)),
+                    Polarity::Positive,
+                ));
+            }
+        }
         return edges;
     }
     for (_, field) in descriptor.with().iter() {
         let attribute = ConceptDescriptor::of_attribute(field);
-        if derived.contains(&attribute.this()) {
+        if derived.contains(&ProgramAnalysis::node(&attribute)) {
             edges.push((attribute, Polarity::Positive));
         }
     }
@@ -163,8 +180,13 @@ fn structural_edges(descriptor: &ConceptDescriptor) -> Vec<(ConceptDescriptor, P
 /// cached until the next install.
 #[derive(Clone, Debug, Default)]
 pub struct ProgramAnalysis {
-    /// Adjacency: concept -> the concepts its rules reference.
+    /// Adjacency: node -> the nodes its rules reference. An attribute
+    /// concept's node is its relation (see [`ProgramAnalysis::node`]).
     edges: HashMap<Entity, Vec<(Entity, Polarity)>>,
+    /// The node of every concept the analysis saw, by the concept's
+    /// own entity, so a question asked by concept entity reaches the
+    /// relation's node.
+    aliases: HashMap<Entity, Entity>,
     /// Concepts whose strongly connected component is non-trivial
     /// (more than one member, or a self-edge).
     recursive: HashSet<Entity>,
@@ -211,13 +233,17 @@ impl ProgramAnalysis {
         derived: HashSet<Entity>,
     ) -> Self {
         let mut edges: HashMap<Entity, Vec<(Entity, Polarity)>> = HashMap::new();
+        let mut aliases: HashMap<Entity, Entity> = HashMap::new();
         let mut pending: VecDeque<ConceptDescriptor> = VecDeque::new();
 
         for (entity, rules) in entries {
             let mut out = Vec::new();
             for rule in rules.rules() {
+                aliases.insert(rule.conclusion().this(), Self::node(rule.conclusion()));
                 for (target, polarity) in rule_edges(rule) {
-                    out.push((target.this(), polarity));
+                    let node = Self::node(&target);
+                    aliases.insert(target.this(), node.clone());
+                    out.push((node, polarity));
                     pending.push_back(target);
                 }
             }
@@ -227,13 +253,15 @@ impl ProgramAnalysis {
         // Concepts referenced by premises but never registered still
         // constrain the graph through their embedded descriptors.
         while let Some(descriptor) = pending.pop_front() {
-            let entity = descriptor.this();
+            let entity = Self::node(&descriptor);
             if edges.contains_key(&entity) {
                 continue;
             }
             let mut out = Vec::new();
             for (target, polarity) in selecting_edges(&descriptor, &derived) {
-                out.push((target.this(), polarity));
+                let node = Self::node(&target);
+                aliases.insert(target.this(), node.clone());
+                out.push((node, polarity));
                 pending.push_back(target);
             }
             edges.insert(entity, out);
@@ -311,6 +339,7 @@ impl ProgramAnalysis {
 
         ProgramAnalysis {
             edges,
+            aliases,
             recursive,
             component,
             violations,
@@ -324,9 +353,30 @@ impl ProgramAnalysis {
         &self.violations
     }
 
+    /// The node a concept is analysed as: an attribute concept is its
+    /// relation, `on:<domain>/<name>`, whatever type or policy it reads
+    /// the relation under, since every rule deriving the relation and
+    /// every read of it meet there; any other concept is itself.
+    pub fn node(concept: &ConceptDescriptor) -> Entity {
+        match concept.attribute_field() {
+            // A ranked chain of relations is a concept of its own with
+            // an edge to each relation (see `selecting_edges`).
+            Some((_, field)) if !field.descriptor().is_chain() => Reach::of(field.the())
+                .on_entity()
+                .unwrap_or_else(|| concept.this()),
+            _ => concept.this(),
+        }
+    }
+
+    /// The node a question about `concept` is asked of: the concept's
+    /// node when the analysis saw it, else the entity itself.
+    fn key<'a>(&'a self, concept: &'a Entity) -> &'a Entity {
+        self.aliases.get(concept).unwrap_or(concept)
+    }
+
     /// Whether the concept participates in a dependency cycle.
     pub fn is_recursive(&self, concept: &Entity) -> bool {
-        self.recursive.contains(concept)
+        self.recursive.contains(self.key(concept))
     }
 
     /// Whether the two concepts sit on the *same* dependency cycle:
@@ -335,6 +385,7 @@ impl ProgramAnalysis {
     /// tell recursive occurrences (evaluated from the answer table)
     /// from base premises (evaluated top-down).
     pub fn in_same_cycle(&self, a: &Entity, b: &Entity) -> bool {
+        let (a, b) = (self.key(a), self.key(b));
         self.recursive.contains(a)
             && self.recursive.contains(b)
             && match (self.component.get(a), self.component.get(b)) {
@@ -361,7 +412,7 @@ impl ProgramAnalysis {
         let mut seen = HashSet::new();
         let mut structural = VecDeque::from([descriptor.clone()]);
         while let Some(descriptor) = structural.pop_front() {
-            let entity = descriptor.this();
+            let entity = Self::node(&descriptor);
             if !seen.insert(entity.clone()) {
                 continue;
             }
@@ -482,11 +533,9 @@ mod tests {
     use super::*;
     use crate::attribute::{AttributeDescriptor, Cardinality, Type};
     use crate::concept::query::ConceptQuery;
-    use crate::reduce::{Aggregator, ReduceSpec};
     use crate::session::RuleRegistry;
     use crate::types::Any;
     use crate::{ConceptFieldDescriptor, Parameters, Term};
-    use std::collections::BTreeMap;
 
     /// A one-field concept in the given domain: `{domain}/name` as
     /// text. Distinct domains produce distinct concept identities.
@@ -532,59 +581,6 @@ mod tests {
             ))));
         }
         DeductiveRule::new(conclusion.clone(), premises).expect("rule compiles")
-    }
-
-    /// The replica-merge scenario: `safe :- person, !blocked` and
-    /// `blocked :- safe, banned` are each valid alone; together they
-    /// form a cycle through negation. Both installs are accepted,
-    /// validate() reports the violation, and only queries touching
-    /// the cycle fail.
-    #[dialog_common::test]
-    fn it_accepts_and_reports_negation_through_recursion() {
-        let person = concept("person");
-        let banned = concept("banned");
-        let safe = concept("safe");
-        let blocked = concept("blocked");
-
-        let mut registry = RuleRegistry::new();
-        registry
-            .register(rule(&safe, &[&person], &[&blocked]))
-            .expect("install is unconditional");
-        registry
-            .register(rule(&blocked, &[&safe, &banned], &[]))
-            .expect("install is unconditional");
-
-        let violations = registry.validate().expect("validate");
-        assert_eq!(
-            violations,
-            vec![Violation::Negation(NegationViolation {
-                concept: safe.this(),
-                negated: blocked.this(),
-            })]
-        );
-
-        assert!(registry.is_recursive(&safe.this()).unwrap());
-        assert!(registry.is_recursive(&blocked.this()).unwrap());
-        assert!(!registry.is_recursive(&person.this()).unwrap());
-
-        match registry.acquire(&safe) {
-            Err(EvaluationError::NegationThroughRecursion { concept, negated }) => {
-                assert_eq!(concept, safe.this().to_string());
-                assert_eq!(negated, blocked.this().to_string());
-            }
-            other => panic!("expected NegationThroughRecursion, got {other:?}"),
-        }
-        assert!(
-            matches!(
-                registry.acquire(&blocked),
-                Err(EvaluationError::NegationThroughRecursion { .. })
-            ),
-            "the whole cycle is poisoned"
-        );
-        assert!(
-            registry.acquire(&person).is_ok(),
-            "concepts outside the ill-stratified region still answer"
-        );
     }
 
     /// A well-stratified recursive closure is rejected with a
@@ -637,56 +633,6 @@ mod tests {
             !analysis.in_same_cycle(&a.this(), &concept("ddd").this()),
             "concepts outside the cycle are not members"
         );
-    }
-
-    /// Ordered-variant style negation over acyclic concepts is
-    /// well-stratified: no violations, queries proceed.
-    #[dialog_common::test]
-    fn it_passes_well_stratified_negation() {
-        let contact = concept("contact");
-        let email = concept("email");
-        let phone = concept("phone");
-
-        let mut registry = RuleRegistry::new();
-        registry.register(rule(&contact, &[&email], &[])).unwrap();
-        registry
-            .register(rule(&contact, &[&phone], &[&email]))
-            .unwrap();
-
-        assert!(registry.validate().unwrap().is_empty());
-        assert!(!registry.is_recursive(&contact.this()).unwrap());
-        assert!(registry.acquire(&contact).is_ok());
-    }
-
-    /// The post-merge case: each registry is valid alone; extending
-    /// one with the other closes a cycle through negation, and the
-    /// merged analysis reports it.
-    #[dialog_common::test]
-    fn it_reports_violation_closed_by_merge() {
-        let person = concept("person");
-        let banned = concept("banned");
-        let safe = concept("safe");
-        let blocked = concept("blocked");
-
-        let mut replica_a = RuleRegistry::new();
-        replica_a
-            .register(rule(&safe, &[&person], &[&blocked]))
-            .unwrap();
-        assert!(replica_a.validate().unwrap().is_empty());
-        assert!(replica_a.acquire(&safe).is_ok(), "valid before the merge");
-
-        let mut replica_b = RuleRegistry::new();
-        replica_b
-            .register(rule(&blocked, &[&safe, &banned], &[]))
-            .unwrap();
-        assert!(replica_b.validate().unwrap().is_empty());
-
-        replica_a.extend(&replica_b).unwrap();
-        assert_eq!(replica_a.validate().unwrap().len(), 1);
-        assert!(matches!(
-            replica_a.acquire(&safe),
-            Err(EvaluationError::NegationThroughRecursion { .. })
-        ));
     }
 
     /// Concept-typed fields contribute structural edges: a concept
@@ -743,258 +689,5 @@ mod tests {
                 .is_some(),
             "the cycle is visible from both ends"
         );
-    }
-
-    /// A one-field unsigned-integer concept in the given domain:
-    /// `{domain}/total`. The head shape every reducing rule below
-    /// concludes.
-    fn totals(domain: &str) -> ConceptDescriptor {
-        ConceptDescriptor::try_from(vec![(
-            "total",
-            AttributeDescriptor::new(
-                format!("{domain}/total").parse().expect("valid selector"),
-                "",
-                Cardinality::One,
-                Some(Type::UnsignedInt),
-            ),
-        )])
-        .expect("concept builds")
-    }
-
-    /// A positive premise over `target` binding `this` and the
-    /// given field to the named variable.
-    fn premise(target: &ConceptDescriptor, field: &str, var: &str) -> Premise {
-        let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::<Entity>::var("this").into());
-        terms.insert(field.to_string(), Term::<Any>::var(var));
-        Premise::Assert(Proposition::Concept(ConceptQuery {
-            terms,
-            predicate: target.clone(),
-        }))
-    }
-
-    /// A reducing rule concluding `conclusion` (a [`totals`]
-    /// concept) that counts the `field` bindings of `target` into
-    /// `total`.
-    fn reducing(
-        conclusion: &ConceptDescriptor,
-        target: &ConceptDescriptor,
-        field: &str,
-    ) -> DeductiveRule {
-        let mut reduce = BTreeMap::new();
-        reduce.insert(
-            "total".to_string(),
-            ReduceSpec {
-                apply: Aggregator::Count,
-                of: Term::var("input"),
-            },
-        );
-        DeductiveRule::with_reduce(
-            conclusion.clone(),
-            vec![premise(target, field, "input")],
-            reduce,
-        )
-        .expect("locally the rule compiles; any cycle is a program property")
-    }
-
-    /// The aggregation mirror of the negation scenario: a reducing
-    /// rule whose body reads its own conclusion is an aggregating
-    /// edge inside its own component. The install is unconditional,
-    /// validate() reports the violation, and only queries touching
-    /// the cycle fail.
-    #[dialog_common::test]
-    fn it_accepts_and_reports_aggregation_through_recursion() {
-        let dept = totals("dept");
-        let person = concept("person");
-
-        let mut registry = RuleRegistry::new();
-        registry
-            .register(reducing(&dept, &dept, "total"))
-            .expect("install is unconditional");
-
-        let violations = registry.validate().expect("validate");
-        assert_eq!(
-            violations,
-            vec![Violation::Aggregation(AggregationViolation {
-                concept: dept.this(),
-                aggregated: dept.this(),
-            })]
-        );
-
-        match registry.acquire(&dept) {
-            Err(EvaluationError::AggregationThroughRecursion {
-                concept,
-                aggregated,
-            }) => {
-                assert_eq!(concept, dept.this().to_string());
-                assert_eq!(aggregated, dept.this().to_string());
-            }
-            other => panic!("expected AggregationThroughRecursion, got {other:?}"),
-        }
-        assert!(
-            registry.acquire(&person).is_ok(),
-            "concepts outside the ill-stratified region still answer"
-        );
-    }
-
-    /// An aggregating edge closing a cycle through a second rule:
-    /// `dept` reduces over `audit`, and a plain rule derives
-    /// `audit` from `dept`. Each install is valid alone; together
-    /// the whole cycle is poisoned.
-    #[dialog_common::test]
-    fn it_reports_aggregation_cycle_through_a_second_rule() {
-        let dept = totals("dept");
-        let audit = totals("audit");
-
-        let mut registry = RuleRegistry::new();
-        registry
-            .register(reducing(&dept, &audit, "total"))
-            .expect("install is unconditional");
-        registry
-            .register(
-                DeductiveRule::new(audit.clone(), vec![premise(&dept, "total", "total")])
-                    .expect("rule compiles"),
-            )
-            .expect("install is unconditional");
-
-        assert_eq!(
-            registry.validate().expect("validate"),
-            vec![Violation::Aggregation(AggregationViolation {
-                concept: dept.this(),
-                aggregated: audit.this(),
-            })]
-        );
-
-        assert!(matches!(
-            registry.acquire(&dept),
-            Err(EvaluationError::AggregationThroughRecursion { .. })
-        ));
-        assert!(
-            matches!(
-                registry.acquire(&audit),
-                Err(EvaluationError::AggregationThroughRecursion { .. })
-            ),
-            "the whole cycle is poisoned"
-        );
-    }
-
-    /// Aggregation *over* a recursive concept is well-stratified:
-    /// the recursive component computes below and the fold reads
-    /// its completed relation. The reducing conclusion itself stays
-    /// non-recursive.
-    #[dialog_common::test]
-    fn it_accepts_aggregation_over_lower_stratum_recursion() {
-        let same = concept("same");
-        let dept = totals("dept");
-
-        let mut registry = RuleRegistry::new();
-        registry.register(rule(&same, &[&same], &[])).unwrap();
-        registry.register(reducing(&dept, &same, "name")).unwrap();
-
-        assert!(registry.validate().unwrap().is_empty(), "stratified");
-        assert!(registry.is_recursive(&same.this()).unwrap());
-        assert!(!registry.is_recursive(&dept.this()).unwrap());
-        let rules = registry
-            .acquire(&dept)
-            .expect("aggregation over a completed lower stratum answers");
-        assert!(
-            rules.recursion().is_none(),
-            "the reducing conclusion is not itself recursive"
-        );
-        assert!(
-            registry.acquire(&same).unwrap().recursion().is_some(),
-            "the lower stratum still evaluates via the fixpoint"
-        );
-    }
-
-    /// Both edge kinds in one program: negation and aggregation
-    /// over acyclic lower strata are accepted together, and closing
-    /// a cycle through either edge rejects with that edge's own
-    /// error while concepts below both strata keep answering.
-    #[dialog_common::test]
-    fn it_stratifies_combined_negation_and_aggregation() {
-        let person = concept("person");
-        let banned = concept("banned");
-        let safe = concept("safe");
-        let dept = totals("dept");
-
-        // Well-stratified: safe negates banned, dept counts safe.
-        let mut registry = RuleRegistry::new();
-        registry
-            .register(rule(&safe, &[&person], &[&banned]))
-            .unwrap();
-        registry.register(reducing(&dept, &safe, "name")).unwrap();
-        assert!(registry.validate().unwrap().is_empty());
-        assert!(registry.acquire(&safe).is_ok());
-        assert!(registry.acquire(&dept).is_ok());
-
-        // One cycle through negation and one through aggregation:
-        // each region fails with its own error.
-        let blocked = concept("blocked");
-        let audit = totals("audit");
-        let mut merged = RuleRegistry::new();
-        merged
-            .register(rule(&safe, &[&person], &[&blocked]))
-            .unwrap();
-        merged.register(rule(&blocked, &[&safe], &[])).unwrap();
-        merged.register(reducing(&audit, &audit, "total")).unwrap();
-
-        let violations = merged.validate().unwrap();
-        assert_eq!(violations.len(), 2, "one violation per edge kind");
-        assert!(
-            violations
-                .iter()
-                .any(|violation| matches!(violation, Violation::Negation(_)))
-        );
-        assert!(
-            violations
-                .iter()
-                .any(|violation| matches!(violation, Violation::Aggregation(_)))
-        );
-        assert!(matches!(
-            merged.acquire(&safe),
-            Err(EvaluationError::NegationThroughRecursion { .. })
-        ));
-        assert!(matches!(
-            merged.acquire(&audit),
-            Err(EvaluationError::AggregationThroughRecursion { .. })
-        ));
-        assert!(
-            merged.acquire(&person).is_ok(),
-            "concepts below both strata still answer"
-        );
-    }
-
-    /// The post-merge case for aggregation, mirroring the negation
-    /// merge test: each registry is valid alone; extending one with
-    /// the other closes a cycle through an aggregating edge, and
-    /// the merged analysis reports it.
-    #[dialog_common::test]
-    fn it_reports_aggregation_violation_closed_by_merge() {
-        let dept = totals("dept");
-        let audit = totals("audit");
-
-        let mut replica_a = RuleRegistry::new();
-        replica_a
-            .register(reducing(&dept, &audit, "total"))
-            .unwrap();
-        assert!(replica_a.validate().unwrap().is_empty());
-        assert!(replica_a.acquire(&dept).is_ok(), "valid before the merge");
-
-        let mut replica_b = RuleRegistry::new();
-        replica_b
-            .register(
-                DeductiveRule::new(audit.clone(), vec![premise(&dept, "total", "total")])
-                    .expect("rule compiles"),
-            )
-            .unwrap();
-        assert!(replica_b.validate().unwrap().is_empty());
-
-        replica_a.extend(&replica_b).unwrap();
-        assert_eq!(replica_a.validate().unwrap().len(), 1);
-        assert!(matches!(
-            replica_a.acquire(&dept),
-            Err(EvaluationError::AggregationThroughRecursion { .. })
-        ));
     }
 }

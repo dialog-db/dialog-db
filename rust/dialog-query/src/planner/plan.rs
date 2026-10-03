@@ -22,6 +22,7 @@ use futures_util::TryStreamExt;
 use futures_util::stream;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::mem;
 use std::sync::{Arc, Mutex};
 
 /// Planning metadata shared by every [`Plan`] variant.
@@ -313,7 +314,7 @@ where
                 matched.insert(Arc::as_ptr(&caller) as usize);
             }
         }
-        let callers = std::mem::take(&mut *callers.lock().expect("negation lock"));
+        let callers = mem::take(&mut *callers.lock().expect("negation lock"));
         for caller in callers {
             if matched.contains(&(Arc::as_ptr(&caller) as usize)) {
                 continue;

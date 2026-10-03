@@ -226,6 +226,62 @@ pub enum TypeError {
         concept: String,
     },
 
+    /// A deductive rule carries an `unless` premise. A deductive rule
+    /// is open: installed as facts, read by any rule installed later,
+    /// resolved against whatever program exists when a query runs. A
+    /// program like that means the same thing under every merge only
+    /// when every rule is monotone, and a negation is not. Negation
+    /// belongs to the closed places: a query, a subscription, an
+    /// inductive rule.
+    #[error(
+        "Rule {rule} is deductive and negates a fact: a deductive rule admits no `unless` over \
+         an attribute or a concept"
+    )]
+    NegationInOpenRule {
+        /// The offending rule.
+        rule: Box<Rule>,
+    },
+
+    /// A deductive rule carries a `reduce` block. A fold withdraws its
+    /// previous result when a fact arrives, which a monotone rule
+    /// never does; an attribute's `select` policy folds instead, as a
+    /// function of the candidates every rule adds to.
+    #[error("Rule {rule} is deductive and folds: a deductive rule admits no `reduce`")]
+    ReduceInOpenRule {
+        /// The offending rule.
+        rule: Box<Rule>,
+    },
+
+    /// A deductive rule concludes through, or reads, a concept field
+    /// whose `select` policy changes the attribute's carrier (`count`,
+    /// `count-distinct`, `avg`). Inside a recursive component such a
+    /// field would read entities as a number; refusing it in the rule
+    /// itself keeps the check local, so no merge of rule sets is ever
+    /// rejected.
+    #[error(
+        "Rule {rule} is deductive and {role} the field `{field}` read as `{select}`: a deductive          rule reads and concludes carrier-closed fields only"
+    )]
+    PolicyInOpenRule {
+        /// The offending rule.
+        rule: Box<Rule>,
+        /// `concludes` or `reads`.
+        role: &'static str,
+        /// The field's name.
+        field: String,
+        /// The field's policy.
+        select: String,
+    },
+
+    /// A concept field declares a `select` policy its attribute cannot
+    /// read under.
+    #[error("Attribute {the} cannot be read as declared: {reason}")]
+    SelectPolicy {
+        /// The attribute's selector.
+        the: String,
+        /// Why the policy does not fit.
+        reason: String,
+    },
+
     /// Type inference over a rule's premises produced a
     /// contradiction (a variable appears in slots with conflicting
     /// kinds). The planner cannot proceed because the rule has no

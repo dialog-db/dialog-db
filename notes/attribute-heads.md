@@ -122,12 +122,59 @@ attribute!: &status
 
 `last` is the newest write, today's cardinality one; `all` is the set,
 today's cardinality many; `top` is the first listed value present;
-`max` and `min` are the extremes of a naturally ordered carrier. Only
-`last` depends on history rather than on the values present, which is
-why it is the one policy under which a derived row needs a standing
-of its own. The engine part of this is a per-attribute election
-policy beside cardinality; the notation is tonk's, and this note only
-requires that election be a property of the attribute.
+`max` and `min` are the extremes of a naturally ordered carrier;
+`sum` their sum. Only `last` depends on history rather than on the
+values present, which is why it is the one policy under which a
+derived row needs a standing of its own.
+
+The policy belongs to the read, not to the relation. A concept field
+names a relation by its attribute and says how it reads it, so two
+fields over one attribute may read it differently: `members` as the
+set and `member-count` as how many. Rules only ever add candidates to
+the relation. That is also how `count`, `count-distinct` and `avg` fit,
+which change the attribute's carrier: candidates are members, the
+value is a number. `as` always declares the carrier, being part of
+the attribute's identity; what a carrier-changing policy yields
+follows from the policy.
+
+What keeps every rule set composable is one check local to a rule,
+never a pass over the program. A deductive rule may conclude through,
+and read, a field whose policy is closed over the carrier (`last`,
+`all`, `top`, `max`, `min`, `sum`): outside a recursive component the
+field reads elected, inside one it reads the candidate set, and
+either way a rule installed later can only add candidates. It may
+neither conclude through nor read a carrier-changing field, since
+inside a component that would be entities read as a number. Views,
+queries, subscriptions and inductive rules read any policy: those
+are the closed places, and a view is where a count lives. A
+candidate is a fact: a fold sees each distinct value of the relation
+once, however many rules derive it, or each distinct entry of a keyed
+collection, so a count per contributor reads a collection keyed by
+the contributor.
+
+The engine part of this is the policy on the attribute descriptor a
+field carries, `select`; the notation is tonk's. The policy is part
+of the attribute: an attribute is a relation, the `(domain, name)`
+pair facts are stored under, read under a type and a policy, and two
+reads of one relation under different policies are two attributes,
+with distinct identities. Cardinality is the policy's arity, `all`
+being many and every other policy one; `cardinality: one` and `many`
+are read as the older spellings of `last` and `all`, and tonk's
+notation no longer writes them: `select: all` where it said `many`,
+nothing where it said `one`. Rules derive into the relation and are
+found by it, whatever type or policy a reader declares over it.
+
+A list is a ranked choice. `as: [case:active, case:registered]`
+lists the values the attribute ranks among, best first, and `the:
+[user/email, user/phone]` lists the relations it reads, best first:
+either implies `top`, and no other policy fits a list. A field over
+several relations gathers candidates from every relation's facts and
+rules, and the first listed relation offering one wins, so a contact
+handle is the email where there is one, stored or derived, and the
+phone otherwise. Discovery and the dependency graph follow each
+listed relation. Carrier-changing policies read as what they yield:
+a field counting entities is an unsigned integer to the planner and
+to the type checker, and `as` always names the carrier.
 
 ## Mechanism
 
@@ -459,18 +506,16 @@ counts the bench prints by a block or two between runs.
 
 ## Not in this change
 
-- the `select` policy that replaces ordered choice; cardinality one
-  still elects by recency alone;
 - `reduce` on inductive rules, the materialised home for aggregates;
-- election at the exit of a recursive component: a recursive
-  cardinality-one attribute concept yields its candidates as a set;
 - a rule body naming a derived attribute through a raw attribute
   premise, rather than a concept, reads stored facts only; the
   notation always emits concept premises, so this reaches only the
   Rust API;
-- the stratification policy note, which this design withdraws once
-  open rules are monotone; until `unless` is refused in deductive
-  rules the analysis and its errors stand;
+- the stratification analysis and its errors, unreachable now that
+  deductive rules refuse `unless` and `reduce`, which still stand in
+  the code until removed;
+- a `select` attribute on `#[derive(Attribute)]`, so a Rust-declared
+  concept reads a ranked or folded field as the notation does;
 - flattening a concept premise's attribute reads into the enclosing
   conjunction's merge, so two concept applications sharing an entity
   join their attributes in one pass rather than probing.

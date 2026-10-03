@@ -65,7 +65,7 @@ use std::env;
 use std::fs::read_to_string;
 use std::mem::take;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tracing::span::Attributes;
 use tracing::{Id, Subscriber};
@@ -75,6 +75,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 use ::dialog_query::concept::query::ConceptRules;
 use ::dialog_query::error::EvaluationError;
+use ::dialog_query::recall::{BodyMemo, Memo};
 use ::dialog_query::source::SelectRules;
 use ::dialog_query::{Concept, ConceptDescriptor, Entity, Output, Query, RuleRegistry, Term};
 
@@ -414,11 +415,11 @@ pub struct JoinEnv<'a, Env> {
     operator: &'a Env,
     rules: RuleRegistry,
     journal: ReadJournal,
-    memo: ::dialog_query::recall::Memo,
+    memo: Memo,
 }
 
-impl<Env> ::dialog_query::recall::BodyMemo for JoinEnv<'_, Env> {
-    fn memo(&self) -> Option<&::dialog_query::recall::Memo> {
+impl<Env> BodyMemo for JoinEnv<'_, Env> {
+    fn memo(&self) -> Option<&Memo> {
         Some(&self.memo)
     }
 }
@@ -806,7 +807,7 @@ where
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
-            memo: ::dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
         };
 
         env.journal().clear();
@@ -842,7 +843,7 @@ where
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
-            memo: ::dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
         };
         env.journal().clear();
         let selector = ArtifactSelector::new()
@@ -871,7 +872,7 @@ where
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
-            memo: ::dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
         };
         env.journal().clear();
         let selector = ArtifactSelector::new().the("stuff/name".parse().expect("valid attribute"));
@@ -1215,7 +1216,7 @@ where
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
-            memo: ::dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
         };
 
         let status_term = match status {
@@ -1434,7 +1435,7 @@ where
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
-            memo: ::dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
         };
 
         let status_term = match status {
@@ -2424,7 +2425,7 @@ where
         // One registry for the whole bench: registering a rule is
         // install-time work (the rule compiles once per head), not part
         // of a query, and the repository caches the result the same way.
-        static RULES: std::sync::OnceLock<RuleRegistry> = std::sync::OnceLock::new();
+        static RULES: OnceLock<RuleRegistry> = OnceLock::new();
         let branch = self
             .repo
             .branch(&self.branch)
@@ -2453,7 +2454,7 @@ where
             operator: &self.operator,
             rules,
             journal: ReadJournal::default(),
-            memo: ::dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
         };
         env.journal().clear();
         let results = Query::<Stuff> {
@@ -2480,7 +2481,7 @@ where
             operator: &self.operator,
             rules,
             journal: ReadJournal::default(),
-            memo: ::dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
         };
         env.journal().clear();
         let results = Query::<Member> {
@@ -2507,7 +2508,7 @@ where
             operator: &self.operator,
             rules,
             journal: ReadJournal::default(),
-            memo: ::dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
         };
         env.journal().clear();
         let results = Query::<Titled> {
@@ -2532,7 +2533,7 @@ where
             operator: &self.operator,
             rules,
             journal: ReadJournal::default(),
-            memo: ::dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
         };
         env.journal().clear();
         let results = Query::<Member> {

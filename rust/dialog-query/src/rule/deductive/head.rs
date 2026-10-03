@@ -20,6 +20,7 @@ use crate::error::TypeError;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
+use crate::rule::compile_internal;
 use crate::rule::deductive::{DeductiveRule, Origin};
 use crate::term::Term;
 use crate::type_system::{Primitive, Type as Kind};
@@ -105,7 +106,11 @@ impl DeductiveRule {
                 }
             }
 
-            let conclusion = ConceptDescriptor::of_attribute(field);
+            // The head derives into the relation, whatever policy the
+            // field it came from reads it under.
+            let relation =
+                ConceptFieldDescriptor::required(field.descriptor().clone().without_select());
+            let conclusion = ConceptDescriptor::of_attribute(&relation);
             let mut body = rename_premises(&premises, &map)?;
             // An optional head field derives a value only where the
             // body bound one: the relation holds values, never
@@ -137,7 +142,7 @@ impl DeductiveRule {
                 .collect();
 
             let rule = if reduce.is_empty() {
-                DeductiveRule::new(conclusion, body)
+                compile_internal::<DeductiveRule>(conclusion, body)
             } else {
                 DeductiveRule::with_reduce(conclusion, body, reduce)
             };
