@@ -372,7 +372,12 @@ mod tests {
     fn concept(field: &str, the: &str, kind: Type) -> ConceptDescriptor {
         ConceptDescriptor::try_from(vec![(
             field,
-            AttributeDescriptor::new(the.parse().expect("an attribute"), "", Cardinality::One, Some(kind)),
+            AttributeDescriptor::new(
+                the.parse().expect("an attribute"),
+                "",
+                Cardinality::One,
+                Some(kind),
+            ),
         )])
         .expect("a well-formed concept")
     }

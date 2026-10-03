@@ -45,6 +45,7 @@ use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
+use dialog_query::rule::statement::Reach;
 use dialog_query::type_system::Type as Kind;
 use dialog_query::types::Any;
 use dialog_query::{
@@ -114,12 +115,14 @@ pub(crate) fn derives_selector(on: &Entity) -> ArtifactSelector<Constrained> {
         .is(Value::Entity(on.clone()))
 }
 
-/// The head-index entity of an attribute concept: the `on:` entity
-/// its one attribute reaches. `None` for a concept that is not an
-/// attribute concept.
-pub(crate) fn derives_key(attribute: &ConceptDescriptor) -> Option<Entity> {
-    attribute.attribute_field()?;
-    head_entities(attribute).into_iter().next()
+/// The head-index entities of an attribute concept: one per relation
+/// it reads, several for a ranked chain. Empty for a concept that is
+/// not an attribute concept.
+pub(crate) fn derives_keys(attribute: &ConceptDescriptor) -> Vec<Entity> {
+    if attribute.attribute_field().is_none() {
+        return Vec::new();
+    }
+    head_entities(attribute).into_iter().collect()
 }
 
 /// Selector for `dialog.rule/source of = <rule>` — fetches a rule's body.
@@ -549,7 +552,7 @@ impl RuleCache {
         self.inner.write().derived.insert(on, (head, entities));
     }
 
-    /// The head of `rule` re-spelled onto `attribute`, if recorded.
+    /// The head of `rule` deriving the relation indexed by `attribute`, if recorded.
     pub(crate) fn head(&self, rule: &Entity, attribute: &Entity) -> Option<DeductiveRule> {
         self.inner
             .read()
@@ -831,18 +834,19 @@ pub(crate) fn overlay_rules_deriving(changes: &Changes, on: &Entity) -> Vec<Dedu
     out
 }
 
-/// The head of `rule` re-spelled onto the attribute concept
-/// `attribute`, if the rule derives it.
+/// The head of `rule` deriving the relation indexed by `on`, if it has
+/// one: the head concluding that relation's attribute concept, whatever
+/// type or policy the reader declares over it.
 pub(crate) fn head_onto(
     rule: &DeductiveRule,
-    attribute: &Entity,
+    on: &Entity,
 ) -> Result<Option<DeductiveRule>, EvaluationError> {
     let heads = rule
         .heads()
         .map_err(|error| EvaluationError::Store(format!("rule head: {error}")))?;
     Ok(heads
         .into_iter()
-        .find(|head| ConceptDescriptor::of_attribute(&head.field).this() == *attribute)
+        .find(|head| Reach::of(head.field.the()).on_entity() == Some(on.clone()))
         .map(|head| head.rule))
 }
 
@@ -865,10 +869,13 @@ mod tests {
         let entity = ancestor.this();
         let rules = builtin(&entity);
         assert_eq!(rules.len(), 2, "the base rule and the inductive step");
+        // The analysis keys an attribute concept by its relation, where
+        // every read of it meets.
+        let node = ProgramAnalysis::node(ancestor);
         let bundle = assemble(ancestor, rules, PlanCache::default());
-        let analysis = ProgramAnalysis::analyze([(&entity, &bundle)]);
+        let analysis = ProgramAnalysis::analyze([(&node, &bundle)]);
         assert!(
-            analysis.is_recursive(&entity),
+            analysis.is_recursive(&node),
             "the step rule's self-reference makes the concept recursive"
         );
     }

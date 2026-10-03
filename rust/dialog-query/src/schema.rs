@@ -12,6 +12,7 @@
 use crate::type_system;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Describes the parameter signature of a premise.
@@ -198,8 +199,8 @@ impl Select {
     }
 }
 
-impl std::fmt::Display for Select {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Select {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Select::Last => "last",
             Select::All => "all",

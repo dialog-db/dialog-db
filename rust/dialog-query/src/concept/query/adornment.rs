@@ -39,7 +39,7 @@ pub struct Adornment(u64);
 impl Adornment {
     /// The adornment of a call binding exactly the operands `scope`
     /// names.
-    pub fn binding(operands: &[String], scope: &crate::environment::Environment) -> Self {
+    pub fn binding(operands: &[String], scope: &Environment) -> Self {
         let mut bits: u64 = 0;
         for (i, operand) in operands.iter().enumerate() {
             debug_assert!(i < 64, "Adornment supports at most 64 operands");

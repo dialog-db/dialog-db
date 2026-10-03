@@ -36,6 +36,7 @@
 //! hashes the canonical spelling.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::iter;
 
 use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
@@ -203,7 +204,7 @@ pub(crate) fn canonicalize(
     let heads: BTreeSet<&String> = rule
         .fields
         .iter()
-        .flat_map(|(name, key)| std::iter::once(name).chain(key.iter()))
+        .flat_map(|(name, key)| iter::once(name).chain(key.iter()))
         .collect();
     let mut prefix = String::from(PREFIX);
     while heads.iter().any(|name| {

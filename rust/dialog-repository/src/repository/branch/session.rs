@@ -13,11 +13,13 @@ use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
+use dialog_query::attribute::AttributeDescriptor;
 use dialog_query::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use dialog_query::concept::query::fixpoint::Continuation;
 use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
+use dialog_query::recall::{BodyMemo, Memo};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
@@ -33,9 +35,9 @@ use crate::repository::branch::select::line_manifest;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::rules::{
-    assemble, builtin, builtin_deriving, conclusion_attr, conclusion_selector, derives_attr,
-    derives_key, derives_selector, has_overlay_rules, head_onto, holds_rules, hydrate,
-    overlay_rules, overlay_rules_deriving, rule_entities, source_attr, source_bytes,
+    RuleRead, Selecting, assemble, builtin, builtin_deriving, conclusion_attr, conclusion_selector,
+    derives_attr, derives_keys, derives_selector, has_overlay_rules, head_onto, holds_rules,
+    hydrate, overlay_rules, overlay_rules_deriving, rule_entities, source_attr, source_bytes,
     source_selector,
 };
 use crate::schema::{
@@ -377,7 +379,7 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// Every rule-discovery read this environment made, in order: what
     /// a rule set assembled here is recorded with, so a subscription
     /// reusing the set still records the reads as demand.
-    reads: Arc<Mutex<Vec<crate::rules::RuleRead>>>,
+    reads: Arc<Mutex<Vec<RuleRead>>>,
     /// A polling subscription's retained fixpoint for one concept:
     /// attached to that concept's resolved rules so a recursive
     /// evaluation continues (or rebuilds into) the retained answer
@@ -389,7 +391,7 @@ pub(crate) struct QueryEnv<'a, Env> {
     fetches: bool,
     /// The per-query memo rule heads share their source body's rows
     /// through.
-    memo: dialog_query::recall::Memo,
+    memo: Memo,
     env: &'a Env,
 }
 
@@ -462,7 +464,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
             reads: Arc::new(Mutex::new(Vec::new())),
             fixpoint: None,
             fetches,
-            memo: dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
             env,
         }
     }
@@ -591,7 +593,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             reads: self.reads.clone(),
             fixpoint: self.fixpoint.clone(),
             fetches: self.fetches,
-            memo: dialog_query::recall::Memo::default(),
+            memo: Memo::default(),
             env: self.env,
         }
     }
@@ -1178,8 +1180,8 @@ fn relation_concept(field: &ConceptFieldDescriptor) -> Entity {
     .this()
 }
 
-impl<Env> dialog_query::recall::BodyMemo for QueryEnv<'_, Env> {
-    fn memo(&self) -> Option<&dialog_query::recall::Memo> {
+impl<Env> BodyMemo for QueryEnv<'_, Env> {
+    fn memo(&self) -> Option<&Memo> {
         Some(&self.memo)
     }
 }
@@ -1240,7 +1242,7 @@ where
     fn head_for(
         &self,
         rule: &DeductiveRule,
-        attribute: &Entity,
+        on: &Entity,
     ) -> Result<Option<DeductiveRule>, EvaluationError> {
         let cache = self
             .sources
@@ -1248,13 +1250,13 @@ where
             .map(|source| source.as_ref().rule_cache());
         let identity = rule.try_this();
         if let (Some(cache), Some(identity)) = (&cache, &identity)
-            && let Some(head) = cache.head(identity, attribute)
+            && let Some(head) = cache.head(identity, on)
         {
             return Ok(Some(head));
         }
-        let head = head_onto(rule, attribute)?;
+        let head = head_onto(rule, on)?;
         if let (Some(cache), Some(identity), Some(head)) = (cache, identity, &head) {
-            cache.record_head(identity, attribute.clone(), head.clone());
+            cache.record_head(identity, on.clone(), head.clone());
         }
         Ok(head)
     }
@@ -1280,11 +1282,6 @@ where
 
         if let Some((_, field)) = descriptor.attribute_field() {
             let canonical = ConceptDescriptor::of_attribute(field);
-            // A rule installed before the `derives` index concluded the
-            // attribute concept of the relation itself, read under no
-            // policy: that is the entity it is found by, whatever
-            // policy this read declares.
-            let relation = relation_concept(field);
             let mut bundle = ConceptRules::with_plan_cache(&canonical, plan_cache);
             for head in builtin_deriving(&concept) {
                 bundle.install(head);
@@ -1305,25 +1302,49 @@ where
                     (Some(Some(_)), Some(_)) => None,
                 });
             };
-            if let Some(on) = derives_key(&canonical) {
+            // A ranked chain scans every relation it lists and takes the
+            // rules deriving any of them; it is never exact.
+            for scan in ConceptRules::chain_scans(field) {
+                note(&scan);
+                bundle.install(scan);
+            }
+            // The rules deriving each relation the field reads, found
+            // by the `derives` index, whatever type or policy this read
+            // declares over the relation. A rule installed before the
+            // index existed concluded the attribute concept of the
+            // relation itself, read under no policy: that is the
+            // entity it is found by.
+            for relation in field.descriptor().relations() {
+                let single = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
+                    AttributeDescriptor::over(
+                        relation.clone(),
+                        "",
+                        field.cardinality(),
+                        field.descriptor().content_type(),
+                    ),
+                ));
+                let Some(on) = derives_keys(&single).into_iter().next() else {
+                    continue;
+                };
+                let legacy = single.this();
                 for rule in self.resolve_rules(Index::Deriving, &on).await? {
                     found.extend(rule.try_this());
-                    if let Some(head) = self.head_for(&rule, &concept)? {
+                    if let Some(head) = self.head_for(&rule, &on)? {
                         note(&head);
                         bundle.install(head);
                     }
                 }
-            }
-            for rule in self.resolve_rules(Index::Concluding, &relation).await? {
-                if rule
-                    .try_this()
-                    .is_some_and(|entity| found.contains(&entity))
-                {
-                    continue;
-                }
-                if let Some(head) = self.head_for(&rule, &concept)? {
-                    note(&head);
-                    bundle.install(head);
+                for rule in self.resolve_rules(Index::Concluding, &legacy).await? {
+                    if rule
+                        .try_this()
+                        .is_some_and(|entity| found.contains(&entity))
+                    {
+                        continue;
+                    }
+                    if let Some(head) = self.head_for(&rule, &on)? {
+                        note(&head);
+                        bundle.install(head);
+                    }
                 }
             }
             if builtin_deriving(&concept).is_empty()
@@ -1365,7 +1386,7 @@ where
             let entity = relation_concept(field);
             let builtins = builtin_deriving(&entity);
             let mut rules = builtins.clone();
-            if let Some(on) = derives_key(&attribute) {
+            for on in derives_keys(&attribute) {
                 rules.extend(self.resolve_rules(Index::Deriving, &on).await?);
             }
             // A rule installed before the `derives` index existed is
@@ -1457,7 +1478,7 @@ where
                             .map(|rule| Exact { rule, attributes }),
                         None => None,
                     };
-                    let selecting = crate::rules::Selecting {
+                    let selecting = Selecting {
                         descriptor: descriptor.clone(),
                         rule,
                         exact,
@@ -1520,7 +1541,11 @@ where
 
         seen.insert(ProgramAnalysis::node(root));
         referenced(root_bundle, &mut queue);
-        entries.push((ProgramAnalysis::node(root), root.clone(), root_bundle.clone()));
+        entries.push((
+            ProgramAnalysis::node(root),
+            root.clone(),
+            root_bundle.clone(),
+        ));
 
         // Level by level: everything a frontier references is known
         // needed, so each level's concepts resolve their rules
@@ -2113,21 +2138,22 @@ mod rule_tests {
         Ok(())
     }
 
-    /// A *reducing* rule stores, discovers, and hydrates through the
-    /// same `db.rule/*` rail: the committed rule's reduce block
-    /// survives the durable layer round trip, and queries evaluate
-    /// its fold over committed facts.
+    /// A committed rule derives a relation a query folds: the rule
+    /// stores, discovers and hydrates through the `db.rule/*` rail, and
+    /// a read of its relation under `sum` folds the candidates it
+    /// derives over committed facts, found by the relation whatever
+    /// policy the read declares over it.
     #[dialog_common::test]
-    async fn it_resolves_a_committed_reducing_rule() -> anyhow::Result<()> {
+    async fn it_folds_a_relation_a_committed_rule_derives() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        // dept-total(this, total: sum(?salary)) grouped by department.
+        // dept-salary(dept, salary) :- dept(employee, dept), salary(employee, salary)
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "total": { "the": "org/dept-total", "as": "UnsignedInteger" }
+                    "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "all" }
                 }},
                 "when": [{
                     "assert": { "with": {
@@ -2139,16 +2165,15 @@ mod rule_tests {
                         "dept": { "?": { "name": "this" } },
                         "salary": { "?": { "name": "salary" } }
                     }
-                }],
-                "reduce": {
-                    "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
-                }
+                }]
             });
             let descriptor: DeductiveRuleDescriptor =
                 serde_json::from_value(json).expect("descriptor parses");
-            descriptor.compile().expect("reducing rule compiles")
+            descriptor.compile().expect("rule compiles")
         };
-        let dept_total = rule.conclusion().clone();
+        let dept_total: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "total": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "sum" }
+        }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;
         let alice: Entity = "id:alice".parse()?;
@@ -2183,25 +2208,26 @@ mod rule_tests {
         assert_eq!(
             rows[0].get::<u64>("total")?,
             7,
-            "the hydrated reduce block folded the committed salaries"
+            "the query folded what the hydrated rule derives"
         );
         Ok(())
     }
 
-    /// A fold rules the attribute's sole source out for good: a plain
-    /// rule found after the reducing one does not become the whole
-    /// answer, so the fold's row is read beside the plain rule's.
+    /// A fold reads every rule's candidates: the committed rule is
+    /// found first and the query's overlay rule after it, and a `sum`
+    /// read over their relation folds what both derive per entity,
+    /// never taking either rule alone for the whole answer.
     #[dialog_common::test]
-    async fn it_keeps_a_fold_beside_a_later_plain_rule() -> anyhow::Result<()> {
+    async fn it_folds_a_committed_and_an_overlay_rule_together() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let total = serde_json::json!({ "with": {
-            "total": { "the": "org/dept-total", "as": "UnsignedInteger" }
+        let salary = serde_json::json!({ "with": {
+            "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "all" }
         }});
-        let reducing: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": total,
+        let committed: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": salary,
             "when": [{
                 "assert": { "with": {
                     "dept": { "the": "org/dept", "as": "Entity" },
@@ -2212,33 +2238,30 @@ mod rule_tests {
                     "dept": { "?": { "name": "this" } },
                     "salary": { "?": { "name": "salary" } }
                 }
-            }],
-            "reduce": {
-                "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
-            }
+            }]
         }))?;
-        let reducing = reducing.compile()?;
-        let plain: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": total,
+        let committed = committed.compile()?;
+        let overlay: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": salary,
             "when": [{
                 "assert": { "with": {
                     "flat": { "the": "org/flat-total", "as": "UnsignedInteger" }
                 }},
                 "where": {
                     "this": { "?": { "name": "this" } },
-                    "flat": { "?": { "name": "total" } }
+                    "flat": { "?": { "name": "salary" } }
                 }
             }]
         }))?;
-        let plain = plain.compile()?;
-        let dept_total = reducing.conclusion().clone();
+        let overlay = overlay.compile()?;
+        let dept_total: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "total": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "sum" }
+        }}))?;
 
         let dept_a: Entity = "id:dept-a".parse()?;
         let dept_b: Entity = "id:dept-b".parse()?;
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
-        // The reducing rule is committed, so it is found first; the
-        // plain rule rides the query's overlay and is found after it.
         branch
             .transaction()
             .assert(the!("org/dept").of(alice.clone()).is(dept_a.clone()))
@@ -2246,7 +2269,7 @@ mod rule_tests {
             .assert(the!("org/dept").of(bob.clone()).is(dept_a.clone()))
             .assert(the!("org/salary").of(bob.clone()).is(4u32))
             .assert(the!("org/flat-total").of(dept_b.clone()).is(9u32))
-            .assert(&reducing)
+            .assert(&committed)
             .commit()
             .publish()
             .perform(&operator)
@@ -2258,7 +2281,7 @@ mod rule_tests {
         terms.insert("total".into(), Term::var("total"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(&plain)
+            .with(&overlay)
             .select(ConceptQuery {
                 predicate: dept_total,
                 terms,
@@ -2274,7 +2297,7 @@ mod rule_tests {
         assert_eq!(
             totals,
             vec![(dept_a, 7), (dept_b, 9)],
-            "the fold and the plain rule both contribute"
+            "the committed and the overlay rule both contribute"
         );
         Ok(())
     }
@@ -3063,8 +3086,10 @@ mod rule_tests {
 
     /// Tonk's `space/presence` shape: a concept whose optional field
     /// is derived by rules whose bodies read the concept itself for a
-    /// required field, with a negated premise over a concept outside
-    /// the loop. A space with no replica is `case:remote`.
+    /// required field. The field lists its cases best first, so every
+    /// space with a subject is `case:remote` and the one whose subject
+    /// has a replica is `case:replicated`, the better-ranked case
+    /// winning: no rule negates anything.
     #[dialog_common::test]
     async fn it_derives_an_optional_field_from_a_rule_reading_the_concept() -> anyhow::Result<()> {
         use dialog_query::rule::deductive::descriptor::DeductiveRuleDescriptor;
@@ -3073,9 +3098,10 @@ mod rule_tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
+        let cases = serde_json::json!(["case:replicated", "case:remote"]);
         let space = serde_json::json!({ "with": {
             "subject": { "the": "load.space/subject", "as": "Entity" },
-            "presence": { "the": "load.space/presence", "as": "Entity", "optional": true }
+            "presence": { "the": "load.space/presence", "as": cases, "optional": true }
         } });
         let replica = serde_json::json!({ "with": {
             "subject": { "the": "load.replica/subject", "as": "Entity" },
@@ -3084,7 +3110,7 @@ mod rule_tests {
         let presence = serde_json::json!({ "with": {
             "presence": { "the": "load.space/presence", "as": "Entity" }
         } });
-        let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+        let remote: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "deduce": presence,
             "when": [
                 { "assert": space, "where": {
@@ -3093,20 +3119,31 @@ mod rule_tests {
                 { "assert": "==", "where": {
                     "this": { "?": { "name": "presence" } },
                     "is": "case:remote" } }
-            ],
-            "unless": [
-                { "assert": replica, "where": {
-                    "subject": { "?": { "name": "subject" } } } }
             ]
         }))?;
-        let rule = rule.compile()?;
+        let remote = remote.compile()?;
+        let replicated: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": presence,
+            "when": [
+                { "assert": space, "where": {
+                    "this": { "?": { "name": "this" } },
+                    "subject": { "?": { "name": "subject" } } } },
+                { "assert": replica, "where": {
+                    "subject": { "?": { "name": "subject" } } } },
+                { "assert": "==", "where": {
+                    "this": { "?": { "name": "presence" } },
+                    "is": "case:replicated" } }
+            ]
+        }))?;
+        let replicated = replicated.compile()?;
 
         let here: Entity = "id:space-here".parse()?;
         let away: Entity = "id:space-away".parse()?;
         let device: Entity = "id:device".parse()?;
         branch
             .transaction()
-            .assert(&rule)
+            .assert(&remote)
+            .assert(&replicated)
             .assert(
                 the!("load.space/subject")
                     .of(here.clone())
@@ -3132,15 +3169,40 @@ mod rule_tests {
             .perform(&operator)
             .await?;
 
-        let presences =
-            entities_of(&branch, &operator, &[("presence", "load.space/presence")]).await?;
+        // The relation read under the ranked cases.
+        let ranked: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "presence": { "the": "load.space/presence", "as": cases }
+        } }))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("presence".into(), Term::var("presence"));
+        let mut presences: Vec<(Entity, String)> = branch
+            .select(ConceptQuery {
+                predicate: ranked,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    row.entity().clone(),
+                    row.get::<Entity>("presence")?.to_string(),
+                ))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        presences.sort();
         assert_eq!(
             presences,
-            vec![(away.clone(), vec!["case:remote".to_string()])]
+            vec![
+                (away.clone(), "case:remote".to_string()),
+                (here.clone(), "case:replicated".to_string()),
+            ]
         );
 
-        // Read through the concept itself: the space with a replica
-        // carries no presence, the other its derived one.
+        // Read through the concept itself: each space carries the
+        // best-ranked case a rule derives for it.
         let predicate: ConceptDescriptor = serde_json::from_value(space.clone())?;
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
@@ -3163,7 +3225,10 @@ mod rule_tests {
         rows.sort();
         assert_eq!(
             rows,
-            vec![(away, Some("case:remote".to_string())), (here, None)]
+            vec![
+                (away, Some("case:remote".to_string())),
+                (here, Some("case:replicated".to_string())),
+            ]
         );
         Ok(())
     }

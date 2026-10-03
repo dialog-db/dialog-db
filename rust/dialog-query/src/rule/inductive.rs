@@ -24,6 +24,7 @@ use crate::negation::Negation;
 use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::rule::analyzer::AnalyzedRule;
+use crate::rule::deductive::legacy_identity;
 use crate::rule::{Compile, RuleKind, fmt_rule_schema};
 use crate::{Environment, Parameters, Proposition};
 use descriptor::InductiveRuleDescriptor;
@@ -169,7 +170,7 @@ impl InductiveRule {
     /// other entity are forged or corrupt.
     pub fn stored_as(&self, entity: &Entity) -> bool {
         self.try_this().as_ref() == Some(entity)
-            || crate::rule::deductive::legacy_identity(self.try_encode()).as_ref() == Some(entity)
+            || legacy_identity(self.try_encode()).as_ref() == Some(entity)
     }
 
     /// Canonical dag-cbor encoding, panicking if the rule has no
@@ -349,8 +350,7 @@ mod tests {
         }))
         .expect("descriptor parses");
         let rule = descriptor.compile().expect("rule compiles");
-        let legacy =
-            crate::rule::deductive::legacy_identity(rule.try_encode()).expect("an encodable body");
+        let legacy = legacy_identity(rule.try_encode()).expect("an encodable body");
         assert_ne!(
             legacy,
             rule.this(),

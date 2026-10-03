@@ -39,7 +39,10 @@ fn it_parses_attribute_formal_notation() {
     let reserialized = serde_json::to_value(&attr).unwrap();
     assert_eq!(reserialized["the"], "io.gozala.person/name");
     assert_eq!(reserialized["as"], "Text");
-    assert_eq!(reserialized["cardinality"], "one");
+    assert!(
+        reserialized.get("cardinality").is_none(),
+        "`cardinality: one` is the older spelling of `last`, read but never written: {reserialized}"
+    );
 }
 
 #[dialog_common::test]

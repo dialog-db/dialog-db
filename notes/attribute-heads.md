@@ -152,19 +152,29 @@ once, however many rules derive it, or each distinct entry of a keyed
 collection, so a count per contributor reads a collection keyed by
 the contributor.
 
-The engine part of this is the policy beside cardinality on the
-attribute descriptor a field carries, `select` with `among` for the
-listed values; the notation is tonk's. The policy is part of the
-attribute: an attribute is a relation, the `(domain, name)` pair
-facts are stored under, read under a type and a policy, and two
-reads of one relation under different policies are two attributes.
-Cardinality is the policy's arity, `all` being many and every other
-policy one; `cardinality: one` and `many` are the older spellings of
-`last` and `all` and name the same attributes they always did, and
-tonk's notation no longer writes them: `select: all` where it said
-`many`, nothing where it said `one`. Rules
-derive into the relation and are found by it, whatever type or
-policy a reader declares over it.
+The engine part of this is the policy on the attribute descriptor a
+field carries, `select`; the notation is tonk's. The policy is part
+of the attribute: an attribute is a relation, the `(domain, name)`
+pair facts are stored under, read under a type and a policy, and two
+reads of one relation under different policies are two attributes,
+with distinct identities. Cardinality is the policy's arity, `all`
+being many and every other policy one; `cardinality: one` and `many`
+are read as the older spellings of `last` and `all`, and tonk's
+notation no longer writes them: `select: all` where it said `many`,
+nothing where it said `one`. Rules derive into the relation and are
+found by it, whatever type or policy a reader declares over it.
+
+A list is a ranked choice. `as: [case:active, case:registered]`
+lists the values the attribute ranks among, best first, and `the:
+[user/email, user/phone]` lists the relations it reads, best first:
+either implies `top`, and no other policy fits a list. A field over
+several relations gathers candidates from every relation's facts and
+rules, and the first listed relation offering one wins, so a contact
+handle is the email where there is one, stored or derived, and the
+phone otherwise. Discovery and the dependency graph follow each
+listed relation. Carrier-changing policies read as what they yield:
+a field counting entities is an unsigned integer to the planner and
+to the type checker, and `as` always names the carrier.
 
 ## Mechanism
 
@@ -497,8 +507,6 @@ counts the bench prints by a block or two between runs.
 ## Not in this change
 
 - `reduce` on inductive rules, the materialised home for aggregates;
-- election at the exit of a recursive component: a recursive
-  cardinality-one attribute concept yields its candidates as a set;
 - a rule body naming a derived attribute through a raw attribute
   premise, rather than a concept, reads stored facts only; the
   notation always emits concept premises, so this reaches only the
