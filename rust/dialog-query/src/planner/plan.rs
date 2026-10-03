@@ -1,20 +1,28 @@
 use crate::attribute::query::{AttributeQuery, DynamicAttributeQuery};
 use crate::concept::query::ConceptQuery;
 use crate::constraint::Constraint;
+use crate::error::EvaluationError;
 use crate::formula::query::FormulaQuery;
 use crate::negation::Negation;
 use crate::optional::OptionalAttributeQuery;
+use crate::planner::Planner;
 use crate::proposition::Proposition;
 use crate::query::Application;
 use crate::recall::Recall;
 use crate::resolver::ResolverQuery;
 use crate::rule::types::TypeEnv;
+use crate::selection::Match;
 use crate::selection::Selection;
 use crate::try_stream;
 use crate::{Environment, Parameters, Premise, Term};
 use auto_enums::auto_enum;
 use core::pin::Pin;
+use futures_util::StreamExt;
 use futures_util::TryStreamExt;
+use futures_util::stream;
+use std::collections::BTreeSet;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 /// Planning metadata shared by every [`Plan`] variant.
 ///
@@ -234,6 +242,10 @@ impl Plan {
 
 /// Filter a selection by a negated plan: keep each incoming match only
 /// when evaluating `inner` against it yields no rows.
+/// Candidates from which on a negation reads the negated relation once
+/// and joins, instead of probing it per candidate.
+const BULK_NEGATION: usize = 16;
+
 fn negate<'a, Env, M: Selection + 'a>(
     inner: Plan,
     selection: M,
@@ -242,29 +254,126 @@ fn negate<'a, Env, M: Selection + 'a>(
 where
     Env: crate::Scope<'a>,
 {
+    // An anti-join. The candidates are buffered, then either the
+    // negated relation is read once with nothing bound and the
+    // candidates are hashed against it on the variables they bind (many
+    // candidates), or every candidate is evaluated through the inner
+    // plan at once, each on its own behalf, and those no result came
+    // back for pass. Evaluating the inner plan once per candidate
+    // instead set the pipeline up, rules and all, for every row.
     try_stream! {
-        for await candidate in selection {
-            let base = candidate?;
-            // Box the recursive evaluation: `Plan::Negate` calls back
-            // into `Plan::evaluate`, so the inner stream's type would
-            // otherwise be infinitely self-referential. Erasing it to
-            // a trait object breaks the recursion.
-            let output: Pin<Box<dyn Selection + 'a>> =
-                Box::pin(inner.clone().evaluate(base.clone().seed(), env));
+        let mut candidates: Vec<Match> = Vec::new();
+        let mut selection = Box::pin(selection);
+        while let Some(candidate) = selection.try_next().await? {
+            candidates.push(candidate);
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let bulk = if candidates.len() >= BULK_NEGATION {
+            negate_in_bulk(&inner, &candidates, env).await?
+        } else {
+            None
+        };
+        if let Some(passing) = bulk {
+            for candidate in passing {
+                yield candidate;
+            }
+            return;
+        }
 
-            tokio::pin!(output);
-
-            match output.try_next().await {
-                // The inner query matched: the negation filters the row.
-                Ok(Some(_)) => continue,
-                // No match: the row passes.
-                Ok(None) => yield base,
-                // An inner failure is not absence; propagate instead
-                // of silently passing the row.
-                Err(error) => Err(error)?,
+        let callers: Arc<Mutex<Vec<Arc<Match>>>> = Arc::new(Mutex::new(Vec::new()));
+        let kept = callers.clone();
+        // Box both streams: `Plan::Negate` calls back into
+        // `Plan::evaluate`, so the inner stream's type would otherwise
+        // be infinitely self-referential. Erasing them to trait objects
+        // breaks the recursion.
+        let seeds: Pin<Box<dyn Selection + 'a>> =
+            Box::pin(stream::iter(candidates).map(move |mut candidate: Match| {
+                candidate.share();
+                let seed = candidate.clone();
+                let caller = Arc::new(candidate);
+                kept.lock().expect("negation lock").push(caller.clone());
+                Ok(seed.within(caller))
+            }));
+        let output: Pin<Box<dyn Selection + 'a>> = Box::pin(inner.evaluate(seeds, env));
+        tokio::pin!(output);
+        let mut matched: HashSet<usize> = HashSet::new();
+        while let Some(result) = output.try_next().await? {
+            let mut result = result;
+            if let Some(caller) = result.take_caller() {
+                matched.insert(Arc::as_ptr(&caller) as usize);
             }
         }
+        let callers = std::mem::take(&mut *callers.lock().expect("negation lock"));
+        for caller in callers {
+            if matched.contains(&(Arc::as_ptr(&caller) as usize)) {
+                continue;
+            }
+            yield Arc::try_unwrap(caller).unwrap_or_else(|shared| (*shared).clone());
+        }
     }
+}
+
+/// The candidates that pass `inner`'s negation, by reading the negated
+/// relation once with nothing bound and hashing the candidates against
+/// it on the variables both bind. `None` when the premise cannot be
+/// read unbound (a formula needing its inputs) or when a candidate
+/// leaves one of those variables without a value, in which case the
+/// per-candidate evaluation decides.
+async fn negate_in_bulk<'a, Env>(
+    inner: &Plan,
+    candidates: &[Match],
+    env: &'a Env,
+) -> Result<Option<Vec<Match>>, EvaluationError>
+where
+    Env: crate::Scope<'a>,
+{
+    let premise = inner.as_premise();
+    let shared: Vec<String> = premise
+        .parameters()
+        .iter()
+        .filter_map(|(_, term)| term.name().map(String::from))
+        .filter(|name| candidates[0].value_of(name).is_some())
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    let Ok(plan) = Planner::from(vec![premise]).plan(&Environment::new()) else {
+        return Ok(None);
+    };
+    let key = |row: &Match| -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for name in &shared {
+            let value = row.value_of(name)?;
+            let encoded = serde_ipld_dagcbor::to_vec(value).ok()?;
+            bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&encoded);
+        }
+        Some(bytes)
+    };
+    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let Some(found) = key(candidate) else {
+            return Ok(None);
+        };
+        keys.push(found);
+    }
+    let output: Pin<Box<dyn Selection + 'a>> = Box::pin(plan.evaluate(Match::new().seed(), env));
+    tokio::pin!(output);
+    let mut present: HashSet<Vec<u8>> = HashSet::new();
+    while let Some(row) = output.try_next().await? {
+        if let Some(found) = key(&row) {
+            present.insert(found);
+        }
+    }
+    Ok(Some(
+        candidates
+            .iter()
+            .zip(keys)
+            .filter(|(_, key)| !present.contains(key))
+            .map(|(candidate, _)| candidate.clone())
+            .collect(),
+    ))
 }
 
 /// Rewrite a premise to reflect rule-level inferred types.
@@ -373,7 +482,6 @@ mod tests {
     use crate::artifact::Type as ValueType;
     use crate::error::TypeError;
     use crate::optional::OptionalAttributeQuery;
-    use crate::planner::Planner;
     use crate::the;
     use crate::types::Any;
     use crate::{AttributeDescriptor, Cardinality, ConceptDescriptor, Term};

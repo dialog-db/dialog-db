@@ -61,7 +61,7 @@
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
 use dialog_effects::blob::Read as BlobRead;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
@@ -102,12 +102,12 @@ use crate::{Branch, Index, NetworkedIndex, RemoteSite, Revision};
 #[derive(Clone, Debug, Default)]
 pub struct Demand {
     /// Ranges read by fact scans: the query's data demand.
-    facts: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
+    facts: Arc<Mutex<Ranges>>,
     /// Ranges read by rule-discovery scans (`dialog.rule/*`). Kept
     /// apart because a change here can install a rule, which can
     /// affect any row — it invalidates the whole result, not one
     /// entity's slice.
-    rules: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
+    rules: Arc<Mutex<Ranges>>,
     /// The format the recorded ranges are keyed under: the manifest of
     /// the tree the evaluation read. `None` until something is recorded.
     /// Keys checked against the cover are built under it.
@@ -170,22 +170,42 @@ fn selects_head(selector: &ArtifactSelector<Constrained>, metadata: &BTreeSet<En
 /// sorted list of disjoint intervals, so it cannot grow beyond the
 /// number of genuinely distinct demanded regions no matter how many
 /// (nested, repeated) selectors record into it.
-fn record_range(ranges: &Mutex<Vec<RangeInclusive<Key>>>, range: RangeInclusive<Key>) {
+/// Disjoint, sorted ranges, keyed by start: the predecessor of a key
+/// is the one range that can contain it, so recording and checking a
+/// range cost a lookup each, however many an evaluation records.
+type Ranges = BTreeMap<Key, Key>;
+
+fn record_range(ranges: &Mutex<Ranges>, range: RangeInclusive<Key>) {
     let mut ranges = ranges.lock().expect("demand lock");
     let (mut start, mut end) = range.into_inner();
-    // Absorb every existing interval the new one overlaps.
-    let mut merged = Vec::with_capacity(ranges.len() + 1);
-    for existing in ranges.drain(..) {
-        if *existing.start() > end || *existing.end() < start {
-            merged.push(existing);
-        } else {
-            start = start.min(existing.start().clone());
-            end = end.max(existing.end().clone());
+    // The range starting at or before the new one may reach into it.
+    if let Some((existing_start, existing_end)) = ranges.range(..=start.clone()).next_back()
+        && *existing_end >= start
+    {
+        start = existing_start.clone();
+        end = end.max(existing_end.clone());
+        ranges.remove(&start);
+    }
+    // Every range starting inside the new one is absorbed.
+    let absorbed: Vec<Key> = ranges
+        .range(start.clone()..=end.clone())
+        .map(|(existing_start, _)| existing_start.clone())
+        .collect();
+    for existing_start in absorbed {
+        if let Some(existing_end) = ranges.remove(&existing_start) {
+            end = end.max(existing_end);
         }
     }
-    merged.push(start..=end);
-    merged.sort_by(|a, b| a.start().cmp(b.start()));
-    *ranges = merged;
+    ranges.insert(start, end);
+}
+
+fn covers_key(ranges: &Mutex<Ranges>, key: &Key) -> bool {
+    ranges
+        .lock()
+        .expect("demand lock")
+        .range(..=key.clone())
+        .next_back()
+        .is_some_and(|(_, end)| end >= key)
 }
 
 impl Demand {
@@ -267,26 +287,30 @@ impl Demand {
     }
 
     fn covers_facts(&self, key: &Key) -> bool {
-        self.facts
-            .lock()
-            .expect("demand lock")
-            .iter()
-            .any(|range| range.contains(key))
+        covers_key(&self.facts, key)
     }
 
     fn covers_rules(&self, key: &Key) -> bool {
-        self.rules
-            .lock()
-            .expect("demand lock")
-            .iter()
-            .any(|range| range.contains(key))
+        covers_key(&self.rules, key)
     }
 
     /// A snapshot of every recorded range (facts and rules): the
     /// scope a cover-gated tree diff walks.
     pub(crate) fn ranges(&self) -> Vec<RangeInclusive<Key>> {
-        let mut ranges = self.facts.lock().expect("demand lock").clone();
-        ranges.extend(self.rules.lock().expect("demand lock").iter().cloned());
+        let mut ranges: Vec<RangeInclusive<Key>> = self
+            .facts
+            .lock()
+            .expect("demand lock")
+            .iter()
+            .map(|(start, end)| start.clone()..=end.clone())
+            .collect();
+        ranges.extend(
+            self.rules
+                .lock()
+                .expect("demand lock")
+                .iter()
+                .map(|(start, end)| start.clone()..=end.clone()),
+        );
         ranges
     }
 
@@ -3005,6 +3029,64 @@ mod tests {
     /// rule-discovery range (full recompute — the rule set changed);
     /// afterwards a fact write that flips a negated variant is
     /// maintained incrementally through the delta-join.
+    /// A negated premise over many candidates reads the negated
+    /// relation once and joins, where few candidates are probed one by
+    /// one: both must agree with the rule's meaning. Twenty contacts
+    /// have a phone, seven of them an email as well; the phone rule
+    /// excludes those seven.
+    #[dialog_common::test]
+    async fn it_negates_many_candidates_in_one_pass() -> anyhow::Result<()> {
+        use concepts::{Contact, Email, Phone, WithEmail, WithPhone};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let contact = Contact::descriptor().clone();
+        let email = WithEmail::descriptor().clone();
+        let phone = WithPhone::descriptor().clone();
+        let phone_rule = concept_rule(
+            &contact,
+            vec![
+                concept_premise(&phone, &[("this", "this"), ("handle", "handle")]),
+                negated_concept_premise(&email, &[("this", "this")]),
+            ],
+        );
+
+        let mut transaction = branch.transaction();
+        let mut expected: Vec<Entity> = Vec::new();
+        for index in 0..20 {
+            let contact: Entity = format!("id:contact-{index}").parse()?;
+            transaction =
+                transaction.assert(Phone::of(contact.clone()).is(format!("555-{index:04}")));
+            if index % 3 == 0 {
+                transaction =
+                    transaction.assert(Email::of(contact.clone()).is(format!("c{index}@mail")));
+            } else {
+                expected.push(contact);
+            }
+        }
+        with_rule(transaction, &phone_rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut found: Vec<Entity> = branch
+            .select(Query::<Contact>::default())
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|row| row.this)
+            .collect();
+        found.sort();
+        expected.sort();
+        assert_eq!(found, expected, "the seven with an email are excluded");
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_maintains_variant_negation_flips() -> anyhow::Result<()> {
         use concepts::{Contact, Email, Handle, Phone, WithEmail, WithPhone};

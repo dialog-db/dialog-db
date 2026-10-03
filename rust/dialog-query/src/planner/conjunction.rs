@@ -268,26 +268,29 @@ impl Conjunction {
 
             // What each scan will read given a row's bindings. Every row of
             // a selection shares one binding PATTERN, but the bound VALUES
-            // can differ from row to row, and a value is what decides how
-            // wide a scan's range is: so the merge-versus-fold choice is
-            // made once per distinct set of resolved ranges, and the
-            // consecutive rows that share one are evaluated as a run (the
-            // fold keeps its probe pipelining across the run's rows).
+            // can differ from row to row, and the consecutive rows that
+            // resolve to one set of ranges are evaluated as a run (the
+            // fold keeps its probe pipelining across the run's rows). The
+            // merge-versus-fold choice is made once, on the first row:
+            // how wide a scan's range is follows mostly from which
+            // attribute it reads and which fields pin it, which every row
+            // shares, and estimating every scan's range again for every
+            // row walks the tree about as much as the scan itself would.
             let fingerprint = |row: &Match| -> Vec<Option<ArtifactSelector<Constrained>>> {
                 scans.iter().map(|scan| scan.resolved_selector(row)).collect()
             };
-            let mut decided: Option<(Vec<Option<ArtifactSelector<Constrained>>>, bool)> = None;
+            let mut decided: Option<bool> = None;
 
             let mut listening = true;
             let mut hinted: HashSet<ArtifactSelector<Constrained>> = HashSet::new();
             while let Some(first) = selection.next().await {
                 let first = first?;
                 let shape = fingerprint(&first);
-                let balanced = match &decided {
-                    Some((known, balanced)) if *known == shape => *balanced,
-                    _ => {
+                let balanced = match decided {
+                    Some(balanced) => balanced,
+                    None => {
                         let balanced = self.scans_balanced_for(&first, env).await;
-                        decided = Some((shape.clone(), balanced));
+                        decided = Some(balanced);
                         balanced
                     }
                 };
