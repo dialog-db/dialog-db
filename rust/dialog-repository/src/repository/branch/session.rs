@@ -13,7 +13,7 @@ use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
-use dialog_query::concept::descriptor::ConceptDescriptor;
+use dialog_query::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use dialog_query::concept::query::fixpoint::Continuation;
 use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
 use dialog_query::error::EvaluationError;
@@ -1167,6 +1167,17 @@ where
     }
 }
 
+/// The entity of the attribute concept of `field`'s relation read
+/// under no policy: what a rule installed before the `derives` index
+/// concluded, and what a concept's derived fields are keyed by, so a
+/// reader's policy never changes which rules it finds.
+fn relation_concept(field: &ConceptFieldDescriptor) -> Entity {
+    ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
+        field.descriptor().clone().without_select(),
+    ))
+    .this()
+}
+
 impl<Env> dialog_query::recall::BodyMemo for QueryEnv<'_, Env> {
     fn memo(&self) -> Option<&dialog_query::recall::Memo> {
         Some(&self.memo)
@@ -1269,6 +1280,11 @@ where
 
         if let Some((_, field)) = descriptor.attribute_field() {
             let canonical = ConceptDescriptor::of_attribute(field);
+            // A rule installed before the `derives` index concluded the
+            // attribute concept of the relation itself, read under no
+            // policy: that is the entity it is found by, whatever
+            // policy this read declares.
+            let relation = relation_concept(field);
             let mut bundle = ConceptRules::with_plan_cache(&canonical, plan_cache);
             for head in builtin_deriving(&concept) {
                 bundle.install(head);
@@ -1298,7 +1314,7 @@ where
                     }
                 }
             }
-            for rule in self.resolve_rules(Index::Concluding, &concept).await? {
+            for rule in self.resolve_rules(Index::Concluding, &relation).await? {
                 if rule
                     .try_this()
                     .is_some_and(|entity| found.contains(&entity))
@@ -1344,7 +1360,9 @@ where
         let mut sole: Option<Option<(DeductiveRule, Vec<dialog_artifacts::Attribute>)>> = None;
         for (_, field) in descriptor.with().iter() {
             let attribute = ConceptDescriptor::of_attribute(field);
-            let entity = attribute.this();
+            // Keyed by the relation's own attribute concept, read under
+            // no policy, which is what a legacy rule concluded.
+            let entity = relation_concept(field);
             let builtins = builtin_deriving(&entity);
             let mut rules = builtins.clone();
             if let Some(on) = derives_key(&attribute) {
@@ -1427,7 +1445,7 @@ where
                 Some(selecting) => selecting,
                 None => {
                     let rule = DeductiveRule::selecting(descriptor, &|field| {
-                        derived.contains(&ConceptDescriptor::of_attribute(field).this())
+                        derived.contains(&relation_concept(field))
                     })
                     .map_err(|error| EvaluationError::Store(format!("selecting rule: {error}")))?;
                     let exact = match sole {

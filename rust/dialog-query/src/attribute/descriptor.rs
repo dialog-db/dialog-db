@@ -421,12 +421,15 @@ impl AttributeDescriptor {
         &self.description
     }
 
-    /// Returns the cardinality: the relation's, which is part of the
-    /// attribute's identity. A `select` policy says how a field reads
-    /// the relation and leaves this as declared, so a `count` over a
-    /// many-valued attribute declares `many` and reads one number.
+    /// Returns the cardinality: the arity of the policy when one is
+    /// declared (`all` is many, every other policy one), else as
+    /// declared. `cardinality` is the older spelling of `last` and
+    /// `all`, so the two never disagree.
     pub fn cardinality(&self) -> Cardinality {
-        self.cardinality
+        match self.select {
+            Some(select) => select.cardinality(),
+            None => self.cardinality,
+        }
     }
 
     /// Returns the expected value type, or `None` if any type is accepted.
@@ -568,11 +571,13 @@ impl AttributeDescriptor {
         // name half of these facts holds. A plain attribute therefore
         // encodes exactly as it did before collections existed, so
         // every existing identity is preserved.
-        // An attribute is a relation read under a type, a cardinality
-        // and a policy: two reads of one relation under different
-        // policies are two attributes. The policy fields are omitted
-        // when none is declared, so every attribute declared without
-        // one keeps the identity it had.
+        // An attribute is a relation read under a type and a policy:
+        // two reads of one relation under different policies are two
+        // attributes. The cardinality hashed is the policy's arity,
+        // and the policy itself is hashed only when it says more than
+        // a cardinality can, so `select: last` is `cardinality: one`,
+        // `select: all` is `cardinality: many`, and every attribute
+        // declared before policies existed keeps its identity.
         #[derive(Serialize)]
         struct CborAttributeDescriptor<'a> {
             domain: &'a str,
@@ -598,7 +603,9 @@ impl AttributeDescriptor {
             name,
             cardinality: self.cardinality(),
             content_type: self.content_type(),
-            select: self.select,
+            select: self
+                .select
+                .filter(|select| !matches!(select, Select::Last | Select::All)),
             among: &self.among,
         };
 
@@ -701,21 +708,25 @@ mod tests {
     }
 
     /// A policy is part of the attribute: two reads of one relation
-    /// under different policies are two attributes, and a read under
-    /// none keeps the identity it always had.
+    /// under different policies are two attributes. `last` and `all`
+    /// are what `cardinality: one` and `many` always said, so they
+    /// are the same attributes, whichever way they are spelled.
     #[dialog_common::test]
     fn it_tells_attributes_apart_by_policy() {
-        let plain = AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(Type::Entity));
-        let ranked = plain
+        let one = AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(Type::Entity));
+        let many = AttributeDescriptor::new(the!("job/status"), "", Cardinality::Many, Some(Type::Entity));
+        let ranked = one
             .clone()
             .with_select(Select::Top, vec![Value::Boolean(true)]);
-        let newest = plain.clone().with_select(Select::Last, Vec::new());
-        assert_ne!(plain.to_uri(), ranked.to_uri());
-        assert_ne!(ranked.to_uri(), newest.to_uri());
-        assert_eq!(
-            plain.to_uri(),
-            AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(Type::Entity)).to_uri()
-        );
+        let newest = many.clone().with_select(Select::Last, Vec::new());
+        let every = one.clone().with_select(Select::All, Vec::new());
+        assert_ne!(one.to_uri(), ranked.to_uri());
+        assert_ne!(one.to_uri(), many.to_uri());
+        assert_eq!(newest.to_uri(), one.to_uri(), "`last` is cardinality one");
+        assert_eq!(every.to_uri(), many.to_uri(), "`all` is cardinality many");
+        assert_eq!(newest.cardinality(), Cardinality::One);
+        assert_eq!(every.cardinality(), Cardinality::Many);
+        assert_eq!(ranked.cardinality(), Cardinality::One, "a ranked read is one value");
     }
 
     /// A policy that does not fit its attribute is named: `top` without
