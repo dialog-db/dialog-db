@@ -179,7 +179,8 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
 /// must answer `None`, not the other vault's bytes. One test, because
 /// overlap is forced through the process-global simulated link; the
 /// assertions read the digest-scoped get ledger, so concurrent tests in
-/// the same process (fetching their own digests) cannot skew them.
+/// the same process (fetching their own digests) cannot skew them. The
+/// gets run through one site, which owns the in-flight reads they join.
 /// Native-only: shaping does not exist on wasm.
 #[cfg(not(target_arch = "wasm32"))]
 #[dialog_common::test]
@@ -188,6 +189,7 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
 
     let holder = setup().await;
     let empty = setup().await;
+    let site = dialog_remote_fs::Fs::default();
     let shared = format!("joined once {}", dialog_storage::unique_name("block"));
     let shared = shared.into_bytes();
     let shared_digest = Blake3Hash::hash(&shared);
@@ -195,7 +197,8 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
     let held = held.into_bytes();
     let held_digest = Blake3Hash::hash(&held);
     for content in [shared.clone(), held.clone()] {
-        perform(
+        helpers::perform_through(
+            &site,
             holder
                 .subject
                 .clone()
@@ -216,7 +219,8 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
 
     // Same vault, same digest, concurrently: one wire request, shared.
     let get = || {
-        perform(
+        helpers::perform_through(
+            &site,
             holder
                 .subject
                 .clone()
@@ -240,7 +244,8 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
     // Different vaults, same digest, concurrently: no join, and the vault
     // that lacks the block answers None.
     let (present, missing) = futures_util::future::join(
-        perform(
+        helpers::perform_through(
+            &site,
             holder
                 .subject
                 .clone()
@@ -250,7 +255,8 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
                 .get(held_digest.clone())
                 .fork(&holder.address),
         ),
-        perform(
+        helpers::perform_through(
+            &site,
             empty
                 .subject
                 .clone()
