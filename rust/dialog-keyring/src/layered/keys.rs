@@ -38,8 +38,18 @@
 //! under, so the same node can seal two different structure regions under one
 //! structure key. It takes a synthetic nonce instead; see
 //! [`Envelope`](super::Envelope).
+//!
+//! # Values
+//!
+//! A value a node refers to without holding it (a spilled value) is sealed
+//! on its own, under `keyed_hash(content_secret, reference)`, where the
+//! reference is the value's plaintext hash, which the node records. Only the
+//! content secret opens it: a party that can read the node that names the
+//! value can read the value, and no one else can.
 
 use std::collections::BTreeMap;
+
+use dialog_common::Blake3Hash;
 
 use crate::EpochId;
 
@@ -49,6 +59,8 @@ const STRUCTURE_DOMAIN: &[u8] = b"dialog/keyring/layered/structure/v1";
 const RANGE_DOMAIN: &[u8] = b"dialog/keyring/layered/range/v1";
 /// Domain separator for content keys.
 const CONTENT_DOMAIN: &[u8] = b"dialog/keyring/layered/content/v1";
+/// Domain separator for a sealed value's key.
+const VALUE_DOMAIN: &[u8] = b"dialog/keyring/layered/value/v1";
 
 /// The one per-node key: opens a node's header, and — with a level secret —
 /// derives the node's other keys.
@@ -207,6 +219,20 @@ impl Access {
             .ok_or_else(|| crate::KeyringError::MissingGeneration(content_generation.clone()))?;
         Ok(derive_content(secret, &range))
     }
+
+    /// The key for the sealed value whose plaintext hashes to `reference`,
+    /// if this party holds the content generation it was sealed under.
+    pub(crate) fn value_key(
+        &self,
+        generation: &EpochId,
+        reference: &Blake3Hash,
+    ) -> Result<[u8; 32], crate::KeyringError> {
+        let secret = self
+            .content
+            .get(generation)
+            .ok_or_else(|| crate::KeyringError::MissingGeneration(generation.clone()))?;
+        Ok(derive_value(secret, reference))
+    }
 }
 
 /// The generations a writer seals new nodes under.
@@ -254,6 +280,12 @@ impl Writer {
     pub(crate) fn content_key(&self, structure: &StructureKey) -> [u8; 32] {
         derive_content(&self.content.secret, &self.range_key(structure))
     }
+
+    /// The key for a value whose plaintext hashes to `reference`, sealed
+    /// under this writer's content generation.
+    pub(crate) fn value_key(&self, reference: &Blake3Hash) -> [u8; 32] {
+        derive_value(&self.content.secret, reference)
+    }
 }
 
 /// `R = keyed_hash(range_secret, S)`.
@@ -269,5 +301,15 @@ fn derive_content(secret: &[u8; 32], range: &[u8; 32]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_keyed(secret);
     hasher.update(CONTENT_DOMAIN);
     hasher.update(range);
+    *hasher.finalize().as_bytes()
+}
+
+/// `V = keyed_hash(content_secret, reference)`, where `reference` is the
+/// value's plaintext hash. One key per distinct value, so, as for the range
+/// and content regions, each key encrypts exactly one message.
+fn derive_value(secret: &[u8; 32], reference: &Blake3Hash) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_keyed(secret);
+    hasher.update(VALUE_DOMAIN);
+    hasher.update(reference.as_bytes());
     *hasher.finalize().as_bytes()
 }

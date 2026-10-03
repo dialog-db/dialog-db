@@ -30,7 +30,8 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 
-use crate::repository::archive::persist;
+use crate::repository::archive::persist_line;
+use crate::sealing::admit;
 use crate::{Branch, CommitError, Index, NetworkedIndex, PublishError, Revision, TreeReference};
 
 /// How many times merging tries to publish its merge before giving
@@ -127,7 +128,12 @@ where
         + ConditionalSync
         + 'static,
 {
-    let store = NetworkedIndex::new(env, branch.archive().index(), branch.fallback());
+    let sealing = branch.sealing();
+    for revision in base.into_iter().chain([mine, theirs]) {
+        admit(sealing, revision);
+    }
+    let store = NetworkedIndex::new(env, branch.archive().index(), branch.fallback())
+        .sealed(sealing.cloned());
     let tree = |reference: &TreeReference| {
         Index::from_hash_with_cache(NodeHash::from(*reference.hash()), branch.node_cache())
     };
@@ -208,12 +214,21 @@ where
     merged
         .record(&store, &mut delta, record.entries(&manifest)?)
         .await?;
+    // Persist before the head names the root: a revision must only point
+    // at durable blocks, and on a sealed line the head also names where
+    // the sealed root lives, which only persisting decides.
+    revision.sealed = persist_line::<_, CommitError>(
+        &branch.archive().index(),
+        &mut delta,
+        sealing,
+        merged.root(),
+        env,
+    )
+    .await?;
     revision.tree = TreeReference::from(*merged.root().as_bytes());
     merged_context.record(revision.version());
     revision.context = Some(merged_context.clone());
     revision.signature = Attest::new(revision.payload()).perform(env).await?;
-
-    persist(&branch.archive().index(), &mut delta, env).await?;
     Ok((revision, merged_context))
 }
 

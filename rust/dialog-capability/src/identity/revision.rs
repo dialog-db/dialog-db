@@ -65,6 +65,24 @@ impl From<TreeReference> for TreeHash {
     }
 }
 
+/// Where a sealed tree starts: its root envelope's address and the
+/// structure key that opens it.
+///
+/// A line whose tree is sealed (see `dialog-keyring`'s layered sealing)
+/// stores envelopes, not nodes, so the plaintext root in
+/// [`Revision::tree`] names nothing in its archive. This is what does. It
+/// is what a party needs to reach the tree at all: the structure key walks
+/// the envelopes, which is everything a replicator does, and a member's
+/// level secrets open them. Publishing it with the head makes every party
+/// that can read the head a replicator of the tree.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SealedTree {
+    /// The root envelope's address: the hash of its bytes.
+    pub address: TreeHash,
+    /// The root's structure key.
+    pub structure: [u8; 32],
+}
+
 /// A revision represents a concrete state of the repository at a point in time.
 ///
 /// Causal position is derived from the revision DAG per
@@ -125,6 +143,15 @@ pub struct Revision {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Context>,
 
+    /// Where the tree starts, when the line seals its tree: the
+    /// [`tree`](Self::tree) root is then the plaintext identity a member
+    /// reads by, and this is where its envelope lives. `None` on an
+    /// unsealed line, and on every head minted before the field existed.
+    /// Covered by the head signature (see [`Revision::payload`]), so a
+    /// relay cannot point a head at other envelopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<SealedTree>,
+
     /// The issuer's Ed25519 signature over [`Revision::payload`], with the
     /// key the issuer DID names (`did:key`). This is what binds the tree
     /// root to the issuer: the in-tree [`RevisionRecord`] signs everything
@@ -145,6 +172,7 @@ impl Revision {
             tree,
             edition: Edition::GENESIS,
             context: None,
+            sealed: None,
             signature: Vec::new(),
         }
     }
@@ -169,6 +197,7 @@ impl Revision {
             tree,
             edition: self.edition.successor(),
             context: None,
+            sealed: None,
             signature: Vec::new(),
         }
     }
@@ -195,6 +224,7 @@ impl Revision {
             tree,
             edition: self.edition.max(upstream.edition).successor(),
             context: None,
+            sealed: None,
             signature: Vec::new(),
         }
     }
@@ -232,13 +262,17 @@ impl Revision {
     ///     0x01 ++ entry count (8, big-endian)
     ///          ++ entries (origin (32) ++ edition (8, big-endian)
     ///                      ++ revision count (8, big-endian), sorted)
+    /// sealed tree, when present:
+    ///     0x02 ++ root envelope address (32) ++ structure key (32)
     /// ```
     ///
     /// A head without a context appends nothing after the edition (the
     /// pre-context payload shape), and a head with one appends the `0x01`
     /// marker plus the sorted watermark entries. The two shapes differ in
     /// length for any fixed prefix, so the encoding stays injective: a
-    /// signature over one can never validate the other.
+    /// signature over one can never validate the other. The sealed tree is
+    /// appended the same way after its own marker, so an unsealed head's
+    /// payload is unchanged by the field's existence.
     pub fn payload(&self) -> Vec<u8> {
         let mut bytes = HEAD_SIGNING_DOMAIN.to_vec();
         for field in [self.branch.as_str(), self.issuer.as_str()] {
@@ -255,6 +289,11 @@ impl Revision {
                 bytes.extend_from_slice(&watermark.edition.key_bytes());
                 bytes.extend_from_slice(&watermark.count.to_be_bytes());
             }
+        }
+        if let Some(sealed) = &self.sealed {
+            bytes.push(0x02);
+            bytes.extend_from_slice(&sealed.address);
+            bytes.extend_from_slice(&sealed.structure);
         }
         bytes
     }
@@ -436,5 +475,56 @@ mod tests {
             head.verify().is_err(),
             "a hostile watermark entry must be refused despite the valid signature"
         );
+    }
+
+    /// An unsealed head signs exactly what it signed before the sealed
+    /// field existed: nothing follows the context.
+    #[test]
+    fn it_leaves_an_unsealed_payload_unchanged() {
+        let head = signed_head(&key(1), |head| head.context = None);
+        let mut expected = HEAD_SIGNING_DOMAIN.to_vec();
+        for field in [head.branch.as_str(), head.issuer.as_str()] {
+            expected.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            expected.extend_from_slice(field.as_bytes());
+        }
+        expected.extend_from_slice(head.tree.hash());
+        expected.extend_from_slice(&head.edition.key_bytes());
+        assert_eq!(head.payload(), expected);
+    }
+
+    /// A sealed head's signature covers where its tree starts: a relay
+    /// that points the head at other envelopes, or strips the sealed root,
+    /// breaks the signature.
+    #[test]
+    fn it_signs_over_the_sealed_tree() {
+        let sealed = SealedTree {
+            address: [3u8; 32],
+            structure: [4u8; 32],
+        };
+        let head = signed_head(&key(1), |head| head.sealed = Some(sealed.clone()));
+        head.verify().expect("a sealed head verifies");
+
+        let bytes = serde_ipld_dagcbor::to_vec(&head).expect("head encodes");
+        let decoded: Revision = serde_ipld_dagcbor::from_slice(&bytes).expect("head decodes");
+        assert_eq!(decoded, head, "the sealed root survives the wire");
+
+        for tampered in [
+            Some(SealedTree {
+                address: [5u8; 32],
+                ..sealed.clone()
+            }),
+            Some(SealedTree {
+                structure: [6u8; 32],
+                ..sealed.clone()
+            }),
+            None,
+        ] {
+            let mut forged = head.clone();
+            forged.sealed = tampered;
+            assert!(
+                matches!(forged.verify(), Err(HistoryError::InvalidSignature(_))),
+                "a re-pointed sealed root must not verify"
+            );
+        }
     }
 }

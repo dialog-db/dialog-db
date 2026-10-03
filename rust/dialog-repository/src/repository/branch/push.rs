@@ -531,7 +531,8 @@ where
         let marker = branch.tracking().checkpoint();
         let mut tracking = branch.tracked();
         let advanced = upstream_state.clone().with_tree(revision.tree.clone());
-        tracking.record(&advanced);
+        let sealed = revision.sealed.clone();
+        tracking.record_sealed(&advanced, sealed.clone());
         // The record is written until it lands. A mismatch means another
         // write to the cell came first: each is some sync recording its
         // own upstream, so there are only ever as many as syncs in flight,
@@ -551,7 +552,7 @@ where
             if !ours_untouched {
                 return Ok(Some(revision));
             }
-            tracking.record(&advanced);
+            tracking.record_sealed(&advanced, sealed.clone());
             publish = marker.publish(tracking, env).await;
         }
         publish?;

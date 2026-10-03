@@ -24,7 +24,8 @@ use rkyv::validation::shared::SharedValidator;
 
 use super::envelope::Envelope;
 use super::keys::{Access, Writer};
-use super::party::Party;
+use super::party::{Party, Staged};
+use super::projection::NoAttachments;
 use super::store::LayeredRoot;
 use crate::KeyringError;
 
@@ -188,13 +189,18 @@ where
         delta: &mut Delta<Blake3Hash, Buffer>,
         root: &Blake3Hash,
     ) -> Result<LayeredRoot, KeyringError> {
-        let sealing = self.party.seal::<K, V>(writer, delta, root)?;
+        let staged = Staged {
+            blocks: delta,
+            values: None,
+        };
+        let sealing = self
+            .party
+            .seal::<K, V, NoAttachments>(writer, &staged, root)?;
         self.catalog
             .import(
                 sealing
-                    .envelopes
-                    .iter()
-                    .map(|(_, bytes)| Buffer::from(bytes.clone())),
+                    .envelopes()
+                    .map(|bytes| Buffer::from(bytes.to_vec())),
             )
             .perform(self.env)
             .await?;
@@ -219,7 +225,9 @@ where
             return Ok(None);
         };
         let envelope = self.fetch(&address).await?;
-        self.party.open::<K, V>(&envelope, &structure).map(Some)
+        self.party
+            .open::<K, V, NoAttachments>(&envelope, &structure)
+            .map(Some)
     }
 }
 

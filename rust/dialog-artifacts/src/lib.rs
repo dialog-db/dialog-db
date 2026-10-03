@@ -108,7 +108,7 @@ pub mod position;
 pub mod tree;
 
 pub use dialog_capability::identity::{
-    ENTITY_LENGTH, Entity, IdentityError, Revision, TreeReference, Uri,
+    ENTITY_LENGTH, Entity, IdentityError, Revision, SealedTree, TreeReference, Uri,
 };
 
 /// Test helpers for generating deterministic test data.

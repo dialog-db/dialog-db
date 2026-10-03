@@ -78,6 +78,7 @@ use dialog_varsig::Principal;
 
 use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
+use crate::sealing::admit;
 use crate::{
     BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex, PublishError,
     RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
@@ -280,7 +281,9 @@ impl Snapshot {
 
     /// The revision this snapshot names.
     pub fn revision(&self) -> Revision {
-        self.head.read().revision.clone()
+        let revision = self.head.read().revision.clone();
+        admit(self.caches.sealing.as_ref(), &revision);
+        revision
     }
 
     /// The subject (repository) this snapshot is a view of.
@@ -646,13 +649,14 @@ impl SnapshotExport {
         let hydrate = upstream.clone();
         let sparse = matches!(self.reach, Reach::Sparse);
         let root = NodeHash::from(*self.snapshot.revision().tree.hash());
+        let sealing = self.snapshot.caches().sealing.clone();
         let scope = self.scope.clone();
 
         try_stream! {
             // With an upstream a read-miss falls through to the remote and
             // is cached; without one the index is exactly what this store
             // holds.
-            let index = NetworkedIndex::new(env, catalog, upstream);
+            let index = NetworkedIndex::new(env, catalog, upstream).sealed(sealing.clone());
             let storage = index.clone();
             let tree = Index::from_hash(root);
 

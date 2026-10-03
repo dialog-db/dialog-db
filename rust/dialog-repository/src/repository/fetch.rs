@@ -249,7 +249,9 @@ where
         return Ok(());
     }
     let catalog = ArchiveScope::new(source.as_ref().subject()).index();
-    let store = NetworkedIndex::new(env, catalog, remote).with_priority(likelihood.into());
+    let store = NetworkedIndex::new(env, catalog, remote)
+        .with_priority(likelihood.into())
+        .sealed(source.as_ref().sealing());
     let store = CacheThrough {
         cache: source.as_ref().node_cache(),
         store,

@@ -42,6 +42,7 @@ pub use load::*;
 mod memory;
 pub use memory::*;
 
+pub mod sealing;
 pub mod secrets;
 pub mod spaces;
 
@@ -70,7 +71,7 @@ pub(crate) mod source;
 // without linking `dialog-query` or the storage/transport stack.
 // Re-exported here at their historical
 // `dialog_repository::{Revision, TreeReference}` paths.
-pub use dialog_artifacts::{Revision, TreeReference};
+pub use dialog_artifacts::{Revision, SealedTree, TreeReference};
 pub use dialog_search_tree::LEGACY_EMPTY_ROOT;
 
 /// A repository scoped to a specific subject.

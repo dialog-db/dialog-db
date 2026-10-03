@@ -237,7 +237,7 @@ where
 {
     let source = source.into();
     let remote = source.fallback();
-    NetworkedIndex::new(env, source.archive().index(), remote)
+    NetworkedIndex::new(env, source.archive().index(), remote).sealed(source.sealing())
 }
 
 /// The size of the content the line's current tree vouches for under `hash`,

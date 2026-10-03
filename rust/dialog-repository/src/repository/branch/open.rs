@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::rules::RuleCache;
+use crate::sealing::TreeSpace;
 use crate::{Branch, BranchReference, Ephemeral, ResolveError};
 use dialog_artifacts::history::{CausalityCache, ContextCache};
 use dialog_artifacts::tree::spill_cache;
@@ -14,15 +15,32 @@ use dialog_query::concept::query::PlanCache;
 /// branch that has never been committed to simply has `None` revision.
 pub struct OpenBranch {
     branch: BranchReference,
+    sealing: Option<TreeSpace>,
 }
 
 impl From<BranchReference> for OpenBranch {
     fn from(branch: BranchReference) -> Self {
-        Self { branch }
+        Self {
+            branch,
+            sealing: None,
+        }
     }
 }
 
 impl OpenBranch {
+    /// Open the branch as a sealed line under `space`: its commits persist
+    /// layered envelopes instead of nodes, and its reads open them. See
+    /// [`crate::sealing`].
+    ///
+    /// Sealing is a property of how this handle reads and writes, not of
+    /// the branch's cells: a handle opened without the space reads a
+    /// sealed line's heads but none of its tree.
+    #[must_use]
+    pub fn sealed(mut self, space: TreeSpace) -> Self {
+        self.sealing = Some(space);
+        self
+    }
+
     /// Execute the open operation.
     ///
     /// A name that is not a branch name (see
@@ -69,6 +87,7 @@ impl OpenBranch {
             layer_metadata_cache: Arc::new(Mutex::new(None)),
             overlay: Ephemeral::default(),
             answers: Arc::default(),
+            sealing: self.sealing,
         })
     }
 }
