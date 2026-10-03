@@ -39,7 +39,7 @@ use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
 use crate::parameters::Parameters;
-use crate::planner::Planner;
+use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
@@ -456,58 +456,145 @@ where
                 if split.occurrences.is_empty() {
                     continue;
                 }
+                let totals: Vec<Vec<Row>> = split
+                    .occurrences
+                    .iter()
+                    .map(|occurrence| table.total(&occurrence.predicate.this()))
+                    .collect();
                 for delta_index in 0..split.occurrences.len() {
-                    let choices: Vec<Vec<Row>> = split
-                        .occurrences
-                        .iter()
-                        .enumerate()
-                        .map(|(index, occurrence)| {
-                            let target = occurrence.predicate.this();
-                            if index == delta_index {
-                                table.delta(&target)
-                            } else {
-                                table.total(&target)
-                            }
-                        })
-                        .collect();
-
-                    for combination in Combinations::new(choices.iter().map(Vec::len).collect()) {
-                        let mut matched = Match::new();
-                        let mut scope = Environment::new();
-                        let mut compatible = true;
-                        for (index, (occurrence, row_index)) in
-                            split.occurrences.iter().zip(&combination).enumerate()
-                        {
-                            let row = &choices[index][*row_index];
-                            if !bind_occurrence(&mut matched, occurrence, row) {
-                                compatible = false;
-                                break;
-                            }
-                            for (_, term) in occurrence.terms.iter() {
-                                if let Some(name) = term.name() {
-                                    scope.add(name);
-                                }
-                            }
-                        }
-                        if !compatible {
-                            continue;
-                        }
-                        stage_rule_rows(
-                            member,
-                            split,
-                            split.base.clone(),
-                            matched,
-                            &scope,
-                            table,
-                            env,
-                        )
-                        .await?;
+                    let delta = table.delta(&split.occurrences[delta_index].predicate.this());
+                    if delta.is_empty() {
+                        continue;
+                    }
+                    for row in
+                        fire_occurrence(member, split, delta_index, &delta, &totals, env).await?
+                    {
+                        table.insert(&member.descriptor.this(), row);
                     }
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Fire `split` once per row of `delta` standing in its `delta_index`th
+/// recursive occurrence, returning the rows it derives. The row is
+/// bound first; then the base premises and the other occurrences are
+/// joined in the order the bindings allow: a base premise as soon as
+/// its inputs are bound, and an occurrence, read from `totals`, once
+/// nothing else can run, preferring one that shares a variable with
+/// what is bound. So a rule with several occurrences joins them through
+/// the premises that connect them, rather than pairing every row of one
+/// table with every row of another and planning the body per pair.
+async fn fire_occurrence<'a, Env>(
+    member: &Member,
+    split: &SplitRule,
+    delta_index: usize,
+    delta: &[Row],
+    totals: &[Vec<Row>],
+    env: &'a Env,
+) -> Result<Vec<Row>, EvaluationError>
+where
+    Env: crate::Scope<'a>,
+{
+    let types = split.rule.analysis().types.clone();
+    let leading = &split.occurrences[delta_index];
+    let mut derived = Vec::new();
+    // The order of stages is the same for every delta row, so a stage's
+    // plan is made once.
+    let mut plans: HashMap<usize, Conjunction> = HashMap::new();
+    for row in delta {
+        let mut matched = Match::new();
+        if !bind_occurrence(&mut matched, leading, row) {
+            continue;
+        }
+        let mut scope = Environment::new();
+        for (_, term) in leading.terms.iter() {
+            if let Some(name) = term.name() {
+                scope.add(name);
+            }
+        }
+        let mut partials = vec![matched];
+        let mut base: Vec<Premise> = split.base.clone();
+        let mut siblings: Vec<usize> = (0..split.occurrences.len())
+            .filter(|index| *index != delta_index)
+            .collect();
+        let mut stage = 0usize;
+        while !base.is_empty() || !siblings.is_empty() {
+            let (ready, later): (Vec<Premise>, Vec<Premise>) = base
+                .into_iter()
+                .partition(|premise| premise.feasible(&scope).is_ok());
+            base = later;
+            if !ready.is_empty() {
+                let plan = match plans.get(&stage) {
+                    Some(plan) => plan.clone(),
+                    None => {
+                        let plan = Planner::with_types(ready, types.clone())
+                            .plan(&scope)
+                            .map_err(|error| EvaluationError::Planning {
+                                message: error.to_string(),
+                            })?;
+                        plans.insert(stage, plan.clone());
+                        plan
+                    }
+                };
+                let mut next = Vec::new();
+                for partial in partials {
+                    let rows: Vec<Match> = plan
+                        .clone()
+                        .evaluate(partial.seed(), env)
+                        .try_collect()
+                        .await?;
+                    next.extend(rows);
+                }
+                partials = next;
+                scope.extend(&plan.binds);
+            } else {
+                if siblings.is_empty() {
+                    return Err(EvaluationError::Planning {
+                        message: format!(
+                            "premises of a recursive rule for {} cannot be bound",
+                            member.descriptor.this()
+                        ),
+                    });
+                }
+                let connected = siblings.iter().position(|index| {
+                    split.occurrences[*index]
+                        .terms
+                        .iter()
+                        .any(|(_, term)| term.name().is_some_and(|name| scope.contains(name)))
+                });
+                let index = siblings.remove(connected.unwrap_or(0));
+                let occurrence = &split.occurrences[index];
+                let mut next = Vec::new();
+                for partial in &partials {
+                    for row in &totals[index] {
+                        let mut joined = partial.clone();
+                        if bind_occurrence(&mut joined, occurrence, row) {
+                            next.push(joined);
+                        }
+                    }
+                }
+                partials = next;
+                for (_, term) in occurrence.terms.iter() {
+                    if let Some(name) = term.name() {
+                        scope.add(name);
+                    }
+                }
+            }
+            stage += 1;
+            if partials.is_empty() {
+                break;
+            }
+        }
+        for complete in &partials {
+            if let Some(row) = project_complete(&member.descriptor, complete) {
+                derived.push(row);
+            }
+        }
+    }
+    Ok(derived)
 }
 
 /// Compute the full fixpoint of the queried concept's strongly

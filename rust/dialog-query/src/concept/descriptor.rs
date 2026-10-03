@@ -206,6 +206,12 @@ impl ConceptDescriptor {
     /// place in a concept, not of the relation, so neither carries
     /// over.
     pub fn of_attribute(field: &ConceptFieldDescriptor) -> Self {
+        field.attribute_concept().clone()
+    }
+
+    /// [`of_attribute`](Self::of_attribute) computed afresh: what the
+    /// field memoises.
+    pub(crate) fn attribute_concept(field: &ConceptFieldDescriptor) -> Self {
         descriptor_from_with(
             NamedAttributes::try_from(vec![(
                 Self::VALUE.to_string(),

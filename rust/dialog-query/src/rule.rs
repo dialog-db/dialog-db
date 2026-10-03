@@ -17,8 +17,10 @@
 
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::{AnalysisError, TypeError};
+use crate::negation::Negation;
 use crate::planner::Planner;
 use crate::premise::Premise;
+use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
 use crate::rule::analyzer::Authored;
 use crate::{Environment, Type};
@@ -183,6 +185,22 @@ pub(crate) fn compile_rule<T: Compile>(
     // Coalesce / reduce checks + dependency graph, all from the
     // premises, before any execution order is chosen. The original
     // premises are kept for the error-path display rule.
+    // A concept premise reads the fields it names and the required
+    // ones: an optional field it leaves out decides nothing, and
+    // selecting it could put the concept on a cycle with the rules
+    // deriving that field (see `ConceptQuery::narrowed`).
+    let premises: Vec<Premise> = premises
+        .into_iter()
+        .map(|premise| match premise {
+            Premise::Assert(Proposition::Concept(query)) => {
+                Premise::Assert(Proposition::Concept(query.narrowed()))
+            }
+            Premise::Unless(Negation(Proposition::Concept(query))) => {
+                Premise::Unless(Negation(Proposition::Concept(query.narrowed())))
+            }
+            other => other,
+        })
+        .collect();
     let display_premises = premises.clone();
     let authored_reduce = reduce.clone();
     let analysis = match analyzer::analyze_with(conclusion.clone(), premises, T::KIND, reduce) {

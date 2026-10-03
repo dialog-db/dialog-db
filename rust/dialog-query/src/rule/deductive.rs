@@ -671,9 +671,10 @@ impl DeductiveRule {
     /// field names, joined with stored scans of the concept's other
     /// fields. This is the concept's exact evaluation when the rule is
     /// the only source of those attributes and nothing is stored under
-    /// them. `None` when the heads share no attribute, when a required
-    /// concept field would come from an optional head field, or when
-    /// the rule folds.
+    /// them. `None` when the heads share no attribute, when a shared
+    /// field is optional on either side (an optional concept field
+    /// admits entities the rule derives nothing for), or when the rule
+    /// folds.
     pub fn covering(&self, concept: &ConceptDescriptor) -> Result<Option<Self>, TypeError> {
         use rename::{Rename, fresh_name, rename_premises, variables};
         use std::collections::BTreeSet;
@@ -699,7 +700,10 @@ impl DeductiveRule {
             else {
                 continue;
             };
-            if head.is_optional() && !field.is_optional() {
+            // A concept field the rule derives is exact only when it is
+            // required: an optional one admits entities the rule derives
+            // nothing for, which the rule's body never yields.
+            if field.is_optional() || head.is_optional() {
                 return Ok(None);
             }
             shared.push(name);
