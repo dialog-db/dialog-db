@@ -475,4 +475,21 @@ mod tests {
             "Entity and String|Symbol have an empty meet"
         );
     }
+
+    /// Re-spelling the constraint over new parameters renames a
+    /// variable prefix along with the subject: a prefix bound elsewhere
+    /// in a body follows the body's renaming.
+    #[dialog_common::test]
+    fn it_takes_its_prefix_from_the_parameters() {
+        let constraint =
+            Constraint::StartsWith(StartsWith::new(Term::var("x"), Term::<String>::var("p")));
+        let mut terms = Parameters::new();
+        terms.insert("of".to_string(), Term::<Any>::var("y"));
+        terms.insert("prefix".to_string(), Term::<Any>::var("q"));
+        let Constraint::StartsWith(renamed) = constraint.with_parameters(&terms) else {
+            panic!("a starts-with stays a starts-with");
+        };
+        assert_eq!(renamed.of, Term::<Any>::var("y"));
+        assert_eq!(renamed.prefix, Term::<String>::var("q"));
+    }
 }

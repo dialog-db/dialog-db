@@ -246,6 +246,11 @@ impl Plan {
 /// and joins, instead of probing it per candidate.
 const BULK_NEGATION: usize = 16;
 
+/// Rows of the negated relation a bulk read may take per candidate
+/// before it is abandoned for probing: past this the relation is large
+/// beside the candidates and probing them is the cheaper join.
+const BULK_NEGATION_READ_FACTOR: usize = 16;
+
 fn negate<'a, Env, M: Selection + 'a>(
     inner: Plan,
     selection: M,
@@ -257,10 +262,13 @@ where
     // An anti-join. The candidates are buffered, then either the
     // negated relation is read once with nothing bound and the
     // candidates are hashed against it on the variables they bind (many
-    // candidates), or every candidate is evaluated through the inner
-    // plan at once, each on its own behalf, and those no result came
-    // back for pass. Evaluating the inner plan once per candidate
-    // instead set the pipeline up, rules and all, for every row.
+    // candidates, a relation not much larger), or every candidate is
+    // evaluated through the inner plan at once, each on its own behalf,
+    // and those no result came back for pass. Evaluating the inner plan
+    // once per candidate instead set the pipeline up, rules and all,
+    // for every row. Buffering holds every candidate in memory at once,
+    // the price of asking the negated relation about all of them in one
+    // pass.
     try_stream! {
         let mut candidates: Vec<Match> = Vec::new();
         let mut selection = Box::pin(selection);
@@ -360,8 +368,14 @@ where
     }
     let output: Pin<Box<dyn Selection + 'a>> = Box::pin(plan.evaluate(Match::new().seed(), env));
     tokio::pin!(output);
+    let limit = candidates.len().saturating_mul(BULK_NEGATION_READ_FACTOR);
+    let mut read = 0usize;
     let mut present: HashSet<Vec<u8>> = HashSet::new();
     while let Some(row) = output.try_next().await? {
+        read += 1;
+        if read > limit {
+            return Ok(None);
+        }
         if let Some(found) = key(&row) {
             present.insert(found);
         }

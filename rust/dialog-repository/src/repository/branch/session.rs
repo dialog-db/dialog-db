@@ -1280,11 +1280,13 @@ where
             // whole answer and needs no election.
             let mut sole: Option<Option<DeductiveRule>> = None;
             let mut note = |head: &DeductiveRule| {
-                sole = Some(match (sole.take().flatten(), head.origin()) {
-                    (_, None) => None,
+                sole = Some(match (sole.take(), head.origin()) {
+                    // Ruled out once, ruled out for good: a later head
+                    // split from a source never reinstates it.
+                    (Some(None), _) | (_, None) => None,
                     (None, Some(origin)) => Some(origin.rule.clone()),
-                    (Some(known), Some(origin)) if known.same(&origin.rule) => Some(known),
-                    (Some(_), Some(_)) => None,
+                    (Some(Some(known)), Some(origin)) if known.same(&origin.rule) => Some(known),
+                    (Some(Some(_)), Some(_)) => None,
                 });
             };
             if let Some(on) = derives_key(&canonical) {
@@ -1347,6 +1349,18 @@ where
             let mut rules = builtins.clone();
             if let Some(on) = derives_key(&attribute) {
                 rules.extend(self.resolve_rules(Index::Deriving, &on).await?);
+            }
+            // A rule installed before the `derives` index existed is
+            // found by the attribute concept it concludes.
+            let known: HashSet<Entity> = rules.iter().filter_map(DeductiveRule::try_this).collect();
+            for rule in self.resolve_rules(Index::Concluding, &entity).await? {
+                if rule
+                    .try_this()
+                    .is_some_and(|identity| known.contains(&identity))
+                {
+                    continue;
+                }
+                rules.push(rule);
             }
             if !rules.is_empty() {
                 derived.insert(entity);
@@ -2147,6 +2161,97 @@ mod rule_tests {
             rows[0].get::<u64>("total")?,
             7,
             "the hydrated reduce block folded the committed salaries"
+        );
+        Ok(())
+    }
+
+    /// A fold rules the attribute's sole source out for good: a plain
+    /// rule found after the reducing one does not become the whole
+    /// answer, so the fold's row is read beside the plain rule's.
+    #[dialog_common::test]
+    async fn it_keeps_a_fold_beside_a_later_plain_rule() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let total = serde_json::json!({ "with": {
+            "total": { "the": "org/dept-total", "as": "UnsignedInteger" }
+        }});
+        let reducing: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": total,
+            "when": [{
+                "assert": { "with": {
+                    "dept": { "the": "org/dept", "as": "Entity" },
+                    "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "employee" } },
+                    "dept": { "?": { "name": "this" } },
+                    "salary": { "?": { "name": "salary" } }
+                }
+            }],
+            "reduce": {
+                "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
+            }
+        }))?;
+        let reducing = reducing.compile()?;
+        let plain: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": total,
+            "when": [{
+                "assert": { "with": {
+                    "flat": { "the": "org/flat-total", "as": "UnsignedInteger" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "flat": { "?": { "name": "total" } }
+                }
+            }]
+        }))?;
+        let plain = plain.compile()?;
+        let dept_total = reducing.conclusion().clone();
+
+        let dept_a: Entity = "id:dept-a".parse()?;
+        let dept_b: Entity = "id:dept-b".parse()?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        // The reducing rule is committed, so it is found first; the
+        // plain rule rides the query's overlay and is found after it.
+        branch
+            .transaction()
+            .assert(the!("org/dept").of(alice.clone()).is(dept_a.clone()))
+            .assert(the!("org/salary").of(alice.clone()).is(3u32))
+            .assert(the!("org/dept").of(bob.clone()).is(dept_a.clone()))
+            .assert(the!("org/salary").of(bob.clone()).is(4u32))
+            .assert(the!("org/flat-total").of(dept_b.clone()).is(9u32))
+            .assert(&reducing)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("dept"));
+        terms.insert("total".into(), Term::var("total"));
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .with(&plain)
+            .select(ConceptQuery {
+                predicate: dept_total,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let mut totals: Vec<(Entity, u64)> = rows
+            .iter()
+            .map(|row| Ok((row.entity().clone(), row.get::<u64>("total")?)))
+            .collect::<anyhow::Result<_>>()?;
+        totals.sort();
+        assert_eq!(
+            totals,
+            vec![(dept_a, 7), (dept_b, 9)],
+            "the fold and the plain rule both contribute"
         );
         Ok(())
     }

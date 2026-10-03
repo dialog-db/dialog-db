@@ -127,8 +127,15 @@ impl Constraint {
                 Constraint::Coalesce(Coalesce::new(slot("source"), slot("fallback"), slot("is")))
             }
             Constraint::TypeOf(c) => Constraint::TypeOf(TypeOf::new(slot("of"), c.is.clone())),
-            Constraint::StartsWith(c) => {
-                Constraint::StartsWith(StartsWith::new(slot("of"), c.prefix.clone()))
+            Constraint::StartsWith(_) => {
+                let prefix = match slot("prefix") {
+                    Term::Constant(value) => Term::<String>::Constant(value),
+                    Term::Variable {
+                        name: Some(name), ..
+                    } => Term::<String>::var(name),
+                    Term::Variable { name: None, .. } => Term::<String>::blank(),
+                };
+                Constraint::StartsWith(StartsWith::new(slot("of"), prefix))
             }
             Constraint::LessThan(_) => {
                 Constraint::LessThan(LessThan::new(slot("of"), slot("with")))
