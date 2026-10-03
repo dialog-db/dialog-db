@@ -263,7 +263,9 @@ pub struct AttributeDescriptor {
     #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
     content_type: Option<Type>,
     /// How a field over this attribute reads its relation (see
-    /// [`Select`]); absent, the cardinality decides.
+    /// [`Select`]); absent, the cardinality decides. Not part of the
+    /// attribute's identity: the relation is, and this is one way of
+    /// reading it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     select: Option<Select>,
     /// The listed values a `top` read ranks by, best first.
@@ -417,14 +419,12 @@ impl AttributeDescriptor {
         &self.description
     }
 
-    /// Returns the cardinality a field over this attribute presents:
-    /// the declared policy's when one is declared, else the declared
-    /// cardinality.
+    /// Returns the cardinality: the relation's, which is part of the
+    /// attribute's identity. A `select` policy says how a field reads
+    /// the relation and leaves this as declared, so a `count` over a
+    /// many-valued attribute declares `many` and reads one number.
     pub fn cardinality(&self) -> Cardinality {
-        match self.select {
-            Some(select) => select.cardinality(),
-            None => self.cardinality,
-        }
+        self.cardinality
     }
 
     /// Returns the expected value type, or `None` if any type is accepted.

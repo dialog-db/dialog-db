@@ -2672,9 +2672,7 @@ mod tests {
     /// `notes/aggregation.md`).
     mod reducing {
         use super::*;
-        use crate::reduce::{Aggregator, ReduceSpec};
         use crate::rule::DeductiveRuleDescriptor;
-        use std::collections::BTreeMap;
 
         fn compile(json: serde_json::Value) -> DeductiveRule {
             let descriptor: DeductiveRuleDescriptor =
@@ -2731,7 +2729,7 @@ mod tests {
             registry.register(dept_salaries_rule())?;
             let source = TestEnv::new(&branch, &operator, registry);
             let total: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-                "total": { "the": "org.dept/salary", "as": "UnsignedInteger", "select": "sum" }
+                "total": { "the": "org.dept/salary", "as": "UnsignedInteger", "cardinality": "many", "select": "sum" }
             }}))?;
             let read = |this: Term<Any>, total_term: Term<Any>| {
                 let mut terms = Parameters::new();
@@ -2803,7 +2801,7 @@ mod tests {
                 }},
                 "when": [
                     { "assert": { "with": {
-                        "total": { "the": "org.dept/salary", "as": "UnsignedInteger", "select": "sum" }
+                        "total": { "the": "org.dept/salary", "as": "UnsignedInteger", "cardinality": "many", "select": "sum" }
                       }},
                       "where": { "this": { "?": { "name": "this" } }, "total": { "?": { "name": "total" } } } },
                     { "assert": "math/sum", "where": {
@@ -2884,7 +2882,7 @@ mod tests {
 
             let read = |select: &str| -> ConceptDescriptor {
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "n": { "the": "org.dept/salary", "as": "UnsignedInteger", "select": select }
+                    "n": { "the": "org.dept/salary", "as": "UnsignedInteger", "cardinality": "many", "select": select }
                 }}))
                 .expect("a concept over the relation")
             };

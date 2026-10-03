@@ -760,22 +760,6 @@ mod tests {
         );
     }
 
-    /// The employee body with an *optional* bonus field: the fold
-    /// input `?bonus` admits Nothing.
-    fn optional_bonus_body() -> serde_json::Value {
-        json!([{
-            "assert": { "with": {
-                "dept": { "the": "org.employee/dept", "as": "Entity" },
-                "bonus": { "the": "org.employee/bonus", "as": "UnsignedInteger", "optional": true }
-            }},
-            "where": {
-                "this": { "?": { "name": "employee" } },
-                "dept": { "?": { "name": "this" } },
-                "bonus": { "?": { "name": "bonus" } }
-            }
-        }])
-    }
-
     #[dialog_common::test]
     fn it_rejects_unbound_variable_in_negation_on_deserialize() {
         use super::super::DeductiveRule;

@@ -642,22 +642,6 @@ mod tests {
         );
     }
 
-    /// A one-field unsigned-integer concept in the given domain:
-    /// `{domain}/total`. The head shape every reducing rule below
-    /// concludes.
-    fn totals(domain: &str) -> ConceptDescriptor {
-        ConceptDescriptor::try_from(vec![(
-            "total",
-            AttributeDescriptor::new(
-                format!("{domain}/total").parse().expect("valid selector"),
-                "",
-                Cardinality::One,
-                Some(Type::UnsignedInt),
-            ),
-        )])
-        .expect("concept builds")
-    }
-
     /// A positive premise over `target` binding `this` and the
     /// given field to the named variable.
     fn premise(target: &ConceptDescriptor, field: &str, var: &str) -> Premise {
@@ -668,30 +652,6 @@ mod tests {
             terms,
             predicate: target.clone(),
         }))
-    }
-
-    /// A reducing rule concluding `conclusion` (a [`totals`]
-    /// concept) that counts the `field` bindings of `target` into
-    /// `total`.
-    fn reducing(
-        conclusion: &ConceptDescriptor,
-        target: &ConceptDescriptor,
-        field: &str,
-    ) -> DeductiveRule {
-        let mut reduce = BTreeMap::new();
-        reduce.insert(
-            "total".to_string(),
-            ReduceSpec {
-                apply: Aggregator::Count,
-                of: Term::var("input"),
-            },
-        );
-        DeductiveRule::with_reduce(
-            conclusion.clone(),
-            vec![premise(target, field, "input")],
-            reduce,
-        )
-        .expect("locally the rule compiles; any cycle is a program property")
     }
 
 }

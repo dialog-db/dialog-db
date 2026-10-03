@@ -45,7 +45,6 @@ mod tests {
     };
     use dialog_capability::Provider;
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
-    use implicit_attr_test::{Name, Role};
 
     /// Lower a single proposition to its compiled `Plan` for the
     /// given binding scope. Tests that exercise a concept/attribute
@@ -659,16 +658,6 @@ mod tests {
         let _rules = registry.acquire(&adult_concept)?;
 
         Ok(())
-    }
-
-    mod implicit_attr_test {
-        use crate::Attribute;
-
-        #[derive(Attribute, Clone, PartialEq)]
-        pub struct Name(pub String);
-
-        #[derive(Attribute, Clone, PartialEq)]
-        pub struct Role(pub String);
     }
 
     #[dialog_common::test]
