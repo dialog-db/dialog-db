@@ -25,6 +25,14 @@
 //! - **The outputs of cached formulas, for the whole environment:** a
 //!   formula is a pure function of its inputs, so what it computed for one
 //!   repository holds for any (see [`FormulaCache`]).
+//! - **The writer of each open branch,** the lock its head moves under.
+//!   It is held here, with the caches, so that every environment sharing
+//!   one set shares the writers too: a session of a peer writes to its
+//!   peer's archive, and its handles must take turns with the peer's.
+//!
+//! One set is for one archive. Environments over different storages must
+//! not share a set: a node one archive holds would answer a read of
+//! another that does not, and a release or clear would reach them both.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -39,6 +47,7 @@ use dialog_query::formula::FormulaCache;
 use dialog_search_tree::{Cache, NODE_CACHE_BUDGET, NodeCache, Scope};
 use dialog_varsig::Did;
 
+use super::branch::{Writer, Writers};
 use super::source::Caches;
 use crate::BranchReference;
 use crate::rules::{RuleCache, SharedRuleCache};
@@ -90,8 +99,9 @@ impl Repository {
 /// # }
 /// ```
 ///
-/// Clones share the caches. A set may be held by more than one environment,
-/// which then share everything in it.
+/// Clones share the caches. A set may be held by more than one environment
+/// over the same storage, which then share everything in it, the writers
+/// of their branches included.
 #[derive(Clone)]
 pub struct HeldCaches {
     /// Tree nodes of every repository, each reading through its own scope.
@@ -100,6 +110,10 @@ pub struct HeldCaches {
     formulas: FormulaCache,
     /// By repository DID.
     repositories: Arc<Mutex<HashMap<String, Arc<Repository>>>>,
+    /// The writers of the branches open through any environment holding
+    /// this set, by branch. Not a cache: untouched by `release` and
+    /// `clear`, and gone with its last handle.
+    writers: Arc<Writers>,
 }
 
 impl fmt::Debug for HeldCaches {
@@ -137,6 +151,7 @@ impl HeldCaches {
             nodes: NodeCache::with_budget(bytes),
             formulas,
             repositories: Arc::default(),
+            writers: Arc::default(),
         }
     }
 
@@ -196,7 +211,14 @@ impl HeldCaches {
         self.nodes.scoped(scope(repository)).release();
     }
 
-    /// Let go of everything, for every repository.
+    /// The writer of the branch `key` names, shared by every handle of it
+    /// open through an environment holding this set.
+    pub(crate) fn writer(&self, key: String) -> Arc<Writer> {
+        Writer::among(&self.writers, key)
+    }
+
+    /// Let go of everything, for every repository. The writers of open
+    /// branches are not caches and stay.
     pub fn clear(&self) {
         self.lock().clear();
         self.nodes.clear();

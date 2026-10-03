@@ -2,7 +2,7 @@ use super::memory::Cell;
 use crate::rules::SharedRuleCache;
 use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
-use dialog_common::{ConditionalSync, Holds, held_key};
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
@@ -228,16 +228,15 @@ pub struct Branch {
 /// connections keeps, collected as a branch connects.
 pub(crate) type Answers = Arc<Mutex<HashMap<Entity, Arc<AtomicUsize>>>>;
 
-/// The key an environment holds its branch writers under.
-const WRITERS: &str = "dialog.writers";
-
 /// The writers of the branches open through an environment, by branch.
 /// Weak, so a writer lives as long as some handle of its branch does.
-type Writers = Mutex<HashMap<String, Weak<Writer>>>;
+pub(crate) type Writers = Mutex<HashMap<String, Weak<Writer>>>;
 
 /// The writer of a branch in an environment, shared by every handle of
-/// the branch opened through it: an environment writes as one issuer, so
-/// its handles mint under one origin and must take turns moving the head.
+/// the branch opened through it, and through any environment that shares
+/// its held caches (a session of a peer): they write to one archive, so
+/// their handles must take turns moving the head, whichever of them mints
+/// the edition.
 #[derive(Debug)]
 pub(crate) struct Writer {
     /// Held while the head moves, by a commit, a pull or a reset, so two
@@ -258,24 +257,17 @@ impl Writer {
         }
     }
 
-    /// The writer of the branch `key` names in `env`, shared with every
-    /// handle of it that is open through `env`.
+    /// The writer of the branch `key` names among `writers`, shared with
+    /// every handle of it that is open through the environments that hold
+    /// `writers` (see [`HeldCaches::writer`](crate::HeldCaches)).
     ///
-    /// The environment holds the registry. Two environments that write as
-    /// the same issuer do not share a writer; a race between them is a
-    /// writer racing itself, which a merging commit refuses rather than
-    /// mint an edition twice (see `merge`). An environment that holds
-    /// nothing, such as a bare storage provider, gives every handle a
-    /// writer of its own, as two environments would.
-    fn held<Env: Holds>(env: &Env, key: String) -> Arc<Self> {
-        let held = env.held_or(&held_key::<Writers>(WRITERS), &|| {
-            Arc::new(Writers::default())
-        });
-        let Some(writers) = held.downcast_ref::<Writers>() else {
-            // Something else is held under the key: a writer of this
-            // handle's own, which takes turns with no other handle.
-            return Arc::new(Self::new());
-        };
+    /// Two environments that hold nothing in common do not share a
+    /// writer; a race between them as one issuer is a writer racing
+    /// itself, which a merging commit refuses rather than mint an edition
+    /// twice (see `merge`). An environment that holds nothing, such as a
+    /// bare storage provider, gives every handle a writer of its own, as
+    /// two environments would.
+    pub(crate) fn among(writers: &Writers, key: String) -> Arc<Self> {
         let mut writers = writers.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some(writer) = writers.get(&key).and_then(Weak::upgrade) {
             return writer;
@@ -443,9 +435,10 @@ impl Branch {
     }
 
     /// The writer shared by every handle of the branch `reference` names
-    /// that is open through `env`.
+    /// that is open through `env`, or through an environment sharing what
+    /// `env` holds.
     pub(crate) fn writer_of<Env: Holds>(env: &Env, reference: &BranchReference) -> Arc<Writer> {
-        Writer::held(env, format!("{}:{}", reference.subject(), reference.name()))
+        crate::HeldCaches::of(env).writer(format!("{}:{}", reference.subject(), reference.name()))
     }
 
     /// Where a read of content this branch holds by reference falls back
