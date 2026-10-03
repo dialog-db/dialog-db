@@ -154,19 +154,13 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
     /// Where the archive holds the node `identity`; see
     /// [`LocalIndex::node_address`].
     pub(crate) fn node_address(&self, identity: &Blake3Hash) -> Option<Blake3Hash> {
-        match self.sealing() {
-            None => Some(identity.clone()),
-            Some(space) => space.locate(identity).map(|at| at.address),
-        }
+        self.local.node_address(identity)
     }
 
     /// Where the archive holds the spilled value hashing to `reference`;
     /// see [`LocalIndex::value_address`].
     pub(crate) fn value_address(&self, reference: &Blake3Hash) -> Option<Blake3Hash> {
-        match self.sealing() {
-            None => Some(reference.clone()),
-            Some(space) => space.locate_value(reference),
-        }
+        self.local.value_address(reference)
     }
 }
 

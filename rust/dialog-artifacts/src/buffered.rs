@@ -685,7 +685,7 @@ mod tests {
     use crate::history::{Edition, Origin, Version};
     use crate::key::FromKey as _;
     use crate::tree::Stamp;
-    use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
+    use crate::tree::{ArtifactNodeCache, ArtifactTree, ArtifactTreeExt as _};
     use crate::{
         Artifact, Asset, AttributeKey, BlobChange, BlobIndexExt as _, Datum, DialogArtifactsError,
         EntityKey, Instruction, SealedCopy, State, Value, blob_changes,
@@ -1128,8 +1128,8 @@ mod tests {
         Ok(())
     }
 
-    /// A sealed asset's one fact vouches for its size and ships as its
-    /// sealed copy: the blob it names is the copy, never the plaintext.
+    /// A sealed asset's one fact records its size and ships as its sealed
+    /// copy: the blob it names is the copy, never the plaintext.
     #[dialog_common::test]
     async fn it_ships_a_sealed_asset_as_its_copy() -> Result<()> {
         let store = store();
@@ -1151,7 +1151,9 @@ mod tests {
         let tree = batch.seal(&store, &mut delta, false).await?;
         delta.flush_into(&store);
 
-        assert_eq!(tree.content_size(&store, asset.hash()).await?, Some(34));
+        // Its plaintext is vouched for nowhere: nothing fetches or ships
+        // bytes under the asset's own hash.
+        assert_eq!(tree.content_size(&store, asset.hash()).await?, None);
         assert_eq!(tree.asset_size(&store, asset.hash()).await?, None);
         assert_eq!(
             tree.sealed_asset(&store, asset.hash()).await?,
@@ -1161,6 +1163,39 @@ mod tests {
             .try_collect()
             .await?;
         assert_eq!(changes, vec![BlobChange::Added(copy.address)]);
+        Ok(())
+    }
+
+    /// A sealed asset's fact is refused, and nothing recorded, on a tree
+    /// whose inline threshold would spill its value out of the keys push
+    /// reads it from.
+    #[dialog_common::test]
+    async fn it_refuses_a_sealed_asset_fact_that_would_spill() -> Result<()> {
+        let store = store();
+        let small = dialog_search_tree::Manifest {
+            inline_n: 16,
+            ..dialog_search_tree::Manifest::default()
+        };
+        let tree = ArtifactTree::empty_with_manifest(small, ArtifactNodeCache::default());
+        let copy = SealedCopy {
+            address: [9u8; 32],
+            length: 99,
+        };
+        let asset = Asset::sealed([7u8; 32], 34, copy);
+
+        let refused = BufferedBatch::apply(
+            &tree,
+            &store,
+            Some(asset_version()),
+            stream::iter(vec![Instruction::Assert(asset.sealed_fact(&copy)?)]),
+            WriteScope::Machinery,
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(DialogArtifactsError::InvalidValue(_))),
+            "a spilling sealed fact was recorded: {:?}",
+            refused.map(|_| ())
+        );
         Ok(())
     }
 

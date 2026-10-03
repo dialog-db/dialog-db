@@ -66,12 +66,11 @@
 //! # }
 //! ```
 
-use crate::repository::archive::local::read_all;
 use crate::repository::branch::asset::{asset_fact, recorded_facts, recorded_sealed};
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
 use crate::sealing::TreeSpace;
-use crate::sealing::asset::OpenedAsset;
+use crate::sealing::asset::open_copy;
 use crate::{
     Branch, CommitError, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite, Snapshot,
 };
@@ -88,7 +87,6 @@ use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
 };
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_keyring::layered::asset::{HEADER, span};
 use futures_util::{Stream, stream};
 
 /// A line's blob store: the target that blob reads and writes bind to.
@@ -327,7 +325,12 @@ impl BlobSize<'_> {
             + 'static,
     {
         let hash = blob_hash(&self.entity)?;
-        index_size(self.archive.source, &hash, env).await
+        if let Some(size) = index_size(self.archive.source, &hash, env).await? {
+            return Ok(Some(size));
+        }
+        Ok(recorded_sealed(self.archive.source, hash.as_bytes(), env)
+            .await?
+            .map(|(_, size)| size))
     }
 }
 
@@ -368,7 +371,7 @@ impl ReadBlob<'_> {
         if let Some(space) = line.sealing()
             && let Some((copy, size)) = recorded_sealed(line, hash.as_bytes(), env).await?
         {
-            return read_sealed(line, &space, copy, size, range, env).await;
+            return read_sealed(line, &space, &hash, copy, size, range, env).await;
         }
 
         let miss_key = match read_local(line, &hash, range, env).await {
@@ -387,13 +390,13 @@ impl ReadBlob<'_> {
     }
 }
 
-/// Read `range` of an asset of `size` bytes through its sealed `copy`,
-/// opened with `space`: the header first, then just the pieces the range
-/// touches. A sealed copy this replica does not hold hydrates whole from
-/// the remote, as a plaintext blob does.
+/// Read `range` of the asset `hash`, of `size` bytes, through its sealed
+/// `copy`, opened with `space` ([`open_copy`]). A copy this replica does not
+/// hold hydrates whole from the remote first, as a plaintext blob does.
 async fn read_sealed<Env>(
     line: SourceRef<'_>,
     space: &TreeSpace,
+    hash: &Blake3Hash,
     copy: SealedCopy,
     size: u64,
     range: Option<ByteRange>,
@@ -410,44 +413,15 @@ where
         + ConditionalSync
         + 'static,
 {
-    let address = Blake3Hash::from(copy.address);
-    let header_range = Some(ByteRange {
-        offset: 0,
-        length: Some(HEADER as u64),
-    });
-    let header = match read_local(line, &address, header_range, env).await {
-        Ok(reader) => reader,
-        Err(BlobError::NotFound(key)) => {
+    match open_copy(line, space, hash, &copy, size, range, env).await {
+        Err(CommitError::Blob(BlobError::NotFound(key))) => {
             let remote = fallback_for_miss(line, key)?;
+            let address = Blake3Hash::from(copy.address);
             hydrate(line, &remote, &address, copy.length, env).await?;
-            read_local(line, &address, header_range, env).await?
+            open_copy(line, space, hash, &copy, size, range, env).await
         }
-        Err(other) => return Err(other.into()),
-    };
-    let opener = space.asset_opener(&read_all(header).await?, size)?;
-    let range = range.unwrap_or(ByteRange {
-        offset: 0,
-        length: None,
-    });
-    let span = span(size, range.offset, range.length);
-    // A range holding no bytes touches no piece, and reads nothing.
-    let pieces = if span.count == 0 {
-        None
-    } else {
-        Some(
-            read_local(
-                line,
-                &address,
-                Some(ByteRange {
-                    offset: span.offset,
-                    length: Some(span.length),
-                }),
-                env,
-            )
-            .await?,
-        )
-    };
-    Ok(Box::new(OpenedAsset::new(pieces, opener, span)))
+        opened => opened,
+    }
 }
 
 /// Read `range` of the blob `digest` from the line's own blob store.

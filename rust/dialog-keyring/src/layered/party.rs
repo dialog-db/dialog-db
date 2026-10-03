@@ -148,12 +148,19 @@ impl Party {
     }
 
     /// Remember that the node `identity` lives at `address`, opened by
-    /// `structure`.
+    /// `structure`, unless this party already knows where it lives.
+    ///
+    /// One node can have more than one envelope: sealed under different
+    /// generations, it seals to different bytes. Any of them opens to the
+    /// node, but a party may hold only some, so a location learned while
+    /// reading never displaces one already known. Only what this party
+    /// itself kept does ([`settle`](Self::settle)).
     pub(crate) fn learn(&self, identity: Blake3Hash, address: Blake3Hash, structure: StructureKey) {
         self.known
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(identity, (address, structure));
+            .entry(identity)
+            .or_insert((address, structure));
     }
 
     fn learn_value(&self, reference: Blake3Hash, address: Blake3Hash) {
@@ -167,9 +174,13 @@ impl Party {
     /// blocks are kept. Learning before they are kept would let a failed
     /// write leave this party pointing at blocks nobody holds.
     pub(crate) fn settle(&self, sealing: Sealing) -> LayeredRoot {
+        // What this party just kept, it holds: prefer it to a location
+        // learned while reading, which it may not.
+        let mut known = self.known.write().unwrap_or_else(PoisonError::into_inner);
         for (identity, address, structure) in sealing.learned {
-            self.learn(identity, address, structure);
+            known.insert(identity, (address, structure));
         }
+        drop(known);
         for (reference, address) in sealing.learned_values {
             self.learn_value(reference, address);
         }

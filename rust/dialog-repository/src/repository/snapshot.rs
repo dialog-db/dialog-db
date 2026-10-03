@@ -57,8 +57,8 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, LoadBlob,
-    ShipmentRef, State, Statement, shipment_ref,
+    ArtifactSelector, BlobIndexExt as _, DialogArtifactsError, Entity, LoadBlob, ShipmentRef,
+    Statement, shipment_ref,
 };
 use dialog_capability::{Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
@@ -69,13 +69,14 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory;
 use dialog_query::query::Application;
-use dialog_search_tree::{NodeBody, NoveltyOp, Traversable as _, Visit, into_owned};
+use dialog_search_tree::{Traversable as _, Visit};
 use futures_util::future::Either;
 use futures_util::{Stream, StreamExt as _, stream};
 use parking_lot::RwLock;
 
 use dialog_varsig::Principal;
 
+use crate::repository::archive::node_entries;
 use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
 use crate::sealing::{TreeSpace, admit};
@@ -715,23 +716,7 @@ impl SnapshotExport {
                 // references nothing of its own). The closure only
                 // collects: classification returns artifact errors,
                 // which do not belong in a tree-walk callback.
-                let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
-                match node.body() {
-                    NodeBody::Segment(segment) => {
-                        segment.for_each_entry::<Key, _>(|key, value| {
-                            entries.push((Key::from(key.to_vec()), into_owned(value)?));
-                            Ok(())
-                        })?;
-                    }
-                    NodeBody::Index(index) => {
-                        for entry in index.all_novelty::<Key>()? {
-                            if let NoveltyOp::Assert(value) = entry.op {
-                                entries.push((Key::from(entry.key), value));
-                            }
-                        }
-                    }
-                }
-                for (key, value) in entries {
+                for (key, value) in node_entries(&node)? {
                     match shipment_ref(&key, &value, false)? {
                         Some(ShipmentRef::SpilledValue(reference)) => {
                             spills.insert(reference);
@@ -1071,7 +1056,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Datum, Instruction, Key, State, Value};
     use dialog_credentials::Credential;
     use dialog_effects::archive::prelude::GetBlockExt as _;
     use dialog_effects::blob::BlobSource;

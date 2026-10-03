@@ -196,14 +196,16 @@ pub trait BlobIndexExt {
     where
         S: ArchiveReader + Clone;
 
-    /// The size of the content this tree vouches for under `hash`, by an
-    /// asset's `dialog.asset/size` or `dialog.asset/sealed` fact or, in a
-    /// tree written before the
+    /// The size of the plaintext this tree vouches for under `hash`, by an
+    /// asset's `dialog.asset/size` fact or, in a tree written before the
     /// index was retired, by a blob-index entry, or `None` when it vouches
     /// for no such content.
     ///
     /// This is the question a blob read asks before hydrating bytes it does
-    /// not hold, and the size it declares when it does.
+    /// not hold, and the size it declares when it does. A sealed asset's
+    /// fact is not counted: its plaintext is stored nowhere, so nothing
+    /// should fetch or ship bytes under `hash` on its say
+    /// (see [`sealed_asset`](BlobIndexExt::sealed_asset)).
     async fn content_size<S>(
         &self,
         store: &S,
@@ -284,9 +286,6 @@ impl BlobIndexExt for ArtifactTree {
         S: ArchiveReader + Clone,
     {
         if let Some(size) = self.asset_size(store, hash).await? {
-            return Ok(Some(size));
-        }
-        if let Some((_, size)) = self.sealed_asset(store, hash).await? {
             return Ok(Some(size));
         }
         Ok(self.get_blob(store, hash).await?.map(|record| record.size))

@@ -167,16 +167,15 @@ fn asset_ref(key: &Key) -> Option<ShipmentRef> {
 }
 
 /// The sealed copy a `dialog.asset/sealed` fact's key records, when it
-/// records one. Its value is 48 bytes, so the key carries all of it: inline
-/// under any usual threshold, and whole in a spilled value's prefix under
-/// one smaller than that. The key alone says what ships.
+/// records one. The commit refuses a sealed fact whose value would spill
+/// (`refuse_spilled_sealed_asset` in `tree.rs`), so its key carries the
+/// whole 48-byte value, and the key alone says what ships.
 fn sealed_ref(parts: &KeyRef<'_>) -> Option<ShipmentRef> {
     if parts.value_type != ValueDataType::Bytes {
         return None;
     }
-    let payload = match parts.value {
-        ValueRef::Inline(payload) => payload,
-        ValueRef::Spilled { prefix, .. } => prefix,
+    let ValueRef::Inline(payload) = parts.value else {
+        return None;
     };
     let (value, _) = decode_value(ValueDataType::Bytes, payload)?;
     let (copy, _) = SealedCopy::from_value(&value)?;

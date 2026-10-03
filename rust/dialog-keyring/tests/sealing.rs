@@ -184,9 +184,15 @@ async fn concurrent_rotation_survives_the_merge() {
         "different epochs must not collide"
     );
 
-    // Neither can read the other yet.
-    assert!(here.open(&written_there).await.is_err());
-    assert!(there.open(&written_here).await.is_err());
+    // Neither can read the other yet: each lacks the other's epoch.
+    assert!(matches!(
+        here.open(&written_there).await,
+        Err(KeyringError::UnknownEpoch(epoch)) if &epoch == written_there.epoch()
+    ));
+    assert!(matches!(
+        there.open(&written_here).await,
+        Err(KeyringError::UnknownEpoch(epoch)) if &epoch == written_here.epoch()
+    ));
 
     // The partition heals: each takes in the other's epoch log.
     let (mine, theirs) = (here.log().clone(), there.log().clone());

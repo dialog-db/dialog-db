@@ -16,7 +16,7 @@ use dialog_common::Blake3Hash;
 use dialog_effects::blob::{BlobError, ByteRange};
 use dialog_effects::storage::Location;
 use dialog_keyring::layered::asset::{CHUNK, sealed_len};
-use dialog_keyring::layered::{Access, Level, LevelSecret, Writer};
+use dialog_keyring::layered::{Access, LayeredRoot, Level, LevelSecret, Writer};
 use dialog_keyring::{EpochId, KeyringError};
 use dialog_peer::helpers::{open_peer, test_storage, unique_name};
 use dialog_search_tree::Manifest;
@@ -535,6 +535,7 @@ on_both_stores!(
         assert!(!holds(&sealed, &marker), "the sealed copy holds the plaintext");
 
         let before = branch.revision();
+        let asset_hash = &asset.hash().to_owned();
         branch
             .transaction()
             .assert(asset)
@@ -543,6 +544,17 @@ on_both_stores!(
             .perform(operator)
             .await?;
         assert_eq!(branch.revision(), before, "re-asserting minted a revision");
+
+        // So does naming it by hash and size alone: the line holds its
+        // sealed copy already, and no plaintext is asked for.
+        branch
+            .transaction()
+            .assert(Asset::stored(*asset_hash, bytes.len() as u64))
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        assert_eq!(branch.revision(), before, "naming it again minted a revision");
 
         // An empty asset seals to one empty piece and reads back empty,
         // as does a range past the end of a full one.
@@ -743,8 +755,9 @@ on_both_stores!(
 
 on_both_stores!(
     /// A handle that can read a sealed line but holds no writer is refused
-    /// sealing an asset, by import and by assertion, with `ReadOnly`; the
-    /// head does not move and nothing is recorded or stored.
+    /// sealing an asset, by import and by assertion, and recording one kept
+    /// in the clear, with `ReadOnly`; the head does not move and nothing is
+    /// recorded or stored.
     it_refuses_to_seal_an_asset_without_a_writer,
     it_refuses_to_seal_an_asset_without_a_writer_on_the_filesystem,
     |operator, repo| {
@@ -796,6 +809,23 @@ on_both_stores!(
                 .is_none()
         );
         assert_eq!(stored!(reader, operator, *asset.hash()), None);
+
+        // Nor does it store an asset marked plaintext, which it could
+        // write but never record.
+        let public = Asset::new(payload(&unique_name("unwritten-public"))).plaintext();
+        let refused = reader
+            .transaction()
+            .assert(public.clone())
+            .commit()
+            .publish()
+            .perform(operator)
+            .await;
+        assert!(
+            matches!(refused, Err(CommitError::Sealing(KeyringError::ReadOnly))),
+            "a reader recorded a plaintext asset: {refused:?}"
+        );
+        assert_eq!(reader.revision(), before, "the head moved");
+        assert_eq!(stored!(reader, operator, *public.hash()), None);
         Ok(())
     }
 );
@@ -839,6 +869,100 @@ on_both_stores!(
                 .await?
                 .is_none()
         );
+        Ok(())
+    }
+);
+
+on_both_stores!(
+    /// A sealed asset whose copy opens to other content than the asset
+    /// names is refused with `DigestMismatch`, even when its address and
+    /// length are those of a real copy; nothing is recorded, and an honest
+    /// assertion of the asset afterwards stores its own copy.
+    it_refuses_a_sealed_asset_whose_copy_is_of_other_content,
+    it_refuses_a_sealed_asset_whose_copy_is_of_other_content_on_the_filesystem,
+    |operator, repo| {
+        let branch = repo
+            .branch("main")
+            .open()
+            .sealed(writer())
+            .perform(operator)
+            .await?;
+        let real = payload(&unique_name("real"));
+        let mut other = real.clone();
+        other[0] ^= 0xff;
+        let imported = branch
+            .asset(stream::iter(chunked(&real)))
+            .import()
+            .perform(operator)
+            .await?;
+        let AssetSealing::Sealed(copy) = *imported.sealing() else {
+            panic!("a sealed line's import returned {imported:?}");
+        };
+        let forged = Asset::sealed(*Asset::new(other.clone()).hash(), imported.size(), copy);
+
+        let refused = branch
+            .transaction()
+            .assert(forged.clone())
+            .commit()
+            .publish()
+            .perform(operator)
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Blob(BlobError::DigestMismatch { .. }))
+            ),
+            "a copy of other content was recorded: {refused:?}"
+        );
+        assert_eq!(branch.revision(), None, "the head moved");
+        assert!(
+            recorded_sealed(SourceRef::from(&branch), forged.hash(), operator)
+                .await?
+                .is_none()
+        );
+
+        let honest = Asset::new(other.clone());
+        branch
+            .transaction()
+            .assert(honest.clone())
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        assert_eq!(read_asset!(branch, operator, honest.entity()?, None), other);
+        Ok(())
+    }
+);
+
+on_both_stores!(
+    /// A location learned while reading never displaces one already known:
+    /// told the root lives at an address nothing holds, a handle that
+    /// sealed the root keeps reading it where it put it.
+    it_keeps_a_known_location_over_one_learned_later,
+    it_keeps_a_known_location_over_one_learned_later_on_the_filesystem,
+    |operator, repo| {
+        let branch = repo
+            .branch("main")
+            .open()
+            .sealed(writer())
+            .perform(operator)
+            .await?;
+        branch
+            .commit(stream::iter(facts("kept")?))
+            .perform(operator)
+            .await?;
+        let head = branch.revision().expect("a head");
+        let root = Blake3Hash::from(*head.tree.hash());
+        let space = branch.sealing().expect("a sealed line").clone();
+        let kept = space.locate(&root).expect("the root is located");
+
+        let elsewhere = LayeredRoot {
+            address: Blake3Hash::hash(b"an envelope nothing holds"),
+            structure: kept.structure,
+        };
+        space.admit(root.clone(), &elsewhere);
+        assert_eq!(space.locate(&root), Some(kept));
+        assert_eq!(values(&read!(branch, operator)?), expected("kept"));
         Ok(())
     }
 );

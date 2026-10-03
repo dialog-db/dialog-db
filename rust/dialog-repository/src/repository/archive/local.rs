@@ -66,25 +66,6 @@ impl<'a, Env> LocalIndex<'a, Env> {
     pub fn env(&self) -> &'a Env {
         self.env
     }
-}
-
-impl<Env> LocalIndex<'_, Env>
-where
-    Env: Provider<Get> + ConditionalSync + 'static,
-{
-    /// The block stored under `hash` in the local archive, if any, as the
-    /// archive holds it: unverified, and sealed on a sealed line. Readers
-    /// outside the crate load through [`LoadBlock`] or [`LoadBlob`], which
-    /// open and check it.
-    pub(crate) async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
-        Ok(self
-            .catalog
-            .clone()
-            .get(hash.clone())
-            .perform(self.env)
-            .await?
-            .map(Buffer::from))
-    }
 
     /// Where the archive holds the node `identity`: under its identity on
     /// a plain line, under its envelope's address on a sealed one. `None`
@@ -105,6 +86,25 @@ where
             None => Some(reference.clone()),
             Some(space) => space.locate_value(reference),
         }
+    }
+}
+
+impl<Env> LocalIndex<'_, Env>
+where
+    Env: Provider<Get> + ConditionalSync + 'static,
+{
+    /// The block stored under `hash` in the local archive, if any, as the
+    /// archive holds it: unverified, and sealed on a sealed line. Readers
+    /// outside the crate load through [`LoadBlock`] or [`LoadBlob`], which
+    /// open and check it.
+    pub(crate) async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
+        Ok(self
+            .catalog
+            .clone()
+            .get(hash.clone())
+            .perform(self.env)
+            .await?
+            .map(Buffer::from))
     }
 
     /// The node `identity` names, opened on a sealed line: the envelope
