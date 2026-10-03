@@ -183,10 +183,20 @@ fn open_rule_error<T: Compile>(
     reduce: &[(String, ReduceSpec)],
 ) -> Option<TypeError> {
     let rule = || Box::new(T::in_progress(conclusion.clone(), premises.to_vec()).into());
-    if premises
-        .iter()
-        .any(|premise| matches!(premise, Premise::Unless(_)))
-    {
+    // A negated attribute or concept premise asks that a fact be
+    // absent, which a fact arriving later withdraws. A negated
+    // constraint, formula or resolver tests the row's own values and
+    // is as monotone as the positive test.
+    if premises.iter().any(|premise| {
+        matches!(
+            premise,
+            Premise::Unless(Negation(
+                Proposition::Attribute(_)
+                    | Proposition::OptionalAttribute(_)
+                    | Proposition::Concept(_)
+            ))
+        )
+    }) {
         return Some(TypeError::NegationInOpenRule { rule: rule() });
     }
     if !reduce.is_empty() {
@@ -224,6 +234,28 @@ pub(crate) fn compile_rule<T: Compile>(
     premises: Vec<Premise>,
     reduce: Vec<(String, ReduceSpec)>,
 ) -> Result<T, TypeError> {
+    compile_rule_as::<T>(conclusion, premises, reduce, true)
+}
+
+/// [`compile_rule`] for a rule the engine writes for itself: a
+/// concept's implicit rule, a selecting or covering rule, a head
+/// split from a source. Such a rule reads a field under whatever
+/// policy the reader declared, which is how the policy reaches the
+/// evaluation, so the open-rule check that an author's rule passes
+/// does not apply to it.
+pub(crate) fn compile_internal<T: Compile>(
+    conclusion: ConceptDescriptor,
+    premises: Vec<Premise>,
+) -> Result<T, TypeError> {
+    compile_rule_as::<T>(conclusion, premises, Vec::new(), false)
+}
+
+fn compile_rule_as<T: Compile>(
+    conclusion: ConceptDescriptor,
+    premises: Vec<Premise>,
+    reduce: Vec<(String, ReduceSpec)>,
+    authored: bool,
+) -> Result<T, TypeError> {
     // A concept with no required (`with`) attributes is
     // unconstructable (see `ConceptDescriptor`'s `TryFrom` /
     // `Deserialize` and the `#[derive(Concept)]` compile-time
@@ -252,7 +284,8 @@ pub(crate) fn compile_rule<T: Compile>(
         .collect();
     let display_premises = premises.clone();
     let authored_reduce = reduce.clone();
-    if matches!(T::KIND, RuleKind::Deductive)
+    if authored
+        && matches!(T::KIND, RuleKind::Deductive)
         && let Some(error) = open_rule_error::<T>(&conclusion, &premises, &reduce)
     {
         return Err(error);

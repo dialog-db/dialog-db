@@ -23,7 +23,7 @@ pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 use crate::reduce::{Reduce, ReduceEntry, ReduceSpec};
 use crate::rule::analyzer::AnalyzedRule;
-use crate::rule::{Compile, RuleKind, compile_rule, fmt_rule_schema};
+use crate::rule::{Compile, RuleKind, compile_internal, compile_rule, fmt_rule_schema};
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
@@ -447,48 +447,6 @@ impl Display for DeductiveRule {
     }
 }
 
-impl DeductiveRule {
-    /// Compile *ordered variants* of a concept: spec-style
-    /// first-to-conform alternatives, each an alternative body for
-    /// the same conclusion.
-    ///
-    /// Variant `k` desugars to a rule whose body is the variant's
-    /// own premises plus one negated premise per *earlier* variant:
-    /// the entity yields variant `k`'s row only when no earlier
-    /// variant matched it. Order is semantic; the returned rules are
-    /// installed together (e.g. via
-    /// [`ConceptRules::install`](crate::ConceptRules)) and their
-    /// disjunction is deterministic per entity because the
-    /// negations make the variants pairwise disjoint.
-    ///
-    /// Every variant must ground the conclusion's required operands
-    /// with its own fields (the ordinary head-grounding contract);
-    /// a variant that doesn't fails compilation like any other rule.
-    pub fn variants(
-        conclusion: ConceptDescriptor,
-        ordered: Vec<ConceptDescriptor>,
-    ) -> Result<Vec<DeductiveRule>, TypeError> {
-        use crate::concept::query::ConceptQuery;
-
-        let mut rules = Vec::new();
-        for (position, variant) in ordered.iter().enumerate() {
-            let mut premises = concept_premises(variant);
-            for earlier in &ordered[..position] {
-                let mut terms = Parameters::new();
-                terms.insert("this".to_string(), Term::<Entity>::var("this").into());
-                premises.push(Premise::Unless(Negation(Proposition::Concept(
-                    ConceptQuery {
-                        terms,
-                        predicate: earlier.clone(),
-                    },
-                ))));
-            }
-            rules.push(DeductiveRule::new(conclusion.clone(), premises)?);
-        }
-        Ok(rules)
-    }
-}
-
 /// Lower a concept's fields into the body premises of its implicit
 /// rule: one scan (or left-join) per field, plus a conjoined target
 /// premise per concept-typed field. Shared by
@@ -658,7 +616,7 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
 
 impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
-        DeductiveRule::new(concept.clone(), concept_premises(concept))
+        compile_internal::<Self>(concept.clone(), concept_premises(concept))
             .expect("Concept should compile")
     }
 }
@@ -673,7 +631,7 @@ impl DeductiveRule {
         concept: &ConceptDescriptor,
         derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
     ) -> Result<Self, TypeError> {
-        DeductiveRule::new(concept.clone(), selecting_premises(concept, derived))
+        compile_internal::<Self>(concept.clone(), selecting_premises(concept, derived))
     }
 
     /// This rule re-headed onto `concept`: its body, with the variables of
@@ -757,7 +715,7 @@ impl DeductiveRule {
                 body.extend(field_premises(name, field, false));
             }
         }
-        DeductiveRule::new(concept.clone(), body).map(Some)
+        compile_internal::<Self>(concept.clone(), body).map(Some)
     }
 }
 
@@ -1376,70 +1334,6 @@ mod tests {
         assert_eq!(maybes, 1, "expected one Maybe left-join (nickname)");
     }
 
-    /// Ordered variants desugar to negated premises: variant `k`
-    /// carries one `Unless` per earlier variant, joined on `this`,
-    /// so the first conforming variant wins.
-    #[dialog_common::test]
-    fn variants_desugar_to_ordered_negations() {
-        let conclusion = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(
-                the!("contact/handle"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
-            ),
-        )])
-        .unwrap();
-        let email = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/email"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-        let phone = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-
-        let rules = DeductiveRule::variants(conclusion, vec![email.clone(), phone.clone()])
-            .expect("variants compile");
-        assert_eq!(rules.len(), 2);
-
-        let negations = |rule: &DeductiveRule| {
-            rule.analysis()
-                .premises
-                .iter()
-                .filter_map(|premise| match premise {
-                    Premise::Unless(Negation(Proposition::Concept(query))) => Some(query.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-
-        assert!(
-            negations(&rules[0]).is_empty(),
-            "the first variant negates nothing"
-        );
-
-        let unless = negations(&rules[1]);
-        assert_eq!(unless.len(), 1, "one negation per earlier variant");
-        assert_eq!(
-            unless[0].predicate.this(),
-            email.this(),
-            "the later variant excludes the earlier one"
-        );
-        assert_eq!(
-            unless[0].terms.iter().count(),
-            1,
-            "the negation joins on `this` alone"
-        );
-        assert_eq!(
-            unless[0].terms.get("this").and_then(|term| term.name()),
-            Some("this")
-        );
-    }
-
     /// Entity locality: the implicit rule of a plain concept reads
     /// only `?this`'s facts; concept premises (conforming fields,
     /// variant negations) make a rule non-local.
@@ -1533,15 +1427,7 @@ mod tests {
             AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
         )])
         .unwrap();
-        let variants = DeductiveRule::variants(conclusion, vec![email, phone]).unwrap();
-        assert!(
-            variants[0].analysis().is_entity_local(),
-            "the first variant is plain attribute premises"
-        );
-        assert!(
-            !variants[1].analysis().is_entity_local(),
-            "a negated concept premise is non-local"
-        );
+
     }
 
     /// A deductive rule is open, so it is monotone: an `unless` premise
@@ -1713,46 +1599,6 @@ mod tests {
                 Err(TypeError::PolicyInOpenRule { role: "reads", .. })
             ),
             "a deductive rule reads carrier-closed fields only, got {result:?}"
-        );
-    }
-
-    /// Negation over *another* concept is a negative IDB edge,
-    /// surfaced by the analysis for the stratification pass.
-    #[dialog_common::test]
-    fn analysis_surfaces_negative_idb_edges() {
-        let conclusion = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(
-                the!("contact/handle"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
-            ),
-        )])
-        .unwrap();
-        let email = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/email"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-        let phone = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-
-        let rules =
-            DeductiveRule::variants(conclusion, vec![email.clone(), phone]).expect("compiles");
-
-        assert_eq!(
-            rules[0].analysis().negated_concepts().count(),
-            0,
-            "the first variant carries no negative edges"
-        );
-        assert_eq!(
-            rules[1].analysis().negated_concepts().collect::<Vec<_>>(),
-            vec![email.this()],
-            "the later variant's negative edge names the earlier variant"
         );
     }
 

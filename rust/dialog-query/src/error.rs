@@ -233,7 +233,10 @@ pub enum TypeError {
     /// when every rule is monotone, and a negation is not. Negation
     /// belongs to the closed places: a query, a subscription, an
     /// inductive rule.
-    #[error("Rule {rule} is deductive and negates: a deductive rule admits no `unless`")]
+    #[error(
+        "Rule {rule} is deductive and negates a fact: a deductive rule admits no `unless` over \
+         an attribute or a concept"
+    )]
     NegationInOpenRule {
         /// The offending rule.
         rule: Box<Rule>,

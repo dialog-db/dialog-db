@@ -308,17 +308,6 @@ impl Match {
             .cloned()
     }
 
-    /// The bytes identifying the facts this row cites, in a fixed
-    /// order: two rows citing the same facts are one claim, however
-    /// they were derived, which is what a fold over an attribute's
-    /// candidates counts by.
-    pub(crate) fn citation_key(&self) -> Result<Vec<u8>, EvaluationError> {
-        let mut claims: Vec<&Arc<Claim>> = self.all_claims().into_iter().map(|(_, claim)| claim).collect();
-        claims.sort_by_key(|claim| (claim.the.to_string(), claim.of.to_string(), format!("{:?}", claim.is)));
-        serde_ipld_dagcbor::to_vec(&claims.iter().map(|claim| claim.as_ref()).collect::<Vec<_>>())
-            .map_err(|error| EvaluationError::Store(error.to_string()))
-    }
-
     /// Adopt every claim and standing `other` cites that this row does
     /// not: a result leaving a nested scope keeps the facts it was
     /// derived from, so the row it merges into stands as they do.
