@@ -173,6 +173,37 @@ mod tests {
         Ok(())
     }
 
+    /// Two environments sharing one set of held caches write to one
+    /// archive (a peer and its session), so a branch opened through
+    /// either has one writer: their commits and pulls take turns. A set
+    /// of its own keeps an environment's writers apart.
+    #[dialog_common::test]
+    async fn it_shares_a_writer_between_environments_sharing_held_caches() -> Result<()> {
+        let peer = Holding::default();
+        let session = Holding::default();
+        let elsewhere = Holding::default();
+        let caches = crate::HeldCaches::new();
+        caches.hold(&peer);
+        caches.hold(&session);
+        let subject = Subject::from(did!("key:zSharedWriterTest"));
+
+        let through_peer = subject.branch("main").open().perform(&peer).await?;
+        let through_session = subject.branch("main").open().perform(&session).await?;
+        let apart = subject.branch("main").open().perform(&elsewhere).await?;
+
+        assert!(Arc::ptr_eq(
+            &through_peer.writer(),
+            &through_session.writer()
+        ));
+        assert!(!Arc::ptr_eq(&through_peer.writer(), &apart.writer()));
+
+        // The writer is not a cache: letting the caches go leaves it.
+        caches.clear();
+        let after = subject.branch("main").open().perform(&session).await?;
+        assert!(Arc::ptr_eq(&through_peer.writer(), &after.writer()));
+        Ok(())
+    }
+
     /// A name that is not a branch name is refused on open and on
     /// load, not only on create and delete: a store lays a branch's
     /// cells out under its name, so `meta?x` or `x/../meta` would open
